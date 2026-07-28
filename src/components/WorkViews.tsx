@@ -122,7 +122,7 @@ export function KanbanView(props: WorkViewProps) {
   const moveNode = (nodeId: string, status: WorkStatus) => {
     if (mode !== 'editor') return
     const node = workNodes.find((candidate) => candidate.id === nodeId)
-    if (!node || effectiveStatus(node) === status) return
+    if (!node || node.data.reference || effectiveStatus(node) === status) return
     const checklist = node.data.checklist ?? []
     let nextChecklist = checklist
     let progress = node.data.progress
@@ -176,14 +176,14 @@ export function KanbanView(props: WorkViewProps) {
                   <div
                     key={node.id}
                     onDragStart={(event) => {
-                      if (mode !== 'editor') return
+                      if (mode !== 'editor' || node.data.reference) return
                       event.dataTransfer.setData('text/mind-node', node.id)
                       event.dataTransfer.effectAllowed = 'move'
                       setDraggingId(node.id)
                     }}
                     onDragEnd={() => setDraggingId(null)}
                   >
-                    <WorkCard node={node} teamMembers={teamMembers} blockedCount={blockingNodes(node, nodes).length} selected={selectedId === node.id} draggable={mode === 'editor'} onSelect={() => onSelect(node.id)} onContextMenu={(event) => onContextMenu(event, node.id)} />
+                    <WorkCard node={node} teamMembers={teamMembers} blockedCount={blockingNodes(node, nodes).length} selected={selectedId === node.id} draggable={mode === 'editor' && !node.data.reference} onSelect={() => onSelect(node.id)} onContextMenu={(event) => onContextMenu(event, node.id)} />
                   </div>
                 ))}
                 {columnNodes.length === 0 && <div className="empty-column">업무가 없습니다</div>}

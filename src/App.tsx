@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type Dispatch, type FormEvent as ReactFormEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type SetStateAction } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type Dispatch, type FormEvent as ReactFormEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type SetStateAction } from 'react'
 import {
   addEdge,
   Background,
@@ -10,8 +10,10 @@ import {
   ReactFlow,
   ReactFlowProvider,
   useEdgesState,
+  useNodesInitialized,
   useNodesState,
   useReactFlow,
+  useUpdateNodeInternals,
   useViewport,
   type Connection,
   type Edge,
@@ -417,6 +419,11 @@ type NodeComment = {
 }
 type CommentReaction = typeof COMMENT_REACTIONS[number]
 type NodeCommentStats = Record<string, { total: number; unresolved: number }>
+type MapDocumentResponse = {
+  map: MapDocument
+  referenceCommentStats?: NodeCommentStats
+  unresolvedReferenceNodeIds?: string[]
+}
 type UserNotification = {
   id: string
   userId: string
@@ -463,6 +470,74 @@ function buildCommentStats(comments: NodeComment[]): NodeCommentStats {
   }, {})
 }
 
+function isSameCommentStats(current: NodeCommentStats, next: NodeCommentStats) {
+  const currentNodeIds = Object.keys(current)
+  const nextNodeIds = Object.keys(next)
+  return currentNodeIds.length === nextNodeIds.length
+    && nextNodeIds.every((nodeId) => (
+      current[nodeId]?.total === next[nodeId]?.total
+      && current[nodeId]?.unresolved === next[nodeId]?.unresolved
+    ))
+}
+
+function mergeResolvedReferenceData(localData: MindNodeData, resolvedData: MindNodeData): MindNodeData {
+  return {
+    ...localData,
+    label: resolvedData.label,
+    description: resolvedData.description,
+    sharedKnowledge: resolvedData.sharedKnowledge,
+    sharedKnowledgeUpdatedAt: resolvedData.sharedKnowledgeUpdatedAt,
+    sharedKnowledgeUpdatedBy: resolvedData.sharedKnowledgeUpdatedBy,
+    progress: resolvedData.progress,
+    status: resolvedData.status,
+    taskUrl: resolvedData.taskUrl,
+    aiConversationId: resolvedData.aiConversationId,
+    isWork: resolvedData.isWork,
+    assigneeId: resolvedData.assigneeId,
+    dueDate: resolvedData.dueDate,
+    checklist: resolvedData.checklist,
+    waitingItems: resolvedData.waitingItems,
+  }
+}
+
+function mergeResolvedReferenceNodes(currentNodes: MindMapNode[], resolvedNodes: MindMapNode[]) {
+  const resolvedById = new Map(resolvedNodes.map((node) => [node.id, node]))
+  let changed = false
+  const nextNodes = currentNodes.map((node) => {
+    if (!node.data.reference) return node
+    const resolvedNode = resolvedById.get(node.id)
+    if (!resolvedNode?.data.reference) return node
+    const nextData = mergeResolvedReferenceData(node.data, resolvedNode.data)
+    if (JSON.stringify(nextData) === JSON.stringify(node.data)) return node
+    changed = true
+    return { ...node, data: nextData }
+  })
+  return changed ? nextNodes : currentNodes
+}
+
+const REFERENCE_MANAGED_DATA_KEYS = new Set<keyof MindNodeData>([
+  'label',
+  'description',
+  'sharedKnowledge',
+  'sharedKnowledgeUpdatedAt',
+  'sharedKnowledgeUpdatedBy',
+  'progress',
+  'status',
+  'taskUrl',
+  'aiConversationId',
+  'isWork',
+  'assigneeId',
+  'dueDate',
+  'checklist',
+  'waitingItems',
+])
+
+function editableReferencePatch(patch: Partial<MindNodeData>) {
+  const editablePatch = { ...patch } as Record<string, unknown>
+  for (const key of REFERENCE_MANAGED_DATA_KEYS) delete editablePatch[key]
+  return editablePatch as Partial<MindNodeData>
+}
+
 class ApiRequestError<T = unknown> extends Error {
   status: number
   body: T
@@ -496,21 +571,29 @@ type HistorySnapshot = {
   signature: string
 }
 
-function createHistorySnapshot(nodes: MindMapNode[], edges: MindMapEdge[]): HistorySnapshot {
-  const historyNodes = structuredClone(nodes).map((node) => {
+function createPersistedMapContent(nodes: MindMapNode[], edges: MindMapEdge[]) {
+  const persistedNodes = structuredClone(nodes).map((node) => {
+    const persistedNode = node as MindMapNode & { width?: number; height?: number; resizing?: boolean }
+    delete persistedNode.width
+    delete persistedNode.height
+    delete persistedNode.resizing
     delete node.selected
     delete node.dragging
     delete node.measured
     return node
   })
-  const historyEdges = structuredClone(edges).map((edge) => {
+  const persistedEdges = structuredClone(edges).map((edge) => {
     delete edge.selected
     return edge
   })
+  return { nodes: persistedNodes, edges: persistedEdges }
+}
+
+function createHistorySnapshot(nodes: MindMapNode[], edges: MindMapEdge[]): HistorySnapshot {
+  const content = createPersistedMapContent(nodes, edges)
   return {
-    nodes: historyNodes,
-    edges: historyEdges,
-    signature: JSON.stringify({ nodes: historyNodes, edges: historyEdges }),
+    ...content,
+    signature: JSON.stringify(content),
   }
 }
 
@@ -1031,6 +1114,7 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
   const [comments, setComments] = useState<NodeComment[]>([])
   const [commentStats, setCommentStats] = useState<NodeCommentStats>({})
   const [referenceCommentStats, setReferenceCommentStats] = useState<NodeCommentStats>({})
+  const [unresolvedReferenceNodeIds, setUnresolvedReferenceNodeIds] = useState<Set<string>>(new Set())
   const [commentsLoading, setCommentsLoading] = useState(false)
   const [commentError, setCommentError] = useState('')
   const [newComment, setNewComment] = useState('')
@@ -1102,6 +1186,8 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
   const referenceCommentTargetsRef = useRef<ReferenceCommentTarget[]>([])
   selectedIdRef.current = selectedId
   const { fitView, screenToFlowPosition, setCenter, setViewport } = useReactFlow<MindMapNode, MindMapEdge>()
+  const nodesInitialized = useNodesInitialized()
+  const updateNodeInternals = useUpdateNodeInternals()
   const viewport = useViewport()
 
   useEffect(() => {
@@ -1112,6 +1198,7 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
 
   const selectedNode = nodes.find((node) => node.id === selectedId) ?? null
   const contextMenuNode = nodeContextMenu ? nodes.find((node) => node.id === nodeContextMenu.nodeId) ?? null : null
+  const selectedReferenceReadOnly = mode === 'viewer' || Boolean(selectedNode?.data.reference)
   const selectedCommentMapId = selectedNode?.data.reference?.mapId ?? activeMapId
   const selectedCommentNodeId = selectedNode?.data.reference?.nodeId ?? selectedId
   const referenceCommentTargets = nodes.flatMap<ReferenceCommentTarget>((node) => node.data.reference ? [{
@@ -1297,6 +1384,7 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
     }
   }), [collapsedHiddenNodeIds, collapsedNodeIds, collapsibleNodeIds, commentStats, descendantCounts, dropTargetId, filterActive, filterMatchedNodeIds, filterVisibleNodeIds, nodes, normalizedNodeSearch, openWaitingItems, referenceCommentStats, searchContextNodeIds, searchMatchedNodeIds, teamMembers])
   const visibleFlowNodeIds = useMemo(() => new Set(flowNodes.filter((node) => !node.hidden).map((node) => node.id)), [flowNodes])
+  const visibleFlowNodeIdsKey = useMemo(() => [...visibleFlowNodeIds].sort().join('\u0000'), [visibleFlowNodeIds])
   const flowEdges = useMemo(() => {
     const pairKey = (edge: MindMapEdge) => JSON.stringify([edge.source, edge.target])
     const hierarchyPairs = new Set(edges.filter(isHierarchyEdge).map(pairKey))
@@ -1324,6 +1412,26 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
       }
     })
   }, [edges, visibleFlowNodeIds])
+
+  useLayoutEffect(() => {
+    if (viewMode !== 'mindmap' || loadedMapId !== activeMapId || !visibleFlowNodeIdsKey) return
+    // ref 댓글 통계처럼 노드 표시 데이터가 측정 직후 바뀌어도 연결 핸들 좌표를 다시 확정한다.
+    const nodeIds = visibleFlowNodeIdsKey.split('\u0000')
+    updateNodeInternals(nodeIds)
+    if (nodesInitialized) return
+    const retryFrame = window.requestAnimationFrame(() => updateNodeInternals(nodeIds))
+    return () => window.cancelAnimationFrame(retryFrame)
+  }, [
+    activeMapId,
+    commentStats,
+    loadedMapId,
+    nodesInitialized,
+    referenceCommentStats,
+    teamMembers,
+    updateNodeInternals,
+    viewMode,
+    visibleFlowNodeIdsKey,
+  ])
 
   const navigateNodeSearch = (direction: 1 | -1) => {
     if (nodeSearchMatches.length === 0) return
@@ -1471,10 +1579,11 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
     })).then((results) => {
       if (!active) return
       const statsByMap = new Map<string, NodeCommentStats>(results)
-      setReferenceCommentStats(Object.fromEntries(targets.map((target) => [
+      const nextStats = Object.fromEntries(targets.map((target) => [
         target.localNodeId,
         statsByMap.get(target.mapId)?.[target.nodeId] ?? { total: 0, unresolved: 0 },
-      ])))
+      ]))
+      setReferenceCommentStats((current) => isSameCommentStats(current, nextStats) ? current : nextStats)
     })
     return () => { active = false }
   }, [referenceCommentTargetsKey])
@@ -1506,6 +1615,26 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
       return { ...current, [selectedId]: stats }
     })
   }, [comments, selectedId, selectedNode?.data.reference])
+
+  const refreshResolvedReferences = useCallback(() => {
+    if (!activeMapId) return
+    void apiRequest<MapDocumentResponse>(`/api/maps/${encodeURIComponent(activeMapId)}`)
+      .then(({ map, referenceCommentStats: nextCommentStats, unresolvedReferenceNodeIds: unresolvedIds }) => {
+        const baseline = serverBaseline.current
+        if (baseline?.id === activeMapId) {
+          serverBaseline.current = {
+            ...baseline,
+            nodes: mergeResolvedReferenceNodes(baseline.nodes, map.nodes),
+          }
+        }
+        setNodes((current) => mergeResolvedReferenceNodes(current, map.nodes))
+        if (nextCommentStats) {
+          setReferenceCommentStats((current) => isSameCommentStats(current, nextCommentStats) ? current : nextCommentStats)
+        }
+        setUnresolvedReferenceNodeIds(new Set(unresolvedIds ?? []))
+      })
+      .catch(() => undefined)
+  }, [activeMapId, setNodes])
 
   useEffect(() => {
     const eventSource = new EventSource(`/api/events?clientId=${encodeURIComponent(CLIENT_ID)}&mapId=${encodeURIComponent(activeMapId)}`)
@@ -1586,7 +1715,10 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
           if (event.userId === user.id) setNotifications((current) => current.filter((notification) => !event.notificationIds.includes(notification.id)))
           return
         }
-        if (event.type !== 'map-changed' || event.sourceClientId === CLIENT_ID) return
+        if (event.type !== 'map-changed') return
+        const changesReferencedMap = referenceCommentTargetsRef.current.some((target) => target.mapId === event.mapId)
+        if (changesReferencedMap) refreshResolvedReferences()
+        if (event.sourceClientId === CLIENT_ID) return
         void (async () => {
           const [library, trashResult] = await Promise.all([
             apiRequest<DocumentLibraryResponse>('/api/maps'),
@@ -1611,7 +1743,7 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
       }
     }
     return () => eventSource.close()
-  }, [activeMapId, mode, setNodes, user.id])
+  }, [activeMapId, mode, refreshResolvedReferences, setNodes, user.id])
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -1627,9 +1759,11 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
     setLoadedMapId(null)
     setSavedAt('서버에서 불러오는 중…')
     setSaveError('')
+    setReferenceCommentStats({})
+    setUnresolvedReferenceNodeIds(new Set())
 
-    void apiRequest<{ map: MapDocument }>(`/api/maps/${encodeURIComponent(activeMapId)}`)
-      .then(({ map }) => {
+    void apiRequest<MapDocumentResponse>(`/api/maps/${encodeURIComponent(activeMapId)}`)
+      .then(({ map, referenceCommentStats: loadedReferenceCommentStats, unresolvedReferenceNodeIds: unresolvedIds }) => {
         if (!active) return
         const deepLink = pendingDeepLink.current
         const deepLinkTargetsMap = deepLink?.mapId === map.id
@@ -1649,6 +1783,8 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
         const loadedNodes = synchronizeNodeSelection(map.nodes, nextSelectedId)
         serverBaseline.current = structuredClone(map)
         resetHistory(loadedNodes, map.edges)
+        setReferenceCommentStats(loadedReferenceCommentStats ?? {})
+        setUnresolvedReferenceNodeIds(new Set(unresolvedIds ?? []))
         setNodes(loadedNodes)
         setEdges(map.edges)
         setSelectedId(nextSelectedId)
@@ -1657,7 +1793,7 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
         }
         pendingSelection.current = null
         lastLoadedMapId.current = map.id
-        localStorage.setItem(storageKeyForMap(activeMapId), JSON.stringify({ nodes: loadedNodes, edges: map.edges }))
+        localStorage.setItem(storageKeyForMap(activeMapId), JSON.stringify(createPersistedMapContent(loadedNodes, map.edges)))
         setDocuments((current) => current.map((document) => document.id === map.id
           ? { ...document, title: map.title, color: map.color, nodeCount: map.nodes.length }
           : document))
@@ -1677,6 +1813,8 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
           const loadedNodes = synchronizeNodeSelection(localMap.nodes, nextSelectedId)
           serverBaseline.current = null
           resetHistory(loadedNodes, localMap.edges)
+          setReferenceCommentStats({})
+          setUnresolvedReferenceNodeIds(new Set())
           setNodes(loadedNodes)
           setEdges(localMap.edges)
           setSelectedId(nextSelectedId)
@@ -1692,16 +1830,22 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
   useEffect(() => {
     if (!activeMapId || loadedMapId !== activeMapId) return
     const timer = window.setTimeout(() => {
-      localStorage.setItem(storageKeyForMap(activeMapId), JSON.stringify({ nodes, edges }))
+      const localContent = createPersistedMapContent(nodes, edges)
+      localStorage.setItem(storageKeyForMap(activeMapId), JSON.stringify(localContent))
       if (mode === 'viewer') {
         setSavedAt('읽기 전용')
+        return
+      }
+      const baseline = serverBaseline.current
+      const baselineContent = baseline ? createPersistedMapContent(baseline.nodes, baseline.edges) : null
+      if (baselineContent && JSON.stringify(localContent) === JSON.stringify(baselineContent)) {
+        setSavedAt('서버와 동기화됨')
         return
       }
 
       setSavedAt('서버에 저장 중…')
       setSaveError('')
       const savingMapId = activeMapId
-      const localContent = { nodes, edges }
       const suppressedNotificationNodeIds = [...(pastedNodeNotificationSuppressions.current.get(savingMapId) ?? [])]
         .filter((nodeId) => localContent.nodes.some((node) => node.id === nodeId))
       const clearPastedNodeNotificationSuppressions = () => {
@@ -1781,12 +1925,18 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
   )
 
   const updateNode = useCallback((id: string, patch: Partial<MindNodeData>) => {
-    const completesWork = patch.status === 'done' || (patch.progress ?? -1) >= 100
-    const normalizedPatch = completesWork && patch.waitingItems === undefined
-      ? { ...patch, waitingItems: [] }
-      : patch
     setNodes((current) => current.map((node) => (
-      node.id === id ? { ...node, data: { ...node.data, ...normalizedPatch } } : node
+      node.id === id
+        ? (() => {
+          const effectivePatch = node.data.reference ? editableReferencePatch(patch) : patch
+          if (Object.keys(effectivePatch).length === 0) return node
+          const completesWork = effectivePatch.status === 'done' || (effectivePatch.progress ?? -1) >= 100
+          const normalizedPatch = completesWork && effectivePatch.waitingItems === undefined
+            ? { ...effectivePatch, waitingItems: [] }
+            : effectivePatch
+          return { ...node, data: { ...node.data, ...normalizedPatch } }
+        })()
+        : node
     )))
     setSavedAt('저장 중…')
   }, [setNodes])
@@ -1800,11 +1950,15 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
     })
   }, [updateNode, user.id, user.name])
 
-  const openAiConversation = (conversationId: string, cardId = selectedId) => {
-    if (activeMapId && cardId) {
+  const openAiConversation = (
+    conversationId: string,
+    cardId = selectedCommentNodeId,
+    mapId = selectedCommentMapId,
+  ) => {
+    if (mapId && cardId) {
       void apiRequest(`/api/integrations/aionui/conversations/${encodeURIComponent(conversationId)}/attribution`, {
         method: 'POST',
-        body: JSON.stringify({ mapId: activeMapId, cardId }),
+        body: JSON.stringify({ mapId, cardId }),
         keepalive: true,
       }).catch((error) => {
         console.warn('[AI conversation attribution refresh]', error)
@@ -1819,7 +1973,11 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
     setNodeContextMenu(null)
     setSelectedId(contextMenuNode.id)
     if (contextMenuNode.data.aiConversationId) {
-      void openAiConversation(contextMenuNode.data.aiConversationId, contextMenuNode.id)
+      void openAiConversation(
+        contextMenuNode.data.aiConversationId,
+        contextMenuNode.data.reference?.nodeId ?? contextMenuNode.id,
+        contextMenuNode.data.reference?.mapId ?? activeMapId,
+      )
       return
     }
     setAiDialogOpen(true)
@@ -3850,14 +4008,14 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
               </div>
               <div className="inspector-content">
                 {selectedNode.data.reference && (
-                  <div className="task-link-field">
+                  <div className="task-link-field reference-source-field">
                     <div className="field-heading">
                       <span>참조 원본</span>
-                      <small>Ref</small>
+                      <small>{unresolvedReferenceNodeIds.has(selectedNode.id) ? '연결 끊김' : '실시간 동기화'}</small>
                     </div>
                     <a
                       className="task-link"
-                      href={`${mode === 'viewer' ? '/viewer' : ''}/mindmap/${encodeURIComponent(selectedNode.data.reference.mapId)}/${encodeURIComponent(selectedNode.data.reference.nodeId)}`}
+                      href={`/mindmap/${encodeURIComponent(selectedNode.data.reference.mapId)}/${encodeURIComponent(selectedNode.data.reference.nodeId)}`}
                       target="_blank"
                       rel="noopener noreferrer"
                       title="원본 노드를 새 탭에서 열기"
@@ -3866,6 +4024,11 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
                       <span>{documents.find((document) => document.id === selectedNode.data.reference?.mapId)?.title ?? selectedNode.data.reference.mapId}: {selectedNode.data.label.replace(/\s*\(ref\)\s*$/i, '')}</span>
                       <strong>원본 열기</strong>
                     </a>
+                    <p className={unresolvedReferenceNodeIds.has(selectedNode.id) ? 'reference-sync-state unavailable' : 'reference-sync-state'}>
+                      {unresolvedReferenceNodeIds.has(selectedNode.id)
+                        ? '원본을 찾을 수 없어 마지막으로 저장된 내용을 표시합니다.'
+                        : '내용과 업무 상태는 원본에서 관리되며 변경 사항이 자동으로 반영됩니다.'}
+                    </p>
                   </div>
                 )}
                 <div className="task-link-field">
@@ -3873,7 +4036,7 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
                     <span>업무 링크</span>
                     <small>선택사항</small>
                   </div>
-                  {mode === 'editor' && (
+                  {mode === 'editor' && !selectedNode.data.reference && (
                     <input
                       type="url"
                       value={selectedNode.data.taskUrl ?? ''}
@@ -3915,12 +4078,12 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
                       event.preventDefault()
                       event.currentTarget.blur()
                     }}
-                    readOnly={mode === 'viewer'}
+                    readOnly={selectedReferenceReadOnly}
                   />
                 </label>
                 <label className="description-field">
                   <span>업무 설명</span>
-                  {mode === 'editor' ? (
+                  {mode === 'editor' && !selectedNode.data.reference ? (
                     <>
                       <textarea value={selectedNode.data.description} onChange={(event) => updateNode(selectedNode.id, { description: event.target.value })} rows={3} />
                       {extractTextLinks(selectedNode.data.description).length > 0 && (
@@ -3947,7 +4110,7 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
                       </time>
                     )}
                   </div>
-                  {mode === 'editor' ? (
+                  {mode === 'editor' && !selectedNode.data.reference ? (
                     <>
                       <textarea
                         value={selectedNode.data.sharedKnowledge ?? ''}
@@ -4029,7 +4192,7 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
                           : selectedNode.data.progress >= 100 ? 95 : selectedNode.data.progress,
                       })
                     }}
-                    disabled={mode === 'viewer'}
+                    disabled={selectedReferenceReadOnly}
                   >
                     <option value="planned">예정</option>
                     <option value="in-progress">진행 중</option>
@@ -4053,7 +4216,7 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
                           : selectedNode.data.status === 'done' ? 'in-progress' : selectedNode.data.status,
                       })
                     }}
-                    disabled={mode === 'viewer'}
+                    disabled={selectedReferenceReadOnly}
                   />
                 </label>
                 <section className={`work-section ${selectedNode.data.isWork ? 'enabled' : ''}`}>
@@ -4066,7 +4229,7 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
                       type="button"
                       className={`work-switch ${selectedNode.data.isWork ? 'on' : ''}`}
                       onClick={() => updateNode(selectedNode.id, { isWork: !selectedNode.data.isWork })}
-                      disabled={mode === 'viewer'}
+                      disabled={selectedReferenceReadOnly}
                       aria-label={selectedNode.data.isWork ? '업무 관리 해제' : '업무로 전환'}
                       aria-pressed={Boolean(selectedNode.data.isWork)}
                     >
@@ -4081,7 +4244,7 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
                         <select
                           value={selectedNode.data.assigneeId ?? ''}
                           onChange={(event) => updateNode(selectedNode.id, { assigneeId: event.target.value || undefined })}
-                          disabled={mode === 'viewer'}
+                          disabled={selectedReferenceReadOnly}
                         >
                           <option value="">담당자 미지정</option>
                           {selectedNode.data.assigneeId && !selectableTeamMembers.some((member) => member.id === selectedNode.data.assigneeId) && (
@@ -4096,7 +4259,7 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
                           type="date"
                           value={selectedNode.data.dueDate ?? ''}
                           onChange={(event) => updateNode(selectedNode.id, { dueDate: event.target.value || undefined })}
-                          readOnly={mode === 'viewer'}
+                          readOnly={selectedReferenceReadOnly}
                         />
                       </label>
 
@@ -4165,10 +4328,10 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
                                   }}
                                   placeholder="무엇을 기다리고 있나요?"
                                   maxLength={120}
-                                  readOnly={mode === 'viewer'}
+                                  readOnly={selectedReferenceReadOnly}
                                   aria-label="대기 항목 이름"
                                 />
-                                {mode === 'editor' && (
+                                {mode === 'editor' && !selectedNode.data.reference && (
                                   <button
                                     type="button"
                                     onClick={() => updateWaitingItems((selectedNode.data.waitingItems ?? []).filter((current) => current.id !== item.id))}
@@ -4185,7 +4348,7 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
                                 )))}
                                 placeholder="메모 (선택)"
                                 maxLength={1000}
-                                readOnly={mode === 'viewer'}
+                                readOnly={selectedReferenceReadOnly}
                                 aria-label={`${item.label} 대기 메모`}
                               />
                               <input
@@ -4195,7 +4358,7 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
                                 )))}
                                 placeholder="재개 조건 (선택)"
                                 maxLength={500}
-                                readOnly={mode === 'viewer'}
+                                readOnly={selectedReferenceReadOnly}
                                 aria-label={`${item.label} 재개 조건`}
                               />
                               <small>{new Date(item.since).toLocaleString('ko-KR')}부터 대기</small>
@@ -4203,7 +4366,7 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
                           ))}
                           {(selectedNode.data.waitingItems ?? []).length === 0 && <div className="empty-waiting">현재 대기 중인 항목이 없습니다.</div>}
                         </div>
-                        {mode === 'editor' && (
+                        {mode === 'editor' && !selectedNode.data.reference && (
                           <form className="waiting-add" onSubmit={(event) => { event.preventDefault(); addWaitingItem() }}>
                             <input
                               value={newWaitingLabel}
@@ -4232,7 +4395,7 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
                                 type="button"
                                 className="check-toggle"
                                 onClick={() => applyChecklist((selectedNode.data.checklist ?? []).map((current) => current.id === item.id ? { ...current, done: !current.done } : current))}
-                                disabled={mode === 'viewer'}
+                                disabled={selectedReferenceReadOnly}
                                 aria-label={`${item.text} ${item.done ? '완료 취소' : '완료'}`}
                               >
                                 {item.done && <Icon name="check" size={11} />}
@@ -4268,7 +4431,7 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
                                   }}
                                   onMouseLeave={() => setChecklistTooltip(null)}
                                   onDoubleClick={() => {
-                                  if (mode === 'editor') {
+                                  if (mode === 'editor' && !selectedNode.data.reference) {
                                     setChecklistTooltip(null)
                                     skipChecklistCommit.current = false
                                     setEditingChecklist({ id: item.id, text: item.text })
@@ -4276,7 +4439,7 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
                                   }}
                                 >{item.text}</span>
                               )}
-                              {mode === 'editor' && (
+                              {mode === 'editor' && !selectedNode.data.reference && (
                                 <div className="check-actions">
                                   <button
                                     type="button"
@@ -4303,7 +4466,7 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
                           ))}
                           {(selectedNode.data.checklist ?? []).length === 0 && <div className="empty-checklist">등록된 실행 항목이 없습니다.</div>}
                         </div>
-                        {mode === 'editor' && (
+                        {mode === 'editor' && !selectedNode.data.reference && (
                           <form className="checklist-add" onSubmit={(event) => { event.preventDefault(); addChecklistItem() }}>
                             <input value={newChecklistText} onChange={(event) => setNewChecklistText(event.target.value)} placeholder="실행 항목 추가" maxLength={120} />
                             <button type="submit" disabled={!newChecklistText.trim()}><Icon name="plus" size={13} /></button>
@@ -4429,12 +4592,12 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
       )}
       {aiDialogOpen && selectedNode && activeDocument && (
         <AiConversationDialog
-          key={activeDocument.id}
-          documentId={activeDocument.id}
-          documentTitle={activeDocument.title}
-          cardId={selectedNode.id}
-          cardTitle={selectedNode.data.label}
-          knowledgeSources={selectedKnowledgeEdges.flatMap((edge) => {
+          key={selectedCommentMapId}
+          documentId={selectedCommentMapId}
+          documentTitle={documents.find((document) => document.id === selectedCommentMapId)?.title ?? activeDocument.title}
+          cardId={selectedCommentNodeId ?? selectedNode.id}
+          cardTitle={selectedNode.data.label.replace(/\s*\(ref\)\s*$/i, '')}
+          knowledgeSources={selectedNode.data.reference ? [] : selectedKnowledgeEdges.flatMap((edge) => {
             const source = nodes.find((node) => node.id === edge.source)
             return source ? [{ id: source.id, label: source.data.label, policy: knowledgePolicyOf(edge) }] : []
           })}

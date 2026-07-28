@@ -411,6 +411,28 @@ function isValidMap(map) {
     && map.edges.every((edge) => typeof edge?.id === 'string' && typeof edge?.source === 'string' && typeof edge?.target === 'string')
 }
 
+function normalizeMapRuntimeState(map) {
+  if (!map || !Array.isArray(map.nodes) || !Array.isArray(map.edges)) return map
+  return {
+    ...map,
+    nodes: map.nodes.map((node) => {
+      const normalized = { ...node }
+      delete normalized.selected
+      delete normalized.dragging
+      delete normalized.measured
+      delete normalized.width
+      delete normalized.height
+      delete normalized.resizing
+      return normalized
+    }),
+    edges: map.edges.map((edge) => {
+      const normalized = { ...edge }
+      delete normalized.selected
+      return normalized
+    }),
+  }
+}
+
 function normalizeMapEdges(map) {
   if (!map || !Array.isArray(map.edges)) return map
   return {
@@ -446,6 +468,10 @@ function normalizeMapAssignees(map) {
       return node
     }),
   }
+}
+
+function normalizeMapForPersistence(map) {
+  return normalizeMapAssignees(normalizeMapRuntimeState(normalizeMapEdges(map)))
 }
 
 function normalizeSharedKnowledgeMetadata(existing, map, user, updatedAt) {
@@ -547,14 +573,14 @@ function mapSummary(map) {
 async function readMap(mapId) {
   try {
     const stored = JSON.parse(await readFile(mapFileForId(mapId), 'utf8'))
-    return normalizeMapAssignees(normalizeMapEdges({
+    return normalizeMapForPersistence({
       ...stored,
       id: mapId,
       title: normalizeTitle(stored.title, '새 마인드맵'),
       createdAt: stored.createdAt ?? stored.updatedAt ?? null,
       createdBy: stored.createdBy ?? stored.updatedBy ?? null,
       version: Number.isInteger(stored.version) && stored.version > 0 ? stored.version : 1,
-    }))
+    })
   } catch (error) {
     if (error?.code === 'ENOENT') return null
     throw error
@@ -1283,6 +1309,96 @@ async function listComments(mapId, nodeId) {
     .sort((first, second) => String(first.createdAt).localeCompare(String(second.createdAt)))
 }
 
+function buildNodeCommentStats(comments) {
+  return comments.reduce((stats, comment) => {
+    const current = stats[comment.nodeId] ?? { total: 0, unresolved: 0 }
+    stats[comment.nodeId] = {
+      total: current.total + 1,
+      unresolved: current.unresolved + (!comment.parentId && !comment.resolvedAt ? 1 : 0),
+    }
+    return stats
+  }, {})
+}
+
+const referenceContentKeys = [
+  'description',
+  'sharedKnowledge',
+  'sharedKnowledgeUpdatedAt',
+  'sharedKnowledgeUpdatedBy',
+  'progress',
+  'status',
+  'taskUrl',
+  'aiConversationId',
+  'isWork',
+  'assigneeId',
+  'dueDate',
+  'checklist',
+  'waitingItems',
+]
+
+function projectReferenceNodeData(localData, sourceData) {
+  const projected = { ...localData }
+  for (const key of referenceContentKeys) {
+    if (Object.hasOwn(sourceData, key)) projected[key] = structuredClone(sourceData[key])
+    else delete projected[key]
+  }
+  const sourceLabel = String(sourceData.label ?? '').replace(/\s*\(ref\)\s*$/i, '').trim()
+  projected.label = `${sourceLabel || String(localData.label ?? '').replace(/\s*\(ref\)\s*$/i, '').trim()} (ref)`
+  return projected
+}
+
+async function resolveReferencesForMap(map) {
+  const targets = (map.nodes ?? []).flatMap((node) => {
+    const reference = node.data?.reference
+    return typeof node.id === 'string'
+      && typeof reference?.mapId === 'string'
+      && typeof reference?.nodeId === 'string'
+      ? [{ localNodeId: node.id, mapId: reference.mapId, nodeId: reference.nodeId }]
+      : []
+  })
+  if (targets.length === 0) return { map, referenceCommentStats: {}, unresolvedReferenceNodeIds: [] }
+
+  const referencesByMap = new Map(await Promise.all(
+    [...new Set(targets.map((target) => target.mapId))].map(async (mapId) => {
+      try {
+        const referencedMap = await readMap(mapId)
+        if (!referencedMap || referencedMap.trashedAt) return [mapId, { map: null, stats: {} }]
+        const comments = await listComments(mapId)
+        return [mapId, { map: referencedMap, stats: buildNodeCommentStats(comments) }]
+      } catch {
+        return [mapId, { map: null, stats: {} }]
+      }
+    }),
+  ))
+
+  const targetByLocalNodeId = new Map(targets.map((target) => [target.localNodeId, target]))
+  const unresolvedReferenceNodeIds = []
+  const resolvedNodes = map.nodes.map((node) => {
+    const target = targetByLocalNodeId.get(node.id)
+    if (!target) return node
+    const referencedMap = referencesByMap.get(target.mapId)?.map
+    const sourceNode = referencedMap?.nodes.find((candidate) => candidate.id === target.nodeId)
+    if (!sourceNode) {
+      unresolvedReferenceNodeIds.push(node.id)
+      return node
+    }
+    return {
+      ...node,
+      data: projectReferenceNodeData(node.data, sourceNode.data),
+    }
+  })
+  const referenceCommentStats = Object.fromEntries(targets.map((target) => [
+    target.localNodeId,
+    referencesByMap.get(target.mapId)?.stats[target.nodeId] ?? { total: 0, unresolved: 0 },
+  ]))
+
+  return {
+    map: { ...map, nodes: resolvedNodes },
+    referenceCommentStats,
+    unresolvedReferenceNodeIds,
+  }
+}
+
 function mentionedUsers(text) {
   return users.filter((candidate) => candidate.active !== false && !isPublicViewer(candidate) && text.includes(`@${candidate.name}`))
 }
@@ -1435,7 +1551,8 @@ function dailyBackupFileForMap(mapId, date) {
 }
 
 function mapContentSignature(map) {
-  return JSON.stringify({ title: map.title, color: map.color, nodes: map.nodes, edges: map.edges })
+  const normalized = normalizeMapForPersistence(map)
+  return JSON.stringify({ title: normalized.title, color: normalized.color, nodes: normalized.nodes, edges: normalized.edges })
 }
 
 async function archiveMapRevision(map, user, reason) {
@@ -1544,7 +1661,7 @@ async function readDailyBackup(mapId, date) {
   try {
     const backup = JSON.parse(await readFile(dailyBackupFileForMap(mapId, date), 'utf8'))
     return backup?.mapId === mapId && backup.date === date && isValidMap(backup.map)
-      ? { ...backup, map: normalizeMapAssignees(normalizeMapEdges(backup.map)) }
+      ? { ...backup, map: normalizeMapForPersistence(backup.map) }
       : null
   } catch (error) {
     if (error?.code === 'ENOENT') return null
@@ -1654,7 +1771,7 @@ async function readMapRevision(mapId, revisionId) {
   try {
     const revision = JSON.parse(await readFile(path.join(revisionDirectoryForMap(mapId), `${revisionId}.json`), 'utf8'))
     return revision?.mapId === mapId && isValidMap(revision.map)
-      ? { ...revision, map: normalizeMapAssignees(normalizeMapEdges(revision.map)) }
+      ? { ...revision, map: normalizeMapForPersistence(revision.map) }
       : null
   } catch (error) {
     if (error?.code === 'ENOENT') return null
@@ -1666,7 +1783,7 @@ async function saveMap(mapId, map, user, title, color, revisionReason = 'edit') 
   await mkdir(dataDirectory, { recursive: true })
   const existing = await readMap(mapId)
   const now = new Date().toISOString()
-  const normalizedMap = normalizeSharedKnowledgeMetadata(existing, normalizeMapAssignees(map), user, now)
+  const normalizedMap = normalizeSharedKnowledgeMetadata(existing, normalizeMapForPersistence(map), user, now)
   const payload = {
     nodes: normalizedMap.nodes,
     edges: normalizeMapEdges(normalizedMap).edges,
@@ -1679,7 +1796,8 @@ async function saveMap(mapId, map, user, title, color, revisionReason = 'edit') 
     updatedBy: publicUser(user),
     version: (existing?.version ?? 0) + 1,
   }
-  if (existing && !existing.trashedAt && mapContentSignature(existing) !== mapContentSignature(payload)) {
+  if (existing && mapContentSignature(existing) === mapContentSignature(payload)) return existing
+  if (existing && !existing.trashedAt) {
     await archiveMapRevision(existing, user, revisionReason)
   }
   await writeStoredMap(mapId, payload)
@@ -2839,9 +2957,13 @@ const server = createServer(async (request, response) => {
 
       if (request.method === 'GET') {
         const map = await readMap(mapId)
-        return map && !map.trashedAt
-          ? sendJson(response, 200, { map })
-          : sendJson(response, 404, { error: '마인드맵을 찾을 수 없습니다.' })
+        if (!map || map.trashedAt) return sendJson(response, 404, { error: '마인드맵을 찾을 수 없습니다.' })
+        const resolved = await resolveReferencesForMap(map)
+        return sendJson(response, 200, {
+          map: resolved.map,
+          referenceCommentStats: resolved.referenceCommentStats,
+          unresolvedReferenceNodeIds: resolved.unresolvedReferenceNodeIds,
+        })
       }
 
       if (request.method === 'PUT') {
@@ -2850,6 +2972,7 @@ const server = createServer(async (request, response) => {
         if (existing?.trashedAt) return sendJson(response, 409, { error: '휴지통에 있는 문서는 변경할 수 없습니다.' })
         const body = await readJsonBody(request)
         if (!isValidMap(body.map)) return sendJson(response, 400, { error: '올바르지 않은 마인드맵 데이터입니다.' })
+        const normalizedIncomingMap = normalizeMapForPersistence(body.map)
         const baseVersion = Number(body.baseVersion)
         if (existing && Number.isInteger(baseVersion) && baseVersion !== existing.version && body.force !== true) {
           return sendJson(response, 409, {
@@ -2859,14 +2982,17 @@ const server = createServer(async (request, response) => {
             summary: mapSummary(existing),
           })
         }
-        const contentChanged = !existing || JSON.stringify({ nodes: existing.nodes, edges: existing.edges }) !== JSON.stringify({ nodes: body.map.nodes, edges: body.map.edges })
+        const contentChanged = !existing || JSON.stringify({ nodes: existing.nodes, edges: existing.edges }) !== JSON.stringify({
+          nodes: normalizedIncomingMap.nodes,
+          edges: normalizedIncomingMap.edges,
+        })
         if (!contentChanged && existing) return sendJson(response, 200, { map: existing, summary: mapSummary(existing) })
         const suppressedWorkNotificationNodeIds = new Set(
           (Array.isArray(body.suppressWorkNotificationNodeIds) ? body.suppressWorkNotificationNodeIds : [])
             .filter((nodeId) => typeof nodeId === 'string' && body.map.nodes.some((node) => node.id === nodeId))
             .slice(0, 100),
         )
-        const map = await saveMap(mapId, body.map, user, undefined, undefined, 'content')
+        const map = await saveMap(mapId, normalizedIncomingMap, user, undefined, undefined, 'content')
         await createWorkChangeNotifications(existing, map, user, suppressedWorkNotificationNodeIds)
         if (contentChanged) broadcastMapChange(request, mapId, 'content', user)
         return sendJson(response, 200, { map, summary: mapSummary(map) })

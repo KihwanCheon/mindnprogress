@@ -242,6 +242,82 @@ async function main() {
     assert.equal(loginResponse.status, 200)
     const sessionCookie = loginResponse.headers.get('set-cookie')?.split(';')[0]
     assert.ok(sessionCookie, '테스트 관리자 세션 쿠키가 없습니다.')
+    const referencedCommentResponse = await fetch(`${apiBaseUrl}/api/maps/${encodeURIComponent(mapId)}/comments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: sessionCookie },
+      body: JSON.stringify({ nodeId: 'branch-b', text: '참조 노드 초기 댓글 통계 검증' }),
+    })
+    assert.equal(referencedCommentResponse.status, 201)
+    const updatedReferenceSource = await invoke('mindnprogress_update_card', {
+      mapId,
+      nodeId: 'branch-b',
+      data: {
+        description: '원본에서 변경된 최신 업무 설명',
+        progress: 65,
+        status: 'in-progress',
+      },
+    })
+    assert.equal(updatedReferenceSource.map.nodes.find((node) => node.id === 'branch-b')?.data.description, '원본에서 변경된 최신 업무 설명')
+    const referencedRootResult = await invoke('mindnprogress_update_card', {
+      mapId: secondaryMapId,
+      nodeId: secondaryRootId,
+      data: { reference: { mapId, nodeId: 'branch-b' } },
+    })
+    assert.deepEqual(
+      referencedRootResult.map.nodes.find((node) => node.id === secondaryRootId)?.data.reference,
+      { mapId, nodeId: 'branch-b' },
+    )
+    const referencedDocumentResponse = await fetch(`${apiBaseUrl}/api/maps/${encodeURIComponent(secondaryMapId)}`, {
+      headers: { Cookie: sessionCookie },
+    })
+    assert.equal(referencedDocumentResponse.status, 200)
+    const referencedDocument = await referencedDocumentResponse.json()
+    const resolvedReferenceNode = referencedDocument.map.nodes.find((node) => node.id === secondaryRootId)
+    assert.equal(resolvedReferenceNode.data.label, '기능 B (ref)')
+    assert.equal(resolvedReferenceNode.data.description, '원본에서 변경된 최신 업무 설명')
+    assert.equal(resolvedReferenceNode.data.progress, 65)
+    assert.equal(resolvedReferenceNode.data.status, 'in-progress')
+    assert.match(resolvedReferenceNode.data.sharedKnowledge, /현재 선택과 무관한 장문 지식/)
+    assert.deepEqual(
+      referencedDocument.referenceCommentStats[secondaryRootId],
+      { total: 1, unresolved: 1 },
+      '참조 노드 댓글 통계가 문서 초기 응답에 포함되지 않았습니다.',
+    )
+    assert.deepEqual(referencedDocument.unresolvedReferenceNodeIds, [])
+    const referencedDocumentSecondResponse = await fetch(`${apiBaseUrl}/api/maps/${encodeURIComponent(secondaryMapId)}`, {
+      headers: { Cookie: sessionCookie },
+    })
+    assert.equal(referencedDocumentSecondResponse.status, 200)
+    const referencedDocumentSecond = await referencedDocumentSecondResponse.json()
+    assert.equal(
+      referencedDocumentSecond.map.version,
+      referencedRootResult.map.version,
+      'Ref 원본 내용을 투영하는 조회가 대상 문서 버전을 변경했습니다.',
+    )
+    documentResult = await invoke('mindnprogress_get_document', { mapId })
+    const versionBeforeReadOnlyTools = documentResult.map.version
+    const transientOnlyMap = structuredClone(documentResult.map)
+    transientOnlyMap.nodes[0].selected = true
+    transientOnlyMap.nodes[0].dragging = false
+    transientOnlyMap.nodes[0].measured = { width: 218, height: 141 }
+    transientOnlyMap.nodes[0].width = 218
+    transientOnlyMap.nodes[0].height = 141
+    const transientOnlySaveResponse = await fetch(`${apiBaseUrl}/api/maps/${encodeURIComponent(mapId)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Cookie: sessionCookie },
+      body: JSON.stringify({
+        map: { nodes: transientOnlyMap.nodes, edges: transientOnlyMap.edges },
+        baseVersion: documentResult.map.version,
+      }),
+    })
+    assert.equal(transientOnlySaveResponse.status, 200)
+    const transientOnlySave = await transientOnlySaveResponse.json()
+    assert.equal(transientOnlySave.map.version, documentResult.map.version, '화면 전용 노드 상태가 문서 버전을 변경했습니다.')
+    assert.equal(transientOnlySave.map.nodes[0].selected, undefined)
+    assert.equal(transientOnlySave.map.nodes[0].dragging, undefined)
+    assert.equal(transientOnlySave.map.nodes[0].measured, undefined)
+    assert.equal(transientOnlySave.map.nodes[0].width, undefined)
+    assert.equal(transientOnlySave.map.nodes[0].height, undefined)
     const layoutResponse = await fetch(`${apiBaseUrl}/api/maps/layout`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', Cookie: sessionCookie },

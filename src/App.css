@@ -301,6 +301,9 @@
 .mini-map .react-flow__minimap-mask { pointer-events: all; cursor: grab; }
 .mini-map .react-flow__minimap-mask:active { cursor: grabbing; }
 
+.reference-sync-state { margin: 7px 1px 0; color: #4b8a73; font-size: 7px; line-height: 1.5; }
+.reference-sync-state.unavailable { color: #b36a45; }
+
 .inspector { position: relative; border-left: 1px solid #e9e7ef; }
 .inspector-resizer { width: 11px; height: 100%; position: absolute; top: 0; left: calc(100% - var(--inspector-width, 278px) - 5px); z-index: 8; display: flex; align-items: center; justify-content: center; outline: 0; cursor: col-resize; touch-action: none; }
 .inspector-resizer > span { width: 4px; height: 42px; position: relative; border-radius: 4px; background: #d2ceda; opacity: 0; transition: opacity .15s, background .15s; }
