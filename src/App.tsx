@@ -1108,6 +1108,7 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
   const [trashDeleting, setTrashDeleting] = useState(false)
   const [trashOpen, setTrashOpen] = useState(false)
   const [activeMapId, setActiveMapId] = useState('')
+  const [miniMapReadyMapId, setMiniMapReadyMapId] = useState<string | null>(null)
   const [loadedMapId, setLoadedMapId] = useState<string | null>(null)
   const [mapReloadToken, setMapReloadToken] = useState(0)
   const [historyOpen, setHistoryOpen] = useState(false)
@@ -1464,6 +1465,10 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
     setAssigneeFilter('all')
     setCollapsedNodeIds(new Set())
   }, [activeMapId])
+
+  useEffect(() => {
+    if (viewMode !== 'mindmap') setMiniMapReadyMapId(null)
+  }, [viewMode])
 
   useEffect(() => {
     setNodeSearchIndex(-1)
@@ -3789,6 +3794,7 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
+            onInit={() => setMiniMapReadyMapId(activeMapId)}
             onNodeContextMenu={(event, node) => openNodeContextMenu(event, node.id)}
             onNodeDragStart={onNodeDragStart}
             onNodeDrag={onNodeDrag}
@@ -3817,17 +3823,19 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
             proOptions={{ hideAttribution: true }}
           >
             <Background variant={BackgroundVariant.Dots} gap={MINDMAP_GRID_SIZE} size={1.2} color="#d8d6df" />
-            <MiniMap
-              className="mini-map"
-              style={{ width: 160, height: 100 }}
-              pannable
-              zoomable
-              ariaLabel="미니맵 뷰 영역을 드래그하여 화면 이동"
-              nodeColor={(node) => (node.data as MindNodeData).progress >= 100 ? '#43b78e' : node.data.kind === 'root' ? '#6657d9' : '#b9b4ef'}
-              maskColor="rgba(248, 247, 251, 0.78)"
-              maskStrokeColor="#6657d9"
-              maskStrokeWidth={2}
-            />
+            {miniMapReadyMapId === activeMapId && (
+              <MiniMap
+                className="mini-map"
+                style={{ width: 160, height: 100 }}
+                pannable
+                zoomable
+                ariaLabel="미니맵 뷰 영역을 드래그하여 화면 이동"
+                nodeColor={(node) => (node.data as MindNodeData).progress >= 100 ? '#43b78e' : node.data.kind === 'root' ? '#6657d9' : '#b9b4ef'}
+                maskColor="rgba(248, 247, 251, 0.78)"
+                maskStrokeColor="#6657d9"
+                maskStrokeWidth={2}
+              />
+            )}
             <Controls position="bottom-center" showInteractive={false} />
             <Panel position="top-left" className="canvas-toolbar">
               {mode === 'editor' && (
