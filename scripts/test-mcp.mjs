@@ -174,7 +174,7 @@ async function main() {
     await client.connect(transport)
     const listedTools = await client.listTools()
     const registeredToolNames = listedTools.tools.map((tool) => tool.name).sort()
-    assert.equal(registeredToolNames.length, 33, `예상과 다른 MCP 도구 수: ${registeredToolNames.length}`)
+    assert.equal(registeredToolNames.length, 36, `예상과 다른 MCP 도구 수: ${registeredToolNames.length}`)
 
     const invoke = async (name, args = {}) => {
       calledTools.set(name, (calledTools.get(name) ?? 0) + 1)
@@ -412,6 +412,50 @@ async function main() {
     assert.equal(fullContext.selection.knowledgeSources.all.length, 0)
     assert.ok(JSON.stringify(context).length < JSON.stringify(fullContext).length)
     assert.ok(JSON.stringify(context).length < 25_000, 'focused 컨텍스트가 크기 회귀 기준을 초과했습니다.')
+    documentResult = await invoke('mindnprogress_get_document', { mapId })
+    assert.equal(documentResult.map.version, versionBeforeReadOnlyTools, '조회 도구가 문서 버전을 변경했습니다.')
+
+    const knowledgeLineAdded = await invoke('mindnprogress_add_knowledge_line', {
+      mapId,
+      sourceCardId: 'branch-a',
+      targetCardId: 'task-a',
+      knowledgePolicy: 'reuse-first',
+    })
+    assert.equal(knowledgeLineAdded.knowledgeLine.knowledgePolicy, 'reuse-first')
+    assert.equal(knowledgeLineAdded.knowledgeLine.sourceCardId, 'branch-a')
+    assert.equal(knowledgeLineAdded.knowledgeLine.targetCardId, 'task-a')
+    assert.equal(knowledgeLineAdded.version, documentResult.map.version + 1, '지식선 추가가 문서 버전을 한 번 증가시키지 않았습니다.')
+    await invokeExpectError('mindnprogress_add_knowledge_line', {
+      mapId,
+      sourceCardId: 'branch-a',
+      targetCardId: 'task-a',
+      knowledgePolicy: 'reuse-first',
+    }, /이미 연결된 지식선/)
+    const knowledgeLineUpdated = await invoke('mindnprogress_update_knowledge_line', {
+      mapId,
+      sourceCardId: 'branch-a',
+      targetCardId: 'task-a',
+      knowledgePolicy: 'inspect-if-insufficient',
+    })
+    assert.equal(knowledgeLineUpdated.knowledgeLine.knowledgePolicy, 'inspect-if-insufficient')
+    assert.equal(knowledgeLineUpdated.version, knowledgeLineAdded.version + 1, '지식선 정책 변경이 문서 버전을 한 번 증가시키지 않았습니다.')
+    await invokeExpectError('mindnprogress_add_knowledge_line', {
+      mapId,
+      sourceCardId: 'task-a',
+      targetCardId: 'branch-a',
+      knowledgePolicy: 'reuse-first',
+    }, /순환 지식선/)
+    const knowledgeLineDeleted = await invoke('mindnprogress_delete_knowledge_line', {
+      mapId,
+      sourceCardId: 'branch-a',
+      targetCardId: 'task-a',
+    })
+    assert.equal(knowledgeLineDeleted.deletedKnowledgeLineIds.length, 1)
+    assert.equal(knowledgeLineDeleted.version, knowledgeLineUpdated.version + 1, '지식선 삭제가 문서 버전을 한 번 증가시키지 않았습니다.')
+    documentResult = await invoke('mindnprogress_get_document', { mapId })
+    assert.ok(!documentResult.map.edges.some((edge) => edge.data?.relation === 'knowledge'
+      && edge.source === 'branch-a' && edge.target === 'task-a'))
+    const versionBeforeConversationLink = documentResult.map.version
 
     const completionResponse = await fetch(attribution.completionUrl, {
       method: 'POST',
@@ -439,6 +483,7 @@ async function main() {
       'Claude Code(Claude Test Model)',
     )
     documentResult = await invoke('mindnprogress_get_document', { mapId })
+    assert.equal(documentResult.map.version, versionBeforeConversationLink + 1, 'AI 대화 ID 연결은 문서 버전을 한 번 증가시켜야 합니다.')
     assert.equal(documentResult.map.nodes.find((node) => node.id === 'task-a')?.data.aiConversationId, 'conversation-test')
     const conversationTranscript = await invoke('mindnprogress_get_ai_conversation_transcript', { mapId, cardId: 'task-a' })
     assert.equal(conversationTranscript.conversation.id, 'conversation-test')
@@ -616,6 +661,18 @@ async function main() {
     const addedCard = addedCardResult.map.nodes.find((node) => node.data.label === '추가 카드')
     assert.ok(addedCard)
     assert.equal(addedCard.data.sharedKnowledge, '')
+    assert.equal(addedCard.position.x % 24, 0)
+    assert.equal(addedCard.position.y % 24, 0)
+
+    const secondAddedCardResult = await invoke('mindnprogress_add_card', {
+      mapId,
+      parentId: 'root',
+      data: { label: '두 번째 추가 카드', description: '', kind: 'branch', status: 'planned', progress: 0 },
+    })
+    const secondAddedCard = secondAddedCardResult.map.nodes.find((node) => node.data.label === '두 번째 추가 카드')
+    assert.ok(secondAddedCard)
+    assert.equal(secondAddedCard.position.x, addedCard.position.x)
+    assert.equal(secondAddedCard.position.y - addedCard.position.y, 144)
 
     const waitingCardResult = await invoke('mindnprogress_update_card', {
       mapId,
@@ -655,6 +712,7 @@ async function main() {
 
     const deletedCardResult = await invoke('mindnprogress_delete_card', { mapId, nodeId: addedCard.id, includeDescendants: true })
     assert.ok(!deletedCardResult.map.nodes.some((node) => node.id === addedCard.id))
+    await invoke('mindnprogress_delete_card', { mapId, nodeId: secondAddedCard.id, includeDescendants: true })
 
     documentResult = await invoke('mindnprogress_get_document', { mapId })
     const metadataResult = await invoke('mindnprogress_update_document_info', {

@@ -191,7 +191,7 @@ AI가 MindNProgress 밖에서 시작되었다면 먼저 `mindnprogress_read_me_f
 
 ## MindNProgress MCP 명령어
 
-현재 MCP 서버는 33개 도구를 제공합니다. 카드가 선택된 작업은 먼저 `mindnprogress_get_context`로 최신 버전과 제품 규칙을 확인하고, 변경 후에는 `mindnprogress_get_document`로 실제 저장 결과를 다시 확인하는 흐름을 권장합니다.
+현재 MCP 서버는 36개 도구를 제공합니다. 카드가 선택된 작업은 먼저 `mindnprogress_get_context`로 최신 버전과 제품 규칙을 확인하고, 변경 후에는 `mindnprogress_get_document`로 실제 저장 결과를 다시 확인하는 흐름을 권장합니다. 조회 도구는 문서 버전을 변경하지 않으며 카드·관계 편집과 AI 대화 ID 연결 같은 저장 작업만 버전을 증가시킵니다.
 
 ### 시작과 조회
 
@@ -216,9 +216,12 @@ AI가 MindNProgress 밖에서 시작되었다면 먼저 `mindnprogress_read_me_f
 | `mindnprogress_update_card` | 카드 제목, 설명, 공유 지식, 상태, 진행률과 업무 관리 필드를 수정합니다. |
 | `mindnprogress_move_card` | 카드와 전체 하위 구조를 다른 카드 아래로 이동합니다. |
 | `mindnprogress_delete_card` | 카드와 선택적으로 전체 하위 카드를 삭제합니다. Root 카드는 삭제할 수 없습니다. |
+| `mindnprogress_add_knowledge_line` | 두 카드 사이에 지식선을 추가합니다. 중복과 순환 관계를 거부합니다. |
+| `mindnprogress_update_knowledge_line` | 지식선 정책을 `reuse-first` 또는 `inspect-if-insufficient`로 변경합니다. |
+| `mindnprogress_delete_knowledge_line` | 두 카드 사이의 지식선만 삭제합니다. |
 | `mindnprogress_update_document_info` | 문서 이름 또는 아이콘 색상을 변경합니다. |
 
-처음부터 여러 카드가 필요한 경우 `mindnprogress_create_document`와 `mindnprogress_save_document`를 연속 호출하지 말고 `mindnprogress_create_mindmap`을 사용합니다. 전체 저장과 문서 정보 변경은 최신 `baseVersion`을 사용하며, 버전 충돌이 발생하면 문서를 다시 조회해야 합니다.
+처음부터 여러 카드가 필요한 경우 `mindnprogress_create_document`와 `mindnprogress_save_document`를 연속 호출하지 말고 `mindnprogress_create_mindmap`을 사용합니다. 지식선만 바꿀 때는 전체 카드와 장문 본문을 다시 전달하는 `mindnprogress_save_document` 대신 지식선 전용 도구를 사용합니다. 전용 도구는 최신 문서를 내부에서 조회해 관계 변경만 재적용하고 일시적인 버전 충돌을 최대 3회까지 다시 시도합니다. 전체 저장과 문서 정보 변경은 최신 `baseVersion`을 사용하며, 버전 충돌이 발생하면 문서를 다시 조회해야 합니다.
 
 ### 문서 목록과 그룹
 

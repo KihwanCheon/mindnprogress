@@ -50,11 +50,24 @@ const DOCUMENT_COLORS = [
 ] as const
 
 const MINDMAP_GRID_SIZE = 24
+const MINDMAP_CHILD_HORIZONTAL_OFFSET = MINDMAP_GRID_SIZE * 13
+const MINDMAP_WORK_NODE_VERTICAL_STEP = MINDMAP_GRID_SIZE * 6
 
 function snapMindMapPosition(position: { x: number; y: number }) {
   return {
     x: Math.round(position.x / MINDMAP_GRID_SIZE) * MINDMAP_GRID_SIZE,
     y: Math.round(position.y / MINDMAP_GRID_SIZE) * MINDMAP_GRID_SIZE,
+  }
+}
+
+function defaultChildMindMapPosition(parentPosition: { x: number; y: number }, siblingPositions: { x: number; y: number }[]) {
+  const alignedParentPosition = snapMindMapPosition(parentPosition)
+  const nextY = siblingPositions.length > 0
+    ? Math.max(...siblingPositions.map((position) => snapMindMapPosition(position).y)) + MINDMAP_WORK_NODE_VERTICAL_STEP
+    : alignedParentPosition.y
+  return {
+    x: alignedParentPosition.x + MINDMAP_CHILD_HORIZONTAL_OFFSET,
+    y: nextY,
   }
 }
 
@@ -2159,11 +2172,15 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
   const addNode = useCallback((parentId?: string, position?: { x: number; y: number }) => {
     if (mode === 'viewer') return
     const parent = nodes.find((node) => node.id === parentId) ?? selectedNode
-    const childCount = parent ? hierarchyEdges.filter((edge) => edge.source === parent.id).length : 0
+    const childIds = new Set(parent
+      ? hierarchyEdges.filter((edge) => edge.source === parent.id).map((edge) => edge.target)
+      : [])
+    const siblingPositions = nodes.filter((node) => childIds.has(node.id)).map((node) => node.position)
     const id = `node-${Date.now()}`
-    const nextPosition = position ?? (parent
-      ? { x: parent.position.x + 320, y: parent.position.y + childCount * 150 - 40 }
-      : { x: 160, y: 120 })
+    const automaticPosition = parent
+      ? defaultChildMindMapPosition(parent.position, siblingPositions)
+      : snapMindMapPosition({ x: 160, y: 120 })
+    const nextPosition = position ?? automaticPosition
     const node: MindMapNode = {
       id,
       type: 'mind',

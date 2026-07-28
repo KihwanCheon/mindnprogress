@@ -12,11 +12,33 @@ const tokenFile = path.resolve(String(process.env.MNP_TOKEN_FILE ?? '').trim() |
 const apiBaseUrl = String(process.env.MNP_API_URL ?? 'http://127.0.0.1:4176').replace(/\/+$/, '')
 const contextSchemaVersion = '2.0'
 const contextCommentLimit = 20
+const mindMapGridSize = 24
+const mindMapChildHorizontalOffset = mindMapGridSize * 13
+const mindMapWorkNodeVerticalStep = mindMapGridSize * 6
 let activeAttributionToken = ''
 let activeEditorId = ''
 let activeMapId = ''
 let activeCardId = ''
-const serverInstructions = `MindNProgress는 마인드맵과 업무 진행 관리를 결합한 웹 서비스입니다. MindNProgress 밖에서 시작해 문서 ID나 카드 ID가 없다면 mindnprogress_read_me_first를 먼저 호출하세요. 선택 문서와 카드가 있다면 mindnprogress_get_context로 제품 규칙과 최신 문서 구조를 먼저 확인하세요. get_context의 selection.taskLinks.startupInspection을 따르세요. mode가 knowledge-guided이면 primary 선행 지식의 sharedKnowledge를 먼저 재사용하고 설명과 댓글로 보완하며, fallbackSources와 fallbackTargets는 정보가 부족할 때만 선택적으로 조사합니다. mode가 default이고 required가 true이면 targets의 업무 본문, 댓글, 첨부파일 목록과 관련 링크를 조사하세요. 진행 과정과 결과는 댓글에 기록하고, 다른 카드나 후속 세션이 재사용할 안정적인 사실·결정·제약은 카드의 sharedKnowledge에 요약하세요. 외부 전달물이나 결정 대기는 waitingItems로 기록하고 제목에 대기 문구를 붙이지 마세요. 대기를 등록할 때는 [차단], 해제할 때는 [진행] 댓글로 이유와 재개 상태를 기록하세요. 특정 자료가 있다고 가정하지 마세요. 여러 카드로 구성된 새 문서는 mindnprogress_create_mindmap으로 한 번에 생성하고, 변경 후에는 최신 문서를 다시 조회해 결과를 검증하세요. 비밀번호 변경과 계정 관리 작업은 지원하지 않습니다.`
+
+function snapMindMapPosition(position) {
+  return {
+    x: Math.round(position.x / mindMapGridSize) * mindMapGridSize,
+    y: Math.round(position.y / mindMapGridSize) * mindMapGridSize,
+  }
+}
+
+function defaultChildMindMapPosition(parentPosition, siblingPositions) {
+  const alignedParentPosition = snapMindMapPosition(parentPosition)
+  const nextY = siblingPositions.length > 0
+    ? Math.max(...siblingPositions.map((position) => snapMindMapPosition(position).y)) + mindMapWorkNodeVerticalStep
+    : alignedParentPosition.y
+  return {
+    x: alignedParentPosition.x + mindMapChildHorizontalOffset,
+    y: nextY,
+  }
+}
+
+const serverInstructions = `MindNProgress는 마인드맵과 업무 진행 관리를 결합한 웹 서비스입니다. MindNProgress 밖에서 시작해 문서 ID나 카드 ID가 없다면 mindnprogress_read_me_first를 먼저 호출하세요. 선택 문서와 카드가 있다면 mindnprogress_get_context로 제품 규칙과 최신 문서 구조를 먼저 확인하세요. get_context의 selection.taskLinks.startupInspection을 따르세요. mode가 knowledge-guided이면 primary 선행 지식의 sharedKnowledge를 먼저 재사용하고 설명과 댓글로 보완하며, fallbackSources와 fallbackTargets는 정보가 부족할 때만 선택적으로 조사합니다. mode가 default이고 required가 true이면 targets의 업무 본문, 댓글, 첨부파일 목록과 관련 링크를 조사하세요. 진행 과정과 결과는 댓글에 기록하고, 다른 카드나 후속 세션이 재사용할 안정적인 사실·결정·제약은 카드의 sharedKnowledge에 요약하세요. 외부 전달물이나 결정 대기는 waitingItems로 기록하고 제목에 대기 문구를 붙이지 마세요. 대기를 등록할 때는 [차단], 해제할 때는 [진행] 댓글로 이유와 재개 상태를 기록하세요. 지식선만 변경할 때는 전체 문서를 다시 보내지 말고 지식선 전용 도구를 사용하세요. 조회 도구는 문서 버전을 변경하지 않지만 카드·관계 편집과 AI 대화 ID 연결은 버전을 증가시킬 수 있습니다. 특정 자료가 있다고 가정하지 마세요. 여러 카드로 구성된 새 문서는 mindnprogress_create_mindmap으로 한 번에 생성하고, 변경 후에는 최신 문서를 다시 조회해 결과를 검증하세요. 비밀번호 변경과 계정 관리 작업은 지원하지 않습니다.`
 const productGuide = {
   version: '1.2',
   product: {
@@ -79,6 +101,8 @@ const productGuide = {
     '여러 카드로 새 문서를 만들 때 mindnprogress_create_mindmap을 한 번만 호출',
     '문서 그룹이나 혼합 순서를 변경할 때 먼저 전체 문서와 documentLayout을 조회하고 모든 활성 문서를 정확히 한 번 유지',
     'create_document 후 save_document를 연속 호출해 전체 구조를 만들지 않음',
+    '지식선 추가·정책 변경·삭제는 전체 save_document 대신 지식선 전용 도구를 사용',
+    '조회 도구는 문서 version을 변경하지 않으며 카드·관계 편집과 AI 대화 ID 연결 같은 저장 작업만 version을 증가시킴',
     '기존 문서 변경은 최신 version을 기준으로 수행하고 버전 충돌 시 최신 상태를 다시 조회',
     '변경 후 mindnprogress_get_document로 저장 결과를 검증하고 실제 변경 내용을 요약',
     '의미 있는 진행·차단·완료는 댓글로 기록하고, 재사용할 결론은 sharedKnowledge에도 반영',
@@ -125,7 +149,12 @@ async function apiRequest(pathname, init = {}) {
       return { ok: true, status: response.status }
     }
   }
-  if (!response.ok) throw new Error(body?.error ?? `MindNProgress 요청 실패 (${response.status})`)
+  if (!response.ok) {
+    const error = new Error(body?.error ?? `MindNProgress 요청 실패 (${response.status})`)
+    error.status = response.status
+    error.code = body?.code
+    throw error
+  }
   return body ?? { ok: true, status: response.status }
 }
 
@@ -170,6 +199,22 @@ async function saveDocument(map, force = false, aiCardId = '') {
   })
 }
 
+async function mutateDocument(mapId, aiCardId, mutation, maxAttempts = 3) {
+  let lastError = null
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const map = await getDocument(mapId)
+    const result = mutation(map)
+    try {
+      const saved = await saveDocument(map, false, aiCardId)
+      return { saved, result }
+    } catch (error) {
+      lastError = error
+      if (error?.code !== 'VERSION_CONFLICT' || attempt === maxAttempts - 1) throw error
+    }
+  }
+  throw lastError ?? new Error('문서를 변경하지 못했습니다.')
+}
+
 function isKnowledgeEdge(edge) {
   return edge?.data?.relation === 'knowledge'
 }
@@ -180,6 +225,23 @@ function isHierarchyEdge(edge) {
 
 function knowledgePolicyOf(edge) {
   return edge?.data?.knowledgePolicy === 'inspect-if-insufficient' ? 'inspect-if-insufficient' : 'reuse-first'
+}
+
+function createsKnowledgeCycle(sourceId, targetId, edges) {
+  if (sourceId === targetId) return true
+  const knowledgeEdges = edges.filter(isKnowledgeEdge)
+  const visited = new Set()
+  const stack = [targetId]
+  while (stack.length > 0) {
+    const currentId = stack.pop()
+    if (!currentId || visited.has(currentId)) continue
+    if (currentId === sourceId) return true
+    visited.add(currentId)
+    knowledgeEdges
+      .filter((edge) => edge.source === currentId)
+      .forEach((edge) => stack.push(edge.target))
+  }
+  return false
 }
 
 function descendantsOf(nodeId, edges) {
@@ -320,6 +382,7 @@ function compactTeamMember(user) {
 
 const mapIdSchema = { mapId: z.string().min(1).describe('문서 ID') }
 const documentColor = z.enum(['violet', 'indigo', 'blue', 'cyan', 'teal', 'green', 'amber', 'orange', 'red', 'pink'])
+const knowledgePolicySchema = z.enum(['reuse-first', 'inspect-if-insufficient'])
 const outlineKey = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/, '카드 key는 영문, 숫자, 밑줄, 하이픈만 사용할 수 있습니다.')
 const waitingItemSchema = z.object({
   id: z.string().min(1).max(120).optional(),
@@ -508,6 +571,8 @@ async function main() {
       'description은 업무 요청과 완료 조건, sharedKnowledge는 다른 카드가 재사용할 안정적인 결론에 사용',
       '진행 과정과 완료 사실은 댓글에 기록하고 재사용할 결과는 sharedKnowledge에도 요약',
       '외부 전달물이나 결정 대기는 waitingItems에 기록하고 카드 제목에는 대기 문구를 추가하지 않음',
+      '지식선만 변경할 때는 전체 문서를 다시 보내지 않고 지식선 전용 도구를 사용',
+      '조회 도구는 문서 version을 올리지 않지만 편집 도구와 AI 대화 ID 연결은 version을 올릴 수 있음',
       '업무 링크, 담당자와 마감일은 실제 값이 있을 때만 지정',
       '비밀번호 변경과 관리자 계정 관리는 MCP에서 지원하지 않음',
     ],
@@ -867,15 +932,17 @@ async function main() {
     const map = await getDocument(mapId)
     const parent = parentId ? map.nodes.find((node) => node.id === parentId) : null
     if (parentId && !parent) throw new Error('상위 카드를 찾을 수 없습니다.')
-    const siblingCount = parentId ? map.edges.filter((edge) => isHierarchyEdge(edge) && edge.source === parentId).length : map.nodes.length
+    const siblingIds = new Set(parentId
+      ? map.edges.filter((edge) => isHierarchyEdge(edge) && edge.source === parentId).map((edge) => edge.target)
+      : [])
+    const siblingPositions = map.nodes.filter((node) => siblingIds.has(node.id)).map((node) => node.position)
     const nodeId = `node-${Date.now().toString(36)}-${randomBytes(3).toString('hex')}`
     const node = {
       id: nodeId,
       type: 'mind',
-      position: position ?? {
-        x: (parent?.position?.x ?? 0) + (parent ? 300 : 0),
-        y: (parent?.position?.y ?? 0) + siblingCount * 150,
-      },
+      position: position ?? (parent
+        ? defaultChildMindMapPosition(parent.position, siblingPositions)
+        : snapMindMapPosition({ x: 0, y: map.nodes.length * mindMapWorkNodeVerticalStep })),
       data: {
         ...data,
         waitingItems: data.status === 'done' || data.progress >= 100 ? [] : normalizeWaitingItems(data.waitingItems),
@@ -952,6 +1019,91 @@ async function main() {
     map.nodes = map.nodes.filter((node) => !deletedIds.has(node.id))
     map.edges = map.edges.filter((edge) => !deletedIds.has(edge.source) && !deletedIds.has(edge.target))
     return saveDocument(map, false, nodeId)
+  })
+
+  registerTool(server, 'mindnprogress_add_knowledge_line', 'source 카드의 결과를 target 카드가 선행 지식으로 사용하도록 지식선을 추가합니다. 전체 문서를 전달하지 않고 최신 버전에 관계만 안전하게 반영하며 순환과 중복 연결을 거부합니다.', {
+    mapId: z.string().min(1),
+    sourceCardId: z.string().min(1).describe('선행 지식을 제공하는 카드 ID'),
+    targetCardId: z.string().min(1).describe('선행 지식을 사용하는 카드 ID'),
+    knowledgePolicy: knowledgePolicySchema.default('reuse-first'),
+  }, async ({ mapId, sourceCardId, targetCardId, knowledgePolicy }) => {
+    const edgeId = `knowledge-${sourceCardId}-${targetCardId}-${Date.now()}-${randomBytes(3).toString('hex')}`
+    const { saved, result } = await mutateDocument(mapId, targetCardId, (map) => {
+      if (!map.nodes.some((node) => node.id === sourceCardId)) throw new Error('선행 지식을 제공하는 카드를 찾을 수 없습니다.')
+      if (!map.nodes.some((node) => node.id === targetCardId)) throw new Error('선행 지식을 사용하는 카드를 찾을 수 없습니다.')
+      if (sourceCardId === targetCardId) throw new Error('카드는 자기 자신을 선행 지식으로 연결할 수 없습니다.')
+      if (map.edges.some((edge) => isKnowledgeEdge(edge) && edge.source === sourceCardId && edge.target === targetCardId)) {
+        throw new Error('이미 연결된 지식선입니다.')
+      }
+      if (createsKnowledgeCycle(sourceCardId, targetCardId, map.edges)) throw new Error('순환 지식선은 추가할 수 없습니다.')
+      const knowledgeLine = {
+        id: edgeId,
+        source: sourceCardId,
+        target: targetCardId,
+        type: 'bezier',
+        reconnectable: false,
+        data: { relation: 'knowledge', knowledgePolicy },
+        markerEnd: { type: 'arrowclosed', width: 18, height: 18 },
+      }
+      map.edges.push(knowledgeLine)
+      return knowledgeLine
+    })
+    return {
+      mapId,
+      version: saved.map.version,
+      knowledgeLine: {
+        id: result.id,
+        sourceCardId: result.source,
+        targetCardId: result.target,
+        knowledgePolicy: knowledgePolicyOf(result),
+      },
+    }
+  })
+
+  registerTool(server, 'mindnprogress_update_knowledge_line', 'source와 target 카드로 지식선을 찾아 주요 지식 우선 또는 정보 부족 시 확인 정책만 변경합니다. 최신 버전에 관계만 다시 적용하므로 전체 문서 저장이 필요하지 않습니다.', {
+    mapId: z.string().min(1),
+    sourceCardId: z.string().min(1),
+    targetCardId: z.string().min(1),
+    knowledgePolicy: knowledgePolicySchema,
+  }, async ({ mapId, sourceCardId, targetCardId, knowledgePolicy }) => {
+    const { saved, result } = await mutateDocument(mapId, targetCardId, (map) => {
+      const matches = map.edges.filter((edge) => isKnowledgeEdge(edge) && edge.source === sourceCardId && edge.target === targetCardId)
+      if (matches.length === 0) throw new Error('변경할 지식선을 찾을 수 없습니다.')
+      if (matches.length > 1) throw new Error('같은 카드 사이에 중복 지식선이 있어 안전하게 변경할 수 없습니다.')
+      matches[0].data = { ...matches[0].data, relation: 'knowledge', knowledgePolicy }
+      return matches[0]
+    })
+    return {
+      mapId,
+      version: saved.map.version,
+      knowledgeLine: {
+        id: result.id,
+        sourceCardId: result.source,
+        targetCardId: result.target,
+        knowledgePolicy: knowledgePolicyOf(result),
+      },
+    }
+  })
+
+  registerTool(server, 'mindnprogress_delete_knowledge_line', 'source와 target 카드 사이의 지식선을 삭제합니다. 카드와 계층선은 변경하지 않으며 최신 버전에 관계 삭제만 다시 적용합니다.', {
+    mapId: z.string().min(1),
+    sourceCardId: z.string().min(1),
+    targetCardId: z.string().min(1),
+  }, async ({ mapId, sourceCardId, targetCardId }) => {
+    const { saved, result } = await mutateDocument(mapId, targetCardId, (map) => {
+      const matches = map.edges.filter((edge) => isKnowledgeEdge(edge) && edge.source === sourceCardId && edge.target === targetCardId)
+      if (matches.length === 0) throw new Error('삭제할 지식선을 찾을 수 없습니다.')
+      const deletedIds = new Set(matches.map((edge) => edge.id))
+      map.edges = map.edges.filter((edge) => !deletedIds.has(edge.id))
+      return matches.map((edge) => edge.id)
+    })
+    return {
+      mapId,
+      version: saved.map.version,
+      deletedKnowledgeLineIds: result,
+      sourceCardId,
+      targetCardId,
+    }
   })
 
   registerTool(server, 'mindnprogress_update_document_info', '문서 이름 또는 아이콘 색상을 변경합니다.', {
