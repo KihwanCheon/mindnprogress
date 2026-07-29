@@ -71,6 +71,7 @@
 .timeline-progress { height: 3px; overflow: hidden; border-radius: 3px; background: #eeecf1; }
 .timeline-progress span { display: block; height: 100%; background: #7162d8; }
 .timeline-meta { min-width: 38px; display: flex; flex-direction: column; align-items: center; gap: 5px; }
+.timeline-assignee-runtime { display: flex; align-items: center; gap: 5px; }
 .timeline-meta > strong { color: #7e7786; font-size: 8px; }
 
 .metric-grid { display: grid; grid-template-columns: repeat(6, minmax(105px, 1fr)); gap: 10px; margin-bottom: 13px; }

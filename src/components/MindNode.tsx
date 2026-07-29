@@ -1,5 +1,6 @@
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react'
 import type { MindNodeData } from '../types/mindMap'
+import { AiConversationRuntimeBadge } from './AiConversationRuntimeBadge'
 import { AssigneeTooltip } from './AssigneeTooltip'
 import './MindNode.css'
 
@@ -23,6 +24,8 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
   const assignee = data.assignee
   const checklist = data.checklist ?? []
   const completedItems = checklist.filter((item) => item.done).length
+  const hasVisibleAiRuntime = data.aiConversationRuntime?.state === 'running'
+    || data.aiConversationRuntime?.state === 'waiting-confirmation'
   const waitingItems = (data.waitingItems ?? []).filter((item) => item.label.trim())
   const waitingTitle = waitingItems.map((item) => [
     item.label,
@@ -79,13 +82,14 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
       <div className="node-progress" aria-label={`진행률 ${data.progress}%`}>
         <span style={{ width: `${data.progress}%` }} />
       </div>
-      {data.isWork && (
+      {(data.isWork || hasVisibleAiRuntime) && (
         <div className="node-work-meta">
-          <span className="work-label">업무</span>
-          {assignee && <AssigneeTooltip name={assignee.name} className={`node-assignee ${assignee.color}`}>{assignee.initials}</AssigneeTooltip>}
-          {data.dueDate && <span className={`node-due ${isOverdue ? 'overdue' : ''}`}>~ {formattedDueDate}</span>}
-          {Boolean(data.unresolvedDependencyCount) && <span className="node-blocked">차단 {data.unresolvedDependencyCount}</span>}
-          {checklist.length > 0 && <span className="node-checklist">✓ {completedItems}/{checklist.length}</span>}
+          {data.isWork && <span className="work-label">업무</span>}
+          {data.isWork && assignee && <AssigneeTooltip name={assignee.name} className={`node-assignee ${assignee.color}`}>{assignee.initials}</AssigneeTooltip>}
+          <AiConversationRuntimeBadge runtime={data.aiConversationRuntime} />
+          {data.isWork && data.dueDate && <span className={`node-due ${isOverdue ? 'overdue' : ''}`}>~ {formattedDueDate}</span>}
+          {data.isWork && Boolean(data.unresolvedDependencyCount) && <span className="node-blocked">차단 {data.unresolvedDependencyCount}</span>}
+          {data.isWork && checklist.length > 0 && <span className="node-checklist">✓ {completedItems}/{checklist.length}</span>}
         </div>
       )}
       <Handle type="source" position={Position.Right} isConnectable={isConnectable} />

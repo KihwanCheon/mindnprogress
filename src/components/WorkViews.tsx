@@ -1,6 +1,7 @@
 import { useMemo, useState, type CSSProperties, type MouseEvent as ReactMouseEvent } from 'react'
 import type { Node } from '@xyflow/react'
 import type { MindNodeData, TeamMember } from '../types/mindMap'
+import { AiConversationRuntimeBadge } from './AiConversationRuntimeBadge'
 import { AssigneeTooltip } from './AssigneeTooltip'
 import { blockingNodes } from '../utils/dependencies'
 import './WorkViews.css'
@@ -104,6 +105,7 @@ function WorkCard({ node, teamMembers, blockedCount, selected, draggable, onSele
       <div className="work-card-progress"><span style={{ width: `${node.data.progress}%` }} /></div>
       <div className="work-card-meta">
         {assignee ? <AssigneeTooltip name={assignee.name} className={`work-avatar ${assignee.color}`}>{assignee.initials}</AssigneeTooltip> : <span className="unassigned">미지정</span>}
+        <AiConversationRuntimeBadge runtime={node.data.aiConversationRuntime} />
         <span className={isOverdue(node) ? 'overdue' : ''}>{formatDate(node.data.dueDate)}</span>
         {Boolean(node.data.commentCount) && <span className={`card-comments ${node.data.unresolvedCommentCount ? 'unresolved' : ''}`} title={`댓글 ${node.data.commentCount}개 · 미해결 스레드 ${node.data.unresolvedCommentCount ?? 0}개`}>💬 {node.data.commentCount}</span>}
         {checklist.length > 0 && <span className="card-checks">✓ {completed}/{checklist.length}</span>}
@@ -227,7 +229,10 @@ export function TimelineView({ nodes, selectedId, onSelect, onOpenMindMap, onCon
                 <div className="timeline-progress"><span style={{ width: `${node.data.progress}%` }} /></div>
               </div>
               <div className="timeline-meta">
-                {assignee ? <AssigneeTooltip name={assignee.name} className={`work-avatar ${assignee.color}`}>{assignee.initials}</AssigneeTooltip> : <span className="unassigned">미지정</span>}
+                <div className="timeline-assignee-runtime">
+                  {assignee ? <AssigneeTooltip name={assignee.name} className={`work-avatar ${assignee.color}`}>{assignee.initials}</AssigneeTooltip> : <span className="unassigned">미지정</span>}
+                  <AiConversationRuntimeBadge runtime={node.data.aiConversationRuntime} />
+                </div>
                 <strong>{node.data.progress}%</strong>
               </div>
             </button>

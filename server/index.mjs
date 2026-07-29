@@ -34,6 +34,12 @@ const rememberedSessionDurationMs = 30 * 24 * 60 * 60 * 1000
 const sessions = new Map()
 let sessionWriteQueue = Promise.resolve()
 const eventClients = new Map()
+const aiConversationRuntimeStates = new Map()
+const aiConversationRuntimeRefreshes = new Map()
+const aiConversationRuntimeRequests = new Map()
+const aiConversationRuntimeSummaries = new Map()
+let aiConversationRuntimeLibraryRefresh = null
+const aiConversationRuntimePollIntervalMs = Math.max(2_000, Number(process.env.MNP_AI_RUNTIME_POLL_INTERVAL_MS) || 4_000)
 const mapColors = ['violet', 'indigo', 'blue', 'cyan', 'teal', 'green', 'amber', 'orange', 'red', 'pink']
 const commentReactions = ['👍', '❤️', '🎉', '👀']
 const serverStartedAt = new Date().toISOString()
@@ -964,6 +970,177 @@ async function fetchAionUi(pathname, { timeoutMs = 8_000 } = {}) {
     }
   }
   throw lastError ?? new Error('AIONUI_REQUEST_FAILED')
+}
+
+function normalizeAiConversationRuntime(conversationId, conversation, observedAt = new Date().toISOString()) {
+  const runtime = conversation?.runtime
+  if (!runtime || typeof runtime !== 'object') {
+    return {
+      conversationId,
+      state: 'unknown',
+      isProcessing: false,
+      pendingConfirmations: 0,
+      turnId: null,
+      observedAt,
+    }
+  }
+
+  const runtimeState = String(runtime.state ?? '').trim().toLowerCase()
+  const taskStatus = String(runtime.task_status ?? '').trim().toLowerCase()
+  const pendingConfirmations = Math.max(0, Math.trunc(Number(runtime.pending_confirmations) || 0))
+  const turnId = typeof runtime.turn_id === 'string' && runtime.turn_id.trim() ? runtime.turn_id.trim() : null
+  const activeRuntimeStates = new Set(['starting', 'running', 'cancelling', 'stopping'])
+  const finishedTaskStates = new Set(['', 'idle', 'finished', 'completed', 'cancelled', 'failed'])
+  const isProcessing = runtime.is_processing === true
+    || activeRuntimeStates.has(runtimeState)
+    || Boolean(turnId)
+    || runtime.has_task === true && !finishedTaskStates.has(taskStatus)
+
+  return {
+    conversationId,
+    state: pendingConfirmations > 0 ? 'waiting-confirmation' : isProcessing ? 'running' : 'idle',
+    isProcessing,
+    pendingConfirmations,
+    turnId,
+    observedAt,
+  }
+}
+
+function sameAiConversationRuntime(first, second) {
+  return first?.conversationId === second?.conversationId
+    && first?.state === second?.state
+    && first?.isProcessing === second?.isProcessing
+    && first?.pendingConfirmations === second?.pendingConfirmations
+    && first?.turnId === second?.turnId
+}
+
+function aiConversationRuntimeSnapshot(mapId) {
+  const prefix = `${mapId}:`
+  return [...aiConversationRuntimeStates.entries()]
+    .filter(([key]) => key.startsWith(prefix))
+    .map(([key, runtime]) => ({ nodeId: key.slice(prefix.length), runtime }))
+}
+
+function aiConversationRuntimeSummary(mapId) {
+  return {
+    mapId,
+    activeCount: aiConversationRuntimeSnapshot(mapId).filter((item) => item.runtime.state === 'running').length,
+  }
+}
+
+function broadcastAiConversationRuntime(mapId, nodeId, runtime) {
+  broadcastEvent(
+    { type: 'ai-conversation-runtime', mapId, nodeId, runtime },
+    (client) => client.mapId === mapId,
+  )
+}
+
+function updateAiConversationRuntimeSummary(mapId) {
+  const summary = aiConversationRuntimeSummary(mapId)
+  const previousCount = aiConversationRuntimeSummaries.get(mapId)
+  aiConversationRuntimeSummaries.set(mapId, summary.activeCount)
+  if (previousCount !== summary.activeCount) {
+    broadcastEvent({ type: 'ai-conversation-runtime-summary', ...summary })
+  }
+  return summary
+}
+
+function clearAiConversationRuntimeMap(mapId) {
+  const prefix = `${mapId}:`
+  for (const [key] of aiConversationRuntimeStates) {
+    if (!key.startsWith(prefix)) continue
+    aiConversationRuntimeStates.delete(key)
+    broadcastAiConversationRuntime(mapId, key.slice(prefix.length), null)
+  }
+  const previousCount = aiConversationRuntimeSummaries.get(mapId)
+  aiConversationRuntimeSummaries.delete(mapId)
+  if (previousCount !== undefined && previousCount !== 0) {
+    broadcastEvent({ type: 'ai-conversation-runtime-summary', mapId, activeCount: 0 })
+  }
+}
+
+function fetchAiConversationRuntime(conversationId) {
+  const existing = aiConversationRuntimeRequests.get(conversationId)
+  if (existing) return existing
+  const request = fetchAionUi(`/api/conversations/${encodeURIComponent(conversationId)}`, { timeoutMs: 2_500 })
+    .finally(() => aiConversationRuntimeRequests.delete(conversationId))
+  aiConversationRuntimeRequests.set(conversationId, request)
+  return request
+}
+
+function refreshAiConversationRuntimeForMap(mapId) {
+  const existing = aiConversationRuntimeRefreshes.get(mapId)
+  if (existing) return existing
+
+  const refresh = (async () => {
+    const map = await readMap(mapId)
+    const targets = map && !map.trashedAt
+      ? map.nodes.flatMap((node) => {
+          const conversationId = typeof node.data?.aiConversationId === 'string' ? node.data.aiConversationId.trim() : ''
+          return conversationId ? [{ nodeId: node.id, conversationId }] : []
+        })
+      : []
+    const targetKeys = new Set(targets.map((target) => conversationAttributionKey(mapId, target.nodeId)))
+    const prefix = `${mapId}:`
+
+    for (const [key] of aiConversationRuntimeStates) {
+      if (!key.startsWith(prefix) || targetKeys.has(key)) continue
+      aiConversationRuntimeStates.delete(key)
+      broadcastAiConversationRuntime(mapId, key.slice(prefix.length), null)
+    }
+
+    const observedAt = new Date().toISOString()
+    const conversationIds = [...new Set(targets.map((target) => target.conversationId))]
+    const runtimesByConversation = new Map(await Promise.all(conversationIds.map(async (conversationId) => {
+      try {
+        const conversation = await fetchAiConversationRuntime(conversationId)
+        if (!conversation || String(conversation.id) !== conversationId) throw new Error('AIONUI_CONVERSATION_NOT_FOUND')
+        return [conversationId, normalizeAiConversationRuntime(conversationId, conversation, observedAt)]
+      } catch {
+        return [conversationId, normalizeAiConversationRuntime(conversationId, null, observedAt)]
+      }
+    })))
+
+    for (const target of targets) {
+      const key = conversationAttributionKey(mapId, target.nodeId)
+      const runtime = runtimesByConversation.get(target.conversationId)
+        ?? normalizeAiConversationRuntime(target.conversationId, null, observedAt)
+      const previous = aiConversationRuntimeStates.get(key)
+      aiConversationRuntimeStates.set(key, runtime)
+      if (!sameAiConversationRuntime(previous, runtime)) {
+        broadcastAiConversationRuntime(mapId, target.nodeId, runtime)
+      }
+    }
+
+    updateAiConversationRuntimeSummary(mapId)
+    return aiConversationRuntimeSnapshot(mapId)
+  })().finally(() => aiConversationRuntimeRefreshes.delete(mapId))
+
+  aiConversationRuntimeRefreshes.set(mapId, refresh)
+  return refresh
+}
+
+function refreshAiConversationRuntimeLibrary() {
+  if (aiConversationRuntimeLibraryRefresh) return aiConversationRuntimeLibraryRefresh
+  const refresh = (async () => {
+    const maps = await listMaps()
+    const mapIds = maps.map((map) => map.id)
+    const mapIdSet = new Set(mapIds)
+    await Promise.allSettled(mapIds.map((mapId) => refreshAiConversationRuntimeForMap(mapId)))
+    for (const mapId of aiConversationRuntimeSummaries.keys()) {
+      if (!mapIdSet.has(mapId)) clearAiConversationRuntimeMap(mapId)
+    }
+    return mapIds.map(aiConversationRuntimeSummary)
+  })().finally(() => {
+    aiConversationRuntimeLibraryRefresh = null
+  })
+  aiConversationRuntimeLibraryRefresh = refresh
+  return refresh
+}
+
+async function refreshVisibleAiConversationRuntimes() {
+  if (eventClients.size === 0) return
+  await refreshAiConversationRuntimeLibrary()
 }
 
 function readAionUiMessageContent(message) {
@@ -2143,6 +2320,9 @@ const server = createServer(async (request, response) => {
           updatedAt: updatedMap.updatedAt,
           updatedBy: publicUser(actor),
         })
+        void refreshAiConversationRuntimeForMap(launch.mapId).catch((error) => {
+          console.warn('[AI conversation runtime link refresh]', error)
+        })
         return sendJson(response, 200, { conversationId })
       } catch (error) {
         console.error('[AionUi conversation completion]', error)
@@ -2410,6 +2590,16 @@ const server = createServer(async (request, response) => {
       response.write(`data: ${JSON.stringify({ type: 'connected', user: publicUser(user), clientId, mapId })}\n\n`)
       eventClients.set(response, { clientId, mapId, user: publicUser(user) })
       broadcastPresence(mapId)
+      void refreshAiConversationRuntimeLibrary()
+        .then((summaries) => {
+          if (!eventClients.has(response)) return
+          response.write(`data: ${JSON.stringify({ type: 'ai-conversation-runtime-summary-snapshot', summaries })}\n\n`)
+          if (mapId) {
+            const runtimes = aiConversationRuntimeSnapshot(mapId)
+            response.write(`data: ${JSON.stringify({ type: 'ai-conversation-runtime-snapshot', mapId, runtimes })}\n\n`)
+          }
+        })
+        .catch((error) => console.warn('[AI conversation runtime initial refresh]', error))
       request.on('close', () => {
         eventClients.delete(response)
         broadcastPresence(mapId)
@@ -3076,6 +3266,10 @@ setInterval(() => {
     }
   }
 }, 25_000).unref()
+
+setInterval(() => {
+  void refreshVisibleAiConversationRuntimes().catch((error) => console.warn('[AI conversation runtime poll]', error))
+}, aiConversationRuntimePollIntervalMs).unref()
 
 setInterval(() => {
   void ensureDailyBackups().catch((error) => console.warn('[Daily backup scheduler]', error))

@@ -30,8 +30,9 @@ import { LinkifiedText } from './components/LinkifiedText'
 import { MentionText } from './components/MentionText'
 import { AdminEditorPanel } from './components/AdminEditorPanel'
 import { AiConversationDialog } from './components/AiConversationDialog'
+import { AiConversationActivityIndicator } from './components/AiConversationRuntimeBadge'
 import { DashboardView, KanbanView, TimelineView } from './components/WorkViews'
-import type { ChecklistItem, KnowledgePolicy, MindMapEdgeData, MindNodeData, TeamMember, WaitingItem } from './types/mindMap'
+import type { AiConversationRuntime, ChecklistItem, KnowledgePolicy, MindMapEdgeData, MindNodeData, TeamMember, WaitingItem } from './types/mindMap'
 import { blockingNodes, createsDependencyCycle, dependentNodes, prerequisiteNodes } from './utils/dependencies'
 import { createsKnowledgeCycle, isHierarchyEdge, isKnowledgeEdge, knowledgePolicyOf } from './utils/knowledgeEdges'
 import { extractTextLinks } from './utils/textLinks'
@@ -52,6 +53,9 @@ const DOCUMENT_COLORS = [
 const MINDMAP_GRID_SIZE = 24
 const MINDMAP_CHILD_HORIZONTAL_OFFSET = MINDMAP_GRID_SIZE * 13
 const MINDMAP_WORK_NODE_VERTICAL_STEP = MINDMAP_GRID_SIZE * 6
+const SIDEBAR_MIN_WIDTH = 190
+const SIDEBAR_AI_ACTIVITY_MIN_WIDTH = 208
+const SIDEBAR_MAX_WIDTH = 420
 
 function snapMindMapPosition(position: { x: number; y: number }) {
   return {
@@ -467,6 +471,26 @@ type AiConversationLinkedEvent = {
   sourceClientId: null
   updatedAt: string
   updatedBy: AuthUser
+}
+type AiConversationRuntimeEvent = {
+  type: 'ai-conversation-runtime'
+  mapId: string
+  nodeId: string
+  runtime: AiConversationRuntime | null
+}
+type AiConversationRuntimeSnapshotEvent = {
+  type: 'ai-conversation-runtime-snapshot'
+  mapId: string
+  runtimes: { nodeId: string; runtime: AiConversationRuntime }[]
+}
+type AiConversationRuntimeSummaryEvent = {
+  type: 'ai-conversation-runtime-summary'
+  mapId: string
+  activeCount: number
+}
+type AiConversationRuntimeSummarySnapshotEvent = {
+  type: 'ai-conversation-runtime-summary-snapshot'
+  summaries: { mapId: string; activeCount: number }[]
 }
 type NotificationEvent = { type: 'notification'; notification: UserNotification }
 type NotificationsReadEvent = { type: 'notifications-read'; userId: string; notificationId: string | null; readAt: string }
@@ -1124,6 +1148,8 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
   const [externalChange, setExternalChange] = useState<MapChangeEvent | null>(null)
   const [presenceClients, setPresenceClients] = useState<PresenceClient[]>([])
   const [liveCursors, setLiveCursors] = useState<Record<string, LiveCursor>>({})
+  const [aiConversationRuntimes, setAiConversationRuntimes] = useState<Record<string, AiConversationRuntime>>({})
+  const [aiConversationActiveCounts, setAiConversationActiveCounts] = useState<Record<string, number>>({})
   const [mergeNotice, setMergeNotice] = useState('')
   const [comments, setComments] = useState<NodeComment[]>([])
   const [commentStats, setCommentStats] = useState<NodeCommentStats>({})
@@ -1169,7 +1195,7 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
   const [rightPanning, setRightPanning] = useState(false)
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const savedWidth = Number(localStorage.getItem('mindnprogress-sidebar-width'))
-    return Number.isFinite(savedWidth) ? Math.min(420, Math.max(190, savedWidth)) : 226
+    return Number.isFinite(savedWidth) ? Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, savedWidth)) : 226
   })
   const [inspectorWidth, setInspectorWidth] = useState(() => {
     const savedWidth = Number(localStorage.getItem('mindnprogress-inspector-width'))
@@ -1177,6 +1203,10 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
   })
   const [resizingSidebar, setResizingSidebar] = useState(false)
   const [resizingInspector, setResizingInspector] = useState(false)
+  const sidebarMinWidth = Object.values(aiConversationActiveCounts).some((count) => count > 0)
+    ? SIDEBAR_AI_ACTIVITY_MIN_WIDTH
+    : SIDEBAR_MIN_WIDTH
+  const effectiveSidebarWidth = Math.max(sidebarMinWidth, sidebarWidth)
   const skipChecklistCommit = useRef(false)
   const waitingBlockRef = useRef<HTMLDivElement | null>(null)
   const sidebarResizeStart = useRef({ pointerX: 0, width: 226 })
@@ -1377,6 +1407,7 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
         unresolvedDependencyCount: blockingNodes(node, nodes).length,
         commentCount: (node.data.reference ? referenceCommentStats[node.id] : commentStats[node.id])?.total ?? 0,
         unresolvedCommentCount: (node.data.reference ? referenceCommentStats[node.id] : commentStats[node.id])?.unresolved ?? 0,
+        aiConversationRuntime: aiConversationRuntimes[node.id],
         hasChildren: collapsibleNodeIds.has(node.id),
         collapsed: collapsedNodeIds.has(node.id),
         hiddenDescendantCount: descendantCounts.get(node.id) ?? 0,
@@ -1396,7 +1427,7 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
         filterActive && filterVisibleNodeIds.has(node.id) && !filterMatchedNodeIds.has(node.id) ? 'filter-context' : '',
       ].filter(Boolean).join(' '),
     }
-  }), [collapsedHiddenNodeIds, collapsedNodeIds, collapsibleNodeIds, commentStats, descendantCounts, dropTargetId, filterActive, filterMatchedNodeIds, filterVisibleNodeIds, nodes, normalizedNodeSearch, openWaitingItems, referenceCommentStats, searchContextNodeIds, searchMatchedNodeIds, teamMembers])
+  }), [aiConversationRuntimes, collapsedHiddenNodeIds, collapsedNodeIds, collapsibleNodeIds, commentStats, descendantCounts, dropTargetId, filterActive, filterMatchedNodeIds, filterVisibleNodeIds, nodes, normalizedNodeSearch, openWaitingItems, referenceCommentStats, searchContextNodeIds, searchMatchedNodeIds, teamMembers])
   const visibleFlowNodeIds = useMemo(() => new Set(flowNodes.filter((node) => !node.hidden).map((node) => node.id)), [flowNodes])
   const visibleFlowNodeIdsKey = useMemo(() => [...visibleFlowNodeIds].sort().join('\u0000'), [visibleFlowNodeIds])
   const flowEdges = useMemo(() => {
@@ -1655,10 +1686,11 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
   }, [activeMapId, setNodes])
 
   useEffect(() => {
+    setAiConversationRuntimes({})
     const eventSource = new EventSource(`/api/events?clientId=${encodeURIComponent(CLIENT_ID)}&mapId=${encodeURIComponent(activeMapId)}`)
     eventSource.onmessage = (message) => {
       try {
-        const event = JSON.parse(message.data) as MapChangeEvent | PresenceEvent | CursorEvent | CommentChangeEvent | AiConversationLinkedEvent | NotificationEvent | NotificationsReadEvent | NotificationsRemovedEvent | { type: 'connected' }
+        const event = JSON.parse(message.data) as MapChangeEvent | PresenceEvent | CursorEvent | CommentChangeEvent | AiConversationLinkedEvent | AiConversationRuntimeEvent | AiConversationRuntimeSnapshotEvent | AiConversationRuntimeSummaryEvent | AiConversationRuntimeSummarySnapshotEvent | NotificationEvent | NotificationsReadEvent | NotificationsRemovedEvent | { type: 'connected' }
         if (event.type === 'presence') {
           if (event.mapId === activeMapId) setPresenceClients(event.clients)
           return
@@ -1697,6 +1729,38 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
           } else if (event.action === 'deleted' && event.commentIds) {
             setComments((current) => current.filter((comment) => !event.commentIds?.includes(comment.id)))
           }
+          return
+        }
+        if (event.type === 'ai-conversation-runtime-snapshot') {
+          if (event.mapId !== activeMapId) return
+          setAiConversationRuntimes(Object.fromEntries(event.runtimes.map((item) => [item.nodeId, item.runtime])))
+          return
+        }
+        if (event.type === 'ai-conversation-runtime-summary-snapshot') {
+          setAiConversationActiveCounts(Object.fromEntries(event.summaries
+            .filter((summary) => summary.activeCount > 0)
+            .map((summary) => [summary.mapId, summary.activeCount])))
+          return
+        }
+        if (event.type === 'ai-conversation-runtime-summary') {
+          setAiConversationActiveCounts((current) => {
+            if (event.activeCount > 0) return { ...current, [event.mapId]: event.activeCount }
+            if (!(event.mapId in current)) return current
+            const next = { ...current }
+            delete next[event.mapId]
+            return next
+          })
+          return
+        }
+        if (event.type === 'ai-conversation-runtime') {
+          if (event.mapId !== activeMapId) return
+          setAiConversationRuntimes((current) => {
+            if (event.runtime) return { ...current, [event.nodeId]: event.runtime }
+            if (!(event.nodeId in current)) return current
+            const next = { ...current }
+            delete next[event.nodeId]
+            return next
+          })
           return
         }
         if (event.type === 'ai-conversation-linked') {
@@ -2169,6 +2233,10 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
   useEffect(() => {
     localStorage.setItem('mindnprogress-sidebar-width', String(sidebarWidth))
   }, [sidebarWidth])
+
+  useEffect(() => {
+    setSidebarWidth((current) => Math.max(sidebarMinWidth, current))
+  }, [sidebarMinWidth])
 
   useEffect(() => {
     localStorage.setItem('mindnprogress-inspector-width', String(inspectorWidth))
@@ -3257,6 +3325,7 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
     const waitingCount = hasLoadedActiveDocument
       ? nodes.reduce((count, node) => count + (node.data.waitingItems ?? []).filter((item) => item.label.trim()).length, 0)
       : document.waitingCount
+    const aiActiveCount = aiConversationActiveCounts[document.id] ?? 0
     const dropKey = location.type === 'top' ? `top-map:${document.id}` : `group-map:${location.groupId}:${document.id}`
 
     return (
@@ -3303,6 +3372,7 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
             {waitingCount > 0 && (
               <span className="map-waiting-indicator" title={`대기 항목 ${waitingCount}건`} aria-label={`대기 항목 ${waitingCount}건`}>⏸️</span>
             )}
+            <AiConversationActivityIndicator activeCount={aiActiveCount} />
           </small>
         </span>
         {document.id === activeMapId && <Icon name="chevron" size={15} />}
@@ -3464,7 +3534,7 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
       <main
         className="workspace"
         style={{
-          '--sidebar-width': `${sidebarWidth}px`,
+          '--sidebar-width': `${effectiveSidebarWidth}px`,
           '--inspector-width': `${inspectorWidth}px`,
         } as CSSProperties}
       >
@@ -3746,23 +3816,26 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
           role="separator"
           aria-label="문서 목록 패널 너비 조절"
           aria-orientation="vertical"
-          aria-valuemin={190}
-          aria-valuemax={420}
-          aria-valuenow={Math.round(sidebarWidth)}
+          aria-valuemin={sidebarMinWidth}
+          aria-valuemax={SIDEBAR_MAX_WIDTH}
+          aria-valuenow={Math.round(effectiveSidebarWidth)}
           tabIndex={0}
           onPointerDown={(event) => {
             if (event.button !== 0) return
             event.preventDefault()
             event.currentTarget.setPointerCapture(event.pointerId)
-            sidebarResizeStart.current = { pointerX: event.clientX, width: sidebarWidth }
+            sidebarResizeStart.current = { pointerX: event.clientX, width: effectiveSidebarWidth }
             setResizingSidebar(true)
           }}
           onPointerMove={(event) => {
             if (!resizingSidebar) return
             const centerMinWidth = window.innerWidth <= 1200 ? 500 : 520
-            const maxWidth = Math.min(420, Math.max(190, window.innerWidth - inspectorWidth - centerMinWidth))
+            const maxWidth = Math.min(
+              SIDEBAR_MAX_WIDTH,
+              Math.max(sidebarMinWidth, window.innerWidth - inspectorWidth - centerMinWidth),
+            )
             const nextWidth = sidebarResizeStart.current.width + event.clientX - sidebarResizeStart.current.pointerX
-            setSidebarWidth(Math.min(maxWidth, Math.max(190, nextWidth)))
+            setSidebarWidth(Math.min(maxWidth, Math.max(sidebarMinWidth, nextWidth)))
           }}
           onPointerUp={(event) => {
             if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
@@ -3773,7 +3846,9 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
             if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
             event.preventDefault()
             const delta = event.key === 'ArrowLeft' ? -20 : 20
-            setSidebarWidth((current) => Math.min(420, Math.max(190, current + delta)))
+            setSidebarWidth((current) =>
+              Math.min(SIDEBAR_MAX_WIDTH, Math.max(sidebarMinWidth, current + delta)),
+            )
           }}
         >
           <span />
@@ -3971,7 +4046,10 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
           onPointerMove={(event) => {
             if (!resizingInspector) return
             const centerMinWidth = window.innerWidth <= 1200 ? 500 : 520
-            const maxWidth = Math.min(520, Math.max(240, window.innerWidth - sidebarWidth - centerMinWidth))
+            const maxWidth = Math.min(
+              520,
+              Math.max(240, window.innerWidth - effectiveSidebarWidth - centerMinWidth),
+            )
             const nextWidth = inspectorResizeStart.current.width + inspectorResizeStart.current.pointerX - event.clientX
             setInspectorWidth(Math.min(maxWidth, Math.max(240, nextWidth)))
           }}

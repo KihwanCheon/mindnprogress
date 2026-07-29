@@ -33,6 +33,15 @@ export type MindNodeReference = {
   nodeId: string
 }
 
+export type AiConversationRuntime = {
+  conversationId: string
+  state: 'running' | 'waiting-confirmation' | 'idle' | 'unknown'
+  isProcessing: boolean
+  pendingConfirmations: number
+  turnId: string | null
+  observedAt: string
+}
+
 export type MindNodeData = {
   label: string
   description: string
@@ -61,6 +70,7 @@ export type MindNodeData = {
   hasChildren?: boolean
   collapsed?: boolean
   hiddenDescendantCount?: number
+  aiConversationRuntime?: AiConversationRuntime
   onToggleCollapse?: () => void
   onOpenWaitingItems?: () => void
 }
