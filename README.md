@@ -213,7 +213,7 @@ AI가 MindNProgress 밖에서 시작되었다면 먼저 `mindnprogress_read_me_f
 | `mindnprogress_create_document` | Root 카드 하나만 포함한 빈 문서를 생성합니다. |
 | `mindnprogress_save_document` | 기준 버전을 확인하면서 문서의 전체 카드와 연결 관계를 저장합니다. |
 | `mindnprogress_add_card` | 새 카드 또는 지정한 상위 카드의 하위 카드를 추가합니다. |
-| `mindnprogress_update_card` | 카드 제목, 설명, 공유 지식, 상태, 진행률과 업무 관리 필드를 수정합니다. |
+| `mindnprogress_update_card` | 전달한 필드만 부분 병합하여 카드 제목, 설명, 공유 지식, 상태, 진행률과 업무 관리 필드를 수정합니다. 일반 카드에서 생략한 필드와 위치는 보존됩니다. |
 | `mindnprogress_move_card` | 카드와 전체 하위 구조를 다른 카드 아래로 이동합니다. |
 | `mindnprogress_delete_card` | 카드와 선택적으로 전체 하위 카드를 삭제합니다. Root 카드는 삭제할 수 없습니다. |
 | `mindnprogress_add_knowledge_line` | 두 카드 사이에 지식선을 추가합니다. 중복과 순환 관계를 거부합니다. |
@@ -222,6 +222,8 @@ AI가 MindNProgress 밖에서 시작되었다면 먼저 `mindnprogress_read_me_f
 | `mindnprogress_update_document_info` | 문서 이름 또는 아이콘 색상을 변경합니다. |
 
 처음부터 여러 카드가 필요한 경우 `mindnprogress_create_document`와 `mindnprogress_save_document`를 연속 호출하지 말고 `mindnprogress_create_mindmap`을 사용합니다. 지식선만 바꿀 때는 전체 카드와 장문 본문을 다시 전달하는 `mindnprogress_save_document` 대신 지식선 전용 도구를 사용합니다. 전용 도구는 최신 문서를 내부에서 조회해 관계 변경만 재적용하고 일시적인 버전 충돌을 최대 3회까지 다시 시도합니다. 전체 저장과 문서 정보 변경은 최신 `baseVersion`을 사용하며, 버전 충돌이 발생하면 문서를 다시 조회해야 합니다.
+
+단일 카드의 일부 필드만 변경할 때는 `mindnprogress_update_card`의 `data`에 변경할 필드만 전달합니다. 현재 카드 전체 데이터를 재전송하면 조회 이후 다른 편집자가 변경한 값을 오래된 값으로 덮어쓸 수 있습니다. 일반 카드에서 생략한 필드와 `position`은 보존되고, 빈 문자열이나 빈 배열을 명시하면 해당 필드가 초기화됩니다. 단, `status=done` 또는 `progress>=100`을 적용하면 `waitingItems`는 전달 여부와 관계없이 자동으로 해제되며 Ref 카드는 원본이 관리하는 제목·설명·공유 지식·업무 필드 등이 최신 원본 값으로 동기화될 수 있습니다.
 
 ### 문서 목록과 그룹
 

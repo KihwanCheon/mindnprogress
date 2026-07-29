@@ -1016,7 +1016,10 @@ function normalizeAionUiOption(option) {
 }
 
 function normalizeAionUiAgent(agent, providers) {
-  const configOptions = Array.isArray(agent?.config_options?.config_options) ? agent.config_options.config_options : []
+  const rawConfigOptions = agent?.config_options
+  const configOptions = Array.isArray(rawConfigOptions)
+    ? rawConfigOptions
+    : Array.isArray(rawConfigOptions?.config_options) ? rawConfigOptions.config_options : []
   const modelOption = configOptions.find((option) => option.category === 'model')
   const modeOption = configOptions.find((option) => option.category === 'mode')
   const thoughtOption = configOptions.find((option) => option.category === 'thought_level')

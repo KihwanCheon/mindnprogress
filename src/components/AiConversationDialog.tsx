@@ -34,6 +34,7 @@ type SavedRuntimeSelections = {
 
 const defaultWorkspace = 'C:\\Git\\MindNProgress'
 const runtimeSelectionsStorageKey = 'mindnprogress-ai-runtime-selections'
+const mcpSelectionsStorageKey = 'mindnprogress-ai-mcp-selections'
 
 function workspaceStorageKey(documentId: string) {
   return `mindnprogress-ai-workspace:${documentId}`
@@ -44,6 +45,15 @@ function readRuntimeSelections(): SavedRuntimeSelections {
     return JSON.parse(localStorage.getItem(runtimeSelectionsStorageKey) ?? '{}') as SavedRuntimeSelections
   } catch {
     return {}
+  }
+}
+
+function readMcpSelections() {
+  try {
+    const value = JSON.parse(localStorage.getItem(mcpSelectionsStorageKey) ?? '[]') as unknown
+    return new Set(Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string') : [])
+  } catch {
+    return new Set<string>()
   }
 }
 
@@ -93,6 +103,7 @@ export function AiConversationDialog({ documentId, documentTitle, cardId, cardTi
       .then((body) => {
         setOptions(body)
         const savedSelections = readRuntimeSelections()
+        const savedMcpIds = readMcpSelections()
         const initialAgent = body.agents.find((agent) => agent.id === savedSelections.agentId && agent.models.length > 0)
           ?? body.agents.find((agent) => agent.models.length > 0)
           ?? body.agents[0]
@@ -103,7 +114,7 @@ export function AiConversationDialog({ documentId, documentTitle, cardId, cardTi
           setThoughtLevel(availableOptionId(initialAgent.thoughtLevels, savedSelections.thoughtLevel, initialAgent.defaultThoughtLevel))
         }
         setSelectedSkillIds(new Set())
-        setSelectedMcpIds(new Set(body.mcpServers.filter((server) => server.required).map((server) => server.id)))
+        setSelectedMcpIds(new Set(body.mcpServers.filter((server) => server.required || savedMcpIds.has(server.id)).map((server) => server.id)))
       })
       .catch((loadError) => {
         if (loadError instanceof DOMException && loadError.name === 'AbortError') return
@@ -117,6 +128,14 @@ export function AiConversationDialog({ documentId, documentTitle, cardId, cardTi
     if (!options || !agentId) return
     localStorage.setItem(runtimeSelectionsStorageKey, JSON.stringify({ agentId, modelId, mode, thoughtLevel }))
   }, [agentId, mode, modelId, options, thoughtLevel])
+
+  useEffect(() => {
+    if (!options) return
+    const selectedIds = options.mcpServers
+      .filter((server) => !server.required && selectedMcpIds.has(server.id))
+      .map((server) => server.id)
+    localStorage.setItem(mcpSelectionsStorageKey, JSON.stringify(selectedIds))
+  }, [options, selectedMcpIds])
 
   const selectedAgent = useMemo(() => options?.agents.find((agent) => agent.id === agentId) ?? null, [agentId, options])
   const selectedModel = selectedAgent?.models.find((model) => model.id === modelId)
@@ -223,7 +242,17 @@ export function AiConversationDialog({ documentId, documentTitle, cardId, cardTi
             </details>
             <details open>
               <summary>MCP 도구 <b>{options.mcpServers.filter((server) => server.required || selectedMcpIds.has(server.id)).length}</b></summary>
-              <div className="ai-capability-list">{options.mcpServers.map((server) => <label key={server.id} title={server.description}><input type="checkbox" checked={server.required || selectedMcpIds.has(server.id)} disabled={server.required} onChange={() => toggleSelection(setSelectedMcpIds, server.id)} /><span><strong>{server.name}{server.required ? ' · 필수' : ''}</strong><small>{server.toolCount > 0 ? `${server.toolCount}개 도구` : server.description || '도구 정보 없음'}</small></span></label>)}</div>
+              <div className="ai-capability-list ai-mcp-capability-list" aria-label="사용할 MCP 도구 선택">
+                {options.mcpServers.map((server) => (
+                  <label key={server.id} title={server.description}>
+                    <input type="checkbox" checked={server.required || selectedMcpIds.has(server.id)} disabled={server.required} onChange={() => toggleSelection(setSelectedMcpIds, server.id)} />
+                    <span>
+                      <strong>{server.name}{server.required ? ' · 필수' : ''}</strong>
+                      <small>{server.toolCount > 0 ? `${server.toolCount}개 도구` : server.description || '도구 정보 없음'}</small>
+                    </span>
+                  </label>
+                ))}
+              </div>
             </details>
             {launchError && <div className="ai-launch-error" role="alert">{launchError}</div>}
           </div>

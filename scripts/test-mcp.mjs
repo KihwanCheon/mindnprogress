@@ -190,6 +190,7 @@ async function main() {
 
     const guide = await invoke('mindnprogress_read_me_first')
     assert.equal(guide.guide.product.name, 'MindNProgress')
+    assert.equal(guide.guide.version, '1.3')
     assert.match(guide.guide.dataModel.cardContent.sharedKnowledge, /재사용/)
 
     const createdMindmap = await invoke('mindnprogress_create_mindmap', {
@@ -678,10 +679,17 @@ async function main() {
       mapId,
       nodeId: addedCard.id,
       data: {
+        description: '부분 병합 보존 설명',
         kind: 'task',
         isWork: true,
         status: 'in-progress',
         progress: 40,
+        taskUrl: 'https://example.com/partial-merge',
+        assigneeId: attribution.editorId,
+        dueDate: '2026-07-30',
+        checklist: [{ id: 'check-partial-merge', text: '부분 병합 보존', done: false }],
+        blockedBy: ['task-a'],
+        aiConversationId: 'conversation-partial-merge',
         waitingItems: [{ label: '캐릭터 아트 전달', resumeCondition: '최종 PNG 수령' }],
       },
     })
@@ -690,6 +698,37 @@ async function main() {
     assert.equal(waitingCard.data.waitingItems[0].label, '캐릭터 아트 전달')
     assert.ok(waitingCard.data.waitingItems[0].id)
     assert.ok(waitingCard.data.waitingItems[0].since)
+
+    const partialMergePreservedFields = [
+      'label',
+      'description',
+      'progress',
+      'status',
+      'kind',
+      'taskUrl',
+      'isWork',
+      'assigneeId',
+      'dueDate',
+      'checklist',
+      'blockedBy',
+      'waitingItems',
+      'aiConversationId',
+    ]
+    const preservedCardData = Object.fromEntries(
+      partialMergePreservedFields.map((field) => [field, waitingCard.data[field]]),
+    )
+    const partialUpdateResult = await invoke('mindnprogress_update_card', {
+      mapId,
+      nodeId: addedCard.id,
+      data: { sharedKnowledge: '공유 지식만 부분 수정' },
+    })
+    const partiallyUpdatedCard = partialUpdateResult.map.nodes.find((node) => node.id === addedCard.id)
+    assert.equal(partiallyUpdatedCard.data.sharedKnowledge, '공유 지식만 부분 수정')
+    assert.deepEqual(
+      Object.fromEntries(partialMergePreservedFields.map((field) => [field, partiallyUpdatedCard.data[field]])),
+      preservedCardData,
+    )
+    assert.deepEqual(partiallyUpdatedCard.position, waitingCard.position)
 
     const updatedCardResult = await invoke('mindnprogress_update_card', {
       mapId,
