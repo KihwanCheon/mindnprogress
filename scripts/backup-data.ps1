@@ -22,6 +22,15 @@ function Test-PathInside([string]$Path, [string]$ParentPath) {
   )
 }
 
+function Test-PathSameOrInside([string]$Path, [string]$ParentPath) {
+  $fullPath = [System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
+  $fullParent = [System.IO.Path]::GetFullPath($ParentPath).TrimEnd('\', '/')
+  return $fullPath.Equals(
+    $fullParent,
+    [System.StringComparison]::OrdinalIgnoreCase
+  ) -or (Test-PathInside $fullPath $fullParent)
+}
+
 function Remove-SafeDirectory([string]$Path, [string]$AllowedRoot) {
   if (-not (Test-Path -LiteralPath $Path)) { return }
   if (-not (Test-PathInside $Path $AllowedRoot)) {
@@ -161,8 +170,11 @@ $backupDrive = [System.IO.Path]::GetPathRoot($backupRoot)
 if (-not $backupDrive -or -not (Test-Path -LiteralPath $backupDrive -PathType Container)) {
   throw "백업 드라이브를 사용할 수 없습니다: $backupDrive"
 }
-if (Test-PathInside $backupRoot $dataSource) {
+if (Test-PathSameOrInside $backupRoot $dataSource) {
   throw "백업 폴더를 데이터 폴더 내부에 둘 수 없습니다: $backupRoot"
+}
+if (Test-PathSameOrInside $backupRoot $resolvedProject) {
+  throw "백업 폴더를 Git 저장소 내부에 둘 수 없습니다: $backupRoot"
 }
 
 $dateText = Get-Date -Format 'yyyy-MM-dd'

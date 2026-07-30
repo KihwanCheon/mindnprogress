@@ -16,6 +16,12 @@ dist-ssr
 server/data/**
 !server/data/.gitkeep
 
+# MindNProgress external backups
+MindNProgress_*.zip
+*.partial.zip
+.staging-*/
+.verify-*/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
