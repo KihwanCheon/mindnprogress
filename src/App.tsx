@@ -934,25 +934,54 @@ function LoginScreen({ onAuthenticated, theme, onToggleTheme }: { onAuthenticate
     <main className="login-page">
       <section className="login-intro">
         <div className="login-brand"><Icon name="map" size={27} /></div>
-        <span className="eyebrow">Mind & Progress</span>
-        <h1>생각을 연결하고,<br />실행을 완성하세요.</h1>
-        <p>아이디어의 흐름과 업무 진행 상황을 하나의 맵에서 관리합니다.</p>
+        <div className="login-eyebrow">
+          <span>Mind & Progress</span>
+          <small>AI Collaboration</small>
+        </div>
+        <h1>업무의 맥락을 연결하고,<br />AI와 함께 완성하세요.</h1>
+        <p>업무·지식·대화의 맥락을 하나의 맵에 연결하고, 사람과 AI가 계획부터 완료까지 함께 진행합니다.</p>
+        <div className="login-feature-tags" aria-hidden="true">
+          <span>업무 관리</span>
+          <span>공유 지식</span>
+          <span>AI 대화</span>
+        </div>
         <div className="login-map-preview" aria-hidden="true">
-          <span className="preview-node root-preview">목표</span>
-          <i className="preview-line line-one" />
-          <i className="preview-line line-two" />
-          <span className="preview-node node-one">제품 설계</span>
-          <span className="preview-node node-two done-preview">출시 준비 ✓</span>
+          <svg viewBox="0 0 520 136" role="presentation">
+            <path className="login-preview-edge" d="M126 94C153 81 177 50 206 32" />
+            <path className="login-preview-edge" d="M126 103H190" />
+            <path className="login-preview-edge knowledge-edge" d="M269 56V77" />
+            <path className="login-preview-edge" d="M348 103H386" />
+
+            <g className="login-preview-card root-card">
+              <rect x="8" y="78" width="118" height="50" rx="12" />
+              <text x="67" y="103">업무 목표</text>
+            </g>
+            <g className="login-preview-card knowledge-card">
+              <rect x="206" y="8" width="126" height="48" rx="12" />
+              <text x="269" y="32">공유 지식</text>
+            </g>
+            <g className="login-preview-card ai-card">
+              <rect x="190" y="77" width="158" height="52" rx="12" />
+              <circle className="preview-ai-dot dot-one" cx="211" cy="103" r="3" />
+              <circle className="preview-ai-dot dot-two" cx="221" cy="103" r="3" />
+              <circle className="preview-ai-dot dot-three" cx="231" cy="103" r="3" />
+              <text x="290" y="103">AI 작업 중</text>
+            </g>
+            <g className="login-preview-card result-card">
+              <rect x="386" y="79" width="126" height="48" rx="12" />
+              <text x="449" y="103">결과 기록 ✓</text>
+            </g>
+          </svg>
         </div>
       </section>
 
       <section className="login-panel">
         <form ref={formRef} className="login-card" onSubmit={(event) => { event.preventDefault(); void login() }}>
           <div className="login-card-heading">
-            <span>워크스페이스 로그인</span>
+            <span>AI 협업 워크스페이스</span>
             <ThemeToggle theme={theme} onToggle={onToggleTheme} className="login-theme-switch" />
-            <h2>다시 만나서 반갑습니다</h2>
-            <p>계정 역할에 따라 편집 권한이 자동으로 적용됩니다.</p>
+            <h2>작업을 이어가세요</h2>
+            <p>로그인하면 편집 권한과 연결된 AI 대화를 이어갈 수 있습니다.</p>
           </div>
           <label>
             <span>이메일</span>
@@ -973,7 +1002,7 @@ function LoginScreen({ onAuthenticated, theme, onToggleTheme }: { onAuthenticate
           <button ref={loginButtonRef} className="login-submit" type="submit" disabled={submitting}>
             {submitting ? '확인 중…' : '로그인'}
           </button>
-          <a className="viewer-entry-link" href="/mindmap/"><Icon name="external" size={13} /><span>읽기 전용으로 바로 보기</span></a>
+          <a className="viewer-entry-link" href="/mindmap/"><Icon name="external" size={13} /><span>로그인 없이 읽기 전용으로 보기</span></a>
         </form>
       </section>
     </main>
