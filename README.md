@@ -89,6 +89,26 @@ AionUi ── Claude / Codex / Copilot 등
 
 현재 데이터 저장소는 별도 데이터베이스가 아닌 로컬 JSON 파일입니다. `server/data`의 런타임 파일은 Git에서 제외됩니다.
 
+## 외부 전체 백업과 복원
+
+Windows에서는 저장소 루트의 `MindNProgress_Backup.bat`을 실행하면 Git으로 복구할 수 없는 운영 데이터를 `D:\MindNProgress_Backup\YYYY-MM-DD` 아래의 시간별 ZIP 파일로 백업합니다.
+
+```bat
+MindNProgress_Backup.bat
+```
+
+백업에는 `server/data` 전체와 존재하는 로컬 `.env*`·`*.local` 설정이 포함됩니다. 문서, 계정, 세션, 댓글, 알림, 변경 이력, 일일 백업, MCP 토큰과 AI 작성자 귀속을 함께 보존하며 `node_modules`, `dist`, 로그와 PID 같은 재생성 가능한 파일은 제외합니다. 서버가 실행 중이면 일관된 시점의 데이터를 복사하기 위해 잠시 중지하고, 스냅샷 복사가 끝나는 즉시 기존 실행 상태로 자동 복구한 뒤 압축과 검증을 계속합니다.
+
+각 ZIP에는 파일별 크기와 SHA-256을 기록한 `manifest.json`과 수동 복원 안내 `RESTORE.txt`가 포함됩니다. 배치는 ZIP을 다시 풀어 manifest와 대조한 뒤에만 완료 처리합니다. 복원은 동일한 소스 버전을 준비한 후 다음처럼 실행합니다.
+
+```bat
+MindNProgress_Restore.bat "D:\MindNProgress_Backup\2026-07-30\MindNProgress_2026-07-30_120000.zip"
+```
+
+복원 배치는 ZIP을 검증하고 현재 `server/data`를 `.mindnprogress\pre-restore-data-*`에 보관한 뒤 백업 데이터로 교체합니다. 데이터 마이그레이션은 수행하지 않으므로 다른 버전으로의 복원은 보장하지 않습니다. 백업에는 계정과 세션, MCP 인증 토큰이 포함되므로 외부에 공유하지 마세요.
+
+기본 백업 경로를 바꿔야 하는 테스트·운영 환경에서는 `MNP_BACKUP_DIR` 환경변수를 사용할 수 있습니다.
+
 ## 요구 사항
 
 - Node.js `20.19.0` 이상 또는 `22.12.0` 이상
