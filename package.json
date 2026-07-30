@@ -10,6 +10,7 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "test:mcp": "node scripts/test-mcp.mjs",
+    "test:unit": "node scripts/run-unit-tests.mjs",
     "mcp": "node mcp/server.mjs",
     "preview": "vite preview",
     "start": "node server/index.mjs"

@@ -307,12 +307,13 @@ npm run dev:client   # Vite 화면만 실행
 npm run dev:server   # API 서버만 watch 모드로 실행
 npm run build        # TypeScript 검사와 배포 빌드
 npm run lint         # oxlint 정적 검사
+npm run test:unit    # Node 20·22 호환 단위 테스트
 npm run test:mcp     # 격리된 임시 API를 이용한 전체 MCP 회귀 검사
 npm run mcp          # MCP stdio 서버 직접 실행
 npm start            # 빌드 결과와 API 서버 실행
 ```
 
-`test:mcp`는 운영 데이터와 분리된 임시 API 서버에서 모든 등록 도구의 성공 경로와 버전 충돌, 순환 이동, 루트 삭제, 영구 삭제 확인 등의 안전 경계를 검사합니다. 테스트 데이터는 종료 시 제거됩니다.
+`test:unit`은 3방향 병합, 진행률 롤업, 대기 해제와 AI 작성자 귀속 같은 순수 로직을 검사합니다. `test:mcp`는 운영 데이터와 분리된 임시 API 서버에서 모든 등록 도구의 성공 경로와 버전 충돌, 순환 이동, 루트 삭제, 영구 삭제 확인 등의 안전 경계를 검사합니다. 테스트 데이터는 종료 시 제거됩니다.
 
 ## 현재 제한사항
 

@@ -35,6 +35,7 @@ import { DashboardView, KanbanView, TimelineView } from './components/WorkViews'
 import type { AiConversationRuntime, ChecklistItem, KnowledgePolicy, MindMapEdgeData, MindNodeData, TeamMember, WaitingItem } from './types/mindMap'
 import { blockingNodes, createsDependencyCycle, dependentNodes, prerequisiteNodes } from './utils/dependencies'
 import { createsKnowledgeCycle, isHierarchyEdge, isKnowledgeEdge, knowledgePolicyOf } from './utils/knowledgeEdges'
+import { mergeMapContent } from './utils/mergeMapContent.mjs'
 import { extractTextLinks } from './utils/textLinks'
 import { appliedUiTheme, applyUiTheme, storedUiTheme, UI_THEME_STORAGE_KEY, type UiTheme } from './theme'
 
@@ -151,64 +152,6 @@ function revisionReasonLabel(reason: string) {
     metadata: '문서 정보 변경',
     'history-restore': '이전 버전 복원',
   } as Record<string, string>)[reason] ?? '문서 변경'
-}
-
-function valuesEqual(first: unknown, second: unknown) {
-  return JSON.stringify(first) === JSON.stringify(second)
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
-}
-
-function isIdentifiedArray(value: unknown[]): value is Array<{ id: string } & Record<string, unknown>> {
-  return value.every((item) => isPlainObject(item) && typeof item.id === 'string')
-}
-
-function mergeChangedValue(base: unknown, local: unknown, remote: unknown): { value: unknown; conflicts: number } {
-  if (valuesEqual(local, remote)) return { value: structuredClone(local), conflicts: 0 }
-  if (valuesEqual(local, base)) return { value: structuredClone(remote), conflicts: 0 }
-  if (valuesEqual(remote, base)) return { value: structuredClone(local), conflicts: 0 }
-
-  if (Array.isArray(base) && Array.isArray(local) && Array.isArray(remote)
-    && isIdentifiedArray(base) && isIdentifiedArray(local) && isIdentifiedArray(remote)) {
-    const baseById = new Map(base.map((item) => [item.id, item]))
-    const localById = new Map(local.map((item) => [item.id, item]))
-    const remoteById = new Map(remote.map((item) => [item.id, item]))
-    const ids = [...new Set([...local.map((item) => item.id), ...remote.map((item) => item.id), ...base.map((item) => item.id)])]
-    let conflicts = 0
-    const value = ids.flatMap((id) => {
-      const merged = mergeChangedValue(baseById.get(id), localById.get(id), remoteById.get(id))
-      conflicts += merged.conflicts
-      return merged.value === undefined ? [] : [merged.value]
-    })
-    return { value, conflicts }
-  }
-
-  if (isPlainObject(base) && isPlainObject(local) && isPlainObject(remote)) {
-    const keys = [...new Set([...Object.keys(base), ...Object.keys(local), ...Object.keys(remote)])]
-    let conflicts = 0
-    const value: Record<string, unknown> = {}
-    for (const key of keys) {
-      const merged = mergeChangedValue(base[key], local[key], remote[key])
-      conflicts += merged.conflicts
-      if (merged.value !== undefined) value[key] = merged.value
-    }
-    return { value, conflicts }
-  }
-
-  if (local === undefined && remote !== undefined) return { value: structuredClone(remote), conflicts: 1 }
-  return { value: structuredClone(local), conflicts: 1 }
-}
-
-function mergeMapContent(base: MapDocument, local: Pick<MapDocument, 'nodes' | 'edges'>, remote: MapDocument) {
-  const nodes = mergeChangedValue(base.nodes, local.nodes, remote.nodes)
-  const edges = mergeChangedValue(base.edges, local.edges, remote.edges)
-  return {
-    nodes: nodes.value as MindMapNode[],
-    edges: edges.value as MindMapEdge[],
-    conflicts: nodes.conflicts + edges.conflicts,
-  }
 }
 
 type MindMapNode = Node<MindNodeData, 'mind'>
@@ -445,7 +388,7 @@ type MapDocumentResponse = {
 type UserNotification = {
   id: string
   userId: string
-  type: 'comment' | 'mention' | 'reply' | 'assignment' | 'schedule'
+  type: 'comment' | 'mention' | 'reply' | 'assignment' | 'schedule' | 'waiting-released'
   mapId: string
   mapTitle: string
   nodeId: string
@@ -3489,11 +3432,13 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                           ? `${notification.actor.name}님이 담당자로 지정했습니다.`
                           : notification.type === 'schedule'
                             ? '담당 업무 일정 알림'
-                            : notification.type === 'mention'
-                              ? `${notification.actor.name}님이 회원님을 멘션했습니다.`
-                              : notification.type === 'reply'
-                                ? `${notification.actor.name}님이 답글을 남겼습니다.`
-                                : `${notification.actor.name}님이 댓글을 남겼습니다.`}</strong>
+                            : notification.type === 'waiting-released'
+                              ? `${notification.actor.name}님이 외부 대기를 해제했습니다.`
+                              : notification.type === 'mention'
+                                ? `${notification.actor.name}님이 회원님을 멘션했습니다.`
+                                : notification.type === 'reply'
+                                  ? `${notification.actor.name}님이 답글을 남겼습니다.`
+                                  : `${notification.actor.name}님이 댓글을 남겼습니다.`}</strong>
                         <small>{notification.mapTitle} · {notification.nodeLabel}</small>
                         <em>{notification.message}</em>
                         <time>{new Date(notification.createdAt).toLocaleString('ko-KR')}</time>

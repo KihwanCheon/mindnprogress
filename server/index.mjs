@@ -4,6 +4,9 @@ import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/p
 import { networkInterfaces, tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { applyProgressRollup } from './lib/progressRollup.mjs'
+import { detectReleasedWaitingItems } from './lib/waitingItems.mjs'
+import { resolveScopedAttribution } from './lib/attributionScope.mjs'
 
 const serverDirectory = path.dirname(fileURLToPath(import.meta.url))
 const projectDirectory = path.resolve(serverDirectory, '..')
@@ -245,6 +248,7 @@ function integrationRequestScope(request) {
   return {
     mapId: String(request.headers['x-mnp-ai-map-id'] ?? '').trim().slice(0, 120),
     cardId: String(request.headers['x-mnp-ai-card-id'] ?? '').trim().slice(0, 120),
+    editorId: String(request.headers['x-mnp-ai-editor-id'] ?? '').trim().slice(0, 120),
   }
 }
 
@@ -253,20 +257,7 @@ function conversationAttributionKey(mapId, cardId) {
 }
 
 function scopedAttribution(request) {
-  const now = Date.now()
-  const scope = integrationRequestScope(request)
-  if (!scope.mapId) return { attribution: null, match: null, scope }
-  const candidates = [...aiAttributions.values()]
-    .filter((candidate) => candidate.expiresAt > now && candidate.mapId === scope.mapId)
-    .sort((first, second) => Number(second.createdAt ?? 0) - Number(first.createdAt ?? 0))
-  const exact = scope.cardId ? candidates.find((candidate) => candidate.cardId === scope.cardId) : null
-  const conversation = scope.cardId
-    ? aiConversationAttributions.get(conversationAttributionKey(scope.mapId, scope.cardId)) ?? null
-    : null
-  if (exact) return { attribution: exact, match: 'card', scope }
-  if (conversation) return { attribution: conversation, match: 'conversation', scope }
-  if (!scope.cardId && candidates.length > 0) return { attribution: candidates[0], match: 'map', scope }
-  return { attribution: null, match: null, scope }
+  return resolveScopedAttribution(integrationRequestScope(request), [...aiAttributions.values()], aiConversationAttributions)
 }
 
 function attributionUser(attribution) {
@@ -275,6 +266,15 @@ function attributionUser(attribution) {
   return editor
     ? { ...editor, name: attribution.authorName }
     : { ...integrationUser, name: attribution.authorName }
+}
+
+function requestDeclaredAiAuthorName(request) {
+  const cleanIdentityPart = (value, maxLength) => [...String(value ?? '')]
+    .filter((character) => character.charCodeAt(0) >= 32 && character.charCodeAt(0) !== 127)
+    .join('').trim().slice(0, maxLength)
+  const aiType = cleanIdentityPart(request.headers['x-mnp-ai-type'], 120)
+  const aiModel = cleanIdentityPart(request.headers['x-mnp-ai-model'], 160)
+  return aiType && aiModel ? `${aiType}(${aiModel})` : ''
 }
 
 function traceAttribution(request, source, user, scope, attributionToken = '') {
@@ -287,6 +287,7 @@ function traceAttribution(request, source, user, scope, attributionToken = '') {
     path: pathname,
     mapId: scope.mapId || null,
     cardId: scope.cardId || null,
+    editorId: scope.editorId || null,
     actorId: user?.id ?? null,
     authorName: user?.name ?? null,
     tokenHashPrefix: attributionToken ? sessionTokenKey(attributionToken).slice(0, 12) : null,
@@ -299,15 +300,15 @@ function attributedIntegrationUser(request) {
     ? users.find((candidate) => candidate.id === editorId && candidate.active !== false && canEdit(candidate))
     : null
   const attributionToken = String(request.headers['x-mnp-ai-attribution'] ?? '').trim()
-  const scoped = scopedAttribution(request)
+  const scoped = attributionToken
+    ? scopedAttribution(request)
+    : { attribution: null, match: null, scope: integrationRequestScope(request) }
   if (!attributionToken) {
-    if (scoped.attribution) {
-      const user = attributionUser(scoped.attribution)
-      traceAttribution(request, `${scoped.match}-scope-fallback`, user, scoped.scope)
-      return user
-    }
-    const user = editor ? { ...editor, name: `${editor.name}의 AI` } : integrationUser
-    traceAttribution(request, editor ? 'editor-fallback' : 'model-unspecified', user, scoped.scope)
+    const declaredAuthorName = requestDeclaredAiAuthorName(request)
+    const user = declaredAuthorName
+      ? { ...(editor ?? integrationUser), name: declaredAuthorName }
+      : editor ? { ...editor, name: `${editor.name}의 AI` } : integrationUser
+    traceAttribution(request, declaredAuthorName ? 'self-declared' : editor ? 'editor-fallback' : 'model-unspecified', user, scoped.scope)
     return user
   }
   const tokenKey = sessionTokenKey(attributionToken)
@@ -339,14 +340,17 @@ function attributedIntegrationUser(request) {
   return user
 }
 
-function getCurrentUser(request) {
+function hasValidIntegrationBearer(request) {
   const authorization = String(request.headers.authorization ?? '')
   const bearerToken = authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : ''
-  if (bearerToken && integrationToken) {
-    const candidate = Buffer.from(bearerToken)
-    const expected = Buffer.from(integrationToken)
-    if (candidate.length === expected.length && timingSafeEqual(candidate, expected)) return attributedIntegrationUser(request)
-  }
+  if (!bearerToken || !integrationToken) return false
+  const candidate = Buffer.from(bearerToken)
+  const expected = Buffer.from(integrationToken)
+  return candidate.length === expected.length && timingSafeEqual(candidate, expected)
+}
+
+function getCurrentUser(request) {
+  if (hasValidIntegrationBearer(request)) return attributedIntegrationUser(request)
 
   const token = parseCookies(request).get('mnp_session')
   if (!token) return null
@@ -477,7 +481,7 @@ function normalizeMapAssignees(map) {
 }
 
 function normalizeMapForPersistence(map) {
-  return normalizeMapAssignees(normalizeMapRuntimeState(normalizeMapEdges(map)))
+  return applyProgressRollup(normalizeMapAssignees(normalizeMapRuntimeState(normalizeMapEdges(map))))
 }
 
 function normalizeSharedKnowledgeMetadata(existing, map, user, updatedAt) {
@@ -1701,6 +1705,26 @@ async function createWorkChangeNotifications(existing, map, actor, suppressedNod
         nodeId: node.id,
         nodeLabel: node.data.label,
         message: `마감일이 ${node.data.dueDate}(으)로 변경되었습니다.`,
+        actor: publicUser(actor),
+      })
+    }
+  }
+}
+
+async function createWaitingReleaseNotifications(existing, map, actor, { includeActor = false } = {}) {
+  const released = detectReleasedWaitingItems(existing?.nodes, map.nodes)
+  for (const release of released) {
+    const assignee = users.find((candidate) => candidate.id === release.assigneeId && candidate.role === 'editor' && candidate.active !== false)
+    const recipients = (assignee ? [assignee] : users.filter((candidate) => candidate.role === 'editor' && candidate.active !== false))
+      .filter((recipient) => includeActor || recipient.id !== actor.id)
+    for (const recipient of recipients) {
+      await createNotification(recipient, {
+        type: 'waiting-released',
+        mapId: map.id,
+        mapTitle: map.title,
+        nodeId: release.nodeId,
+        nodeLabel: release.nodeLabel,
+        message: `외부 대기 '${release.item.label}'이(가) 해제되었습니다.`,
         actor: publicUser(actor),
       })
     }
@@ -3187,6 +3211,9 @@ const server = createServer(async (request, response) => {
         )
         const map = await saveMap(mapId, normalizedIncomingMap, user, undefined, undefined, 'content')
         await createWorkChangeNotifications(existing, map, user, suppressedWorkNotificationNodeIds)
+        await createWaitingReleaseNotifications(existing, map, user, {
+          includeActor: hasValidIntegrationBearer(request),
+        })
         if (contentChanged) broadcastMapChange(request, mapId, 'content', user)
         return sendJson(response, 200, { map, summary: mapSummary(map) })
       }

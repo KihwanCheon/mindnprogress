@@ -150,13 +150,17 @@ async function main() {
     MNP_AI_ATTRIBUTION_DURATION_MS: '10000',
   }
   const serverLogs = []
-  const apiServer = spawn(process.execPath, ['server/index.mjs'], {
-    cwd: projectDirectory,
-    env: environment,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
-  apiServer.stdout.on('data', (chunk) => serverLogs.push(chunk.toString()))
-  apiServer.stderr.on('data', (chunk) => serverLogs.push(chunk.toString()))
+  const startApiServer = () => {
+    const child = spawn(process.execPath, ['server/index.mjs'], {
+      cwd: projectDirectory,
+      env: environment,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    child.stdout.on('data', (chunk) => serverLogs.push(chunk.toString()))
+    child.stderr.on('data', (chunk) => serverLogs.push(chunk.toString()))
+    return child
+  }
+  let apiServer = startApiServer()
 
   let client = null
   const calledTools = new Map()
@@ -190,8 +194,13 @@ async function main() {
 
     const guide = await invoke('mindnprogress_read_me_first')
     assert.equal(guide.guide.product.name, 'MindNProgress')
-    assert.equal(guide.guide.version, '1.3')
+    assert.equal(guide.guide.version, '1.4')
     assert.match(guide.guide.dataModel.cardContent.sharedKnowledge, /재사용/)
+    assert.match(guide.guide.authoringRules.join('\n'), /말단 업무의 진행률을 동일 가중치 평균/)
+    assert.match(guide.guide.operationRules.join('\n'), /변경할 필드만 보내고/)
+    assert.match(guide.guide.operationRules.join('\n'), /조회 도구는 문서 version을 변경하지 않으며/)
+    assert.match(guide.guide.operationRules.join('\n'), /댓글은 \[진행\].*\[차단\].*\[결과\]/)
+    assert.match(guide.guide.operationRules.join('\n'), /waitingItems가 해제되면 서버가 관련 사용자에게 알림/)
 
     const createdMindmap = await invoke('mindnprogress_create_mindmap', {
       title: 'MCP 전체 회귀 문서',
@@ -233,16 +242,38 @@ async function main() {
     assert.equal(createdWaitingItem?.label, '서버 API 완료')
     assert.ok(createdWaitingItem?.id)
     assert.ok(createdWaitingItem?.since)
+    assert.equal(documentResult.map.nodes.find((node) => node.id === 'root')?.data.progress, 30)
+    assert.equal(documentResult.map.nodes.find((node) => node.id === 'root')?.data.status, 'in-progress')
     assert.equal(documentResult.access.documentUrl, `https://mindnprogress.test/mindmap/${mapId}`)
     assert.equal(documentResult.access.cards.find((card) => card.cardId === 'task-a')?.accessUrl, `https://mindnprogress.test/mindmap/${mapId}/task-a`)
-    const loginResponse = await fetch(`${apiBaseUrl}/api/auth/login`, {
+    let loginResponse = await fetch(`${apiBaseUrl}/api/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email: 'mcp-test-admin@mind.local', password: 'McpTest!2026' }),
     })
     assert.equal(loginResponse.status, 200)
-    const sessionCookie = loginResponse.headers.get('set-cookie')?.split(';')[0]
+    let sessionCookie = loginResponse.headers.get('set-cookie')?.split(';')[0]
     assert.ok(sessionCookie, '테스트 관리자 세션 쿠키가 없습니다.')
+    const editorCreateResponse = await fetch(`${apiBaseUrl}/api/admin/editors`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: sessionCookie },
+      body: JSON.stringify({
+        name: 'MCP 테스트 편집자',
+        email: 'mcp-test-editor@mind.local',
+        password: 'McpEditor!2026',
+      }),
+    })
+    assert.equal(editorCreateResponse.status, 201)
+    const testEditor = (await editorCreateResponse.json()).editor
+    assert.equal(testEditor.role, 'editor')
+    const editorLoginResponse = await fetch(`${apiBaseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'mcp-test-editor@mind.local', password: 'McpEditor!2026' }),
+    })
+    assert.equal(editorLoginResponse.status, 200)
+    const editorSessionCookie = editorLoginResponse.headers.get('set-cookie')?.split(';')[0]
+    assert.ok(editorSessionCookie, '테스트 편집자 세션 쿠키가 없습니다.')
     const referencedCommentResponse = await fetch(`${apiBaseUrl}/api/maps/${encodeURIComponent(mapId)}/comments`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Cookie: sessionCookie },
@@ -361,7 +392,7 @@ async function main() {
     assert.equal(unspecifiedComment.comment.author.name, 'AI(모델 미지정)')
     const attributionResponse = await fetch(`${apiBaseUrl}/api/integrations/aionui/attributions`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Cookie: sessionCookie },
+      headers: { 'Content-Type': 'application/json', Cookie: editorSessionCookie },
       body: JSON.stringify({
         agentId: 'agent-claude-test',
         modelId: 'claude-test-model',
@@ -373,7 +404,23 @@ async function main() {
     const attribution = await attributionResponse.json()
     assert.equal(attribution.authorName, 'Claude Code(Claude Test Model)')
     assert.ok(attribution.attributionToken)
-    assert.equal(attribution.editorId, 'user-admin')
+    assert.equal(attribution.editorId, testEditor.id)
+
+    const mismatchedEditorCommentResponse = await fetch(`${apiBaseUrl}/api/maps/${encodeURIComponent(mapId)}/comments`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${integrationToken}`,
+        'Content-Type': 'application/json',
+        'X-MNP-AI-Map-Id': mapId,
+        'X-MNP-AI-Card-Id': 'branch-b',
+        'X-MNP-AI-Editor-Id': 'user-admin',
+      },
+      body: JSON.stringify({ nodeId: 'branch-b', text: '다른 편집자의 AI 귀속을 사용하지 않는지 검증' }),
+    })
+    assert.equal(mismatchedEditorCommentResponse.status, 201)
+    const mismatchedEditorComment = await mismatchedEditorCommentResponse.json()
+    assert.equal(mismatchedEditorComment.comment.author.id, 'user-admin')
+    assert.notEqual(mismatchedEditorComment.comment.author.name, attribution.authorName)
 
     const context = await invoke('mindnprogress_get_context', {
       mapId,
@@ -501,6 +548,26 @@ async function main() {
       mapId, cardId: 'branch-a',
     }, /카드에 연결된 AI 대화가 없습니다/)
 
+    apiServer.kill()
+    await new Promise((resolve) => apiServer.once('exit', resolve))
+    apiServer = startApiServer()
+    await waitForServer(apiBaseUrl, apiServer, serverLogs)
+    loginResponse = await fetch(`${apiBaseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'mcp-test-admin@mind.local', password: 'McpTest!2026' }),
+    })
+    assert.equal(loginResponse.status, 200)
+    sessionCookie = loginResponse.headers.get('set-cookie')?.split(';')[0]
+    assert.ok(sessionCookie, '재시작 후 테스트 관리자 세션 쿠키가 없습니다.')
+
+    const persistedTokenComment = await invoke('mindnprogress_add_comment', {
+      mapId,
+      nodeId: 'task-a',
+      text: 'API 서버 재시작 후 기존 MCP 토큰 귀속 검증',
+    })
+    assert.equal(persistedTokenComment.comment.author.name, 'Claude Code(Claude Test Model)')
+
     const freshTransport = new StdioClientTransport({
       command: process.execPath,
       args: ['mcp/server.mjs'],
@@ -511,11 +578,44 @@ async function main() {
     const freshClient = new Client({ name: 'mindnprogress-attribution-reconnect', version: '1.0.0' })
     await freshClient.connect(freshTransport)
     try {
+      const mapScopedComment = parseToolResult('mindnprogress_add_comment', await freshClient.callTool({
+        name: 'mindnprogress_add_comment',
+        arguments: { mapId, nodeId: 'branch-b', text: '서버 재시작 후 다른 카드 오귀속 방지 검증' },
+      }))
+      assert.equal(mapScopedComment.comment.author.name, 'AI(모델 미지정)')
+
       const reconnectedComment = parseToolResult('mindnprogress_add_comment', await freshClient.callTool({
         name: 'mindnprogress_add_comment',
         arguments: { mapId, nodeId: 'task-a', text: 'MCP 재연결 후 모델 귀속 검증' },
       }))
-      assert.equal(reconnectedComment.comment.author.name, 'Claude Code(Claude Test Model)')
+      assert.equal(reconnectedComment.comment.author.name, 'AI(모델 미지정)')
+
+      parseToolResult('mindnprogress_get_context', await freshClient.callTool({
+        name: 'mindnprogress_get_context',
+        arguments: {
+          mapId,
+          cardId: 'task-a',
+          editorId: attribution.editorId,
+          aiType: 'Codex CLI',
+          aiModel: 'GPT-5.6-Sol',
+        },
+      }))
+      const selfDeclaredComment = parseToolResult('mindnprogress_add_comment', await freshClient.callTool({
+        name: 'mindnprogress_add_comment',
+        arguments: { mapId, nodeId: 'task-a', text: '외부 MCP 세션의 명시적 AI 종류와 모델 귀속 검증' },
+      }))
+      assert.equal(selfDeclaredComment.comment.author.id, attribution.editorId)
+      assert.equal(selfDeclaredComment.comment.author.name, 'Codex CLI(GPT-5.6-Sol)')
+
+      parseToolResult('mindnprogress_get_context', await freshClient.callTool({
+        name: 'mindnprogress_get_context',
+        arguments: { mapId, cardId: 'task-a', editorId: attribution.editorId },
+      }))
+      const clearedIdentityComment = parseToolResult('mindnprogress_add_comment', await freshClient.callTool({
+        name: 'mindnprogress_add_comment',
+        arguments: { mapId, nodeId: 'task-a', text: '다음 컨텍스트에서 이전 자기 식별이 남지 않는지 검증' },
+      }))
+      assert.equal(clearedIdentityComment.comment.author.name, `${testEditor.name}의 AI`)
     } finally {
       await freshClient.close()
     }
@@ -698,6 +798,8 @@ async function main() {
     assert.equal(waitingCard.data.waitingItems[0].label, '캐릭터 아트 전달')
     assert.ok(waitingCard.data.waitingItems[0].id)
     assert.ok(waitingCard.data.waitingItems[0].since)
+    assert.equal(waitingCardResult.map.nodes.find((node) => node.id === 'root')?.data.progress, 35)
+    assert.equal(waitingCardResult.map.nodes.find((node) => node.id === 'root')?.data.status, 'in-progress')
 
     const partialMergePreservedFields = [
       'label',
@@ -745,12 +847,23 @@ async function main() {
     assert.equal(updatedCard.data.sharedKnowledge, '후속 카드가 재사용할 완료 결과')
     assert.equal(updatedCard.data.sharedKnowledgeUpdatedBy.name, 'Claude Code(Claude Test Model)')
     assert.ok(updatedCard.data.sharedKnowledgeUpdatedAt)
+    assert.equal(updatedCardResult.map.nodes.find((node) => node.id === 'root')?.data.progress, 65)
+    assert.equal(updatedCardResult.map.nodes.find((node) => node.id === 'root')?.data.status, 'in-progress')
+
+    const waitingReleaseNotifications = await invoke('mindnprogress_list_notifications')
+    const waitingReleaseNotification = waitingReleaseNotifications.notifications.find((notification) =>
+      notification.type === 'waiting-released' && notification.nodeId === addedCard.id)
+    assert.ok(waitingReleaseNotification, 'AI가 담당자 본인의 대기를 해제했을 때 알림이 생성되지 않았습니다.')
+    assert.equal(waitingReleaseNotification.userId, attribution.editorId)
+    assert.equal(waitingReleaseNotification.actor.id, attribution.editorId)
+    assert.equal(waitingReleaseNotification.actor.name, 'Claude Code(Claude Test Model)')
 
     const movedCardResult = await invoke('mindnprogress_move_card', { mapId, nodeId: addedCard.id, newParentId: 'branch-b' })
     assert.ok(movedCardResult.map.edges.some((edge) => edge.source === 'branch-b' && edge.target === addedCard.id))
 
     const deletedCardResult = await invoke('mindnprogress_delete_card', { mapId, nodeId: addedCard.id, includeDescendants: true })
     assert.ok(!deletedCardResult.map.nodes.some((node) => node.id === addedCard.id))
+    assert.equal(deletedCardResult.map.nodes.find((node) => node.id === 'root')?.data.progress, 30)
     await invoke('mindnprogress_delete_card', { mapId, nodeId: secondAddedCard.id, includeDescendants: true })
 
     documentResult = await invoke('mindnprogress_get_document', { mapId })
@@ -800,7 +913,7 @@ async function main() {
     await rm(notificationsPath, { force: true })
     await mkdir(notificationsPath, { recursive: true })
 
-    await writeFile(path.join(notificationsPath, 'user-admin.json'), '{', 'utf8')
+    await writeFile(path.join(notificationsPath, `${attribution.editorId}.json`), '{', 'utf8')
     const parentComment = await invoke('mindnprogress_add_comment', { mapId, nodeId: 'root', text: '댓글 상태와 반응 검증' })
     const replyComment = await invoke('mindnprogress_add_comment', {
       mapId, nodeId: 'root', parentId: parentComment.comment.id, text: '답글 검증',
@@ -934,14 +1047,14 @@ async function main() {
       env: environment,
       stderr: 'pipe',
     })
-    const postExpiryClient = new Client({ name: 'mindnprogress-persistent-attribution', version: '1.0.0' })
+    const postExpiryClient = new Client({ name: 'mindnprogress-post-expiry-without-token', version: '1.0.0' })
     await postExpiryClient.connect(postExpiryTransport)
     try {
       const persistedComment = parseToolResult('mindnprogress_add_comment', await postExpiryClient.callTool({
         name: 'mindnprogress_add_comment',
-        arguments: { mapId, nodeId: 'task-a', text: '단기 토큰 만료 후 장기 대화 귀속 검증' },
+        arguments: { mapId, nodeId: 'task-a', text: '토큰 없는 새 MCP 세션의 오귀속 방지 검증' },
       }))
-      assert.equal(persistedComment.comment.author.name, 'Claude Code(Claude Test Model)')
+      assert.equal(persistedComment.comment.author.name, 'AI(모델 미지정)')
     } finally {
       await postExpiryClient.close()
     }
