@@ -60,6 +60,17 @@
 .view-switcher button:hover { color: #5d50ca; background: #efedf7; }
 .view-switcher button.active { color: #5b4dcc; background: white; box-shadow: 0 1px 5px rgba(42,34,78,.12); }
 .topbar-actions { margin-left: auto; display: flex; align-items: center; gap: 9px; }
+.theme-switch { height: 31px; display: inline-flex; flex: 0 0 auto; align-items: center; gap: 4px; padding: 3px 6px; color: #918a99; border: 1px solid #dedbe5; border-radius: 16px; background: #f7f6f9; cursor: pointer; transition: color .18s, border-color .18s, background .18s; }
+.theme-switch:hover { color: #5d50ca; border-color: #cbc5e6; background: #f0eef8; }
+.theme-switch-icon { width: 14px; height: 20px; display: grid; place-items: center; transition: color .18s, opacity .18s; }
+.theme-switch-sun { color: #c58a2b; }
+.theme-switch-moon { color: #aaa4af; opacity: .62; }
+.theme-switch-track { width: 31px; height: 18px; position: relative; flex: 0 0 31px; border-radius: 10px; background: #d8d4df; box-shadow: inset 0 0 0 1px rgba(62,54,79,.08); transition: background .2s, box-shadow .2s; }
+.theme-switch-thumb { width: 14px; height: 14px; position: absolute; top: 2px; left: 2px; border-radius: 50%; background: white; box-shadow: 0 2px 5px rgba(40,33,59,.24); transition: transform .22s cubic-bezier(.22,.8,.3,1); }
+.theme-switch[aria-checked="true"] .theme-switch-track { background: #7062d8; box-shadow: inset 0 0 0 1px rgba(72,58,157,.28); }
+.theme-switch[aria-checked="true"] .theme-switch-thumb { transform: translateX(13px); }
+.theme-switch[aria-checked="true"] .theme-switch-sun { color: #aaa4af; opacity: .6; }
+.theme-switch[aria-checked="true"] .theme-switch-moon { color: #6657d9; opacity: 1; }
 .history-controls { display: flex; align-items: center; overflow: hidden; border: 1px solid #e6e3ea; border-radius: 8px; background: #faf9fb; }
 .history-controls button { width: 29px; height: 29px; display: grid; place-items: center; padding: 0; color: #756b82; border: 0; border-right: 1px solid #ebe8ef; background: transparent; cursor: pointer; }
 .history-controls button:last-child { border-right: 0; }
@@ -642,8 +653,9 @@
 .line-two { width: 170px; left: 103px; top: 79px; transform: rotate(22deg); }
 .login-panel { display: flex; align-items: center; justify-content: center; padding: 50px; background: #fdfcfe; }
 .login-card { width: 100%; max-width: 390px; }
-.login-card-heading { margin-bottom: 31px; }
+.login-card-heading { position: relative; margin-bottom: 31px; }
 .login-card-heading > span { color: #6b5bd7; font-size: 10px; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+.login-theme-switch { position: absolute; top: -8px; right: 0; }
 .login-card-heading h2 { margin: 10px 0 8px; color: #2f2a35; font-size: 26px; letter-spacing: -.025em; }
 .login-card-heading p { margin: 0; color: #9a94a1; font-size: 11px; }
 .login-card > label { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }

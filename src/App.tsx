@@ -36,6 +36,7 @@ import type { AiConversationRuntime, ChecklistItem, KnowledgePolicy, MindMapEdge
 import { blockingNodes, createsDependencyCycle, dependentNodes, prerequisiteNodes } from './utils/dependencies'
 import { createsKnowledgeCycle, isHierarchyEdge, isKnowledgeEdge, knowledgePolicyOf } from './utils/knowledgeEdges'
 import { extractTextLinks } from './utils/textLinks'
+import { appliedUiTheme, applyUiTheme, storedUiTheme, UI_THEME_STORAGE_KEY, type UiTheme } from './theme'
 
 const DOCUMENT_COLORS = [
   { id: 'violet', label: '보라', solid: '#6758d8', halo: '#dedafd' },
@@ -808,12 +809,35 @@ function Icon({ name, size = 18 }: { name: string; size?: number }) {
     users: <><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></>,
     lock: <><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/></>,
     logout: <><path d="M10 17l5-5-5-5M15 12H3"/><path d="M14 3h5a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-5"/></>,
+    sun: <><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></>,
+    moon: <path d="M20.4 15.2A8.5 8.5 0 0 1 8.8 3.6 8.5 8.5 0 1 0 20.4 15.2Z"/>,
   }
 
   return (
     <svg className="icon" width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
       {paths[name]}
     </svg>
+  )
+}
+
+function ThemeToggle({ theme, onToggle, className = '' }: { theme: UiTheme; onToggle: () => void; className?: string }) {
+  const darkMode = theme === 'dark'
+  const nextThemeLabel = darkMode ? '라이트 모드' : '다크 모드'
+
+  return (
+    <button
+      className={`theme-switch ${className}`.trim()}
+      type="button"
+      role="switch"
+      aria-checked={darkMode}
+      aria-label={`화면 테마: ${darkMode ? '다크 모드' : '라이트 모드'}. ${nextThemeLabel}로 전환`}
+      title={`${nextThemeLabel}로 전환`}
+      onClick={onToggle}
+    >
+      <span className="theme-switch-icon theme-switch-sun"><Icon name="sun" size={13} /></span>
+      <span className="theme-switch-track" aria-hidden="true"><span className="theme-switch-thumb" /></span>
+      <span className="theme-switch-icon theme-switch-moon"><Icon name="moon" size={13} /></span>
+    </button>
   )
 }
 
@@ -916,7 +940,7 @@ function updateWithoutInsertedTab(value: string, update: (nextValue: string) => 
   if (sanitized !== value) window.requestAnimationFrame(moveFocus)
 }
 
-function LoginScreen({ onAuthenticated }: { onAuthenticated: (user: AuthUser) => void }) {
+function LoginScreen({ onAuthenticated, theme, onToggleTheme }: { onAuthenticated: (user: AuthUser) => void; theme: UiTheme; onToggleTheme: () => void }) {
   const formRef = useRef<HTMLFormElement>(null)
   const emailRef = useRef<HTMLInputElement>(null)
   const passwordRef = useRef<HTMLInputElement>(null)
@@ -933,7 +957,7 @@ function LoginScreen({ onAuthenticated }: { onAuthenticated: (user: AuthUser) =>
     if (!form) return
     const moveFocusOnTab = (event: KeyboardEvent) => {
       if (event.key !== 'Tab') return
-      const focusable = [...form.querySelectorAll<HTMLElement>('input:not(:disabled), button:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])')]
+      const focusable = Array.from(form.querySelectorAll<HTMLElement>('input:not(:disabled), button:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])'))
       if (focusable.length === 0) return
       const currentIndex = focusable.indexOf(document.activeElement as HTMLElement)
       const nextIndex = event.shiftKey
@@ -983,6 +1007,7 @@ function LoginScreen({ onAuthenticated }: { onAuthenticated: (user: AuthUser) =>
         <form ref={formRef} className="login-card" onSubmit={(event) => { event.preventDefault(); void login() }}>
           <div className="login-card-heading">
             <span>워크스페이스 로그인</span>
+            <ThemeToggle theme={theme} onToggle={onToggleTheme} className="login-theme-switch" />
             <h2>다시 만나서 반갑습니다</h2>
             <p>계정 역할에 따라 편집 권한이 자동으로 적용됩니다.</p>
           </div>
@@ -1035,7 +1060,7 @@ function PasswordChangeDialog({ onClose }: { onClose: () => void }) {
         return
       }
       if (event.key !== 'Tab') return
-      const focusable = [...dialog.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])')]
+      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])'))
         .filter((element) => !element.hasAttribute('hidden'))
       if (focusable.length === 0) return
       const currentIndex = focusable.indexOf(document.activeElement as HTMLElement)
@@ -1105,7 +1130,7 @@ function PasswordChangeDialog({ onClose }: { onClose: () => void }) {
   )
 }
 
-function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogout: () => void; initialDeepLink: WorkspaceDeepLink | null }) {
+function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { user: AuthUser; onLogout: () => void; initialDeepLink: WorkspaceDeepLink | null; theme: UiTheme; onToggleTheme: () => void }) {
   const [nodes, setNodes, onNodesChange] = useNodesState<MindMapNode>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState<MindMapEdge>([])
   const { canUndo, canRedo, undo, redo, resetHistory, beginTransaction: beginHistoryTransaction, endTransaction: endHistoryTransaction } = useMapHistory(nodes, setNodes, edges, setEdges)
@@ -1448,12 +1473,12 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
         },
         className: `knowledge-edge ${primary ? 'reuse-first' : 'inspect-if-insufficient'}`,
         label: primary ? '주요 지식' : '부족할 때 확인',
-        labelStyle: { fill: primary ? '#316d5a' : '#9a6a24', fontSize: 9, fontWeight: 700 },
-        labelBgStyle: { fill: primary ? '#e7f7f1' : '#fff5df', fillOpacity: .96 },
+        labelStyle: { fill: primary ? 'var(--theme-knowledge-primary-text)' : 'var(--theme-knowledge-fallback-text)', fontSize: 9, fontWeight: 700 },
+        labelBgStyle: { fill: primary ? 'var(--theme-knowledge-primary-bg)' : 'var(--theme-knowledge-fallback-bg)', fillOpacity: .96 },
         labelBgPadding: [5, 3] as [number, number],
         labelBgBorderRadius: 5,
-        style: { stroke: primary ? '#43a684' : '#d59a3a', strokeWidth: 2.2, strokeDasharray: primary ? undefined : '6 5' },
-        markerEnd: { type: MarkerType.ArrowClosed, width: 18, height: 18, color: primary ? '#43a684' : '#d59a3a' },
+        style: { stroke: primary ? 'var(--theme-knowledge-primary)' : 'var(--theme-knowledge-fallback)', strokeWidth: 2.2, strokeDasharray: primary ? undefined : '6 5' },
+        markerEnd: { type: MarkerType.ArrowClosed, width: 18, height: 18, color: primary ? 'var(--theme-knowledge-primary)' : 'var(--theme-knowledge-fallback)' },
       }
     })
   }, [edges, visibleFlowNodeIds])
@@ -3432,6 +3457,7 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
           ))}
         </nav>
         <div className="topbar-actions">
+          <ThemeToggle theme={theme} onToggle={onToggleTheme} />
           {user.role === 'admin' && (
             <button className={`admin-panel-trigger ${adminOpen ? 'active' : ''}`} onClick={() => { setAdminOpen((current) => !current); setNotificationsOpen(false) }} title="편집자 계정 관리">
               <Icon name="users" size={15} /><span>계정 관리</span>
@@ -3894,10 +3920,10 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
             fitViewOptions={{ padding: 0.2 }}
             minZoom={0.25}
             maxZoom={1.8}
-            defaultEdgeOptions={{ style: { strokeWidth: 2, stroke: '#b8b5c7' } }}
+            defaultEdgeOptions={{ style: { strokeWidth: 2, stroke: 'var(--theme-edge)' } }}
             proOptions={{ hideAttribution: true }}
           >
-            <Background variant={BackgroundVariant.Dots} gap={MINDMAP_GRID_SIZE} size={1.2} color="#d8d6df" />
+            <Background variant={BackgroundVariant.Dots} gap={MINDMAP_GRID_SIZE} size={1.2} color="var(--theme-grid)" />
             {miniMapReadyMapId === activeMapId && (
               <MiniMap
                 className="mini-map"
@@ -3905,9 +3931,9 @@ function Workspace({ user, onLogout, initialDeepLink }: { user: AuthUser; onLogo
                 pannable
                 zoomable
                 ariaLabel="미니맵 뷰 영역을 드래그하여 화면 이동"
-                nodeColor={(node) => (node.data as MindNodeData).progress >= 100 ? '#43b78e' : node.data.kind === 'root' ? '#6657d9' : '#b9b4ef'}
-                maskColor="rgba(248, 247, 251, 0.78)"
-                maskStrokeColor="#6657d9"
+                nodeColor={(node) => (node.data as MindNodeData).progress >= 100 ? 'var(--theme-node-complete)' : node.data.kind === 'root' ? 'var(--theme-node-root)' : 'var(--theme-node-planned)'}
+                maskColor="var(--theme-minimap-mask)"
+                maskStrokeColor="var(--theme-minimap-stroke)"
                 maskStrokeWidth={2}
               />
             )}
@@ -4841,6 +4867,25 @@ function App() {
   const deepLinkEntry = deepLink !== null
   const [user, setUser] = useState<AuthUser | null>(null)
   const [checkingSession, setCheckingSession] = useState(true)
+  const [theme, setTheme] = useState<UiTheme>(() => appliedUiTheme())
+
+  const toggleTheme = useCallback(() => {
+    const nextTheme = theme === 'dark' ? 'light' : 'dark'
+    applyUiTheme(nextTheme, true)
+    setTheme(nextTheme)
+  }, [theme])
+
+  useEffect(() => {
+    const synchronizeTheme = (event: StorageEvent) => {
+      if (event.key !== UI_THEME_STORAGE_KEY) return
+      const nextTheme = storedUiTheme(event.newValue)
+      if (!nextTheme) return
+      applyUiTheme(nextTheme)
+      setTheme(nextTheme)
+    }
+    window.addEventListener('storage', synchronizeTheme)
+    return () => window.removeEventListener('storage', synchronizeTheme)
+  }, [])
 
   useEffect(() => {
     void apiRequest<{ user: AuthUser | null }>('/api/auth/me')
@@ -4872,11 +4917,11 @@ function App() {
     )
   }
 
-  if (!user) return <LoginScreen onAuthenticated={setUser} />
+  if (!user) return <LoginScreen onAuthenticated={setUser} theme={theme} onToggleTheme={toggleTheme} />
 
   return (
     <ReactFlowProvider>
-      <Workspace user={user} onLogout={() => { void logout() }} initialDeepLink={deepLink} />
+      <Workspace user={user} onLogout={() => { void logout() }} initialDeepLink={deepLink} theme={theme} onToggleTheme={toggleTheme} />
     </ReactFlowProvider>
   )
 }
