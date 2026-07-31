@@ -14,6 +14,11 @@ import {
   isValidImageAssetId,
   isValidImageNodeData,
 } from './lib/imageAssets.mjs'
+import {
+  commentForResponse,
+  createCommentContent,
+  updateCommentContent,
+} from './lib/commentContent.mjs'
 
 const serverDirectory = path.dirname(fileURLToPath(import.meta.url))
 const projectDirectory = path.resolve(serverDirectory, '..')
@@ -2992,6 +2997,17 @@ const server = createServer(async (request, response) => {
       return sendJson(response, 200, { maps: await listMaps(), documentLayout })
     }
 
+    const commentStatsRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/comments\/stats$/)
+    if (commentStatsRoute && request.method === 'GET') {
+      const mapId = decodeURIComponent(commentStatsRoute[1])
+      if (!isValidMapId(mapId)) return sendJson(response, 400, { error: '올바르지 않은 문서 ID입니다.' })
+      const user = requireUser(request, response)
+      if (!user) return
+      const map = await readMap(mapId)
+      if (!map || map.trashedAt) return sendJson(response, 404, { error: '마인드맵을 찾을 수 없습니다.' })
+      return sendJson(response, 200, { stats: buildNodeCommentStats(await listComments(mapId)) })
+    }
+
     const commentReactionRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/comments\/([^/]+)\/reactions$/)
     if (commentReactionRoute && request.method === 'POST') {
       const mapId = decodeURIComponent(commentReactionRoute[1])
@@ -3068,11 +3084,16 @@ const server = createServer(async (request, response) => {
         return sendJson(response, 403, { error: '댓글 작성자 또는 편집자만 댓글을 수정할 수 있습니다.' })
       }
       const body = await readJsonBody(request)
-      const text = String(body.text ?? '').trim().slice(0, 1000)
-      if (!text) return sendJson(response, 400, { error: '댓글 내용을 입력해 주세요.' })
+      if (typeof body.expectedText === 'string' && target.text !== body.expectedText) {
+        return sendJson(response, 409, {
+          error: '댓글 원문이 조회 이후 변경되었습니다. 최신 댓글을 다시 확인해 주세요.',
+          currentComment: commentForResponse(target, true),
+        })
+      }
+      const updatedContent = updateCommentContent(target, body)
+      if (updatedContent.error) return sendJson(response, 400, { error: updatedContent.error })
       const comment = {
-        ...target,
-        text,
+        ...updatedContent.content,
         updatedAt: new Date().toISOString(),
       }
       await writeStoredArray(commentFileForMap(mapId), comments.map((item) => item.id === commentId ? comment : item))
@@ -3131,17 +3152,19 @@ const server = createServer(async (request, response) => {
       if (request.method === 'GET') {
         const nodeId = String(url.searchParams.get('nodeId') ?? '').slice(0, 120)
         const comments = await listComments(mapId, nodeId || undefined)
+        const includeDetail = url.searchParams.get('includeDetail') !== 'false'
+        const responseComments = comments.map((comment) => commentForResponse(comment, includeDetail))
         const limitValue = url.searchParams.get('limit')
-        if (limitValue === null) return sendJson(response, 200, { comments })
+        if (limitValue === null) return sendJson(response, 200, { comments: responseComments })
         const offset = Math.max(0, Number.parseInt(url.searchParams.get('offset') ?? '0', 10) || 0)
         const limit = Math.min(100, Math.max(1, Number.parseInt(limitValue, 10) || 50))
         const order = url.searchParams.get('order') === 'asc' ? 'asc' : 'desc'
-        const ordered = order === 'asc' ? comments : [...comments].reverse()
+        const ordered = order === 'asc' ? responseComments : [...responseComments].reverse()
         const page = ordered.slice(offset, offset + limit)
         const nextOffset = offset + page.length
         return sendJson(response, 200, {
           comments: page,
-          total: comments.length,
+          total: responseComments.length,
           offset,
           limit,
           order,
@@ -3154,10 +3177,10 @@ const server = createServer(async (request, response) => {
         if (isPublicViewer(user)) return sendJson(response, 403, { error: '공개 뷰어는 댓글을 작성할 수 없습니다.' })
         const body = await readJsonBody(request)
         const nodeId = String(body.nodeId ?? '').slice(0, 120)
-        const text = String(body.text ?? '').trim().slice(0, 1000)
         const node = map.nodes.find((item) => item.id === nodeId)
         if (!node) return sendJson(response, 400, { error: '댓글을 남길 노드를 찾을 수 없습니다.' })
-        if (!text) return sendJson(response, 400, { error: '댓글 내용을 입력해 주세요.' })
+        const createdContent = createCommentContent(body)
+        if (createdContent.error) return sendJson(response, 400, { error: createdContent.error })
         const comments = await listComments(mapId)
         const requestedParentId = typeof body.parentId === 'string' ? body.parentId : null
         const requestedParent = requestedParentId ? comments.find((item) => item.id === requestedParentId && item.nodeId === nodeId) : null
@@ -3167,7 +3190,7 @@ const server = createServer(async (request, response) => {
           id: `comment-${Date.now().toString(36)}-${randomBytes(4).toString('hex')}`,
           mapId,
           nodeId,
-          text,
+          ...createdContent.content,
           parentId: parent?.id ?? null,
           resolvedAt: null,
           resolvedBy: null,
@@ -3176,7 +3199,9 @@ const server = createServer(async (request, response) => {
           author: publicUser(user),
         }
         await writeStoredArray(commentFileForMap(mapId), [...comments, comment])
-        const mentionedIds = new Set(mentionedUsers(text).map((candidate) => candidate.id))
+        const notificationSummary = comment.summary ?? comment.text
+        const mentionSource = [notificationSummary, comment.detail].filter(Boolean).join('\n')
+        const mentionedIds = new Set(mentionedUsers(mentionSource).map((candidate) => candidate.id))
         const notificationResults = await Promise.allSettled(users
           .filter((recipient) => recipient.id !== user.id && recipient.active !== false && !isPublicViewer(recipient))
           .map((recipient) => createNotification(recipient, {
@@ -3186,7 +3211,7 @@ const server = createServer(async (request, response) => {
             nodeId,
             nodeLabel: node.data.label,
             commentId: comment.id,
-            message: text.slice(0, 180),
+            message: notificationSummary.slice(0, 180),
             actor: publicUser(user),
           })))
         reportRejectedSideEffects(notificationResults, 'Comment notification creation')

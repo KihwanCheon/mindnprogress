@@ -40,9 +40,9 @@ function defaultChildMindMapPosition(parentPosition, siblingPositions) {
   }
 }
 
-const serverInstructions = `MindNProgress는 마인드맵과 업무 진행 관리를 결합한 웹 서비스입니다. MindNProgress 밖에서 시작해 문서 ID나 카드 ID가 없다면 mindnprogress_read_me_first를 먼저 호출하세요. 선택 문서와 카드가 있다면 mindnprogress_get_context로 제품 규칙과 최신 문서 구조를 먼저 확인하세요. AionUi가 발급한 attributionToken이 없는 외부 MCP 세션은 자신이 현재 AI 종류와 모델을 정확히 알고 있을 때 get_context의 aiType과 aiModel에 함께 전달하고, 알지 못하면 추측하지 마세요. get_context의 selection.taskLinks.startupInspection을 따르세요. mode가 knowledge-guided이면 primary 선행 지식의 sharedKnowledge를 먼저 재사용하고 설명과 댓글로 보완하며, fallbackSources와 fallbackTargets는 정보가 부족할 때만 선택적으로 조사합니다. mode가 default이고 required가 true이면 targets의 업무 본문, 댓글, 첨부파일 목록과 관련 링크를 조사하세요. 진행 과정과 결과는 댓글에 기록하고, 다른 카드나 후속 세션이 재사용할 안정적인 사실·결정·제약은 카드의 sharedKnowledge에 요약하세요. 외부 전달물이나 결정 대기는 waitingItems로 기록하고 제목에 대기 문구를 붙이지 마세요. 대기를 등록할 때는 [차단], 해제할 때는 [진행] 댓글로 이유와 재개 상태를 기록하세요. 카드 일부 필드만 변경할 때는 mindnprogress_update_card의 data에 변경할 필드만 보내고 현재 카드 전체 데이터를 재전송하지 마세요. 일반 카드에서 생략한 필드와 위치는 보존되지만 완료 상태 또는 진행률 100 적용 시 waitingItems는 자동으로 해제되며, Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 지식선만 변경할 때는 전체 문서를 다시 보내지 말고 지식선 전용 도구를 사용하세요. 조회 도구는 문서 버전을 변경하지 않지만 카드·관계 편집과 AI 대화 ID 연결은 버전을 증가시킬 수 있습니다. 특정 자료가 있다고 가정하지 마세요. 여러 카드로 구성된 새 문서는 mindnprogress_create_mindmap으로 한 번에 생성하고, 변경 후에는 최신 문서를 다시 조회해 결과를 검증하세요. 비밀번호 변경과 계정 관리 작업은 지원하지 않습니다.`
+const serverInstructions = `MindNProgress는 마인드맵과 업무 진행 관리를 결합한 웹 서비스입니다. MindNProgress 밖에서 시작해 문서 ID나 카드 ID가 없다면 mindnprogress_read_me_first를 먼저 호출하세요. 선택 문서와 카드가 있다면 mindnprogress_get_context로 제품 규칙과 최신 문서 구조를 먼저 확인하세요. AionUi가 발급한 attributionToken이 없는 외부 MCP 세션은 자신이 현재 AI 종류와 모델을 정확히 알고 있을 때 get_context의 aiType과 aiModel에 함께 전달하고, 알지 못하면 추측하지 마세요. get_context의 selection.taskLinks.startupInspection을 따르세요. mode가 knowledge-guided이면 primary 선행 지식의 sharedKnowledge를 먼저 재사용하고 설명과 댓글로 보완하며, fallbackSources와 fallbackTargets는 정보가 부족할 때만 선택적으로 조사합니다. mode가 default이고 required가 true이면 targets의 업무 본문, 댓글, 첨부파일 목록과 관련 링크를 조사하세요. 진행 과정과 결과는 댓글에 기록하고, 다른 카드나 후속 세션이 재사용할 안정적인 사실·결정·제약은 카드의 sharedKnowledge에 요약하세요. AI 댓글은 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 충실히 담은 detail로 작성하며, 요약 때문에 상세를 축약하지 마세요. 외부 전달물이나 결정 대기는 waitingItems로 기록하고 제목에 대기 문구를 붙이지 마세요. 대기를 등록할 때는 [차단], 해제할 때는 [진행] 댓글로 이유와 재개 상태를 기록하세요. 카드 일부 필드만 변경할 때는 mindnprogress_update_card의 data에 변경할 필드만 보내고 현재 카드 전체 데이터를 재전송하지 마세요. 일반 카드에서 생략한 필드와 위치는 보존되지만 완료 상태 또는 진행률 100 적용 시 waitingItems는 자동으로 해제되며, Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 지식선만 변경할 때는 전체 문서를 다시 보내지 말고 지식선 전용 도구를 사용하세요. 조회 도구는 문서 버전을 변경하지 않지만 카드·관계 편집과 AI 대화 ID 연결은 버전을 증가시킬 수 있습니다. 특정 자료가 있다고 가정하지 마세요. 여러 카드로 구성된 새 문서는 mindnprogress_create_mindmap으로 한 번에 생성하고, 변경 후에는 최신 문서를 다시 조회해 결과를 검증하세요. 비밀번호 변경과 계정 관리 작업은 지원하지 않습니다.`
 const productGuide = {
-  version: '1.4',
+  version: '1.5',
   product: {
     name: 'MindNProgress',
     purpose: '아이디어를 계층형 마인드맵으로 구조화하고 실행 업무의 진행 상황을 같은 문서에서 관리하는 웹 서비스',
@@ -59,7 +59,7 @@ const productGuide = {
     cardContent: {
       description: '업무의 목적, 범위, 요구사항과 완료 조건. 사용자가 작성한 원래 맥락을 보존함',
       sharedKnowledge: '다른 카드나 후속 AI 세션에서 재사용할 안정적인 사실, 결정, 제약, 조사 결과와 사용 방법',
-      comments: '시간순 진행 과정, 검증 결과, 차단 사유와 완료 기록',
+      comments: '시간순 진행 과정, 검증 결과, 차단 사유와 완료 기록. 새 댓글은 요약과 접을 수 있는 상세 내용으로 구분',
     },
     cardKinds: {
       root: '문서의 최상위 주제',
@@ -83,6 +83,13 @@ const productGuide = {
     kanban: 'isWork=true인 업무 카드를 상태별로 표시',
     timeline: 'isWork=true인 업무 중 일정 정보를 기준으로 표시',
     dashboard: '업무 진행률, 완료 상태와 병목을 요약',
+  },
+  commentRules: {
+    summary: '현재 상태와 핵심 결과를 1~2문장으로 전달. [진행], [차단], [결과] 중 알맞은 머리말로 시작',
+    detail: '다른 AI 세션이나 편집자가 댓글만 읽어도 작업을 이어가거나 결과를 검증할 수 있도록 현재 작업에 해당하는 수행 내용, 중요한 판단, 변경 범위, 검증 방법과 실제 결과, 산출물, 제한사항, 다음 단계 또는 재개 조건을 구체적으로 기록',
+    detailRequired: '코드·문서·카드 변경, 외부 시스템 처리, 검증, 중요한 결정, 실패 또는 차단이 발생하면 상세를 작성. 새로운 사실이 없는 단순 상태 알림만 상세 생략 가능',
+    omit: '해당하지 않는 빈 항목, 개별 도구 호출 목록, 의미 없는 반복, 원문 로그 전체와 카드 본문의 단순 복사는 제외',
+    legacy: 'contentFormat이 summary-detail이 아닌 기존 댓글은 마이그레이션 전 원문이므로 요청 없이 자동 분리하거나 다시 쓰지 않음',
   },
   authoringRules: [
     '루트는 전체 목적이나 프로젝트 이름으로 작성',
@@ -109,8 +116,10 @@ const productGuide = {
     '조회 도구는 문서 version을 변경하지 않으며 카드·관계 편집과 AI 대화 ID 연결 같은 저장 작업만 version을 증가시킴',
     '기존 문서 변경은 최신 version을 기준으로 수행하고 버전 충돌 시 최신 상태를 다시 조회',
     '변경 후 mindnprogress_get_document로 저장 결과를 검증하고 실제 변경 내용을 요약',
-    '의미 있는 진행·차단·완료는 댓글로 기록하고, 재사용할 결론은 sharedKnowledge에도 반영',
-    '댓글은 [진행](수행한 작업·현재 상태·다음 단계), [차단](진행 불가 원인과 필요한 정보·결정), [결과](완료 내용·검증 결과·산출물 링크) 머리말로 시작하고, 등록 전에 최근 댓글을 확인해 같은 내용을 반복하지 않음',
+    '의미 있는 진행·차단·완료는 요약과 상세로 구분한 댓글로 기록하고, 재사용할 결론은 sharedKnowledge에도 반영',
+    '댓글 summary는 [진행](수행 내용·현재 상태·다음 단계), [차단](차단 원인·재개 조건), [결과](완료 내용·검증 결과·산출물) 머리말로 시작하는 1~2문장으로 작성하고, 등록 전에 최근 댓글을 확인해 같은 내용을 반복하지 않음',
+    '댓글 detail은 다른 세션이 작업을 이어가거나 결과를 검증하는 데 필요한 수행 내용, 판단, 변경 범위, 검증 방법과 실제 결과, 산출물, 제한사항, 다음 단계 또는 재개 조건 중 해당 내용을 구체적으로 기록하며 summary가 있다는 이유로 상세를 축약하지 않음',
+    '코드·문서·카드 변경, 외부 시스템 처리, 검증, 중요한 결정, 실패 또는 차단이 있으면 detail을 작성하고, 새로운 사실이 없는 단순 상태 알림에만 생략. 개별 도구 호출 목록, 의미 없는 반복, 원문 로그 전체와 카드 본문의 단순 복사는 제외',
     'waitingItems가 해제되면 서버가 관련 사용자에게 알림을 자동 생성하므로 별도 알림 요청은 불필요',
     'waitingItems를 등록할 때는 [차단] 댓글에 대기 이유와 재개 조건을, 해제할 때는 [진행] 댓글에 해제 사실과 다음 단계를 기록',
     '문서나 카드 접근 링크를 기록할 때 localhost나 127.0.0.1 주소를 만들지 말고 MCP 응답의 accessUrl을 사용',
@@ -360,6 +369,7 @@ function paginateComments(comments, { offset = 0, limit = 50, order = 'desc' } =
 function focusedCommentWindow(comments, mapId, nodeId) {
   const items = comments.slice(-contextCommentLimit)
   const hasMore = comments.length > items.length
+  const hasDetail = items.some((comment) => comment.hasDetail === true)
   return {
     comments: items,
     commentsPage: {
@@ -368,12 +378,21 @@ function focusedCommentWindow(comments, mapId, nodeId) {
       order: 'asc',
       hasMore,
       tool: 'mindnprogress_list_comments',
+      detailToolArguments: hasDetail ? {
+        mapId,
+        nodeId,
+        offset: 0,
+        limit: Math.max(1, items.length),
+        order: 'desc',
+        includeDetail: true,
+      } : null,
       nextToolArguments: hasMore ? {
         mapId,
         nodeId,
         offset: items.length,
         limit: 50,
         order: 'desc',
+        includeDetail: false,
       } : null,
     },
   }
@@ -578,7 +597,7 @@ async function main() {
       '여러 카드의 새 문서는 create_document와 save_document 조합이 아니라 mindnprogress_create_mindmap으로 생성',
       '업무로 추적할 task만 isWork=true로 설정',
       'description은 업무 요청과 완료 조건, sharedKnowledge는 다른 카드가 재사용할 안정적인 결론에 사용',
-      '진행 과정과 완료 사실은 댓글에 기록하고 재사용할 결과는 sharedKnowledge에도 요약',
+      '진행 과정과 완료 사실은 짧은 summary와 충실한 detail 댓글로 기록하고 재사용할 결과는 sharedKnowledge에도 요약',
       '외부 전달물이나 결정 대기는 waitingItems에 기록하고 카드 제목에는 대기 문구를 추가하지 않음',
       '카드 일부 필드만 변경할 때는 mindnprogress_update_card에 변경할 필드만 전달하고 현재 카드 전체 데이터를 재전송하지 않음',
       '지식선만 변경할 때는 전체 문서를 다시 보내지 않고 지식선 전용 도구를 사용',
@@ -608,7 +627,7 @@ async function main() {
     activeAiModel = attributionToken ? '' : (aiModel ?? '')
     const [documentResult, commentsResult, usersResult, health] = await Promise.all([
       apiRequest(`/api/maps/${encodeURIComponent(mapId)}`),
-      apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments`),
+      apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments?includeDetail=false`),
       apiRequest('/api/assignees'),
       apiRequest('/api/health'),
     ])
@@ -751,7 +770,7 @@ async function main() {
       ...focusedCommentWindow(source.comments, mapId, source.card.id),
       taskLink: source.taskLink,
       detailTool: 'mindnprogress_get_card',
-      detailToolArguments: { mapId, cardId: source.card.id },
+      detailToolArguments: { mapId, cardId: source.card.id, includeCommentDetail: true },
     }))
     const focusedFallbackKnowledge = fallbackKnowledge.map((source) => ({
       policy: source.policy,
@@ -765,12 +784,12 @@ async function main() {
         hasMore: source.comments.length > 0,
         tool: 'mindnprogress_list_comments',
         nextToolArguments: source.comments.length > 0
-          ? { mapId, nodeId: source.card.id, offset: 0, limit: 50, order: 'desc' }
+          ? { mapId, nodeId: source.card.id, offset: 0, limit: 50, order: 'desc', includeDetail: true }
           : null,
       },
       taskLink: source.taskLink,
       detailTool: 'mindnprogress_get_card',
-      detailToolArguments: { mapId, cardId: source.card.id },
+      detailToolArguments: { mapId, cardId: source.card.id, includeCommentDetail: true },
     }))
     const taskLinks = {
       selectedCard: selectedTaskLink,
@@ -826,7 +845,7 @@ async function main() {
         ...(full ? {} : { commentsPage: focusedSelectedComments.commentsPage }),
       },
       teamMembers: full ? (usersResult.users ?? []) : (usersResult.users ?? []).map(compactTeamMember),
-      nextStep: '사용자 요청을 수행한 뒤 의미 있는 진행과 결과는 댓글에 기록하고, 재사용할 결론은 sharedKnowledge에 요약한 다음 mindnprogress_get_document로 결과를 다시 확인하세요. 외부 전달물이나 결정 때문에 멈추면 제목을 바꾸지 말고 waitingItems와 [차단] 댓글을 추가하며, 재개할 때 해당 항목을 제거하고 [진행] 댓글을 남기세요.',
+      nextStep: '사용자 요청을 수행한 뒤 의미 있는 진행과 결과는 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 담은 detail 댓글로 기록하고, 재사용할 결론은 sharedKnowledge에 요약한 다음 mindnprogress_get_document로 결과를 다시 확인하세요. 외부 전달물이나 결정 때문에 멈추면 제목을 바꾸지 말고 waitingItems와 [차단] 댓글을 추가하며, 재개할 때 해당 항목을 제거하고 [진행] 댓글을 남기세요.',
     }
   }, { compactResult: true })
 
@@ -856,10 +875,11 @@ async function main() {
     commentOffset: z.number().int().nonnegative().default(0),
     commentLimit: z.number().int().min(1).max(100).default(20),
     commentOrder: z.enum(['asc', 'desc']).default('desc'),
-  }, async ({ mapId, cardId, commentOffset, commentLimit, commentOrder }) => {
+    includeCommentDetail: z.boolean().default(false).describe('true이면 댓글 상세 본문을 함께 반환. 요약만으로 작업 판단이 어려울 때 사용'),
+  }, async ({ mapId, cardId, commentOffset, commentLimit, commentOrder, includeCommentDetail }) => {
     const [documentResult, commentsResult, health] = await Promise.all([
       apiRequest(`/api/maps/${encodeURIComponent(mapId)}`),
-      apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments?nodeId=${encodeURIComponent(cardId)}`),
+      apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments?nodeId=${encodeURIComponent(cardId)}&includeDetail=${includeCommentDetail}`),
       apiRequest('/api/health'),
     ])
     const card = documentResult.map.nodes.find((node) => node.id === cardId)
@@ -1170,31 +1190,53 @@ async function main() {
 
   registerTool(server, 'mindnprogress_list_users', '담당자로 지정할 수 있는 편집자 계정 목록을 조회합니다. active=false인 계정은 기존 담당자 표시용이며 새 담당자로 지정하지 마세요.', {}, async () =>
     apiRequest('/api/assignees'))
-  registerTool(server, 'mindnprogress_list_comments', '문서 또는 특정 카드의 댓글과 답글을 페이지 단위로 조회합니다. 다음 댓글이 있으면 nextOffset을 offset으로 전달하세요.', {
+  registerTool(server, 'mindnprogress_list_comments', '문서 또는 특정 카드의 댓글과 답글을 페이지 단위로 조회합니다. 기본 응답은 요약과 상세 존재 여부만 포함하며, 작업 근거나 검증 내용이 더 필요할 때 includeDetail=true를 사용하세요. 다음 댓글이 있으면 nextOffset을 offset으로 전달하세요.', {
     mapId: z.string().min(1),
     nodeId: z.string().optional(),
     offset: z.number().int().nonnegative().default(0),
     limit: z.number().int().min(1).max(100).default(50),
     order: z.enum(['asc', 'desc']).default('desc'),
-  }, async ({ mapId, nodeId, offset, limit, order }) => {
+    includeDetail: z.boolean().default(false),
+  }, async ({ mapId, nodeId, offset, limit, order, includeDetail }) => {
     const query = new URLSearchParams({
       offset: String(offset),
       limit: String(limit),
       order,
+      includeDetail: String(includeDetail),
     })
     if (nodeId) query.set('nodeId', nodeId)
     return apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments?${query}`)
   })
-  registerTool(server, 'mindnprogress_add_comment', '카드에 댓글 또는 답글을 작성합니다.', {
-    mapId: z.string().min(1), nodeId: z.string().min(1), text: z.string().min(1).max(1000), parentId: z.string().optional(),
-  }, async ({ mapId, ...body }) => apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments`, {
-    method: 'POST', aiCardId: body.nodeId, body: JSON.stringify(body),
-  }))
-  registerTool(server, 'mindnprogress_update_comment', '기존 댓글 또는 답글의 본문을 제자리에서 수정합니다. 댓글 ID, 작성자, 생성 시각, 답글 관계, 반응과 해결 상태는 유지됩니다.', {
-    mapId: z.string().min(1), commentId: z.string().min(1), text: z.string().min(1).max(1000),
-  }, async ({ mapId, commentId, text }) => apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments/${encodeURIComponent(commentId)}`, {
-    method: 'PATCH', body: JSON.stringify({ text }),
-  }))
+  registerTool(server, 'mindnprogress_add_comment', '카드에 댓글 또는 답글을 요약과 상세로 작성합니다. summary는 [진행], [차단], [결과]로 시작하는 1~2문장으로 작성하고, detail에는 작업을 이어가거나 검증하는 데 필요한 수행 내용·판단·변경 범위·검증 결과·산출물·다음 단계 중 해당 내용을 충실히 기록하세요. 요약 때문에 상세를 축약하지 마세요.', {
+    mapId: z.string().min(1),
+    nodeId: z.string().min(1),
+    summary: z.string().min(1).max(240).optional().describe('새 형식 댓글의 짧은 요약'),
+    detail: z.string().max(6000).optional().describe('작업을 이어가거나 검증하는 데 필요한 상세 내용'),
+    text: z.string().min(1).max(1000).optional().describe('이전 도구 호출과의 호환용 필드. 새 댓글은 summary와 detail을 사용'),
+    parentId: z.string().optional(),
+  }, async ({ mapId, nodeId, summary, detail, text, parentId }) => {
+    if (!summary?.trim() && !text?.trim()) throw new Error('댓글 summary를 입력해 주세요.')
+    const body = summary !== undefined
+      ? { nodeId, summary, detail, parentId }
+      : { nodeId, text, parentId }
+    return apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments`, {
+      method: 'POST', aiCardId: nodeId, body: JSON.stringify(body),
+    })
+  })
+  registerTool(server, 'mindnprogress_update_comment', '기존 댓글 또는 답글의 요약과 상세를 제자리에서 수정합니다. summary를 보내면 기존 단일 본문 댓글도 summary-detail 형식으로 전환되므로, 향후 마이그레이션에서는 원문을 확인한 뒤 summary와 detail을 함께 보내세요. 댓글 ID, 작성자, 생성 시각, 답글 관계, 반응과 해결 상태는 유지됩니다.', {
+    mapId: z.string().min(1),
+    commentId: z.string().min(1),
+    summary: z.string().min(1).max(240).optional(),
+    detail: z.string().max(6000).optional().describe('빈 문자열이면 기존 상세 삭제'),
+    text: z.string().min(1).max(1000).optional().describe('이전 호출과의 호환용. 새 형식 댓글의 요약 변경에는 summary 사용'),
+    expectedText: z.string().max(1000).optional().describe('조건부 수정에 사용할 현재 댓글 원문. 서버 값과 다르면 다른 편집자의 변경을 덮어쓰지 않고 실패'),
+  }, async ({ mapId, commentId, summary, detail, text, expectedText }) => {
+    if (summary === undefined && detail === undefined && text === undefined) throw new Error('수정할 댓글 내용을 입력해 주세요.')
+    return apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments/${encodeURIComponent(commentId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ summary, detail, text, expectedText }),
+    })
+  })
   registerTool(server, 'mindnprogress_delete_comment', '댓글과 연결된 답글을 삭제합니다.', {
     mapId: z.string().min(1), commentId: z.string().min(1),
   }, async ({ mapId, commentId }) => apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments/${encodeURIComponent(commentId)}`, { method: 'DELETE' }))

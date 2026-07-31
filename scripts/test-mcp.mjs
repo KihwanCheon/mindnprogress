@@ -194,12 +194,14 @@ async function main() {
 
     const guide = await invoke('mindnprogress_read_me_first')
     assert.equal(guide.guide.product.name, 'MindNProgress')
-    assert.equal(guide.guide.version, '1.4')
+    assert.equal(guide.guide.version, '1.5')
     assert.match(guide.guide.dataModel.cardContent.sharedKnowledge, /재사용/)
     assert.match(guide.guide.authoringRules.join('\n'), /말단 업무의 진행률을 동일 가중치 평균/)
     assert.match(guide.guide.operationRules.join('\n'), /변경할 필드만 보내고/)
     assert.match(guide.guide.operationRules.join('\n'), /조회 도구는 문서 version을 변경하지 않으며/)
-    assert.match(guide.guide.operationRules.join('\n'), /댓글은 \[진행\].*\[차단\].*\[결과\]/)
+    assert.match(guide.guide.operationRules.join('\n'), /댓글 summary는 \[진행\].*\[차단\].*\[결과\]/)
+    assert.match(guide.guide.commentRules.detail, /작업을 이어가거나 결과를 검증/)
+    assert.match(guide.guide.commentRules.legacy, /자동 분리하거나 다시 쓰지 않음/)
     assert.match(guide.guide.operationRules.join('\n'), /waitingItems가 해제되면 서버가 관련 사용자에게 알림/)
 
     const createdMindmap = await invoke('mindnprogress_create_mindmap', {
@@ -659,7 +661,10 @@ async function main() {
     assert.equal(saved.map.updatedBy.name, 'Claude Code(Claude Test Model)')
 
     const knowledgeComment = await invoke('mindnprogress_add_comment', {
-      mapId, nodeId: 'branch-a', text: '선행 분석 결과를 재사용합니다.',
+      mapId,
+      nodeId: 'branch-a',
+      summary: '[결과] 선행 분석 결과를 재사용할 수 있습니다.',
+      detail: '검증된 결정과 적용 범위를 공유 지식과 함께 확인했습니다.',
     })
     const knowledgeSaved = await invoke('mindnprogress_save_document', {
       mapId,
@@ -693,9 +698,23 @@ async function main() {
     assert.deepEqual(knowledgeContext.selection.knowledgeSources.fallback.map((source) => source.card.id), ['root'])
     assert.equal(knowledgeContext.selection.knowledgeSources.primary[0].card.data.sharedKnowledge, '기능 A의 재사용 가능한 결정과 결과')
     assert.equal(knowledgeContext.selection.knowledgeSources.primary[0].comments[0].id, knowledgeComment.comment.id)
+    assert.equal(knowledgeContext.selection.knowledgeSources.primary[0].comments[0].detail, undefined)
+    assert.equal(knowledgeContext.selection.knowledgeSources.primary[0].comments[0].hasDetail, true)
     assert.equal(knowledgeContext.selection.knowledgeSources.primary[0].commentsPage.total, 1)
+    assert.deepEqual(knowledgeContext.selection.knowledgeSources.primary[0].commentsPage.detailToolArguments, {
+      mapId,
+      nodeId: 'branch-a',
+      offset: 0,
+      limit: 1,
+      order: 'desc',
+      includeDetail: true,
+    })
     assert.equal(knowledgeContext.selection.knowledgeSources.fallback[0].card.data, undefined)
-    assert.deepEqual(knowledgeContext.selection.knowledgeSources.fallback[0].detailToolArguments, { mapId, cardId: 'root' })
+    assert.deepEqual(knowledgeContext.selection.knowledgeSources.fallback[0].detailToolArguments, {
+      mapId,
+      cardId: 'root',
+      includeCommentDetail: true,
+    })
     assert.equal(knowledgeContext.selection.knowledgeSources.all, undefined)
     assert.deepEqual(knowledgeContext.selection.taskLinks.startupInspection.targets.map((target) => target.url), ['https://example.com/task-a'])
     assert.deepEqual(knowledgeContext.selection.taskLinks.startupInspection.fallbackTargets.map((target) => target.url), ['https://example.com/root'])
@@ -743,6 +762,12 @@ async function main() {
     assert.ok(commentPage.total >= 2)
     assert.equal(commentPage.hasMore, true)
     assert.equal(commentPage.nextOffset, 1)
+    const knowledgeCommentDetail = await invoke('mindnprogress_list_comments', {
+      mapId,
+      nodeId: 'branch-a',
+      includeDetail: true,
+    })
+    assert.equal(knowledgeCommentDetail.comments[0].detail, '검증된 결정과 적용 범위를 공유 지식과 함께 확인했습니다.')
 
     const history = await invoke('mindnprogress_list_history', { mapId, limit: 1 })
     assert.equal(history.revisions.length, 1)
@@ -914,7 +939,12 @@ async function main() {
     await mkdir(notificationsPath, { recursive: true })
 
     await writeFile(path.join(notificationsPath, `${attribution.editorId}.json`), '{', 'utf8')
-    const parentComment = await invoke('mindnprogress_add_comment', { mapId, nodeId: 'root', text: '댓글 상태와 반응 검증' })
+    const parentComment = await invoke('mindnprogress_add_comment', {
+      mapId,
+      nodeId: 'root',
+      summary: '[진행] 댓글 상태와 반응을 검증합니다.',
+      detail: '답글, 해결 상태, 반응과 수정 후 메타데이터 보존을 순서대로 확인합니다.',
+    })
     const replyComment = await invoke('mindnprogress_add_comment', {
       mapId, nodeId: 'root', parentId: parentComment.comment.id, text: '답글 검증',
     })
@@ -928,10 +958,17 @@ async function main() {
     })
     assert.ok(reacted.comment.reactions['👍'].includes(attribution.editorId))
     const updatedComment = await invoke('mindnprogress_update_comment', {
-      mapId, commentId: parentComment.comment.id, text: '댓글 본문 수정과 메타데이터 보존 검증',
+      mapId,
+      commentId: parentComment.comment.id,
+      expectedText: parentComment.comment.text,
+      summary: '[결과] 댓글 수정과 메타데이터 보존을 검증했습니다.',
+      detail: '작성자, 생성 시각, 해결 상태와 이모지 반응이 수정 뒤에도 유지됩니다.',
     })
     assert.equal(updatedComment.comment.id, parentComment.comment.id)
-    assert.equal(updatedComment.comment.text, '댓글 본문 수정과 메타데이터 보존 검증')
+    assert.equal(updatedComment.comment.text, '[결과] 댓글 수정과 메타데이터 보존을 검증했습니다.')
+    assert.equal(updatedComment.comment.summary, updatedComment.comment.text)
+    assert.equal(updatedComment.comment.detail, '작성자, 생성 시각, 해결 상태와 이모지 반응이 수정 뒤에도 유지됩니다.')
+    assert.equal(updatedComment.comment.contentFormat, 'summary-detail')
     assert.equal(updatedComment.comment.createdAt, parentComment.comment.createdAt)
     assert.equal(updatedComment.comment.author.name, parentComment.comment.author.name)
     assert.equal(updatedComment.comment.resolvedAt, resolved.comment.resolvedAt)
@@ -939,6 +976,8 @@ async function main() {
     assert.ok(updatedComment.comment.updatedAt)
     commentList = await invoke('mindnprogress_list_comments', { mapId, nodeId: 'root' })
     assert.equal(commentList.comments.length, 2)
+    assert.equal(commentList.comments.find((comment) => comment.id === parentComment.comment.id)?.detail, undefined)
+    assert.equal(commentList.comments.find((comment) => comment.id === parentComment.comment.id)?.hasDetail, true)
     assert.equal(commentList.comments.find((comment) => comment.id === replyComment.comment.id)?.parentId, parentComment.comment.id)
     const deletedThread = await invoke('mindnprogress_delete_comment', { mapId, commentId: parentComment.comment.id })
     assert.equal(deletedThread.deletedIds.length, 2)

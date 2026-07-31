@@ -40,7 +40,7 @@ Mind & Progress는 아이디어의 구조와 실제 업무 진행 상태를 하�
 - 문서 색상 지정과 휴지통 이동·복원·영구 삭제
 - 좌측 문서 목록과 우측 세부정보 패널의 너비 조절 및 브라우저별 너비 저장
 - 문서별 최대 100단계 실행 취소·다시 실행
-- 노드별 댓글, 답글, 멘션, 해결 상태와 이모지 반응
+- 노드별 요약·접이식 상세 댓글, 답글, 멘션, 해결 상태와 이모지 반응
 - 문서별 변경 이력을 최근 항목부터 50개씩 제한 없이 추가 조회하고 이전 버전 복원
 - 날짜별 최신 상태를 제한 없이 보관하는 자동 일일 백업과 복원
 - 기존 변경 이력의 날짜별 최신본을 일일 백업으로 자동 백필
@@ -210,7 +210,7 @@ AionUi에 다음 로컬 MCP 서버를 등록하고 활성화합니다.
 
 MCP는 데이터 폴더의 `_integration-token`을 사용해 로컬 API와 통신합니다. 이 토큰은 자동 생성되며 Git에 포함되지 않습니다. 비밀번호 변경 MCP 도구는 제공하지 않습니다.
 
-AI가 MindNProgress 밖에서 시작되었다면 먼저 `mindnprogress_read_me_first`를 호출해 제품 개념과 작업 규칙을 확인할 수 있습니다. 카드에서 시작된 대화는 `mindnprogress_get_context`로 최신 문서 구조, 선택 카드, 접근 URL과 업무 링크를 함께 조회합니다. 기본 `focused` 모드는 선택 카드와 주요 선행 지식 원문 및 문서 개요를 반환하고, 전체 원문이 필요한 경우 `detailLevel=full`을 사용할 수 있습니다. 간략 응답에서 특정 카드 원문이 더 필요하면 `mindnprogress_get_card`, 오래된 댓글까지 필요하면 페이지 방식의 `mindnprogress_list_comments`를 사용합니다. 여러 카드로 구성된 새 문서는 `mindnprogress_create_mindmap`으로 한 번에 생성하는 것이 권장됩니다. 외부 전달물이나 결정 때문에 업무가 멈춘 경우 제목을 변경하지 않고 카드의 `waitingItems`에 자유 입력 항목을 추가하며, 대기 등록과 해제는 각각 `[차단]`, `[진행]` 댓글로 기록합니다.
+AI가 MindNProgress 밖에서 시작되었다면 먼저 `mindnprogress_read_me_first`를 호출해 제품 개념과 작업 규칙을 확인할 수 있습니다. 카드에서 시작된 대화는 `mindnprogress_get_context`로 최신 문서 구조, 선택 카드, 접근 URL과 업무 링크를 함께 조회합니다. 기본 `focused` 모드는 선택 카드와 주요 선행 지식 원문 및 문서 개요를 반환하고, 전체 원문이 필요한 경우 `detailLevel=full`을 사용할 수 있습니다. 간략 응답에서 특정 카드 원문이 더 필요하면 `mindnprogress_get_card`, 오래된 댓글까지 필요하면 페이지 방식의 `mindnprogress_list_comments`를 사용합니다. 댓글 조회는 기본적으로 요약과 상세 존재 여부를 반환하며, 작업 근거나 검증 내용이 더 필요할 때 `includeDetail=true`를 사용합니다. 여러 카드로 구성된 새 문서는 `mindnprogress_create_mindmap`으로 한 번에 생성하는 것이 권장됩니다. 외부 전달물이나 결정 때문에 업무가 멈춘 경우 제목을 변경하지 않고 카드의 `waitingItems`에 자유 입력 항목을 추가하며, 대기 등록과 해제는 각각 `[차단]`, `[진행]` 댓글로 기록합니다.
 
 ## MindNProgress MCP 명령어
 
@@ -282,14 +282,39 @@ AI가 MindNProgress 밖에서 시작되었다면 먼저 `mindnprogress_read_me_f
 
 | 명령어 | 설명 |
 | --- | --- |
-| `mindnprogress_list_comments` | 문서 전체 또는 특정 카드의 댓글과 답글을 페이지 조회합니다. |
-| `mindnprogress_add_comment` | 카드에 새 댓글 또는 답글을 작성합니다. |
-| `mindnprogress_update_comment` | 기존 댓글이나 답글의 본문을 수정합니다. |
+| `mindnprogress_list_comments` | 문서 전체 또는 특정 카드의 댓글과 답글을 페이지 조회합니다. `includeDetail=true`이면 상세 본문을 포함합니다. |
+| `mindnprogress_add_comment` | 카드에 짧은 `summary`와 선택적 `detail`로 새 댓글 또는 답글을 작성합니다. |
+| `mindnprogress_update_comment` | 기존 댓글이나 답글의 요약과 상세를 수정하고 기존 단일 본문 댓글을 새 형식으로 전환할 수 있습니다. `expectedText`를 보내면 조회 이후 원문이 달라졌을 때 수정을 거부합니다. |
 | `mindnprogress_delete_comment` | 댓글과 연결된 답글을 삭제합니다. |
 | `mindnprogress_set_comment_resolved` | 댓글 스레드를 해결하거나 다시 엽니다. |
 | `mindnprogress_toggle_comment_reaction` | 댓글의 `👍`, `❤️`, `🎉`, `👀` 반응을 추가하거나 취소합니다. |
 
-`mindnprogress_list_comments` 응답에 `nextOffset`이 있으면 다음 호출의 `offset`으로 전달합니다. 의미 있는 진행, 차단과 완료 결과는 각각 `[진행]`, `[차단]`, `[결과]` 머리말로 기록합니다.
+`mindnprogress_list_comments` 응답에 `nextOffset`이 있으면 다음 호출의 `offset`으로 전달합니다. AI 댓글의 `summary`는 의미 있는 진행, 차단과 완료 결과에 따라 `[진행]`, `[차단]`, `[결과]` 머리말로 시작하는 1~2문장으로 작성합니다. `detail`에는 다른 세션이 작업을 이어가거나 검증하는 데 필요한 수행 내용, 판단, 변경 범위, 검증 방법과 실제 결과, 산출물, 제한사항과 다음 단계 중 해당 내용을 충실하게 기록합니다. 요약 때문에 상세를 축약하지 않으며 개별 도구 호출과 의미 없는 반복만 제외합니다.
+
+새 형식 댓글에는 `contentFormat=summary-detail`이 저장됩니다. 이 값이 없는 기존 단일 본문 댓글은 자동으로 변경하지 않으므로, 추후 원문을 확인하며 요약과 상세로 분류하는 마이그레이션 대상을 명확하게 식별할 수 있습니다.
+
+#### 기존 댓글 무손실 마이그레이션
+
+기존 단일 본문 댓글은 상세함이 낮아지지 않도록 원문 전체를 `detail`에 문자 단위로 보존하고, 원문과 카드의 시간순 문맥을 확인해 `summary`만 새로 작성하는 방식을 사용합니다. 진행 상태는 Git에서 제외되는 `server/data/_migrations/comment-summary-detail-v1.json`에 저장되며 전체 데이터 백업에 포함됩니다.
+
+```bash
+npm run comments:migration -- snapshot
+npm run comments:migration -- status
+npm run comments:migration -- list --status pending --limit 10
+npm run comments:migration -- stage --input <요약 초안 JSON>
+npm run comments:migration -- review --input <독립 검토 JSON>
+npm run comments:migration -- apply --confirm --limit 10
+npm run comments:migration -- verify
+```
+
+`stage` 입력은 `{ "commentId": "...", "summary": "[결과] ..." }` 항목의 배열이고, `review` 입력은 `{ "commentId": "...", "approved": true }` 항목의 배열입니다. 적용은 별도 검토에서 승인된 항목만 대상으로 하며 다음 조건을 모두 확인합니다.
+
+- 초안의 `detail`과 스냅샷 원문 및 SHA-256이 일치
+- 적용 직전 서버 댓글의 `text`와 `expectedText`가 일치
+- 적용 후 ID, 작성자, 작성 시각, 답글 관계, 해결 상태와 반응이 유지
+- 저장된 `summary`, `text`, `detail`과 `contentFormat`이 승인된 값과 일치
+
+원문이나 메타데이터가 달라지면 해당 항목을 `needs-review`로 바꾸고 즉시 중지하므로, 다른 세션의 댓글 변경을 덮어쓰지 않습니다. 여러 세션에서 작업할 때는 같은 카드의 댓글을 시간순으로 확인하여 한 번에 3~8개씩 초안을 만들고, 다른 세션에서 검토한 뒤 적용하는 방식을 권장합니다.
 
 ### 알림
 
@@ -334,6 +359,7 @@ npm run lint         # oxlint 정적 검사
 npm run test:unit    # Node 20·22 호환 단위 테스트
 npm run test:mcp     # 격리된 임시 API를 이용한 전체 MCP 회귀 검사
 npm run mcp          # MCP stdio 서버 직접 실행
+npm run comments:migration -- <명령> # 댓글 요약·상세 마이그레이션 관리
 npm start            # 빌드 결과와 API 서버 실행
 ```
 

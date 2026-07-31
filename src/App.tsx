@@ -403,6 +403,10 @@ type NodeComment = {
   mapId: string
   nodeId: string
   text: string
+  contentFormat?: 'summary-detail'
+  summary?: string
+  detail?: string
+  hasDetail?: boolean
   parentId: string | null
   resolvedAt: string | null
   resolvedBy: AuthUser | null
@@ -929,6 +933,9 @@ function CommentCard({ comment, isReply, mode, user, collaborators, readOnly = f
   const canResolve = !readOnly && !isReply && (mode === 'editor' || comment.author.id === user.id)
   const canDelete = !readOnly && (mode === 'editor' || comment.author.id === user.id)
   const mentionNames = collaborators.map((collaborator) => collaborator.name)
+  const structured = comment.contentFormat === 'summary-detail'
+  const summary = structured ? comment.summary ?? comment.text : comment.text
+  const detail = structured ? comment.detail?.trim() : ''
 
   return (
     <article className={`comment-item ${isReply ? 'reply' : ''} ${comment.resolvedAt ? 'resolved' : ''}`}>
@@ -938,7 +945,13 @@ function CommentCard({ comment, isReply, mode, user, collaborators, readOnly = f
           <span><strong>{comment.author.name}</strong>{comment.resolvedAt && <i>해결됨</i>}</span>
           <time>{new Date(comment.createdAt).toLocaleString('ko-KR')}</time>
         </header>
-        <p><MentionText text={comment.text} names={mentionNames} /></p>
+        <p className="comment-summary"><MentionText text={summary} names={mentionNames} /></p>
+        {detail && (
+          <details className="comment-detail">
+            <summary><span>상세 보기</span><small>수행 내용과 검증 결과</small></summary>
+            <div><MentionText text={detail} names={mentionNames} /></div>
+          </details>
+        )}
         {!readOnly && <div className="comment-reactions">
           {COMMENT_REACTIONS.map((emoji) => {
             const reactedUsers = comment.reactions?.[emoji] ?? []
@@ -1345,6 +1358,8 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const [commentsLoading, setCommentsLoading] = useState(false)
   const [commentError, setCommentError] = useState('')
   const [newComment, setNewComment] = useState('')
+  const [newCommentDetail, setNewCommentDetail] = useState('')
+  const [commentDetailOpen, setCommentDetailOpen] = useState(false)
   const [replyTarget, setReplyTarget] = useState<NodeComment | null>(null)
   const [collaborators, setCollaborators] = useState<AuthUser[]>([])
   const [assigneeUsers, setAssigneeUsers] = useState<AuthUser[]>([])
@@ -1825,8 +1840,8 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       return
     }
     let active = true
-    void apiRequest<{ comments: NodeComment[] }>(`/api/maps/${encodeURIComponent(activeMapId)}/comments`)
-      .then((result) => { if (active) setCommentStats(buildCommentStats(result.comments)) })
+    void apiRequest<{ stats: NodeCommentStats }>(`/api/maps/${encodeURIComponent(activeMapId)}/comments/stats`)
+      .then((result) => { if (active) setCommentStats(result.stats) })
       .catch(() => { if (active) setCommentStats({}) })
     return () => { active = false }
   }, [activeMapId])
@@ -1841,8 +1856,8 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     const mapIds = [...new Set(targets.map((target) => target.mapId))]
     void Promise.all(mapIds.map(async (mapId) => {
       try {
-        const result = await apiRequest<{ comments: NodeComment[] }>(`/api/maps/${encodeURIComponent(mapId)}/comments`)
-        return [mapId, buildCommentStats(result.comments)] as const
+        const result = await apiRequest<{ stats: NodeCommentStats }>(`/api/maps/${encodeURIComponent(mapId)}/comments/stats`)
+        return [mapId, result.stats] as const
       } catch {
         return [mapId, {}] as const
       }
@@ -1861,6 +1876,8 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   useEffect(() => {
     setReplyTarget(null)
     setNewComment('')
+    setNewCommentDetail('')
+    setCommentDetailOpen(false)
     if (!selectedCommentMapId || !selectedCommentNodeId) {
       setComments([])
       return
@@ -1923,17 +1940,17 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         }
         if (event.type === 'comment-changed') {
           if (event.mapId === activeMapId) {
-            void apiRequest<{ comments: NodeComment[] }>(`/api/maps/${encodeURIComponent(activeMapId)}/comments`)
-              .then((result) => setCommentStats(buildCommentStats(result.comments)))
+            void apiRequest<{ stats: NodeCommentStats }>(`/api/maps/${encodeURIComponent(activeMapId)}/comments/stats`)
+              .then((result) => setCommentStats(result.stats))
               .catch(() => undefined)
           }
           const referencedLocalNodeIds = referenceCommentTargetsRef.current
             .filter((target) => target.mapId === event.mapId && target.nodeId === event.nodeId)
             .map((target) => target.localNodeId)
           if (referencedLocalNodeIds.length > 0) {
-            void apiRequest<{ comments: NodeComment[] }>(`/api/maps/${encodeURIComponent(event.mapId)}/comments?nodeId=${encodeURIComponent(event.nodeId)}`)
+            void apiRequest<{ stats: NodeCommentStats }>(`/api/maps/${encodeURIComponent(event.mapId)}/comments/stats`)
               .then((result) => {
-                const stats = buildCommentStats(result.comments)[event.nodeId] ?? { total: 0, unresolved: 0 }
+                const stats = result.stats[event.nodeId] ?? { total: 0, unresolved: 0 }
                 setReferenceCommentStats((current) => ({
                   ...current,
                   ...Object.fromEntries(referencedLocalNodeIds.map((localNodeId) => [localNodeId, stats])),
@@ -3375,16 +3392,24 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   }, [addImageFilesAtPoint, mode, viewMode])
 
   const submitComment = async () => {
-    const text = newComment.trim()
-    if (!selectedCommentMapId || !selectedCommentNodeId || !text) return
+    const summary = newComment.trim()
+    const detail = newCommentDetail.trim()
+    if (!selectedCommentMapId || !selectedCommentNodeId || !summary) return
     setCommentError('')
     try {
       const result = await apiRequest<{ comment: NodeComment }>(`/api/maps/${encodeURIComponent(selectedCommentMapId)}/comments`, {
         method: 'POST',
-        body: JSON.stringify({ nodeId: selectedCommentNodeId, text, parentId: replyTarget?.id ?? null }),
+        body: JSON.stringify({
+          nodeId: selectedCommentNodeId,
+          summary,
+          ...(detail ? { detail } : {}),
+          parentId: replyTarget?.id ?? null,
+        }),
       })
       setComments((current) => current.some((comment) => comment.id === result.comment.id) ? current : [...current, result.comment])
       setNewComment('')
+      setNewCommentDetail('')
+      setCommentDetailOpen(false)
       setReplyTarget(null)
     } catch (error) {
       setCommentError(error instanceof Error ? error.message : '댓글을 등록하지 못했습니다.')
@@ -5019,12 +5044,32 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                   {commentError && <div className="comment-error">{commentError}</div>}
                   {user.publicAccess ? <div className="public-viewer-comment-note"><Icon name="lock" size={12} /><span>공개 뷰어에서는 댓글을 조회만 할 수 있습니다.</span></div> : <form className="comment-form" onSubmit={(event) => { event.preventDefault(); void submitComment() }}>
                     {replyTarget && <div className="reply-target"><span><strong>{replyTarget.author.name}</strong>님에게 답글</span><button type="button" onClick={() => setReplyTarget(null)} aria-label="답글 취소"><Icon name="close" size={11} /></button></div>}
-                    <textarea value={newComment} onChange={(event) => setNewComment(event.target.value)} placeholder={replyTarget ? '답글을 입력하세요' : '댓글을 입력하세요'} maxLength={1000} rows={3} />
+                    <label className="comment-summary-editor">
+                      <span>요약</span>
+                      <textarea value={newComment} onChange={(event) => setNewComment(event.target.value)} placeholder={replyTarget ? '답글의 핵심 내용을 입력하세요' : '현재 상태와 핵심 결과를 입력하세요'} maxLength={240} rows={2} />
+                      <small>{newComment.length}/240</small>
+                    </label>
+                    <button
+                      type="button"
+                      className={`comment-detail-toggle ${commentDetailOpen ? 'open' : ''}`}
+                      onClick={() => setCommentDetailOpen((current) => !current)}
+                      aria-expanded={commentDetailOpen}
+                    >
+                      <span>{commentDetailOpen ? '상세 내용 접기' : newCommentDetail ? '작성한 상세 내용 보기' : '상세 내용 추가'}</span>
+                      <Icon name="chevron-down" size={12} />
+                    </button>
+                    {commentDetailOpen && (
+                      <label className="comment-detail-editor">
+                        <span>상세</span>
+                        <textarea value={newCommentDetail} onChange={(event) => setNewCommentDetail(event.target.value)} placeholder="수행 내용, 중요한 판단, 변경 범위, 검증 결과, 산출물과 다음 단계를 입력하세요." maxLength={6000} rows={7} />
+                        <small>{newCommentDetail.length}/6000</small>
+                      </label>
+                    )}
                     <div className="mention-tools">
                       <span>멘션</span>
                       {collaborators.filter((collaborator) => collaborator.id !== user.id).map((collaborator) => <button type="button" key={collaborator.id} onClick={() => insertMention(collaborator)}>@{collaborator.name}</button>)}
                     </div>
-                    <div><small>{newComment.length}/1000 · {selectedNode.data.reference ? '원본 노드에 등록' : '편집자와 뷰어 모두 작성 가능'}</small><button type="submit" disabled={!newComment.trim()}><Icon name="send" size={13} />{replyTarget ? '답글' : '등록'}</button></div>
+                    <div><small>{selectedNode.data.reference ? '원본 노드에 등록' : '편집자와 뷰어 모두 작성 가능'}</small><button type="submit" disabled={!newComment.trim()}><Icon name="send" size={13} />{replyTarget ? '답글' : '등록'}</button></div>
                   </form>}
                 </section>
                 <div className="meta-card">
