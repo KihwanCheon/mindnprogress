@@ -33,6 +33,16 @@ export type MindNodeReference = {
   nodeId: string
 }
 
+export type MindImageData = {
+  assetId: string
+  fileName: string
+  mimeType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'
+  naturalWidth: number
+  naturalHeight: number
+  displayWidth: number
+  displayHeight: number
+}
+
 export type AiConversationRuntime = {
   conversationId: string
   state: 'running' | 'waiting-confirmation' | 'idle' | 'unknown'
@@ -53,7 +63,13 @@ export type MindNodeData = {
   }
   progress: number
   status: 'planned' | 'in-progress' | 'done'
-  kind: 'root' | 'branch' | 'task'
+  kind: 'root' | 'branch' | 'task' | 'image'
+  image?: MindImageData
+  imageAssetUrl?: string
+  imageEditable?: boolean
+  onImageResizeStart?: () => void
+  onImageResizeEnd?: (width: number, height: number) => void
+  onOpenImagePreview?: () => void
   taskUrl?: string
   aiConversationId?: string
   reference?: MindNodeReference

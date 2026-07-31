@@ -31,8 +31,9 @@ import { MentionText } from './components/MentionText'
 import { AdminEditorPanel } from './components/AdminEditorPanel'
 import { AiConversationDialog } from './components/AiConversationDialog'
 import { AiConversationActivityIndicator } from './components/AiConversationRuntimeBadge'
+import { ImagePreviewDialog } from './components/ImagePreviewDialog'
 import { DashboardView, KanbanView, TimelineView } from './components/WorkViews'
-import type { AiConversationRuntime, ChecklistItem, KnowledgePolicy, MindMapEdgeData, MindNodeData, TeamMember, WaitingItem } from './types/mindMap'
+import type { AiConversationRuntime, ChecklistItem, KnowledgePolicy, MindImageData, MindMapEdgeData, MindNodeData, TeamMember, WaitingItem } from './types/mindMap'
 import { blockingNodes, createsDependencyCycle, dependentNodes, prerequisiteNodes } from './utils/dependencies'
 import { createsKnowledgeCycle, isHierarchyEdge, isKnowledgeEdge, knowledgePolicyOf } from './utils/knowledgeEdges'
 import { mergeMapContent } from './utils/mergeMapContent.mjs'
@@ -55,6 +56,10 @@ const DOCUMENT_COLORS = [
 const MINDMAP_GRID_SIZE = 24
 const MINDMAP_CHILD_HORIZONTAL_OFFSET = MINDMAP_GRID_SIZE * 13
 const MINDMAP_WORK_NODE_VERTICAL_STEP = MINDMAP_GRID_SIZE * 6
+const MINDMAP_IMAGE_MAX_WIDTH = 480
+const MINDMAP_IMAGE_MAX_HEIGHT = 360
+const SUPPORTED_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp'])
+const SUPPORTED_IMAGE_FILE_PATTERN = /\.(?:png|jpe?g|gif|webp)$/i
 const SIDEBAR_MIN_WIDTH = 190
 const SIDEBAR_AI_ACTIVITY_MIN_WIDTH = 208
 const SIDEBAR_MAX_WIDTH = 420
@@ -996,6 +1001,65 @@ async function apiRequest<T>(pathname: string, init?: RequestInit) {
   return body
 }
 
+async function uploadMindMapImage(mapId: string, file: File) {
+  const response = await fetch(`/api/maps/${encodeURIComponent(mapId)}/images`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'X-MNP-Client': CLIENT_ID,
+      'Content-Type': file.type || 'application/octet-stream',
+    },
+    body: file,
+  })
+  const body = await response.json().catch(() => ({})) as {
+    image?: { assetId: string; mimeType: MindImageData['mimeType'] }
+    error?: string
+  }
+  if (!response.ok || !body.image) {
+    throw new ApiRequestError(body.error ?? '이미지를 업로드하지 못했습니다.', response.status, body)
+  }
+  return body.image
+}
+
+async function imageFileDimensions(file: File) {
+  if (typeof createImageBitmap === 'function') {
+    const bitmap = await createImageBitmap(file)
+    try {
+      return { width: bitmap.width, height: bitmap.height }
+    } finally {
+      bitmap.close()
+    }
+  }
+
+  const objectUrl = URL.createObjectURL(file)
+  try {
+    return await new Promise<{ width: number; height: number }>((resolve, reject) => {
+      const image = new Image()
+      image.onload = () => resolve({ width: image.naturalWidth, height: image.naturalHeight })
+      image.onerror = () => reject(new Error('이미지 크기를 확인하지 못했습니다.'))
+      image.src = objectUrl
+    })
+  } finally {
+    URL.revokeObjectURL(objectUrl)
+  }
+}
+
+function defaultImageDisplaySize(naturalWidth: number, naturalHeight: number) {
+  const scale = Math.min(1, MINDMAP_IMAGE_MAX_WIDTH / naturalWidth, MINDMAP_IMAGE_MAX_HEIGHT / naturalHeight)
+  return {
+    width: Math.max(1, Math.round(naturalWidth * scale)),
+    height: Math.max(1, Math.round(naturalHeight * scale)),
+  }
+}
+
+function imageAssetUrl(mapId: string, assetId: string) {
+  return `/api/maps/${encodeURIComponent(mapId)}/images/${encodeURIComponent(assetId)}`
+}
+
+function isSupportedImageFile(file: File) {
+  return SUPPORTED_IMAGE_MIME_TYPES.has(file.type) || (!file.type && SUPPORTED_IMAGE_FILE_PATTERN.test(file.name))
+}
+
 function preventInsertedTab(event: ReactFormEvent<HTMLInputElement>, moveFocus: () => void) {
   if ((event.nativeEvent as InputEvent).data !== '\t') return
   event.preventDefault()
@@ -1237,6 +1301,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const [accountMenuOpen, setAccountMenuOpen] = useState(false)
   const [passwordDialogOpen, setPasswordDialogOpen] = useState(false)
   const [aiDialogOpen, setAiDialogOpen] = useState(false)
+  const [previewImageNodeId, setPreviewImageNodeId] = useState<string | null>(null)
   const [nodeLinkCopyStatus, setNodeLinkCopyStatus] = useState<'idle' | 'copied' | 'failed'>('idle')
   const [viewMode, setViewMode] = useState<ViewMode>(initialDeepLink?.viewMode ?? 'mindmap')
   const [documents, setDocuments] = useState<MapSummary[]>([])
@@ -1348,9 +1413,12 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const pendingDeepLink = useRef(initialDeepLink)
   const lastLoadedMapId = useRef<string | null>(null)
   const selectedIdRef = useRef<string | null>(selectedId)
+  const activeMapIdRef = useRef(activeMapId)
+  const canvasPointerRef = useRef({ inside: false, x: 0, y: 0 })
   const selectedCommentTargetRef = useRef<{ mapId: string; nodeId: string } | null>(null)
   const referenceCommentTargetsRef = useRef<ReferenceCommentTarget[]>([])
   selectedIdRef.current = selectedId
+  activeMapIdRef.current = activeMapId
   const { fitView, screenToFlowPosition, setCenter, setViewport } = useReactFlow<MindMapNode, MindMapEdge>()
   const nodesInitialized = useNodesInitialized()
   const updateNodeInternals = useUpdateNodeInternals()
@@ -1363,6 +1431,9 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   }, [])
 
   const selectedNode = nodes.find((node) => node.id === selectedId) ?? null
+  const previewImageNode = previewImageNodeId
+    ? nodes.find((node) => node.id === previewImageNodeId && node.data.kind === 'image') ?? null
+    : null
   const contextMenuNode = nodeContextMenu ? nodes.find((node) => node.id === nodeContextMenu.nodeId) ?? null : null
   const selectedReferenceReadOnly = mode === 'viewer' || Boolean(selectedNode?.data.reference)
   const selectedCommentMapId = selectedNode?.data.reference?.mapId ?? activeMapId
@@ -1469,6 +1540,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   }, [childrenById, collapsedNodeIds])
   const filterActive = nodeFilter !== 'all' || assigneeFilter !== 'all'
   const filterMatchedNodeIds = useMemo(() => new Set(nodes.filter((node) => {
+    if (node.data.kind === 'image') return true
     const status = node.data.progress >= 100 ? 'done' : node.data.status
     const statusMatches = nodeFilter === 'all'
       || nodeFilter === 'work' && Boolean(node.data.isWork)
@@ -1520,11 +1592,38 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       && !(filterActive && filterVisibleNodeIds.has(node.id))
     const hiddenByFilter = filterActive && !filterVisibleNodeIds.has(node.id)
     const hidden = hiddenByCollapse || hiddenByFilter
+    const image = node.data.kind === 'image' ? node.data.image : undefined
     return {
       ...node,
       hidden,
+      connectable: image ? false : node.connectable,
+      deletable: image ? false : node.deletable,
+      style: image
+        ? { ...node.style, width: image.displayWidth, height: image.displayHeight }
+        : node.style,
       data: {
         ...node.data,
+        imageAssetUrl: image ? imageAssetUrl(activeMapId, image.assetId) : undefined,
+        imageEditable: Boolean(image && mode === 'editor'),
+        onOpenImagePreview: image ? () => setPreviewImageNodeId(node.id) : undefined,
+        onImageResizeStart: image ? beginHistoryTransaction : undefined,
+        onImageResizeEnd: image ? (width: number) => {
+          const displayWidth = Math.max(1, Math.min(2_000, width))
+          const displayHeight = displayWidth * image.naturalHeight / image.naturalWidth
+          setNodes((current) => current.map((candidate) => candidate.id === node.id
+            ? {
+                ...candidate,
+                data: {
+                  ...candidate.data,
+                  image: candidate.data.image
+                    ? { ...candidate.data.image, displayWidth, displayHeight }
+                    : candidate.data.image,
+                },
+              }
+            : candidate))
+          setSavedAt('이미지 크기 변경됨')
+          endHistoryTransaction()
+        } : undefined,
         assignee: teamMembers.find((member) => member.id === node.data.assigneeId),
         unresolvedDependencyCount: blockingNodes(node, nodes).length,
         commentCount: (node.data.reference ? referenceCommentStats[node.id] : commentStats[node.id])?.total ?? 0,
@@ -1549,7 +1648,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         filterActive && filterVisibleNodeIds.has(node.id) && !filterMatchedNodeIds.has(node.id) ? 'filter-context' : '',
       ].filter(Boolean).join(' '),
     }
-  }), [aiConversationRuntimes, collapsedHiddenNodeIds, collapsedNodeIds, collapsibleNodeIds, commentStats, descendantCounts, dropTargetId, filterActive, filterMatchedNodeIds, filterVisibleNodeIds, nodes, normalizedNodeSearch, openWaitingItems, referenceCommentStats, searchContextNodeIds, searchMatchedNodeIds, teamMembers])
+  }), [activeMapId, aiConversationRuntimes, beginHistoryTransaction, collapsedHiddenNodeIds, collapsedNodeIds, collapsibleNodeIds, commentStats, descendantCounts, dropTargetId, endHistoryTransaction, filterActive, filterMatchedNodeIds, filterVisibleNodeIds, mode, nodes, normalizedNodeSearch, openWaitingItems, referenceCommentStats, searchContextNodeIds, searchMatchedNodeIds, setNodes, teamMembers])
   const visibleFlowNodeIds = useMemo(() => new Set(flowNodes.filter((node) => !node.hidden).map((node) => node.id)), [flowNodes])
   const visibleFlowNodeIdsKey = useMemo(() => [...visibleFlowNodeIds].sort().join('\u0000'), [visibleFlowNodeIds])
   const flowEdges = useMemo(() => {
@@ -2469,9 +2568,31 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     setSelectedId((current) => current === nodeId ? null : current)
   }, [mode, setEdges, setNodes])
 
+  const deleteImageNodeById = useCallback(async (nodeId: string) => {
+    if (mode !== 'editor' || !activeMapId) return
+    const image = nodes.find((node) => node.id === nodeId)?.data.image
+    if (!image) return
+    const targetMapId = activeMapId
+    setNodeContextMenu(null)
+    setSaveError('')
+    setSavedAt('이미지 삭제 중…')
+    try {
+      await apiRequest(`/api/maps/${encodeURIComponent(targetMapId)}/images/${encodeURIComponent(image.assetId)}`, {
+        method: 'DELETE',
+      })
+      if (activeMapIdRef.current === targetMapId) {
+        deleteNodeById(nodeId)
+        setSavedAt('이미지 삭제됨')
+      }
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : '이미지를 삭제하지 못했습니다.')
+      setSavedAt('이미지 삭제 실패')
+    }
+  }, [activeMapId, deleteNodeById, mode, nodes])
+
   const deleteSelected = useCallback(() => {
-    if (selectedId) deleteNodeById(selectedId)
-  }, [deleteNodeById, selectedId])
+    if (selectedId && selectedNode?.data.kind !== 'image') deleteNodeById(selectedId)
+  }, [deleteNodeById, selectedId, selectedNode?.data.kind])
 
   const startNodeRightPan = useCallback((event: ReactPointerEvent<HTMLElement>) => {
     if (event.button !== 2 || viewMode !== 'mindmap') return
@@ -2506,12 +2627,13 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     setDocumentContextMenu(null)
     setAiConversationContextMenu(null)
     setSelectedId(nodeId)
+    const menuHeight = nodes.find((node) => node.id === nodeId)?.data.kind === 'image' ? 125 : 330
     setNodeContextMenu({
       x: Math.max(8, Math.min(event.clientX, window.innerWidth - 230)),
-      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 330)),
+      y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight)),
       nodeId,
     })
-  }, [mode])
+  }, [mode, nodes])
 
   useEffect(() => {
     const moveRightPan = (event: PointerEvent) => {
@@ -2561,9 +2683,10 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
 
   const copyNode = useCallback((nodeId: string) => {
     const node = nodes.find((candidate) => candidate.id === nodeId)
-    if (!node || !activeMapId) return
+    if (!node || node.data.kind === 'image' || !activeMapId) return
     const selectedNodes = nodes.filter((candidate) => candidate.selected)
-    const nodesToCopy = selectedNodes.some((candidate) => candidate.id === nodeId) ? selectedNodes : [node]
+    const nodesToCopy = (selectedNodes.some((candidate) => candidate.id === nodeId) ? selectedNodes : [node])
+      .filter((candidate) => candidate.data.kind !== 'image')
     const copiedNodeIds = new Set(nodesToCopy.map((candidate) => candidate.id))
     setCopiedNodes({
       sourceMapId: activeMapId,
@@ -2706,6 +2829,14 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     setDocumentContextMenu(null)
     setAiConversationContextMenu(null)
   }, [activeMapId, viewMode])
+
+  useEffect(() => {
+    setPreviewImageNodeId(null)
+  }, [activeMapId])
+
+  useEffect(() => {
+    if (previewImageNodeId && !previewImageNode) setPreviewImageNodeId(null)
+  }, [previewImageNode, previewImageNodeId])
 
   useEffect(() => {
     setAiConversationContextMenu(null)
@@ -3031,7 +3162,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       const sourceMap = mapId === activeMapId && loadedMapId === activeMapId
         ? { nodes, edges, version: serverBaseline.current?.version }
         : (await apiRequest<{ map: MapDocument }>(`/api/maps/${encodeURIComponent(mapId)}`)).map
-      const completedNodes = sourceMap.nodes.map((node) => ({
+      const completedNodes = sourceMap.nodes.map((node) => node.data.kind === 'image' ? node : ({
         ...node,
         data: {
           ...node.data,
@@ -3148,6 +3279,100 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       body: JSON.stringify({ mapId: activeMapId, x: position.x, y: position.y }),
     }).catch(() => undefined)
   }, [activeMapId, screenToFlowPosition, viewMode])
+
+  const trackCanvasPointer = useCallback((event: ReactPointerEvent<HTMLElement>) => {
+    canvasPointerRef.current = { inside: true, x: event.clientX, y: event.clientY }
+    shareCursorPosition(event)
+  }, [shareCursorPosition])
+
+  const addImageFilesAtPoint = useCallback(async (files: File[], clientPoint: { x: number; y: number }) => {
+    if (mode !== 'editor' || viewMode !== 'mindmap' || !activeMapId || loadedMapId !== activeMapId) return
+    const targetMapId = activeMapId
+    const flowPoint = screenToFlowPosition(clientPoint)
+    const createdNodes: MindMapNode[] = []
+    let lastError = ''
+    setSaveError('')
+    setSavedAt('이미지 업로드 중…')
+
+    for (const [index, file] of files.entries()) {
+      try {
+        if (!isSupportedImageFile(file)) {
+          throw new Error('PNG, JPEG, GIF 또는 WebP 이미지만 추가할 수 있습니다.')
+        }
+        const natural = await imageFileDimensions(file)
+        if (natural.width < 1 || natural.height < 1) throw new Error('이미지 크기를 확인하지 못했습니다.')
+        const uploaded = await uploadMindMapImage(targetMapId, file)
+        const display = defaultImageDisplaySize(natural.width, natural.height)
+        const offset = index * 24
+        const image: MindImageData = {
+          assetId: uploaded.assetId,
+          fileName: (file.name.trim() || '붙여넣은 이미지').slice(0, 240),
+          mimeType: uploaded.mimeType,
+          naturalWidth: natural.width,
+          naturalHeight: natural.height,
+          displayWidth: display.width,
+          displayHeight: display.height,
+        }
+        createdNodes.push({
+          id: `image-${crypto.randomUUID()}`,
+          type: 'mind',
+          position: {
+            x: flowPoint.x - display.width / 2 + offset,
+            y: flowPoint.y - display.height / 2 + offset,
+          },
+          selected: true,
+          connectable: false,
+          deletable: false,
+          data: {
+            label: image.fileName,
+            description: '',
+            progress: 0,
+            status: 'planned',
+            kind: 'image',
+            image,
+          },
+        })
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : '이미지를 추가하지 못했습니다.'
+      }
+    }
+
+    if (activeMapIdRef.current !== targetMapId || createdNodes.length === 0) {
+      if (lastError) setSaveError(lastError)
+      else setSavedAt('이미지 추가 취소됨')
+      return
+    }
+
+    const selectedImageId = createdNodes.at(-1)?.id ?? null
+    setNodes((current) => [
+      ...current.map((node) => node.selected ? { ...node, selected: false } : node),
+      ...createdNodes.map((node) => ({ ...node, selected: node.id === selectedImageId })),
+    ])
+    setSelectedId(selectedImageId)
+    setSavedAt(createdNodes.length > 1 ? `이미지 ${createdNodes.length}개 추가됨` : '이미지 추가됨')
+    if (lastError) setSaveError(`일부 이미지를 추가하지 못했습니다. ${lastError}`)
+  }, [activeMapId, loadedMapId, mode, screenToFlowPosition, setNodes, viewMode])
+
+  useEffect(() => {
+    if (mode !== 'editor' || viewMode !== 'mindmap') return
+    const handleClipboardImage = (event: ClipboardEvent) => {
+      const pointer = canvasPointerRef.current
+      if (!pointer.inside) return
+      const elementAtPointer = document.elementFromPoint(pointer.x, pointer.y)
+      if (!elementAtPointer?.closest('.canvas-wrap')
+        || elementAtPointer.closest('.react-flow__panel, .react-flow__controls, .react-flow__minimap')) return
+      const files = [...(event.clipboardData?.items ?? [])]
+        .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+        .map((item) => item.getAsFile())
+        .filter((file): file is File => Boolean(file))
+      if (files.length === 0) return
+      event.preventDefault()
+      void addImageFilesAtPoint(files, { x: pointer.x, y: pointer.y })
+    }
+
+    window.addEventListener('paste', handleClipboardImage)
+    return () => window.removeEventListener('paste', handleClipboardImage)
+  }, [addImageFilesAtPoint, mode, viewMode])
 
   const submitComment = async () => {
     const text = newComment.trim()
@@ -3335,6 +3560,15 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       }
     }))
 
+    if (draggedNode.data.kind === 'image') {
+      if (dropTargetIdRef.current !== null) {
+        dropTargetIdRef.current = null
+        setDropTargetId(null)
+      }
+      setSavedAt('저장 중…')
+      return
+    }
+
     const draggedWidth = draggedNode.measured?.width ?? draggedNode.width ?? 218
     const draggedHeight = draggedNode.measured?.height ?? draggedNode.height ?? 112
     const center = {
@@ -3348,7 +3582,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       ...snapshot.selectedPositions.keys(),
     ])
     const target = nodes
-      .filter((node) => !invalidTargetIds.has(node.id) && node.id !== currentParentId && !node.hidden)
+      .filter((node) => node.data.kind !== 'image' && !invalidTargetIds.has(node.id) && node.id !== currentParentId && !node.hidden)
       .filter((node) => {
         const width = node.measured?.width ?? node.width ?? 218
         const height = node.measured?.height ?? node.height ?? 112
@@ -3984,7 +4218,30 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         <section
           className={`canvas-wrap ${rightPanning ? 'right-panning' : ''}`}
           onPointerDownCapture={startNodeRightPan}
-          onPointerMove={shareCursorPosition}
+          onPointerEnter={trackCanvasPointer}
+          onPointerMove={trackCanvasPointer}
+          onPointerLeave={() => { canvasPointerRef.current.inside = false }}
+          onDragOver={(event) => {
+            if (mode !== 'editor') return
+            const hasImage = [...event.dataTransfer.files].some(isSupportedImageFile)
+              || [...event.dataTransfer.items].some((item) => item.kind === 'file' && SUPPORTED_IMAGE_MIME_TYPES.has(item.type))
+            if (!hasImage) return
+            event.preventDefault()
+            event.dataTransfer.dropEffect = 'copy'
+          }}
+          onDrop={(event) => {
+            if (mode !== 'editor') return
+            const imageFiles = [...event.dataTransfer.files].filter((file) => file.type.startsWith('image/') || SUPPORTED_IMAGE_FILE_PATTERN.test(file.name))
+            if (imageFiles.length === 0) return
+            event.preventDefault()
+            event.stopPropagation()
+            const supportedFiles = imageFiles.filter(isSupportedImageFile)
+            if (supportedFiles.length === 0) {
+              setSaveError('PNG, JPEG, GIF 또는 WebP 이미지만 추가할 수 있습니다.')
+              return
+            }
+            void addImageFilesAtPoint(supportedFiles, { x: event.clientX, y: event.clientY })
+          }}
         >
           <ReactFlow<MindMapNode, MindMapEdge>
             key={activeMapId}
@@ -4031,7 +4288,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                 pannable
                 zoomable
                 ariaLabel="미니맵 뷰 영역을 드래그하여 화면 이동"
-                nodeColor={(node) => (node.data as MindNodeData).progress >= 100 ? 'var(--theme-node-complete)' : node.data.kind === 'root' ? 'var(--theme-node-root)' : 'var(--theme-node-planned)'}
+                nodeColor={(node) => node.data.kind === 'image' ? 'var(--theme-node-image)' : (node.data as MindNodeData).progress >= 100 ? 'var(--theme-node-complete)' : node.data.kind === 'root' ? 'var(--theme-node-root)' : 'var(--theme-node-planned)'}
                 maskColor="var(--theme-minimap-mask)"
                 maskStrokeColor="var(--theme-minimap-stroke)"
                 maskStrokeWidth={2}
@@ -4054,7 +4311,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                   <Icon name={collapsedNodeIds.size > 0 ? 'expand' : 'collapse'} size={17} />
                 </button>
               )}
-              {mode === 'editor' && <button onClick={deleteSelected} disabled={!selectedId} title="선택 삭제"><Icon name="trash" size={17} /></button>}
+              {mode === 'editor' && <button onClick={deleteSelected} disabled={!selectedId || selectedNode?.data.kind === 'image'} title={selectedNode?.data.kind === 'image' ? '이미지는 우클릭 메뉴에서 삭제할 수 있습니다.' : '선택 삭제'}><Icon name="trash" size={17} /></button>}
             </Panel>
             <Panel position="top-right" className="node-explorer">
               <label className="node-search-box">
@@ -4091,7 +4348,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
               {filterActive && <button type="button" className="filter-reset" onClick={() => { setNodeFilter('all'); setAssigneeFilter('all') }}>초기화</button>}
             </Panel>
             <Panel position="bottom-right" className="hint-pill">
-              {mode === 'editor' ? 'Alt+드래그로 눈금 맞춤 · 우클릭 드래그로 이동 · Insert로 하위 노드 추가' : '우클릭 드래그로 이동 · 읽기 전용'}
+              {mode === 'editor' ? '이미지 드롭·Ctrl+V · Alt+드래그로 눈금 맞춤 · 우클릭 드래그로 이동 · Insert로 하위 노드 추가' : '우클릭 드래그로 이동 · 읽기 전용'}
             </Panel>
           </ReactFlow>
           <div className="live-cursors" aria-hidden="true">
@@ -4195,7 +4452,39 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         </div>
 
         <aside className={`inspector ${selectedNode ? 'open' : ''}`}>
-          {selectedNode ? (
+          {selectedNode?.data.kind === 'image' && selectedNode.data.image ? (
+            <>
+              <div className="inspector-header">
+                <div><span>선택한 항목</span><strong>이미지 정보</strong></div>
+                <div className="inspector-header-actions">
+                  <button onClick={() => setSelectedId(null)} aria-label="닫기"><Icon name="close" size={17} /></button>
+                </div>
+              </div>
+              <div className="inspector-content image-inspector-content">
+                <div className="image-inspector-preview">
+                  <img
+                    src={imageAssetUrl(activeMapId, selectedNode.data.image.assetId)}
+                    alt={selectedNode.data.image.fileName}
+                    draggable={false}
+                  />
+                </div>
+                <div className="image-inspector-name">
+                  <span>파일 이름</span>
+                  <strong>{selectedNode.data.image.fileName}</strong>
+                </div>
+                <dl className="image-inspector-meta">
+                  <div><dt>원본 크기</dt><dd>{selectedNode.data.image.naturalWidth} × {selectedNode.data.image.naturalHeight}</dd></div>
+                  <div><dt>표시 크기</dt><dd>{Math.round(selectedNode.data.image.displayWidth)} × {Math.round(selectedNode.data.image.displayHeight)}</dd></div>
+                  <div><dt>파일 형식</dt><dd>{selectedNode.data.image.mimeType.replace('image/', '').toUpperCase()}</dd></div>
+                </dl>
+                <div className="image-inspector-help">
+                  <strong>이미지 편집</strong>
+                  <span>마인드맵에서 이미지를 드래그해 이동하고, 선택 테두리의 조절점을 드래그해 원본 비율을 유지한 채 크기를 변경할 수 있습니다.</span>
+                  <span>삭제는 이미지의 우클릭 메뉴를 사용하세요.</span>
+                </div>
+              </div>
+            </>
+          ) : selectedNode ? (
             <>
               <div className="inspector-header">
                 <div><span>선택한 항목</span><strong>세부 정보</strong></div>
@@ -4819,7 +5108,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
           </section>
         </div>
       )}
-      {aiDialogOpen && selectedNode && activeDocument && (
+      {aiDialogOpen && selectedNode && selectedNode.data.kind !== 'image' && activeDocument && (
         <AiConversationDialog
           key={selectedCommentMapId}
           documentId={selectedCommentMapId}
@@ -4831,6 +5120,16 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
             return source ? [{ id: source.id, label: source.data.label, policy: knowledgePolicyOf(edge) }] : []
           })}
           onClose={() => setAiDialogOpen(false)}
+        />
+      )}
+      {previewImageNode?.data.image && (
+        <ImagePreviewDialog
+          key={previewImageNode.data.image.assetId}
+          src={imageAssetUrl(activeMapId, previewImageNode.data.image.assetId)}
+          fileName={previewImageNode.data.image.fileName}
+          naturalWidth={previewImageNode.data.image.naturalWidth}
+          naturalHeight={previewImageNode.data.image.naturalHeight}
+          onClose={() => setPreviewImageNodeId(null)}
         />
       )}
       {checklistTooltip && (
@@ -4853,46 +5152,57 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
           role="menu"
         >
           <div className="context-menu-title">
-            <span>노드 메뉴</span>
+            <span>{contextMenuNode?.data.kind === 'image' ? '이미지 메뉴' : '노드 메뉴'}</span>
             <strong>{contextMenuNode?.data.label}</strong>
           </div>
-          <button role="menuitem" onClick={startOrOpenContextNodeAiConversation}>
-            <span className="context-icon"><Icon name="sparkles" size={15} /></span>
-            <span>
-              <strong>{contextMenuNode?.data.aiConversationId ? 'AI 대화 열기' : 'AI 대화 시작'}</strong>
-              <small>{contextMenuNode?.data.aiConversationId ? '연결된 AionUi 대화 열기' : '현재 카드를 기준으로 옵션 선택'}</small>
-            </span>
-          </button>
-          <div className="context-divider" />
-          <button role="menuitem" onClick={() => copyNode(nodeContextMenu.nodeId)}>
-            <span className="context-icon"><Icon name="copy" size={15} /></span>
-            <span><strong>복사{nodes.some((node) => node.id === nodeContextMenu.nodeId && node.selected) && nodes.filter((node) => node.selected).length > 1 ? ` (${nodes.filter((node) => node.selected).length}개)` : ''}</strong><small>선택 노드와 내부 연결 관계 복사</small></span>
-          </button>
-          {copiedNodes && copiedNodes.sourceMapId !== activeMapId ? (
+          {contextMenuNode?.data.kind === 'image' ? (
             <>
-              <button role="menuitem" disabled={!copiedNodes} onClick={() => pasteNodeAsChild(nodeContextMenu.nodeId, 'clone')}>
-                <span className="context-icon"><Icon name="paste" size={15} /></span>
-                <span><strong>Clone으로 붙여넣기</strong><small>{copiedNodes.nodes.length === 1 ? `“${copiedNodes.nodes[0].data.reference ? copiedNodes.nodes[0].data.label.replace(/\s*\(ref\)\s*$/i, '') : copiedNodes.nodes[0].data.label}” 독립 복제` : `${copiedNodes.nodes.length}개 노드 독립 복제`}</small></span>
-              </button>
-              <button role="menuitem" disabled={!copiedNodes} onClick={() => pasteNodeAsChild(nodeContextMenu.nodeId, 'reference')}>
-                <span className="context-icon"><Icon name="share" size={15} /></span>
-                <span><strong>Ref로 붙여넣기</strong><small>{copiedNodes.nodes.length === 1 ? `“${copiedNodes.nodes[0].data.reference ? copiedNodes.nodes[0].data.label.replace(/\s*\(ref\)\s*$/i, '') : copiedNodes.nodes[0].data.label} (ref)” 원본 참조` : `${copiedNodes.nodes.length}개 노드 원본 참조`}</small></span>
+              <button className="danger" role="menuitem" onClick={() => { void deleteImageNodeById(nodeContextMenu.nodeId) }}>
+                <span className="context-icon"><Icon name="trash" size={15} /></span>
+                <span><strong>이미지 삭제</strong><small>마인드맵과 디스크에서 즉시 제거</small></span>
               </button>
             </>
           ) : (
-            <button role="menuitem" disabled={!copiedNodes} onClick={() => pasteNodeAsChild(nodeContextMenu.nodeId)}>
-              <span className="context-icon"><Icon name="paste" size={15} /></span>
-              <span><strong>자식으로 붙여넣기</strong><small>{copiedNodes ? copiedNodes.nodes.length === 1 ? `“${copiedNodes.nodes[0].data.label}” 복사본 생성` : `${copiedNodes.nodes.length}개 노드 복사본 생성` : '먼저 노드를 복사해 주세요'}</small></span>
-            </button>
+            <>
+              <button role="menuitem" onClick={startOrOpenContextNodeAiConversation}>
+                <span className="context-icon"><Icon name="sparkles" size={15} /></span>
+                <span>
+                  <strong>{contextMenuNode?.data.aiConversationId ? 'AI 대화 열기' : 'AI 대화 시작'}</strong>
+                  <small>{contextMenuNode?.data.aiConversationId ? '연결된 AionUi 대화 열기' : '현재 카드를 기준으로 옵션 선택'}</small>
+                </span>
+              </button>
+              <div className="context-divider" />
+              <button role="menuitem" onClick={() => copyNode(nodeContextMenu.nodeId)}>
+                <span className="context-icon"><Icon name="copy" size={15} /></span>
+                <span><strong>복사{nodes.some((node) => node.id === nodeContextMenu.nodeId && node.selected) && nodes.filter((node) => node.selected).length > 1 ? ` (${nodes.filter((node) => node.selected).length}개)` : ''}</strong><small>선택 노드와 내부 연결 관계 복사</small></span>
+              </button>
+              {copiedNodes && copiedNodes.sourceMapId !== activeMapId ? (
+                <>
+                  <button role="menuitem" disabled={!copiedNodes} onClick={() => pasteNodeAsChild(nodeContextMenu.nodeId, 'clone')}>
+                    <span className="context-icon"><Icon name="paste" size={15} /></span>
+                    <span><strong>Clone으로 붙여넣기</strong><small>{copiedNodes.nodes.length === 1 ? `“${copiedNodes.nodes[0].data.reference ? copiedNodes.nodes[0].data.label.replace(/\s*\(ref\)\s*$/i, '') : copiedNodes.nodes[0].data.label}” 독립 복제` : `${copiedNodes.nodes.length}개 노드 독립 복제`}</small></span>
+                  </button>
+                  <button role="menuitem" disabled={!copiedNodes} onClick={() => pasteNodeAsChild(nodeContextMenu.nodeId, 'reference')}>
+                    <span className="context-icon"><Icon name="share" size={15} /></span>
+                    <span><strong>Ref로 붙여넣기</strong><small>{copiedNodes.nodes.length === 1 ? `“${copiedNodes.nodes[0].data.reference ? copiedNodes.nodes[0].data.label.replace(/\s*\(ref\)\s*$/i, '') : copiedNodes.nodes[0].data.label} (ref)” 원본 참조` : `${copiedNodes.nodes.length}개 노드 원본 참조`}</small></span>
+                  </button>
+                </>
+              ) : (
+                <button role="menuitem" disabled={!copiedNodes} onClick={() => pasteNodeAsChild(nodeContextMenu.nodeId)}>
+                  <span className="context-icon"><Icon name="paste" size={15} /></span>
+                  <span><strong>자식으로 붙여넣기</strong><small>{copiedNodes ? copiedNodes.nodes.length === 1 ? `“${copiedNodes.nodes[0].data.label}” 복사본 생성` : `${copiedNodes.nodes.length}개 노드 복사본 생성` : '먼저 노드를 복사해 주세요'}</small></span>
+                </button>
+              )}
+              <div className="context-divider" />
+              <button className="danger" role="menuitem" onClick={() => { deleteNodeById(nodeContextMenu.nodeId); setNodeContextMenu(null) }}>
+                <span className="context-icon"><Icon name="trash" size={15} /></span>
+                <span><strong>삭제</strong><small>노드와 연결선 삭제</small></span>
+              </button>
+            </>
           )}
-          <div className="context-divider" />
-          <button className="danger" role="menuitem" onClick={() => { deleteNodeById(nodeContextMenu.nodeId); setNodeContextMenu(null) }}>
-            <span className="context-icon"><Icon name="trash" size={15} /></span>
-            <span><strong>삭제</strong><small>노드와 연결선 삭제</small></span>
-          </button>
         </div>
       )}
-      {aiConversationContextMenu && selectedNode && mode === 'editor' && (
+      {aiConversationContextMenu && selectedNode && selectedNode.data.kind !== 'image' && mode === 'editor' && (
         <div
           className="node-context-menu ai-conversation-context-menu"
           style={{ left: aiConversationContextMenu.x, top: aiConversationContextMenu.y }}

@@ -8,6 +8,12 @@ import { applyProgressRollup } from './lib/progressRollup.mjs'
 import { detectReleasedWaitingItems } from './lib/waitingItems.mjs'
 import { resolveScopedAttribution } from './lib/attributionScope.mjs'
 import { readAionUiSubscriptionUsage } from './lib/aionUiSubscriptionUsage.mjs'
+import {
+  detectImageAssetType,
+  imageAssetMimeType,
+  isValidImageAssetId,
+  isValidImageNodeData,
+} from './lib/imageAssets.mjs'
 
 const serverDirectory = path.dirname(fileURLToPath(import.meta.url))
 const projectDirectory = path.resolve(serverDirectory, '..')
@@ -16,6 +22,7 @@ const historyDirectory = path.join(dataDirectory, '_history')
 const dailyBackupDirectory = path.join(dataDirectory, '_daily-backups')
 const commentsDirectory = path.join(dataDirectory, '_comments')
 const notificationsDirectory = path.join(dataDirectory, '_notifications')
+const imageAssetsDirectory = path.join(dataDirectory, '_assets')
 const usersFile = path.join(dataDirectory, '_users.json')
 const sessionsFile = path.join(dataDirectory, '_sessions.json')
 const aiAttributionsFile = path.join(dataDirectory, '_ai-attributions.json')
@@ -39,6 +46,7 @@ const aionUiSubscriptionUsageStaleAfterMs = Math.max(
   60_000,
   Number(process.env.MNP_AIONUI_USAGE_STALE_AFTER_MS) || 180_000,
 )
+const imageAssetMaxBytes = Math.max(1_000_000, Number(process.env.MNP_IMAGE_MAX_BYTES) || 15_000_000)
 let activeAionUiBaseUrl = configuredAionUiBaseUrls[0] ?? fallbackAionUiBaseUrls[0]
 const sessionDurationMs = 8 * 60 * 60 * 1000
 const rememberedSessionDurationMs = 30 * 24 * 60 * 60 * 1000
@@ -387,6 +395,17 @@ async function readJsonBody(request) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'))
 }
 
+async function readBinaryBody(request, maxBytes) {
+  const chunks = []
+  let size = 0
+  for await (const chunk of request) {
+    size += chunk.length
+    if (size > maxBytes) throw new Error('PAYLOAD_TOO_LARGE')
+    chunks.push(chunk)
+  }
+  return Buffer.concat(chunks)
+}
+
 function requireUser(request, response) {
   const user = getCurrentUser(request)
   if (!user) sendJson(response, 401, { error: '로그인이 필요합니다.' })
@@ -409,6 +428,7 @@ function isValidMap(map) {
   return map.nodes.every((node) =>
     typeof node?.id === 'string'
     && node.id.length <= 120
+    && (node.data?.kind !== 'image' || isValidImageNodeData(node.data?.image))
     && (node.data?.sharedKnowledge === undefined
       || (typeof node.data.sharedKnowledge === 'string' && node.data.sharedKnowledge.length <= 10_000))
     && (node.data?.waitingItems === undefined
@@ -532,6 +552,16 @@ function isValidMapId(mapId) {
 function mapFileForId(mapId) {
   if (!isValidMapId(mapId)) throw new Error('INVALID_MAP_ID')
   return path.join(dataDirectory, `${mapId}.json`)
+}
+
+function imageAssetsDirectoryForMap(mapId) {
+  if (!isValidMapId(mapId)) throw new Error('INVALID_MAP_ID')
+  return path.join(imageAssetsDirectory, mapId)
+}
+
+function imageAssetFile(mapId, assetId) {
+  if (!isValidImageAssetId(assetId)) throw new Error('INVALID_IMAGE_ASSET_ID')
+  return path.join(imageAssetsDirectoryForMap(mapId), assetId)
 }
 
 function normalizeTitle(title, fallback = '새 마인드맵') {
@@ -2057,6 +2087,7 @@ async function permanentlyDeleteTrashedMaps(mapIds) {
     rm(commentFileForMap(mapId), { force: true }),
     rm(revisionDirectoryForMap(mapId), { recursive: true, force: true }),
     rm(dailyBackupDirectoryForMap(mapId), { recursive: true, force: true }),
+    rm(imageAssetsDirectoryForMap(mapId), { recursive: true, force: true }),
   ]))
 
   const deletedMapIds = new Set(uniqueMapIds)
@@ -2729,6 +2760,111 @@ const server = createServer(async (request, response) => {
       return sendJson(response, 200, {
         maps,
         documentLayout: await readDocumentLayout(maps.map((map) => map.id)),
+      })
+    }
+
+    const mapImageAssetRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/images\/([^/]+)$/)
+    if (mapImageAssetRoute && request.method === 'GET') {
+      const user = requireUser(request, response)
+      if (!user) return
+      const mapId = decodeURIComponent(mapImageAssetRoute[1])
+      const assetId = decodeURIComponent(mapImageAssetRoute[2])
+      if (!isValidMapId(mapId) || !isValidImageAssetId(assetId)) {
+        return sendJson(response, 400, { error: '올바르지 않은 이미지 자산 경로입니다.' })
+      }
+      const map = await readMap(mapId)
+      if (!map || map.trashedAt) return sendJson(response, 404, { error: '이미지가 속한 문서를 찾을 수 없습니다.' })
+      try {
+        const content = await readFile(imageAssetFile(mapId, assetId))
+        response.writeHead(200, {
+          'Content-Type': imageAssetMimeType(assetId),
+          'Content-Length': content.length,
+          'Cache-Control': 'private, max-age=31536000, immutable',
+          'Content-Disposition': 'inline',
+          'X-Content-Type-Options': 'nosniff',
+        })
+        response.end(content)
+        return
+      } catch (error) {
+        if (error?.code === 'ENOENT') return sendJson(response, 404, { error: '이미지 자산을 찾을 수 없습니다.' })
+        throw error
+      }
+    }
+
+    if (mapImageAssetRoute && request.method === 'DELETE') {
+      const user = requireUser(request, response)
+      if (!user) return
+      if (!canEdit(user)) return sendJson(response, 403, { error: '뷰어는 이미지 자산을 삭제할 수 없습니다.' })
+      const mapId = decodeURIComponent(mapImageAssetRoute[1])
+      const assetId = decodeURIComponent(mapImageAssetRoute[2])
+      if (!isValidMapId(mapId) || !isValidImageAssetId(assetId)) {
+        return sendJson(response, 400, { error: '올바르지 않은 이미지 자산 경로입니다.' })
+      }
+      const map = await readMap(mapId)
+      if (!map || map.trashedAt) return sendJson(response, 404, { error: '이미지가 속한 문서를 찾을 수 없습니다.' })
+      const assetFile = imageAssetFile(mapId, assetId)
+      const pendingDeleteFile = `${assetFile}.deleting-${randomBytes(6).toString('hex')}`
+      let assetMoved = false
+      try {
+        await rename(assetFile, pendingDeleteFile)
+        assetMoved = true
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error
+      }
+
+      const deletedNodeIds = map.nodes
+        .filter((node) => node.data?.kind === 'image' && node.data?.image?.assetId === assetId)
+        .map((node) => node.id)
+      const deletedNodeIdSet = new Set(deletedNodeIds)
+      let updatedMap = map
+      try {
+        if (deletedNodeIds.length > 0) {
+          updatedMap = await saveMap(mapId, {
+            nodes: map.nodes.filter((node) => !deletedNodeIdSet.has(node.id)),
+            edges: map.edges.filter((edge) => !deletedNodeIdSet.has(edge.source) && !deletedNodeIdSet.has(edge.target)),
+          }, user, undefined, undefined, 'content')
+        }
+      } catch (error) {
+        if (assetMoved) await rename(pendingDeleteFile, assetFile).catch(() => undefined)
+        throw error
+      }
+      if (assetMoved) await rm(pendingDeleteFile, { force: true })
+      if (deletedNodeIds.length > 0) broadcastMapChange(request, mapId, 'content', user)
+      return sendJson(response, 200, {
+        deletedAssetId: assetId,
+        deletedNodeIds,
+        map: updatedMap,
+        summary: mapSummary(updatedMap),
+      })
+    }
+
+    const mapImageUploadRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/images$/)
+    if (mapImageUploadRoute && request.method === 'POST') {
+      const user = requireUser(request, response)
+      if (!user) return
+      if (!canEdit(user)) return sendJson(response, 403, { error: '뷰어는 이미지를 추가할 수 없습니다.' })
+      const mapId = decodeURIComponent(mapImageUploadRoute[1])
+      if (!isValidMapId(mapId)) return sendJson(response, 400, { error: '올바르지 않은 문서 ID입니다.' })
+      const map = await readMap(mapId)
+      if (!map || map.trashedAt) return sendJson(response, 404, { error: '이미지를 추가할 문서를 찾을 수 없습니다.' })
+      const declaredSize = Number(request.headers['content-length'])
+      if (Number.isFinite(declaredSize) && declaredSize > imageAssetMaxBytes) {
+        return sendJson(response, 413, { error: `이미지는 ${Math.round(imageAssetMaxBytes / 1_000_000)}MB 이하만 추가할 수 있습니다.` })
+      }
+      const content = await readBinaryBody(request, imageAssetMaxBytes)
+      const detectedType = detectImageAssetType(content)
+      if (!detectedType) {
+        return sendJson(response, 415, { error: 'PNG, JPEG, GIF 또는 WebP 이미지만 추가할 수 있습니다.' })
+      }
+      const assetId = `${randomBytes(16).toString('hex')}.${detectedType.extension}`
+      const targetDirectory = imageAssetsDirectoryForMap(mapId)
+      await mkdir(targetDirectory, { recursive: true })
+      await writeFile(imageAssetFile(mapId, assetId), content, { flag: 'wx', mode: 0o600 })
+      return sendJson(response, 201, {
+        image: {
+          assetId,
+          mimeType: detectedType.mimeType,
+        },
       })
     }
 

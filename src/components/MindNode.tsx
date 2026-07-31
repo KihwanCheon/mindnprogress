@@ -2,6 +2,7 @@ import { Handle, Position, type Node, type NodeProps } from '@xyflow/react'
 import type { MindNodeData } from '../types/mindMap'
 import { AiConversationRuntimeBadge } from './AiConversationRuntimeBadge'
 import { AssigneeTooltip } from './AssigneeTooltip'
+import { MindImageNode } from './MindImageNode'
 import './MindNode.css'
 
 type MindNodeType = Node<MindNodeData, 'mind'>
@@ -19,6 +20,8 @@ const statusIcon: Record<MindNodeData['status'], string> = {
 }
 
 export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeType>) {
+  if (data.kind === 'image') return <MindImageNode data={data} selected={selected} />
+
   const isCompleted = data.progress >= 100
   const displayStatus = isCompleted ? 'done' : data.status
   const assignee = data.assignee

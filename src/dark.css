@@ -5,6 +5,7 @@
   --theme-node-planned: #b9b4ef;
   --theme-node-root: #6657d9;
   --theme-node-complete: #43b78e;
+  --theme-node-image: #928b9d;
   --theme-minimap-mask: rgba(248, 247, 251, 0.78);
   --theme-minimap-stroke: #6657d9;
   --theme-knowledge-primary: #43a684;
@@ -44,6 +45,7 @@
   --theme-node-planned: #77708f;
   --theme-node-root: #8b7cf6;
   --theme-node-complete: #5bc89f;
+  --theme-node-image: #8e93a8;
   --theme-minimap-mask: rgba(17, 19, 27, .78);
   --theme-minimap-stroke: #9c8dff;
   --theme-knowledge-primary: #65d2aa;
@@ -423,6 +425,36 @@
 
 [data-theme="dark"] .canvas-wrap .react-flow__edge.selected .react-flow__edge-path {
   stroke: var(--theme-accent);
+}
+
+[data-theme="dark"] .image-inspector-preview,
+[data-theme="dark"] .image-inspector-meta {
+  border-color: var(--theme-border);
+  background: var(--theme-surface-soft);
+}
+
+[data-theme="dark"] .image-inspector-name span,
+[data-theme="dark"] .image-inspector-meta dt {
+  color: var(--theme-text-muted);
+}
+
+[data-theme="dark"] .image-inspector-name strong,
+[data-theme="dark"] .image-inspector-meta dd {
+  color: var(--theme-text-secondary);
+}
+
+[data-theme="dark"] .image-inspector-meta > div {
+  border-color: var(--theme-border);
+}
+
+[data-theme="dark"] .image-inspector-help {
+  color: var(--theme-text-muted);
+  border-color: #454064;
+  background: var(--theme-accent-soft);
+}
+
+[data-theme="dark"] .image-inspector-help strong {
+  color: #b7adff;
 }
 
 [data-theme="dark"] .inspector-content label > span,
