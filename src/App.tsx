@@ -259,6 +259,33 @@ type AuthUser = {
   active?: boolean
 }
 
+type SubscriptionUsageWindow = {
+  usedPercent: number
+  resetsAt: string | null
+}
+
+type AionUiSubscriptionUsage = {
+  available: boolean
+  state: 'loading' | 'ready' | 'partial' | 'unavailable'
+  generatedAt: string | null
+  updatedAt: string | null
+  retryAfterMs: number | null
+  claude: {
+    state: 'loading' | 'ready' | 'unavailable'
+    updatedAt: string | null
+    stale: boolean
+    session: SubscriptionUsageWindow | null
+    weekly: SubscriptionUsageWindow | null
+  } | null
+  codex: {
+    state: 'loading' | 'ready' | 'unavailable'
+    updatedAt: string | null
+    stale: boolean
+    weekly: (SubscriptionUsageWindow & { windowDurationMins: number | null }) | null
+    limitReached: boolean
+  } | null
+}
+
 type MapSummary = {
   id: string
   title: string
@@ -781,6 +808,104 @@ function ThemeToggle({ theme, onToggle, className = '' }: { theme: UiTheme; onTo
       <span className="theme-switch-track" aria-hidden="true"><span className="theme-switch-thumb" /></span>
       <span className="theme-switch-icon theme-switch-moon"><Icon name="moon" size={13} /></span>
     </button>
+  )
+}
+
+function usageResetLabel(value: string | null) {
+  if (!value) return '초기화 시각 알 수 없음'
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) return '초기화 시각 알 수 없음'
+  return `${new Intl.DateTimeFormat('ko-KR', {
+    month: 'numeric',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date)} 초기화`
+}
+
+function usageTone(...values: Array<number | null | undefined>) {
+  const highest = Math.max(...values.filter((value): value is number => Number.isFinite(value)), 0)
+  if (highest >= 100) return 'limit'
+  if (highest >= 80) return 'warning'
+  return 'normal'
+}
+
+function LoadingUsageDots() {
+  return <span className="subscription-usage-loading" aria-label="조회 중"><i /><i /><i /></span>
+}
+
+function AionUiSubscriptionUsageIndicator() {
+  const [usage, setUsage] = useState<AionUiSubscriptionUsage | null>(null)
+
+  useEffect(() => {
+    let active = true
+    let timer: number | null = null
+
+    const load = async () => {
+      let nextDelay = 60_000
+      try {
+        const result = await apiRequest<{ usage: AionUiSubscriptionUsage }>('/api/integrations/aionui/subscription-usage')
+        if (!active) return
+        setUsage(result.usage)
+        if (result.usage.state === 'loading' || result.usage.state === 'partial') {
+          nextDelay = Math.max(1_000, Math.min(10_000, result.usage.retryAfterMs ?? 2_000))
+        }
+      } catch {
+        if (!active) return
+        setUsage(null)
+      }
+      if (active) timer = window.setTimeout(() => { void load() }, nextDelay)
+    }
+
+    void load()
+    return () => {
+      active = false
+      if (timer !== null) window.clearTimeout(timer)
+    }
+  }, [])
+
+  const claude = usage?.claude
+  const codex = usage?.codex
+  const claudeLoading = claude?.state === 'loading'
+  const codexLoading = codex?.state === 'loading'
+  const showClaude = claudeLoading || Boolean(claude?.state === 'ready' && !claude.stale && (claude.session || claude.weekly))
+  const showCodex = codexLoading || Boolean(codex?.state === 'ready' && !codex.stale && codex.weekly)
+
+  if (!usage?.available || (!showClaude && !showCodex)) return null
+
+  const claudeTitle = claude?.state === 'ready'
+    ? [
+        'Claude 사용량',
+        claude.session ? `5시간 ${Math.round(claude.session.usedPercent)}% · ${usageResetLabel(claude.session.resetsAt)}` : null,
+        claude.weekly ? `주간 ${Math.round(claude.weekly.usedPercent)}% · ${usageResetLabel(claude.weekly.resetsAt)}` : null,
+      ].filter(Boolean).join('\n')
+    : 'Claude 사용량을 조회하고 있습니다.'
+  const codexTitle = codex?.state === 'ready' && codex.weekly
+    ? `Codex 사용량\n주간 ${Math.round(codex.weekly.usedPercent)}% · ${usageResetLabel(codex.weekly.resetsAt)}`
+    : 'Codex 사용량을 조회하고 있습니다.'
+
+  return (
+    <div className="subscription-usage-summary" aria-label="AI 구독 사용량">
+      {showClaude && <div
+        className={`subscription-usage-pill claude ${usageTone(claude?.session?.usedPercent, claude?.weekly?.usedPercent)}`}
+        title={claudeTitle}
+      >
+        <strong>Claude</strong>
+        {claudeLoading
+          ? <LoadingUsageDots />
+          : <span>{[
+              claude?.session ? `${Math.round(claude.session.usedPercent)}%` : null,
+              claude?.weekly ? `${Math.round(claude.weekly.usedPercent)}%` : null,
+            ].filter(Boolean).join(' · ')}</span>}
+      </div>}
+      {showCodex && <div
+        className={`subscription-usage-pill codex ${usageTone(codex?.weekly?.usedPercent, codex?.limitReached ? 100 : null)}`}
+        title={codexTitle}
+      >
+        <strong>Codex</strong>
+        {codexLoading ? <LoadingUsageDots /> : <span>{Math.round(codex?.weekly?.usedPercent ?? 0)}%</span>}
+      </div>}
+    </div>
   )
 }
 
@@ -3429,6 +3554,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
           ))}
         </nav>
         <div className="topbar-actions">
+          {!user.publicAccess && <AionUiSubscriptionUsageIndicator />}
           <ThemeToggle theme={theme} onToggle={onToggleTheme} />
           {user.role === 'admin' && (
             <button className={`admin-panel-trigger ${adminOpen ? 'active' : ''}`} onClick={() => { setAdminOpen((current) => !current); setNotificationsOpen(false) }} title="편집자 계정 관리">

@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { applyProgressRollup } from './lib/progressRollup.mjs'
 import { detectReleasedWaitingItems } from './lib/waitingItems.mjs'
 import { resolveScopedAttribution } from './lib/attributionScope.mjs'
+import { readAionUiSubscriptionUsage } from './lib/aionUiSubscriptionUsage.mjs'
 
 const serverDirectory = path.dirname(fileURLToPath(import.meta.url))
 const projectDirectory = path.resolve(serverDirectory, '..')
@@ -30,6 +31,13 @@ const configuredAionUiBaseUrls = configuredAionUiBaseUrl ? [configuredAionUiBase
 const fallbackAionUiBaseUrls = ['http://127.0.0.1:1986', 'http://127.0.0.1:5830']
 const aionUiDiscoveryFile = path.resolve(
   String(process.env.MNP_AIONUI_DISCOVERY_FILE ?? '').trim() || path.join(tmpdir(), 'aionui-backend.json'),
+)
+const aionUiSubscriptionUsageFile = path.resolve(
+  String(process.env.MNP_AIONUI_USAGE_FILE ?? '').trim() || path.join(tmpdir(), 'aionui-subscription-usage.json'),
+)
+const aionUiSubscriptionUsageStaleAfterMs = Math.max(
+  60_000,
+  Number(process.env.MNP_AIONUI_USAGE_STALE_AFTER_MS) || 180_000,
 )
 let activeAionUiBaseUrl = configuredAionUiBaseUrls[0] ?? fallbackAionUiBaseUrls[0]
 const sessionDurationMs = 8 * 60 * 60 * 1000
@@ -2186,6 +2194,17 @@ const server = createServer(async (request, response) => {
     if (request.method === 'GET' && url.pathname === '/api/auth/me') {
       const user = getCurrentUser(request)
       return sendJson(response, 200, { user: user ? publicUser(user) : null })
+    }
+
+    if (request.method === 'GET' && url.pathname === '/api/integrations/aionui/subscription-usage') {
+      const user = requireUser(request, response)
+      if (!user) return
+      if (!canEdit(user)) return sendJson(response, 403, { error: '편집자만 AI 구독 사용량을 확인할 수 있습니다.' })
+      const usage = await readAionUiSubscriptionUsage(aionUiSubscriptionUsageFile, {
+        readText: (filePath) => readFile(filePath, 'utf8'),
+        staleAfterMs: aionUiSubscriptionUsageStaleAfterMs,
+      })
+      return sendJson(response, 200, { usage })
     }
 
     if (request.method === 'GET' && url.pathname === '/api/users') {
