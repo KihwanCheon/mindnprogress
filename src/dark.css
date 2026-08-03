@@ -494,12 +494,18 @@
   background: var(--theme-surface-soft);
 }
 
+[data-theme="dark"] .empty-image-description {
+  color: var(--theme-text-muted);
+}
+
+[data-theme="dark"] .inspector-header .image-preview-open-button,
 [data-theme="dark"] .inspector-header .ai-conversation-button {
   color: #c3bcff;
   border-color: #4a4568;
   background: var(--theme-accent-soft);
 }
 
+[data-theme="dark"] .inspector-header .image-preview-open-button:hover,
 [data-theme="dark"] .inspector-header .ai-conversation-button:hover {
   border-color: #625a88;
   background: #353052;

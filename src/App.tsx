@@ -4488,6 +4488,13 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
               <div className="inspector-header">
                 <div><span>선택한 항목</span><strong>이미지 정보</strong></div>
                 <div className="inspector-header-actions">
+                  <button
+                    className="image-preview-open-button"
+                    onClick={() => setPreviewImageNodeId(selectedNode.id)}
+                    title="확대 보기"
+                  >
+                    <Icon name="search" size={15} /><span>확대 보기</span>
+                  </button>
                   <button onClick={() => setSelectedId(null)} aria-label="닫기"><Icon name="close" size={17} /></button>
                 </div>
               </div>
@@ -4503,6 +4510,33 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                   <span>파일 이름</span>
                   <strong>{selectedNode.data.image.fileName}</strong>
                 </div>
+                <label className="description-field image-description-field">
+                  <span>설명</span>
+                  {mode === 'editor' ? (
+                    <>
+                      <textarea
+                        value={selectedNode.data.description ?? ''}
+                        onChange={(event) => updateNode(selectedNode.id, { description: event.target.value })}
+                        rows={4}
+                        placeholder="이미지의 용도나 참고할 내용을 입력하세요"
+                        aria-label="이미지 설명"
+                      />
+                      {extractTextLinks(selectedNode.data.description ?? '').length > 0 && (
+                        <div className="description-links">
+                          {extractTextLinks(selectedNode.data.description ?? '').map((link) => (
+                            <a key={`${link.start}-${link.label}`} href={link.href} target="_blank" rel="noopener noreferrer"><Icon name="external" size={12} /><span>{link.label}</span></a>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div className={`description-rich-text ${selectedNode.data.description ? '' : 'empty-image-description'}`}>
+                      {selectedNode.data.description
+                        ? <LinkifiedText text={selectedNode.data.description} />
+                        : '등록된 설명 없음'}
+                    </div>
+                  )}
+                </label>
                 <dl className="image-inspector-meta">
                   <div><dt>원본 크기</dt><dd>{selectedNode.data.image.naturalWidth} × {selectedNode.data.image.naturalHeight}</dd></div>
                   <div><dt>표시 크기</dt><dd>{Math.round(selectedNode.data.image.displayWidth)} × {Math.round(selectedNode.data.image.displayHeight)}</dd></div>

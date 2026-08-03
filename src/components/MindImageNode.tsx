@@ -5,6 +5,11 @@ import './MindImageNode.css'
 export function MindImageNode({ data, selected }: { data: MindNodeData; selected: boolean }) {
   const image = data.image
   if (!image) return null
+  const description = data.description?.trim() ?? ''
+  const tooltip = [
+    description ? `내용: ${description}` : '',
+    `원본 크기: ${image.naturalWidth} × ${image.naturalHeight}`,
+  ].filter(Boolean).join('\n')
 
   return (
     <>
@@ -22,7 +27,7 @@ export function MindImageNode({ data, selected }: { data: MindNodeData; selected
       />
       <figure
         className={`mind-image-node ${selected ? 'selected' : ''}`}
-        title={`${image.fileName}\n원본 ${image.naturalWidth} × ${image.naturalHeight}`}
+        title={tooltip}
         onDoubleClick={(event) => {
           event.stopPropagation()
           data.onOpenImagePreview?.()
