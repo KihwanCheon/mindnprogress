@@ -69,17 +69,24 @@ export function ImagePreviewDialog({
         horizontalSpace / naturalWidth,
         verticalSpace / naturalHeight,
       ))
-      setFitScale(nextFitScale)
+      setFitScale((current) => current === nextFitScale ? current : nextFitScale)
       if (fitMode) {
-        setScale(nextFitScale)
-        setOffset({ x: 0, y: 0 })
+        setScale((current) => current === nextFitScale ? current : nextFitScale)
+        setOffset((current) => current.x === 0 && current.y === 0 ? current : { x: 0, y: 0 })
       }
     }
 
     updateFitScale()
-    const observer = new ResizeObserver(updateFitScale)
+    let resizeFrame = 0
+    const observer = new ResizeObserver(() => {
+      window.cancelAnimationFrame(resizeFrame)
+      resizeFrame = window.requestAnimationFrame(updateFitScale)
+    })
     observer.observe(stage)
-    return () => observer.disconnect()
+    return () => {
+      observer.disconnect()
+      window.cancelAnimationFrame(resizeFrame)
+    }
   }, [fitMode, naturalHeight, naturalWidth])
 
   const zoomTo = (nextScale: number) => {

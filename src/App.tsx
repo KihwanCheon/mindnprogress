@@ -2070,7 +2070,11 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   useEffect(() => {
     const timer = window.setInterval(() => {
       const staleBefore = Date.now() - 4_000
-      setLiveCursors((current) => Object.fromEntries(Object.entries(current).filter(([, cursor]) => cursor.receivedAt >= staleBefore)))
+      setLiveCursors((current) => {
+        const entries = Object.entries(current)
+        const activeEntries = entries.filter(([, cursor]) => cursor.receivedAt >= staleBefore)
+        return activeEntries.length === entries.length ? current : Object.fromEntries(activeEntries)
+      })
     }, 2_000)
     return () => window.clearInterval(timer)
   }, [])
@@ -2238,7 +2242,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       if (mode === 'viewer') return
       setEdges((current) => addEdge({
         ...connection,
-        type: 'bezier',
+        type: 'default',
         data: { relation: 'hierarchy' },
         markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
       }, current))
@@ -2415,7 +2419,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       id: `knowledge-${knowledgeCandidate}-${selectedNode.id}-${Date.now()}`,
       source: knowledgeCandidate,
       target: selectedNode.id,
-      type: 'bezier',
+      type: 'default',
       reconnectable: false,
       data: { relation: 'knowledge', knowledgePolicy },
       markerEnd: { type: MarkerType.ArrowClosed, width: 18, height: 18 },
@@ -2513,7 +2517,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         id: `edge-${parent.id}-${id}`,
         source: parent.id,
         target: id,
-        type: 'bezier',
+        type: 'default',
         data: { relation: 'hierarchy' },
         markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
       }])
@@ -2803,7 +2807,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         id: `edge-${parentId}-${timestamp}-root-${index}`,
         source: parentId,
         target: nodeIdMap.get(item.sourceNodeId) as string,
-        type: 'bezier',
+        type: 'default',
         data: { relation: 'hierarchy' },
         markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
       }))
@@ -3672,7 +3676,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
             id: `edge-${targetId}-${draggedNode.id}-${Date.now()}`,
             source: targetId,
             target: draggedNode.id,
-            type: 'bezier',
+            type: 'default',
             data: { relation: 'hierarchy' },
             markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
           },
