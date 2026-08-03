@@ -843,6 +843,8 @@ function LoadingUsageDots() {
   return <span className="subscription-usage-loading" aria-label="조회 중"><i /><i /><i /></span>
 }
 
+const SUBSCRIPTION_USAGE_READY_POLL_MS = 10_000
+
 function AionUiSubscriptionUsageIndicator() {
   const [usage, setUsage] = useState<AionUiSubscriptionUsage | null>(null)
 
@@ -851,7 +853,7 @@ function AionUiSubscriptionUsageIndicator() {
     let timer: number | null = null
 
     const load = async () => {
-      let nextDelay = 60_000
+      let nextDelay = SUBSCRIPTION_USAGE_READY_POLL_MS
       try {
         const result = await apiRequest<{ usage: AionUiSubscriptionUsage }>('/api/integrations/aionui/subscription-usage')
         if (!active) return
