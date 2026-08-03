@@ -1,5 +1,6 @@
 // 최상위 카드 진행률 롤업 규칙.
-// isWork=true이면서 하위에 다른 업무 카드가 없는 말단 업무만 동일 가중치로 평균해 반올림한다.
+// 최상위 카드를 제외한 계층 안의 isWork=true 업무를 모두 동일 가중치로 평균해 반올림한다.
+// 계층 안에서 단순히 업무를 묶는 카드는 branch 또는 isWork=false로 구성한다.
 // 평균이 100이면 done, 1~99면 in-progress, 0이면 기존 상태를 유지하고,
 // 집계 대상이 없으면 최상위 카드를 변경하지 않는다.
 
@@ -37,30 +38,18 @@ function collectDescendantIds(rootId, edges) {
     descendants.add(currentId)
     stack.push(...(childrenByParent.get(currentId) ?? []))
   }
-  return { descendants, childrenByParent }
+  return descendants
 }
 
 export function computeWorkRollup(nodes, edges) {
   const root = findRollupRoot(nodes, edges)
   if (!root) return null
 
-  const { descendants, childrenByParent } = collectDescendantIds(root.id, edges)
+  const descendants = collectDescendantIds(root.id, edges)
   const nodesById = new Map((nodes ?? []).map((node) => [node.id, node]))
-
-  const hasWorkDescendant = (nodeId, visited = new Set()) => {
-    for (const childId of childrenByParent.get(nodeId) ?? []) {
-      if (visited.has(childId)) continue
-      visited.add(childId)
-      const child = nodesById.get(childId)
-      if (child?.data?.isWork === true) return true
-      if (hasWorkDescendant(childId, visited)) return true
-    }
-    return false
-  }
-
   const targets = [...descendants]
     .map((nodeId) => nodesById.get(nodeId))
-    .filter((node) => node?.data?.isWork === true && !hasWorkDescendant(node.id))
+    .filter((node) => node?.data?.isWork === true)
   if (targets.length === 0) return null
 
   const total = targets.reduce((sum, node) => sum + clampProgress(node.data?.progress), 0)

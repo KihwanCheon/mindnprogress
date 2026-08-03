@@ -482,7 +482,7 @@ function normalizeMapEdges(map) {
     ...map,
     edges: map.edges.map((edge) => ({
       ...edge,
-      type: 'bezier',
+      type: 'default',
       markerEnd: {
         ...edge.markerEnd,
         type: 'arrowclosed',

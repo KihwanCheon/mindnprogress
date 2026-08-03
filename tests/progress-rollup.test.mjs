@@ -6,9 +6,9 @@ const node = (id, data) => ({ id, type: 'mind', position: { x: 0, y: 0 }, data }
 const hierarchy = (source, target) => ({ id: `edge-${source}-${target}`, source, target })
 const knowledge = (source, target) => ({ id: `edge-${source}-${target}`, source, target, data: { relation: 'knowledge' } })
 
-test('말단 업무 진행률을 동일 가중치로 평균해 반올림한다', () => {
+test('계층 안의 모든 업무 진행률을 동일 가중치로 평균해 반올림한다', () => {
   const nodes = [
-    node('root', { kind: 'root', label: '루트', status: 'planned', progress: 0 }),
+    node('root', { kind: 'root', label: '루트', isWork: true, status: 'planned', progress: 100 }),
     node('a', { kind: 'task', label: 'A', isWork: true, progress: 30 }),
     node('b', { kind: 'task', label: 'B', isWork: true, progress: 45 }),
   ]
@@ -17,7 +17,7 @@ test('말단 업무 진행률을 동일 가중치로 평균해 반올림한다',
   assert.deepEqual(rollup, { rootId: 'root', targetCount: 2, progress: 38, status: 'in-progress' })
 })
 
-test('다른 업무 카드를 하위에 가진 업무 카드는 집계에서 제외한다', () => {
+test('하위 업무를 가진 실행 업무도 별도 업무로 집계한다', () => {
   const nodes = [
     node('root', { kind: 'root', label: '루트', status: 'planned', progress: 0 }),
     node('parent-work', { kind: 'task', label: '상위 업무', isWork: true, progress: 90 }),
@@ -26,8 +26,8 @@ test('다른 업무 카드를 하위에 가진 업무 카드는 집계에서 제
   ]
   const edges = [hierarchy('root', 'parent-work'), hierarchy('parent-work', 'leaf-1'), hierarchy('parent-work', 'leaf-2')]
   const rollup = computeWorkRollup(nodes, edges)
-  assert.equal(rollup.targetCount, 2)
-  assert.equal(rollup.progress, 50)
+  assert.equal(rollup.targetCount, 3)
+  assert.equal(rollup.progress, 63)
 })
 
 test('지식선은 계층으로 취급하지 않는다', () => {
@@ -102,6 +102,7 @@ test('계층 순환이 있어도 무한 루프에 빠지지 않는다', () => {
     node('b', { kind: 'task', label: 'B', isWork: true, progress: 40 }),
   ]
   const edges = [hierarchy('root', 'a'), hierarchy('a', 'b'), hierarchy('b', 'a')]
-  // 순환에서는 두 업무가 서로의 하위가 되어 말단 업무가 없으므로 롤업하지 않는다.
-  assert.equal(computeWorkRollup(nodes, edges), null)
+  const rollup = computeWorkRollup(nodes, edges)
+  assert.equal(rollup.targetCount, 2)
+  assert.equal(rollup.progress, 30)
 })

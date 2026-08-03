@@ -194,9 +194,9 @@ async function main() {
 
     const guide = await invoke('mindnprogress_read_me_first')
     assert.equal(guide.guide.product.name, 'MindNProgress')
-    assert.equal(guide.guide.version, '1.5')
+    assert.equal(guide.guide.version, '1.6')
     assert.match(guide.guide.dataModel.cardContent.sharedKnowledge, /재사용/)
-    assert.match(guide.guide.authoringRules.join('\n'), /말단 업무의 진행률을 동일 가중치 평균/)
+    assert.match(guide.guide.authoringRules.join('\n'), /모든 isWork=true 업무 진행률을 동일 가중치 평균/)
     assert.match(guide.guide.operationRules.join('\n'), /변경할 필드만 보내고/)
     assert.match(guide.guide.operationRules.join('\n'), /조회 도구는 문서 version을 변경하지 않으며/)
     assert.match(guide.guide.operationRules.join('\n'), /댓글 summary는 \[진행\].*\[차단\].*\[결과\]/)
@@ -659,6 +659,7 @@ async function main() {
     assert.ok(saved.map.version > documentResult.map.version)
     assert.equal(saved.map.updatedBy.id, attribution.editorId)
     assert.equal(saved.map.updatedBy.name, 'Claude Code(Claude Test Model)')
+    assert.ok(saved.map.edges.every((edge) => edge.type === 'default'))
 
     const knowledgeComment = await invoke('mindnprogress_add_comment', {
       mapId,
@@ -685,6 +686,7 @@ async function main() {
       ],
     })
     assert.ok(knowledgeSaved.map.edges.some((edge) => edge.data?.relation === 'knowledge'))
+    assert.ok(knowledgeSaved.map.edges.every((edge) => edge.type === 'default'))
 
     const knowledgeContext = await invoke('mindnprogress_get_context', {
       mapId,

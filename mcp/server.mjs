@@ -42,7 +42,7 @@ function defaultChildMindMapPosition(parentPosition, siblingPositions) {
 
 const serverInstructions = `MindNProgress는 마인드맵과 업무 진행 관리를 결합한 웹 서비스입니다. MindNProgress 밖에서 시작해 문서 ID나 카드 ID가 없다면 mindnprogress_read_me_first를 먼저 호출하세요. 선택 문서와 카드가 있다면 mindnprogress_get_context로 제품 규칙과 최신 문서 구조를 먼저 확인하세요. AionUi가 발급한 attributionToken이 없는 외부 MCP 세션은 자신이 현재 AI 종류와 모델을 정확히 알고 있을 때 get_context의 aiType과 aiModel에 함께 전달하고, 알지 못하면 추측하지 마세요. get_context의 selection.taskLinks.startupInspection을 따르세요. mode가 knowledge-guided이면 primary 선행 지식의 sharedKnowledge를 먼저 재사용하고 설명과 댓글로 보완하며, fallbackSources와 fallbackTargets는 정보가 부족할 때만 선택적으로 조사합니다. mode가 default이고 required가 true이면 targets의 업무 본문, 댓글, 첨부파일 목록과 관련 링크를 조사하세요. 진행 과정과 결과는 댓글에 기록하고, 다른 카드나 후속 세션이 재사용할 안정적인 사실·결정·제약은 카드의 sharedKnowledge에 요약하세요. AI 댓글은 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 충실히 담은 detail로 작성하며, 요약 때문에 상세를 축약하지 마세요. 외부 전달물이나 결정 대기는 waitingItems로 기록하고 제목에 대기 문구를 붙이지 마세요. 대기를 등록할 때는 [차단], 해제할 때는 [진행] 댓글로 이유와 재개 상태를 기록하세요. 카드 일부 필드만 변경할 때는 mindnprogress_update_card의 data에 변경할 필드만 보내고 현재 카드 전체 데이터를 재전송하지 마세요. 일반 카드에서 생략한 필드와 위치는 보존되지만 완료 상태 또는 진행률 100 적용 시 waitingItems는 자동으로 해제되며, Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 지식선만 변경할 때는 전체 문서를 다시 보내지 말고 지식선 전용 도구를 사용하세요. 조회 도구는 문서 버전을 변경하지 않지만 카드·관계 편집과 AI 대화 ID 연결은 버전을 증가시킬 수 있습니다. 특정 자료가 있다고 가정하지 마세요. 여러 카드로 구성된 새 문서는 mindnprogress_create_mindmap으로 한 번에 생성하고, 변경 후에는 최신 문서를 다시 조회해 결과를 검증하세요. 비밀번호 변경과 계정 관리 작업은 지원하지 않습니다.`
 const productGuide = {
-  version: '1.5',
+  version: '1.6',
   product: {
     name: 'MindNProgress',
     purpose: '아이디어를 계층형 마인드맵으로 구조화하고 실행 업무의 진행 상황을 같은 문서에서 관리하는 웹 서비스',
@@ -67,7 +67,7 @@ const productGuide = {
       task: '구체적인 실행 항목. 실제 업무라면 isWork=true로 설정',
     },
     workFields: {
-      progress: '0~100의 진행률. 100이면 완료로 표시. 최상위 카드의 진행률·상태는 저장 시 서버가 말단 업무 진행률의 동일 가중치 평균으로 자동 재계산함',
+      progress: '0~100의 진행률. 100이면 완료로 표시. 최상위 카드의 진행률·상태는 저장 시 서버가 계층 안의 모든 isWork=true 업무 진행률을 동일 가중치로 평균해 자동 재계산함',
       status: 'planned, in-progress, done. done은 progress=100과 함께 사용',
       assigneeId: '담당자 사용자 ID. 담당자가 없으면 생략',
       dueDate: '마감일. 없는 업무는 생략',
@@ -102,7 +102,7 @@ const productGuide = {
     '존재하지 않는 담당자, 불필요한 업무 링크와 임의의 선행 관계를 만들지 않음',
     '문서 내부 선행 업무는 blockedBy, 외부 전달물·결정 대기는 waitingItems로 구분하고 제목에 “(서버 대기)” 같은 문구를 붙이지 않음',
     '진행률이 100이면 status=done, 완료가 아니면 progress를 100 미만으로 유지',
-    '최상위 카드의 진행률과 상태는 저장 시 서버가 자동 재계산(하위에 다른 업무 카드가 없는 isWork=true 말단 업무의 진행률을 동일 가중치 평균 후 반올림, 100이면 done, 1~99면 in-progress, 0이면 기존 상태 유지, 집계 대상이 없으면 변경 없음)하므로 수동으로 계산해 덮어쓰지 않음',
+    '최상위 카드의 진행률과 상태는 저장 시 서버가 자동 재계산(최상위 카드를 제외한 계층 안의 모든 isWork=true 업무 진행률을 동일 가중치 평균 후 반올림, 100이면 done, 1~99면 in-progress, 0이면 기존 상태 유지, 집계 대상이 없으면 변경 없음)하므로 수동으로 계산해 덮어쓰지 않음. 단순 묶음 카드는 branch 또는 isWork=false로 구성',
   ],
   operationRules: [
     '분석과 편집 전에 mindnprogress_get_context로 최신 버전과 제품 규칙을 확인',
@@ -561,7 +561,7 @@ function buildMapFromOutline(cards) {
     id: `edge-${card.parentKey}-${card.key}`,
     source: card.parentKey,
     target: card.key,
-    type: 'bezier',
+    type: 'default',
     data: { relation: 'hierarchy' },
     markerEnd: { type: 'arrowclosed', width: 16, height: 16 },
   }))
@@ -990,7 +990,7 @@ async function main() {
       id: `edge-${parentId}-${nodeId}`,
       source: parentId,
       target: nodeId,
-      type: 'bezier',
+      type: 'default',
       data: { relation: 'hierarchy' },
       markerEnd: { type: 'arrowclosed', width: 16, height: 16 },
     })
@@ -1035,7 +1035,7 @@ async function main() {
       id: `edge-${newParentId}-${nodeId}`,
       source: newParentId,
       target: nodeId,
-      type: 'bezier',
+      type: 'default',
       data: { relation: 'hierarchy' },
       markerEnd: { type: 'arrowclosed', width: 16, height: 16 },
     })
@@ -1077,7 +1077,7 @@ async function main() {
         id: edgeId,
         source: sourceCardId,
         target: targetCardId,
-        type: 'bezier',
+        type: 'default',
         reconnectable: false,
         data: { relation: 'knowledge', knowledgePolicy },
         markerEnd: { type: 'arrowclosed', width: 18, height: 18 },
