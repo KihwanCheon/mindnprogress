@@ -5982,6 +5982,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       {aiDialogOpen && selectedNode && selectedNode.data.kind !== 'image' && activeDocument && (
         <AiConversationDialog
           key={selectedCommentMapId}
+          userId={user.id}
           documentId={selectedCommentMapId}
           documentTitle={documents.find((document) => document.id === selectedCommentMapId)?.title ?? activeDocument.title}
           cardId={selectedCommentNodeId ?? selectedNode.id}

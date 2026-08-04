@@ -1,5 +1,11 @@
-import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react'
 import type { KnowledgePolicy } from '../types/mindMap'
+import {
+  AI_WORKSPACE_MAX_LENGTH,
+  normalizeAiWorkspaceHistory,
+  rememberAiWorkspace,
+  removeAiWorkspace,
+} from '../utils/aiWorkspaceHistory.mjs'
 import './AiConversationDialog.css'
 
 type RuntimeOption = { id: string; label: string; description: string; providerId?: string }
@@ -35,9 +41,32 @@ type SavedRuntimeSelections = {
 const defaultWorkspace = 'C:\\Git\\MindNProgress'
 const runtimeSelectionsStorageKey = 'mindnprogress-ai-runtime-selections'
 const mcpSelectionsStorageKey = 'mindnprogress-ai-mcp-selections'
+const legacyWorkspaceHistoryStorageKey = 'mindnprogress-ai-workspace-history-v1'
+const workspaceHistoryApiPath = '/api/integrations/aionui/workspaces'
 
-function workspaceStorageKey(documentId: string) {
-  return `mindnprogress-ai-workspace:${documentId}`
+function workspaceStorageKey(userId: string, documentId: string) {
+  return `mindnprogress-ai-workspace:${userId}:${documentId}`
+}
+
+function workspaceHistoryStorageKey(userId: string) {
+  return `mindnprogress-ai-workspace-history-v2:${userId}`
+}
+
+function readDocumentWorkspace(userId: string, documentId: string) {
+  try {
+    return localStorage.getItem(workspaceStorageKey(userId, documentId))
+      ?? defaultWorkspace
+  } catch {
+    return defaultWorkspace
+  }
+}
+
+function storeDocumentWorkspace(userId: string, documentId: string, value: string) {
+  try {
+    localStorage.setItem(workspaceStorageKey(userId, documentId), value)
+  } catch {
+    // 브라우저 저장소를 사용할 수 없어도 현재 입력값은 계속 사용합니다.
+  }
 }
 
 function readRuntimeSelections(): SavedRuntimeSelections {
@@ -57,6 +86,55 @@ function readMcpSelections() {
   }
 }
 
+function readWorkspaceHistory(userId: string) {
+  try {
+    const stored = localStorage.getItem(workspaceHistoryStorageKey(userId))
+      ?? localStorage.getItem(legacyWorkspaceHistoryStorageKey)
+      ?? '[]'
+    return normalizeAiWorkspaceHistory(JSON.parse(stored))
+  } catch {
+    return []
+  }
+}
+
+function readLegacyWorkspaceHistory() {
+  try {
+    return normalizeAiWorkspaceHistory(JSON.parse(localStorage.getItem(legacyWorkspaceHistoryStorageKey) ?? '[]'))
+  } catch {
+    return []
+  }
+}
+
+function storeWorkspaceHistory(userId: string, history: string[]) {
+  try {
+    localStorage.setItem(workspaceHistoryStorageKey(userId), JSON.stringify(history))
+  } catch {
+    // 브라우저 저장소를 사용할 수 없어도 현재 대화는 시작할 수 있습니다.
+  }
+}
+
+function clearLegacyWorkspaceHistory() {
+  try {
+    localStorage.removeItem(legacyWorkspaceHistoryStorageKey)
+  } catch {
+    // 사용자별 서버 이력이 저장되었으므로 기존 공용 캐시 정리는 생략해도 됩니다.
+  }
+}
+
+async function requestWorkspaceHistory(method: 'GET' | 'POST' | 'DELETE', body?: object) {
+  const response = await fetch(workspaceHistoryApiPath, {
+    method,
+    credentials: 'include',
+    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+    keepalive: true,
+    signal: AbortSignal.timeout(5_000),
+  })
+  const result = await response.json().catch(() => ({})) as { workspaces?: unknown; error?: string }
+  if (!response.ok) throw new Error(result.error ?? '최근 작업공간을 동기화하지 못했습니다.')
+  return normalizeAiWorkspaceHistory(result.workspaces)
+}
+
 function availableOptionId(options: RuntimeOption[], preferredId?: string, defaultId?: string) {
   if (preferredId && options.some((option) => option.id === preferredId)) return preferredId
   if (defaultId && options.some((option) => option.id === defaultId)) return defaultId
@@ -70,7 +148,8 @@ function encodeBase64Json(value: unknown) {
   return btoa(binary)
 }
 
-export function AiConversationDialog({ documentId, documentTitle, cardId, cardTitle, knowledgeSources, onClose }: {
+export function AiConversationDialog({ userId, documentId, documentTitle, cardId, cardTitle, knowledgeSources, onClose }: {
+  userId: string
   documentId: string
   documentTitle: string
   cardId: string
@@ -88,9 +167,43 @@ export function AiConversationDialog({ documentId, documentTitle, cardId, cardTi
   const [modelId, setModelId] = useState('')
   const [mode, setMode] = useState('')
   const [thoughtLevel, setThoughtLevel] = useState('')
-  const [workspace, setWorkspace] = useState(() => localStorage.getItem(workspaceStorageKey(documentId)) ?? defaultWorkspace)
+  const [workspace, setWorkspace] = useState(() => readDocumentWorkspace(userId, documentId))
+  const [workspaceHistory, setWorkspaceHistory] = useState(() => readWorkspaceHistory(userId))
+  const workspaceHistoryRef = useRef(workspaceHistory)
+  const workspaceHistoryMutationRef = useRef(0)
+  const workspaceHistoryRequestRef = useRef<Promise<void>>(Promise.resolve())
   const [selectedSkillIds, setSelectedSkillIds] = useState<Set<string>>(new Set())
   const [selectedMcpIds, setSelectedMcpIds] = useState<Set<string>>(new Set())
+
+  const applyWorkspaceHistory = useCallback((history: string[]) => {
+    workspaceHistoryRef.current = history
+    storeWorkspaceHistory(userId, history)
+    setWorkspaceHistory(history)
+  }, [userId])
+
+  const enqueueWorkspaceHistoryRequest = useCallback((requestAction: () => Promise<string[]>) => {
+    const operation = workspaceHistoryRequestRef.current.then(requestAction, requestAction)
+    workspaceHistoryRequestRef.current = operation.then(() => undefined, () => undefined)
+    return operation
+  }, [])
+
+  useEffect(() => {
+    let active = true
+    const legacyHistory = readLegacyWorkspaceHistory()
+    const mutationVersion = workspaceHistoryMutationRef.current
+    const operation = enqueueWorkspaceHistoryRequest(async () => {
+      const serverHistory = await requestWorkspaceHistory('GET')
+      if (legacyHistory.length === 0) return serverHistory
+      return requestWorkspaceHistory('POST', { migration: true, workspaces: legacyHistory })
+    })
+    void operation.then((history) => {
+      clearLegacyWorkspaceHistory()
+      if (active && workspaceHistoryMutationRef.current === mutationVersion) applyWorkspaceHistory(history)
+    }).catch(() => {
+      // 서버가 일시적으로 응답하지 않으면 사용자별 브라우저 캐시를 계속 사용합니다.
+    })
+    return () => { active = false }
+  }, [applyWorkspaceHistory, enqueueWorkspaceHistoryRequest])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -159,7 +272,35 @@ export function AiConversationDialog({ documentId, documentTitle, cardId, cardTi
 
   const updateWorkspace = (value: string) => {
     setWorkspace(value)
-    localStorage.setItem(workspaceStorageKey(documentId), value)
+    storeDocumentWorkspace(userId, documentId, value)
+  }
+
+  const rememberWorkspace = async (value: string) => {
+    const normalizedWorkspace = value.trim()
+    if (!normalizedWorkspace) return
+    storeDocumentWorkspace(userId, documentId, normalizedWorkspace)
+    const next = rememberAiWorkspace(workspaceHistoryRef.current, normalizedWorkspace)
+    const mutationVersion = ++workspaceHistoryMutationRef.current
+    applyWorkspaceHistory(next)
+    try {
+      const history = await enqueueWorkspaceHistoryRequest(() => requestWorkspaceHistory('POST', { workspace: normalizedWorkspace }))
+      if (workspaceHistoryMutationRef.current === mutationVersion) applyWorkspaceHistory(history)
+    } catch {
+      // 대화 시작은 서버 이력 저장 실패로 막지 않고 브라우저 캐시로 보완합니다.
+    }
+  }
+
+  const deleteWorkspaceHistory = async (value: string) => {
+    const previous = workspaceHistoryRef.current
+    const next = removeAiWorkspace(workspaceHistoryRef.current, value)
+    const mutationVersion = ++workspaceHistoryMutationRef.current
+    applyWorkspaceHistory(next)
+    try {
+      const history = await enqueueWorkspaceHistoryRequest(() => requestWorkspaceHistory('DELETE', { workspace: value }))
+      if (workspaceHistoryMutationRef.current === mutationVersion) applyWorkspaceHistory(history)
+    } catch {
+      if (workspaceHistoryMutationRef.current === mutationVersion) applyWorkspaceHistory(previous)
+    }
   }
 
   const launch = async () => {
@@ -201,6 +342,7 @@ export function AiConversationDialog({ documentId, documentTitle, cardId, cardTi
         autoSend: true,
       }
       const data = encodeURIComponent(encodeBase64Json({ payload: JSON.stringify(launchPayload) }))
+      void rememberWorkspace(workspace)
       window.location.href = `${options.protocol}?v=1&data=${data}`
       onClose()
     } catch (launchFailure) {
@@ -235,7 +377,24 @@ export function AiConversationDialog({ documentId, documentTitle, cardId, cardTi
               {selectedAgent && selectedAgent.modes.length > 0 && <label><span>권한</span><select value={mode} onChange={(event) => setMode(event.target.value)}>{selectedAgent.modes.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>}
               {selectedAgent && selectedAgent.thoughtLevels.length > 0 && <label><span>사고 수준</span><select value={thoughtLevel} onChange={(event) => setThoughtLevel(event.target.value)}>{selectedAgent.thoughtLevels.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>}
             </div>
-            <label><span>작업공간</span><input value={workspace} onChange={(event) => updateWorkspace(event.target.value)} placeholder="선택사항" /></label>
+            <div className="ai-workspace-field">
+              <label><span>작업공간</span><input value={workspace} onChange={(event) => updateWorkspace(event.target.value)} placeholder="선택사항" maxLength={AI_WORKSPACE_MAX_LENGTH} /></label>
+              {workspaceHistory.length > 0 && (
+                <div className="ai-workspace-history">
+                  <div className="ai-workspace-history-heading"><span>최근 작업공간</span><small>{workspaceHistory.length}개</small></div>
+                  <div className="ai-workspace-history-list" role="list" aria-label="최근 작업공간">
+                    {workspaceHistory.map((item) => (
+                      <div className={`ai-workspace-history-item ${workspace.trim() === item ? 'selected' : ''}`} role="listitem" key={item}>
+                        <button type="button" className="ai-workspace-history-select" onClick={() => updateWorkspace(item)} title={item}>
+                          <span>{item}</span>
+                        </button>
+                        <button type="button" className="ai-workspace-history-remove" onClick={() => { void deleteWorkspaceHistory(item) }} aria-label={`${item} 이력 삭제`} title="이력에서 삭제">×</button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
             <details open>
               <summary>스킬 <b>{selectedSkillIds.size}</b></summary>
               <div className="ai-capability-list">{options.skills.map((skill) => <label key={skill.id} title={skill.description}><input type="checkbox" checked={selectedSkillIds.has(skill.id)} onChange={() => toggleSelection(setSelectedSkillIds, skill.id)} /><span><strong>{skill.name}</strong><small>{skill.description || '설명 없음'}</small></span></label>)}</div>

@@ -756,6 +756,7 @@
 
 [data-theme="dark"] .password-form label > span,
 [data-theme="dark"] .ai-dialog-content > label,
+[data-theme="dark"] .ai-workspace-field > label,
 [data-theme="dark"] .ai-dialog-grid label {
   color: var(--theme-text-secondary);
 }
@@ -772,6 +773,46 @@
 [data-theme="dark"] .ai-capability-list label:hover {
   color: var(--theme-text-secondary);
   background: var(--theme-surface-soft);
+}
+
+[data-theme="dark"] .ai-workspace-history {
+  border-color: var(--theme-border-strong);
+  background: var(--theme-surface-raised);
+}
+
+[data-theme="dark"] .ai-workspace-history-heading {
+  color: var(--theme-text-secondary);
+  border-color: var(--theme-border);
+  background: var(--theme-surface-soft);
+}
+
+[data-theme="dark"] .ai-workspace-history-heading small {
+  color: var(--theme-text-muted);
+}
+
+[data-theme="dark"] .ai-workspace-history-item:hover {
+  background: var(--theme-surface-hover);
+}
+
+[data-theme="dark"] .ai-workspace-history-item.selected {
+  background: var(--theme-accent-soft);
+}
+
+[data-theme="dark"] .ai-workspace-history-select {
+  color: var(--theme-text-secondary);
+}
+
+[data-theme="dark"] .ai-workspace-history-item.selected .ai-workspace-history-select {
+  color: #c3bcff;
+}
+
+[data-theme="dark"] .ai-workspace-history-remove {
+  color: var(--theme-text-muted);
+}
+
+[data-theme="dark"] .ai-workspace-history-remove:hover {
+  color: #ff9aa2;
+  background: var(--theme-danger-soft);
 }
 
 [data-theme="dark"] .ai-knowledge-notice {

@@ -26,6 +26,13 @@ import {
   loadDoorayApiConfig,
   parseDoorayTaskUrl,
 } from './lib/doorayTasks.mjs'
+import {
+  AI_WORKSPACE_HISTORY_LIMIT,
+  AI_WORKSPACE_MAX_LENGTH,
+  normalizeAiWorkspaceHistory,
+  rememberAiWorkspace,
+  removeAiWorkspace,
+} from '../src/utils/aiWorkspaceHistory.mjs'
 
 const serverDirectory = path.dirname(fileURLToPath(import.meta.url))
 const projectDirectory = path.resolve(serverDirectory, '..')
@@ -39,6 +46,7 @@ const usersFile = path.join(dataDirectory, '_users.json')
 const sessionsFile = path.join(dataDirectory, '_sessions.json')
 const aiAttributionsFile = path.join(dataDirectory, '_ai-attributions.json')
 const aiConversationAttributionsFile = path.join(dataDirectory, '_ai-conversation-attributions.json')
+const aiWorkspaceHistoriesFile = path.join(dataDirectory, '_ai-workspace-histories.json')
 const integrationTokenFile = path.join(dataDirectory, '_integration-token')
 const mapOrderFile = path.join(dataDirectory, '_map-order.json')
 const distDirectory = path.join(projectDirectory, 'dist')
@@ -170,8 +178,10 @@ const aiAttributionDurationMs = Math.max(50, Number(process.env.MNP_AI_ATTRIBUTI
 const aiAttributions = new Map()
 const aiConversationAttributions = new Map()
 const aiConversationLaunches = new Map()
+const aiWorkspaceHistories = new Map()
 let aiAttributionWriteQueue = Promise.resolve()
 let aiConversationAttributionWriteQueue = Promise.resolve()
+let aiWorkspaceHistoryWriteQueue = Promise.resolve()
 
 function publicUser(user) {
   return { id: user.id, name: user.name, email: user.email, role: user.role, publicAccess: user.systemManaged === true }
@@ -381,9 +391,7 @@ function hasValidIntegrationBearer(request) {
   return candidate.length === expected.length && timingSafeEqual(candidate, expected)
 }
 
-function getCurrentUser(request) {
-  if (hasValidIntegrationBearer(request)) return attributedIntegrationUser(request)
-
+function getSignedInUser(request) {
   const token = parseCookies(request).get('mnp_session')
   if (!token) return null
   const tokenKey = sessionTokenKey(token)
@@ -395,6 +403,11 @@ function getCurrentUser(request) {
     return null
   }
   return users.find((user) => user.id === session.userId && user.active !== false) ?? null
+}
+
+function getCurrentUser(request) {
+  if (hasValidIntegrationBearer(request)) return attributedIntegrationUser(request)
+  return getSignedInUser(request)
 }
 
 async function readJsonBody(request) {
@@ -441,6 +454,12 @@ async function readBinaryBody(request, maxBytes) {
 
 function requireUser(request, response) {
   const user = getCurrentUser(request)
+  if (!user) sendJson(response, 401, { error: '로그인이 필요합니다.' })
+  return user
+}
+
+function requireSignedInUser(request, response) {
+  const user = getSignedInUser(request)
   if (!user) sendJson(response, 401, { error: '로그인이 필요합니다.' })
   return user
 }
@@ -949,6 +968,15 @@ function persistAiConversationAttributions() {
   return aiConversationAttributionWriteQueue
 }
 
+function persistAiWorkspaceHistories() {
+  const storedHistories = [...aiWorkspaceHistories.entries()]
+    .sort(([firstUserId], [secondUserId]) => firstUserId.localeCompare(secondUserId))
+    .map(([userId, workspaces]) => ({ userId, workspaces }))
+  aiWorkspaceHistoryWriteQueue = aiWorkspaceHistoryWriteQueue.catch(() => {})
+    .then(() => writeStoredArray(aiWorkspaceHistoriesFile, storedHistories))
+  return aiWorkspaceHistoryWriteQueue
+}
+
 async function loadAiAttributions() {
   const now = Date.now()
   const storedAttributions = await readStoredArray(aiAttributionsFile)
@@ -972,6 +1000,17 @@ async function loadAiConversationAttributions() {
     aiConversationAttributions.set(conversationAttributionKey(attribution.mapId, attribution.cardId), attribution)
   }
   await persistAiConversationAttributions()
+}
+
+async function loadAiWorkspaceHistories() {
+  const storedHistories = await readStoredArray(aiWorkspaceHistoriesFile)
+  for (const history of storedHistories) {
+    if (typeof history?.userId !== 'string' || !Array.isArray(history.workspaces)
+      || !users.some((user) => user.id === history.userId)) continue
+    const workspaces = normalizeAiWorkspaceHistory(history.workspaces)
+    aiWorkspaceHistories.set(history.userId, workspaces)
+  }
+  await persistAiWorkspaceHistories()
 }
 
 async function loadSessions() {
@@ -2187,6 +2226,7 @@ const adminBootstrapped = await loadUsers()
 await loadSessions()
 await loadAiAttributions()
 await loadAiConversationAttributions()
+await loadAiWorkspaceHistories()
 const metadataMigration = await migrateStoredMapCreationMetadata()
 if (metadataMigration.migratedDocuments > 0) {
   console.log(`[Mind & Progress] 문서 ${metadataMigration.migratedDocuments}개에 생성자와 생성 시각을 복원했습니다.`)
@@ -2563,6 +2603,64 @@ const server = createServer(async (request, response) => {
       }
     }
 
+    if (url.pathname === '/api/integrations/aionui/workspaces') {
+      const user = requireSignedInUser(request, response)
+      if (!user) return
+      if (!canEdit(user)) return sendJson(response, 403, { error: '편집자만 AI 작업공간 이력을 사용할 수 있습니다.' })
+
+      if (request.method === 'GET') {
+        return sendJson(response, 200, { workspaces: aiWorkspaceHistories.get(user.id) ?? [] })
+      }
+
+      if (request.method === 'POST') {
+        const body = await readJsonBody(request)
+        const currentWorkspaces = aiWorkspaceHistories.get(user.id) ?? []
+
+        if (typeof body?.workspace === 'string') {
+          const workspace = body.workspace.trim()
+          if (!workspace || workspace.length > AI_WORKSPACE_MAX_LENGTH) {
+            return sendJson(response, 400, { error: '추가할 작업공간이 올바르지 않습니다.' })
+          }
+          const workspaces = rememberAiWorkspace(currentWorkspaces, workspace)
+          aiWorkspaceHistories.set(user.id, workspaces)
+          await persistAiWorkspaceHistories()
+          return sendJson(response, 200, { workspaces })
+        }
+
+        if (body?.migration === true) {
+          if (!Array.isArray(body.workspaces) || body.workspaces.length > AI_WORKSPACE_HISTORY_LIMIT
+            || body.workspaces.some((workspace) => typeof workspace !== 'string'
+              || !workspace.trim()
+              || workspace.trim().length > AI_WORKSPACE_MAX_LENGTH)) {
+            return sendJson(response, 400, { error: '가져올 작업공간 이력이 올바르지 않습니다.' })
+          }
+          if (aiWorkspaceHistories.has(user.id)) return sendJson(response, 200, { workspaces: currentWorkspaces })
+          const workspaces = normalizeAiWorkspaceHistory(body.workspaces)
+          if (workspaces.length > 0) {
+            aiWorkspaceHistories.set(user.id, workspaces)
+            await persistAiWorkspaceHistories()
+          }
+          return sendJson(response, 200, { workspaces })
+        }
+
+        return sendJson(response, 400, { error: '추가할 작업공간이 올바르지 않습니다.' })
+      }
+
+      if (request.method === 'DELETE') {
+        const body = await readJsonBody(request)
+        const workspace = typeof body.workspace === 'string' ? body.workspace.trim() : ''
+        if (!workspace || workspace.length > AI_WORKSPACE_MAX_LENGTH) {
+          return sendJson(response, 400, { error: '삭제할 작업공간이 올바르지 않습니다.' })
+        }
+        const workspaces = removeAiWorkspace(aiWorkspaceHistories.get(user.id) ?? [], workspace)
+        aiWorkspaceHistories.set(user.id, workspaces)
+        await persistAiWorkspaceHistories()
+        return sendJson(response, 200, { workspaces })
+      }
+
+      return sendJson(response, 405, { error: '지원하지 않는 요청입니다.' })
+    }
+
     if (request.method === 'GET' && url.pathname === '/api/integrations/aionui/options') {
       const user = requireUser(request, response)
       if (!user) return
@@ -2725,6 +2823,8 @@ const server = createServer(async (request, response) => {
       if (request.method === 'DELETE') {
         users = users.filter((candidate) => candidate.id !== editor.id)
         await invalidateUserSessions(editor.id)
+        aiWorkspaceHistories.delete(editor.id)
+        await persistAiWorkspaceHistories()
         await persistUsers()
         return sendJson(response, 200, { deletedId: editor.id })
       }
