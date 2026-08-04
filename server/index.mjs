@@ -19,6 +19,13 @@ import {
   createCommentContent,
   updateCommentContent,
 } from './lib/commentContent.mjs'
+import {
+  DoorayTaskError,
+  fetchDoorayTaskPreview,
+  isValidDoorayTaskLinkData,
+  loadDoorayApiConfig,
+  parseDoorayTaskUrl,
+} from './lib/doorayTasks.mjs'
 
 const serverDirectory = path.dirname(fileURLToPath(import.meta.url))
 const projectDirectory = path.resolve(serverDirectory, '..')
@@ -53,6 +60,10 @@ const aionUiSubscriptionUsageStaleAfterMs = Math.max(
 )
 const imageAssetMaxBytes = Math.max(1_000_000, Number(process.env.MNP_IMAGE_MAX_BYTES) || 15_000_000)
 let activeAionUiBaseUrl = configuredAionUiBaseUrls[0] ?? fallbackAionUiBaseUrls[0]
+let doorayApiConfigPromise = null
+const doorayTaskTitleCache = new Map()
+const doorayTaskTitleCacheDurationMs = 5 * 60 * 1000
+const doorayTaskTitleBatchLimit = 50
 const sessionDurationMs = 8 * 60 * 60 * 1000
 const rememberedSessionDurationMs = 30 * 24 * 60 * 60 * 1000
 const sessions = new Map()
@@ -400,6 +411,23 @@ async function readJsonBody(request) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'))
 }
 
+function getDoorayApiConfig() {
+  doorayApiConfigPromise ??= loadDoorayApiConfig()
+  return doorayApiConfigPromise
+}
+
+async function resolveDoorayTaskTitle(parsed, config) {
+  const cached = doorayTaskTitleCache.get(parsed.url)
+  if (cached && cached.expiresAt > Date.now()) return cached.title
+
+  const task = await fetchDoorayTaskPreview(parsed, config)
+  doorayTaskTitleCache.set(parsed.url, {
+    title: task.subject,
+    expiresAt: Date.now() + doorayTaskTitleCacheDurationMs,
+  })
+  return task.subject
+}
+
 async function readBinaryBody(request, maxBytes) {
   const chunks = []
   let size = 0
@@ -434,6 +462,9 @@ function isValidMap(map) {
     typeof node?.id === 'string'
     && node.id.length <= 120
     && (node.data?.kind !== 'image' || isValidImageNodeData(node.data?.image))
+    && (node.data?.externalLink === undefined
+      || (isValidDoorayTaskLinkData(node.data.externalLink)
+        && node.data.taskUrl === node.data.externalLink.url))
     && (node.data?.sharedKnowledge === undefined
       || (typeof node.data.sharedKnowledge === 'string' && node.data.sharedKnowledge.length <= 10_000))
     && (node.data?.waitingItems === undefined
@@ -1555,6 +1586,7 @@ const referenceContentKeys = [
   'progress',
   'status',
   'taskUrl',
+  'externalLink',
   'aiConversationId',
   'isWork',
   'assigneeId',
@@ -2230,6 +2262,51 @@ const server = createServer(async (request, response) => {
     if (request.method === 'GET' && url.pathname === '/api/auth/me') {
       const user = getCurrentUser(request)
       return sendJson(response, 200, { user: user ? publicUser(user) : null })
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/integrations/dooray/task-preview') {
+      const user = requireUser(request, response)
+      if (!user) return
+      if (!canEdit(user)) return sendJson(response, 403, { error: '편집자만 Dooray 업무를 추가할 수 있습니다.' })
+      const body = await readJsonBody(request)
+      try {
+        const parsed = parseDoorayTaskUrl(body.url)
+        const task = await fetchDoorayTaskPreview(parsed, await getDoorayApiConfig())
+        return sendJson(response, 200, { task })
+      } catch (error) {
+        if (error instanceof DoorayTaskError) return sendJson(response, error.status, { error: error.message, code: error.code })
+        throw error
+      }
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/integrations/dooray/task-titles') {
+      const user = requireUser(request, response)
+      if (!user) return
+      const body = await readJsonBody(request)
+      if (!Array.isArray(body.urls) || body.urls.length === 0 || body.urls.length > doorayTaskTitleBatchLimit) {
+        return sendJson(response, 400, { error: `Dooray 업무 URL은 한 번에 1~${doorayTaskTitleBatchLimit}개까지 조회할 수 있습니다.` })
+      }
+
+      let tasks
+      try {
+        const parsedTasks = [...new Map(body.urls.map((taskUrl) => {
+          const parsed = parseDoorayTaskUrl(taskUrl)
+          return [parsed.url, parsed]
+        })).values()]
+        const config = await getDoorayApiConfig()
+        tasks = (await Promise.all(parsedTasks.map(async (parsed) => {
+          try {
+            return { url: parsed.url, title: await resolveDoorayTaskTitle(parsed, config) }
+          } catch (error) {
+            if (error instanceof DoorayTaskError) return null
+            throw error
+          }
+        }))).filter(Boolean)
+      } catch (error) {
+        if (error instanceof DoorayTaskError) return sendJson(response, error.status, { error: error.message, code: error.code })
+        throw error
+      }
+      return sendJson(response, 200, { tasks })
     }
 
     if (request.method === 'GET' && url.pathname === '/api/integrations/aionui/subscription-usage') {

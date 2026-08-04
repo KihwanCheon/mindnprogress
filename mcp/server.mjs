@@ -78,7 +78,7 @@ const productGuide = {
       status: 'planned, in-progress, done. done은 progress=100과 함께 사용',
       assigneeId: '담당자 사용자 ID. 담당자가 없으면 생략',
       dueDate: '마감일. 없는 업무는 생략',
-      taskUrl: '관련 업무 링크. 링크가 없는 경우 생략',
+      taskUrl: '관련 업무나 외부 자료를 가리키는 범용 링크. Dooray 형식은 전용 카드 표현과 메타데이터를 사용하고 그 밖의 URL도 그대로 유지하며, 링크가 없는 경우 생략',
       taskUrlContext: 'AI 대화 문맥에서는 선택 카드와 해당 계층의 최상위 카드 링크를 별도로 제공하며, 하위 카드에 링크를 상속하거나 덮어쓰지 않음',
       checklist: '세부 실행 항목. 체크 상태에 따라 진행률을 계산할 수 있음',
       blockedBy: '현재 업무보다 먼저 완료되어야 하는 카드 ID 목록. 계층 관계를 표현하는 용도로 사용하지 않음',
@@ -669,7 +669,32 @@ async function main() {
       ?? selectedCard
     const taskLinkFor = (card) => {
       const url = typeof card?.data?.taskUrl === 'string' ? card.data.taskUrl.trim() : ''
-      return url ? { cardId: card.id, label: card.data?.label ?? card.id, url } : null
+      if (!url) return null
+      let provider = 'web'
+      try {
+        const parsed = new URL(url)
+        if (parsed.protocol === 'https:'
+          && /^(?:[a-z0-9-]+\.)+dooray\.com$/i.test(parsed.hostname)
+          && /^\/task\/\d+\/\d+\/?$/.test(parsed.pathname)) provider = 'dooray-task'
+      } catch {
+        provider = 'unknown'
+      }
+      const externalLink = card.data?.externalLink?.url === url ? card.data.externalLink : null
+      return {
+        cardId: card.id,
+        label: card.data?.label ?? card.id,
+        url,
+        provider,
+        ...(externalLink ? {
+          preview: {
+            title: externalLink.title ?? card.data?.label ?? card.id,
+            taskNumber: externalLink.taskNumber,
+            workflowName: externalLink.workflowName,
+            closed: externalLink.closed,
+            resolvedAt: externalLink.resolvedAt,
+          },
+        } : {}),
+      }
     }
     const selectedTaskLink = taskLinkFor(selectedCard)
     const topLevelTaskLink = taskLinkFor(topLevelCard)

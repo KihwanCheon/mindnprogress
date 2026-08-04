@@ -2,7 +2,9 @@ import { Handle, Position, type Node, type NodeProps } from '@xyflow/react'
 import type { MindNodeData } from '../types/mindMap'
 import { AiConversationRuntimeBadge } from './AiConversationRuntimeBadge'
 import { AssigneeTooltip } from './AssigneeTooltip'
+import { DoorayTaskNode } from './DoorayTaskNode'
 import { MindImageNode } from './MindImageNode'
+import { normalizedDoorayTaskUrl } from '../utils/externalLinks'
 import './MindNode.css'
 
 type MindNodeType = Node<MindNodeData, 'mind'>
@@ -21,6 +23,10 @@ const statusIcon: Record<MindNodeData['status'], string> = {
 
 export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeType>) {
   if (data.kind === 'image') return <MindImageNode data={data} selected={selected} />
+  const doorayTaskUrl = normalizedDoorayTaskUrl(data.taskUrl ?? '')
+  if (doorayTaskUrl && data.externalLink?.provider === 'dooray-task' && data.externalLink.url === doorayTaskUrl) {
+    return <DoorayTaskNode data={data} selected={selected} isConnectable={isConnectable} />
+  }
 
   const isCompleted = data.progress >= 100
   const displayStatus = isCompleted ? 'done' : data.status
@@ -95,7 +101,24 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
         )}
         <strong>{data.progress}%</strong>
       </div>
-      <h3>{data.label}</h3>
+      {doorayTaskUrl ? (
+        <div className="node-title-row dooray-linked-title">
+          <span className="dooray-linked-icon" title="Dooray 업무" aria-label="Dooray 업무">D</span>
+          <h3>{data.label}</h3>
+          <a
+            className="dooray-linked-open nodrag nopan"
+            href={doorayTaskUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="Dooray 업무 원본 열기"
+            title="Dooray 업무 원본 열기"
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => event.stopPropagation()}
+          >
+            ↗
+          </a>
+        </div>
+      ) : <h3>{data.label}</h3>}
       <p>{data.description}</p>
       <div className="node-progress" aria-label={`진행률 ${data.progress}%`}>
         <span style={{ width: `${data.progress}%` }} />

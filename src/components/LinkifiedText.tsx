@@ -1,5 +1,6 @@
 import { Fragment, type ReactNode } from 'react'
 import { extractTextLinks } from '../utils/textLinks'
+import { DoorayTaskLinkLabel } from './DoorayTaskLinkLabel'
 
 export function LinkifiedText({ text }: { text: string }) {
   const links = extractTextLinks(text)
@@ -14,13 +15,14 @@ export function LinkifiedText({ text }: { text: string }) {
         key={`${link.start}-${link.label}`}
         className="text-link nodrag nopan"
         href={link.href}
+        title={link.href}
         target="_blank"
         rel="noopener noreferrer"
         draggable={false}
         onClick={(event) => event.stopPropagation()}
         onPointerDown={(event) => event.stopPropagation()}
       >
-        {link.label}
+        <DoorayTaskLinkLabel href={link.href} fallback={link.label} />
       </a>,
     )
     lastIndex = link.end

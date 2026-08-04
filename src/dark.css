@@ -456,9 +456,35 @@
 }
 
 [data-theme="dark"] .image-inspector-preview,
-[data-theme="dark"] .image-inspector-meta {
+[data-theme="dark"] .image-inspector-meta,
+[data-theme="dark"] .dooray-knowledge-origin {
   border-color: var(--theme-border);
   background: var(--theme-surface-soft);
+}
+
+[data-theme="dark"] .dooray-knowledge-provider-row {
+  color: #b8c9ff;
+}
+
+[data-theme="dark"] .dooray-knowledge-provider-row > small {
+  color: #b8c9ff;
+  background: rgba(113, 149, 238, .18);
+}
+
+[data-theme="dark"] .dooray-knowledge-origin > strong {
+  color: var(--theme-text-strong);
+}
+
+[data-theme="dark"] .dooray-knowledge-url-field > span {
+  color: var(--theme-text-secondary);
+}
+
+[data-theme="dark"] .dooray-knowledge-url-field > small.updating {
+  color: #b8c9ff;
+}
+
+[data-theme="dark"] .dooray-knowledge-url-field > small.error {
+  color: #ffaaaa;
 }
 
 [data-theme="dark"] .image-inspector-name > span,

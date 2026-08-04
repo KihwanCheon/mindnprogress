@@ -176,8 +176,14 @@ npm run dev
 | `MNP_AIONUI_URL` | 자동 탐색 | AionUi 백엔드 주소 강제 지정 |
 | `MNP_AIONUI_DISCOVERY_FILE` | OS 임시 폴더의 `aionui-backend.json` | AionUi 가변 포트 탐색 파일 |
 | `MNP_AI_ATTRIBUTION_DURATION_MS` | 8시간 | AI 종류·모델 작성자 귀속 정보의 유지 시간(ms) |
+| `MNP_DOORAY_API_KEY` | Claude 설정에서 조회 | Dooray API 키 환경변수 우선 지정 |
+| `MNP_DOORAY_BASE_URL` | Dooray MCP 설정 또는 `https://api.dooray.com` | Dooray API 기준 주소 |
+| `MNP_DOORAY_CONFIG_FILE` | 사용자 홈의 `.claude.json` | Dooray MCP 설정을 읽을 Claude 설정 파일 |
+| `MNP_DOORAY_MCP_SERVER_NAME` | `docker-dooray-mcp` | Claude 설정에서 조회할 Dooray MCP 서버 이름 |
 | `MNP_API_URL` | `http://127.0.0.1:4176` | MCP가 호출할 MindNProgress API 주소 |
 | `MNP_TOKEN_FILE` | 데이터 폴더의 `_integration-token` | MCP 인증 토큰 파일 경로 |
+
+카드의 `taskUrl`은 Dooray를 포함한 범용 업무 링크로 유지합니다. 일반 카드에 Dooray 업무 URL을 설정하면 카드 형태와 업무 문맥은 그대로 유지하고 제목 왼쪽에 Dooray 아이콘, 오른쪽에 원본 열기 아이콘을 표시합니다. 다른 웹 URL이면 일반 카드 표현을 그대로 유지합니다. 마인드맵 캔버스에 Dooray 업무 URL을 직접 붙여넣으면 MNP 서버가 업무 제목과 상태를 조회해 크기 조절 가능한 전용 Dooray 지식 카드로 추가합니다. 전용 카드의 Dooray 제목과 원본 정보는 저장된 값을 즉시 표시하며 제목은 편집할 수 없습니다. 원본 URL은 변경할 수 있고, 새 URL 확인에 성공하면 URL·제목·상태를 한 번에 교체합니다. 편집자가 문서를 열거나 카드 상세 보기를 열면 원본을 비동기로 다시 조회하고, 실제 변경이 있을 때만 저장 값을 갱신합니다. 조회에 실패하면 기존 저장 값을 유지합니다. 사용자는 AI가 지식으로 활용할 보충 설명을 입력하고 주요·보조 지식선으로 일반 카드에 연결합니다. 서버는 `MNP_DOORAY_API_KEY` 또는 `DOORAY_API_KEY`를 우선 사용하고, 값이 없으면 `MNP_DOORAY_CONFIG_FILE`의 `mcpServers.{MNP_DOORAY_MCP_SERVER_NAME}.env.DOORAY_API_KEY`를 읽습니다. API 키는 브라우저, 문서 데이터와 API 응답에 포함되지 않습니다. 사용자 홈의 `.claude.json`은 저장소 밖에 있으므로 Git 커밋이나 MindNProgress 백업에 포함되지 않습니다.
 
 ## 접속과 공유 경로
 

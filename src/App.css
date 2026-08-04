@@ -373,6 +373,20 @@
 .image-inspector-meta dd { margin: 0; color: #5c5563; font-size: 8px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .image-inspector-help { display: flex; flex-direction: column; gap: 6px; padding: 11px; color: #8d8794; border: 1px solid #e5e0f4; border-radius: 9px; background: #f6f3fd; font-size: 8px; line-height: 1.55; }
 .image-inspector-help strong { color: #6255c5; font-size: 9px; }
+.dooray-knowledge-inspector-content { display: flex; flex-direction: column; gap: 16px; }
+.dooray-knowledge-origin { display: flex; flex-direction: column; gap: 10px; padding: 12px; border: 1px solid #dfe5f2; border-radius: 10px; background: #f7f9fe; }
+.dooray-knowledge-provider-row { min-width: 0; display: flex; align-items: center; gap: 6px; color: #5570a9; font-size: 8px; font-weight: 800; }
+.dooray-knowledge-provider-row > small { max-width: 45%; margin-left: auto; overflow: hidden; padding: 3px 6px; color: #5872aa; border-radius: 999px; background: #e7eefc; font-size: 7px; font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }
+.dooray-knowledge-origin > strong { overflow: hidden; color: #2f3748; font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+.dooray-knowledge-origin .dooray-knowledge-url-field { gap: 6px; margin: 0; }
+.dooray-knowledge-url-field > span { color: #7d7784; font-size: 8px; font-weight: 700; }
+.dooray-knowledge-url-field > input.invalid { border-color: #d36a6a; box-shadow: 0 0 0 3px rgba(211, 106, 106, .09); }
+.dooray-knowledge-url-field > small { font-size: 8px; line-height: 1.45; }
+.dooray-knowledge-url-field > small.updating { color: #5570a9; }
+.dooray-knowledge-url-field > small.error { color: #bd5555; }
+.dooray-knowledge-origin .task-link { margin-top: 1px; }
+.dooray-knowledge-inspector-content .image-description-field { margin-bottom: 0; }
+.dooray-knowledge-help { margin-top: auto; }
 
 .inspector { position: relative; border-left: 1px solid #e9e7ef; }
 .inspector-resizer { width: 11px; height: 100%; position: absolute; top: 0; left: calc(100% - var(--inspector-width, 278px) - 5px); z-index: 8; display: flex; align-items: center; justify-content: center; outline: 0; cursor: col-resize; touch-action: none; }

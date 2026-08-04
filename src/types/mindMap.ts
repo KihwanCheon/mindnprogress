@@ -43,6 +43,22 @@ export type MindImageData = {
   displayHeight: number
 }
 
+export type MindDoorayTaskData = {
+  provider: 'dooray-task'
+  url: string
+  hostname: string
+  projectId: string
+  postId: string
+  title?: string
+  taskNumber: string
+  workflowName: string
+  workflowClass: string
+  closed: boolean
+  resolvedAt: string
+  displayWidth: number
+  displayHeight: number
+}
+
 export type AiConversationRuntime = {
   conversationId: string
   state: 'running' | 'waiting-confirmation' | 'idle' | 'unknown'
@@ -65,11 +81,15 @@ export type MindNodeData = {
   status: 'planned' | 'in-progress' | 'done'
   kind: 'root' | 'branch' | 'task' | 'image'
   image?: MindImageData
+  externalLink?: MindDoorayTaskData
   imageAssetUrl?: string
   imageEditable?: boolean
   onImageResizeStart?: () => void
   onImageResizeEnd?: (width: number, height: number) => void
   onOpenImagePreview?: () => void
+  externalLinkEditable?: boolean
+  onExternalLinkResizeStart?: () => void
+  onExternalLinkResizeEnd?: (width: number, height: number) => void
   taskUrl?: string
   aiConversationId?: string
   reference?: MindNodeReference

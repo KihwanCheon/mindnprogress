@@ -42,7 +42,14 @@
 .mind-node.root .node-status-badge.in-progress { background: rgba(255,255,255,.22); }
 .mind-node.root .node-status-badge.done { background: rgba(255,255,255,.2); }
 .mind-node h3 { max-width: 185px; margin: 10px 0 4px; overflow: hidden; color: #332e3b; font-size: 13px; font-weight: 720; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
+.node-title-row { max-width: 185px; display: flex; align-items: center; gap: 6px; margin: 10px 0 4px; }
+.node-title-row h3 { min-width: 0; max-width: none; flex: 1; margin: 0; }
+.dooray-linked-icon { width: 16px; height: 16px; display: grid; flex: none; place-items: center; color: white; border-radius: 5px; background: #4f79d8; font-size: 8px; font-weight: 850; line-height: 1; }
+.dooray-linked-open { width: 18px; height: 18px; display: grid; flex: none; place-items: center; color: #4f6fb5; border-radius: 5px; background: #e8eefb; font-size: 11px; font-weight: 800; line-height: 1; text-decoration: none; }
+.dooray-linked-open:hover { color: white; background: #4f79d8; }
 .mind-node.root h3 { color: white; font-size: 14px; }
+.mind-node.root .dooray-linked-open { color: white; background: rgba(255,255,255,.16); }
+.mind-node.root .dooray-linked-open:hover { color: #5548bd; background: white; }
 .mind-node p { max-width: 185px; margin: 0; overflow: hidden; color: #9993a1; font-size: 9px; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
 .mind-node.root p { color: rgba(255,255,255,.72); }
 .node-progress { height: 3px; margin-top: 12px; overflow: hidden; border-radius: 4px; background: #eeecf1; }
@@ -86,5 +93,7 @@
 .mind-node .react-flow__handle:hover { transform: scale(1.35); }
 .mind-node .knowledge-route-handle,
 .mind-node.selected .knowledge-route-handle { width: 1px; height: 1px; border: 0; background: transparent; opacity: 0; pointer-events: none; }
+[data-theme="dark"] .dooray-linked-open { color: #b8c9ff; background: rgba(113,149,238,.18); }
+[data-theme="dark"] .dooray-linked-open:hover { color: white; background: #7195ee; }
 .react-flow__node.drop-target .mind-node { border-color: #35a77f; box-shadow: 0 0 0 4px rgba(67,183,142,.17), 0 12px 28px rgba(40,139,104,.2); transform: scale(1.025); }
 .react-flow__node.drop-target::after { content: '여기에 자식으로 이동'; position: absolute; left: 50%; bottom: -26px; z-index: 5; padding: 4px 7px; color: white; border-radius: 6px; background: #35a77f; box-shadow: 0 5px 12px rgba(40,139,104,.22); font-size: 8px; font-weight: 700; white-space: nowrap; transform: translateX(-50%); pointer-events: none; }
