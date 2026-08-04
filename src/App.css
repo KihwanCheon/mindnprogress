@@ -286,8 +286,9 @@
 .access-dot { width: 6px; height: 6px; border-radius: 50%; background: #45b58d; }
 .access-dot.viewer { background: #e1a14c; }
 
-.canvas-wrap { position: relative; min-width: 0; background: #f8f7fb; }
-.canvas-wrap.right-panning, .canvas-wrap.right-panning * { cursor: grabbing !important; user-select: none; }
+.canvas-wrap { position: relative; min-width: 0; background: #f8f7fb; touch-action: none; }
+.canvas-wrap .react-flow__node { -webkit-touch-callout: none; }
+.canvas-wrap.right-panning, .canvas-wrap.right-panning *, .canvas-wrap.touch-panning, .canvas-wrap.touch-panning * { cursor: grabbing !important; user-select: none; }
 .canvas-wrap.knowledge-connecting .react-flow__node, .canvas-wrap.knowledge-connecting .react-flow__node * { cursor: crosshair !important; }
 .knowledge-connection-preview { width: 100%; height: 100%; position: absolute; inset: 0; z-index: 8; overflow: hidden; color: var(--theme-knowledge-primary); pointer-events: none; }
 .knowledge-connection-preview.secondary { color: var(--theme-knowledge-fallback); }

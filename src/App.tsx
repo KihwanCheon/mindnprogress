@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type Dispatch, type FormEvent as ReactFormEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type SetStateAction } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type Dispatch, type FormEvent as ReactFormEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type SetStateAction, type TouchEvent as ReactTouchEvent } from 'react'
 import {
   addEdge,
   Background,
@@ -41,6 +41,7 @@ import { createsKnowledgeCycle, isHierarchyEdge, isKnowledgeEdge, knowledgePolic
 import { normalizedDoorayTaskUrl, taskUrlProvider } from './utils/externalLinks'
 import { mergeMapContent } from './utils/mergeMapContent.mjs'
 import { extractTextLinks } from './utils/textLinks'
+import { touchPointCentroid, touchPointDistance, viewportForTouchGesture } from './utils/touchViewport.mjs'
 import { appliedUiTheme, applyUiTheme, storedUiTheme, UI_THEME_STORAGE_KEY, type UiTheme } from './theme'
 
 const DOCUMENT_COLORS = [
@@ -58,6 +59,10 @@ const DOCUMENT_COLORS = [
 
 const MINDMAP_GRID_SIZE = 24
 const MINDMAP_SNAP_GRID: [number, number] = [MINDMAP_GRID_SIZE, MINDMAP_GRID_SIZE]
+const MINDMAP_MIN_ZOOM = 0.25
+const MINDMAP_MAX_ZOOM = 1.8
+const TOUCH_CARD_LONG_PRESS_MS = 500
+const TOUCH_CARD_MOVE_THRESHOLD = 8
 const MINDMAP_CHILD_HORIZONTAL_GAP = MINDMAP_GRID_SIZE * 4
 const MINDMAP_WORK_NODE_VERTICAL_STEP = MINDMAP_GRID_SIZE * 6
 const MINDMAP_IMAGE_MAX_WIDTH = 480
@@ -690,6 +695,48 @@ type RightPanGesture = {
   contextMenuSuppressed: boolean
 }
 
+type TouchPanGesture = {
+  startCentroid: { x: number; y: number }
+  startDistance: number
+  viewport: { x: number; y: number; zoom: number }
+}
+
+type TouchCardGesture = {
+  identifier: number
+  nodeId: string
+  startClient: { x: number; y: number }
+  startFlow: { x: number; y: number }
+  startPosition: { x: number; y: number }
+  currentPosition: { x: number; y: number }
+  phase: 'pressing' | 'armed' | 'dragging' | 'cancelled'
+  timer: number | null
+}
+
+function touchPointsWithin(
+  element: HTMLElement,
+  touches: ReactTouchEvent<HTMLElement>['touches'],
+) {
+  const bounds = element.getBoundingClientRect()
+  const points: { x: number; y: number }[] = []
+  for (let index = 0; index < touches.length; index += 1) {
+    const touch = touches.item(index)
+    if (!touch || !(touch.target instanceof Element) || !element.contains(touch.target)) continue
+    points.push({ x: touch.clientX - bounds.left, y: touch.clientY - bounds.top })
+  }
+  return points
+}
+
+function touchWithIdentifier(
+  touches: ReactTouchEvent<HTMLElement>['touches'],
+  identifier: number,
+) {
+  for (let index = 0; index < touches.length; index += 1) {
+    const touch = touches.item(index)
+    if (touch?.identifier === identifier) return touch
+  }
+  return null
+}
+
 type HistorySnapshot = {
   nodes: MindMapNode[]
   edges: MindMapEdge[]
@@ -842,7 +889,14 @@ function useMapHistory(
     if (pending.current) commitTimer.current = window.setTimeout(commitPending, 350)
   }, [clearCommitTimer, commitPending])
 
-  return { ...availability, undo, redo, resetHistory, beginTransaction, endTransaction }
+  const cancelTransaction = useCallback(() => {
+    transactionActive.current = false
+    clearCommitTimer()
+    pending.current = null
+    refreshAvailability()
+  }, [clearCommitTimer, refreshAvailability])
+
+  return { ...availability, undo, redo, resetHistory, beginTransaction, endTransaction, cancelTransaction }
 }
 
 const MAP_CACHE_KEY = 'mindnprogress-map-cache-v1'
@@ -1499,7 +1553,7 @@ function PasswordChangeDialog({ onClose }: { onClose: () => void }) {
 function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { user: AuthUser; onLogout: () => void; initialDeepLink: WorkspaceDeepLink | null; theme: UiTheme; onToggleTheme: () => void }) {
   const [nodes, setNodes, onNodesChange] = useNodesState<MindMapNode>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState<MindMapEdge>([])
-  const { canUndo, canRedo, undo, redo, resetHistory, beginTransaction: beginHistoryTransaction, endTransaction: endHistoryTransaction } = useMapHistory(nodes, setNodes, edges, setEdges)
+  const { canUndo, canRedo, undo, redo, resetHistory, beginTransaction: beginHistoryTransaction, endTransaction: endHistoryTransaction, cancelTransaction: cancelHistoryTransaction } = useMapHistory(nodes, setNodes, edges, setEdges)
   const mode: AccessMode = user.role === 'viewer' ? 'viewer' : 'editor'
   const [adminOpen, setAdminOpen] = useState(false)
   const closeAdminPanel = useCallback(() => setAdminOpen(false), [])
@@ -1593,6 +1647,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const [documentDropTargetId, setDocumentDropTargetId] = useState<string | null>(null)
   const [dropTargetId, setDropTargetId] = useState<string | null>(null)
   const [rightPanning, setRightPanning] = useState(false)
+  const [touchPanning, setTouchPanning] = useState(false)
   const [resizeSnapToGrid, setResizeSnapToGrid] = useState(false)
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const savedWidth = Number(localStorage.getItem('mindnprogress-sidebar-width'))
@@ -1619,8 +1674,13 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const [saveError, setSaveError] = useState('')
   const dragSnapshot = useRef<DragSnapshot | null>(null)
   const rightPanGesture = useRef<RightPanGesture | null>(null)
+  const touchPanGesture = useRef<TouchPanGesture | null>(null)
+  const touchPanOwned = useRef(false)
+  const touchCardGesture = useRef<TouchCardGesture | null>(null)
   const resizeGestureActive = useRef(false)
   const suppressNodeContextMenuUntil = useRef(0)
+  const suppressTouchClickUntil = useRef(0)
+  const suppressTouchContextMenu = useRef<{ nodeId: string; until: number } | null>(null)
   const serverBaseline = useRef<MapDocument | null>(null)
   const pastedNodeNotificationSuppressions = useRef<Map<string, Set<string>>>(new Map())
   const cursorSendAt = useRef(0)
@@ -3131,7 +3191,26 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     }
   }, [setResizeGridSnap])
 
+  const showNodeContextMenu = useCallback((nodeId: string, clientX: number, clientY: number) => {
+    if (mode !== 'editor') return
+    setDocumentContextMenu(null)
+    setAiConversationContextMenu(null)
+    setSelectedId(nodeId)
+    const menuHeight = nodes.find((node) => node.id === nodeId)?.data.kind === 'image' ? 240 : 440
+    setNodeContextMenu({
+      x: Math.max(8, Math.min(clientX, window.innerWidth - 230)),
+      y: Math.max(8, Math.min(clientY, window.innerHeight - menuHeight)),
+      nodeId,
+    })
+  }, [mode, nodes])
+
   const openNodeContextMenu = useCallback((event: ReactMouseEvent, nodeId: string) => {
+    const touchSuppression = suppressTouchContextMenu.current
+    if (touchSuppression?.nodeId === nodeId && Date.now() < touchSuppression.until) {
+      event.preventDefault()
+      event.stopPropagation()
+      return
+    }
     const gesture = rightPanGesture.current
     if (gesture?.moved || Date.now() < suppressNodeContextMenuUntil.current) {
       event.preventDefault()
@@ -3143,16 +3222,8 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     if (mode !== 'editor') return
     event.preventDefault()
     event.stopPropagation()
-    setDocumentContextMenu(null)
-    setAiConversationContextMenu(null)
-    setSelectedId(nodeId)
-    const menuHeight = nodes.find((node) => node.id === nodeId)?.data.kind === 'image' ? 240 : 440
-    setNodeContextMenu({
-      x: Math.max(8, Math.min(event.clientX, window.innerWidth - 230)),
-      y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight)),
-      nodeId,
-    })
-  }, [mode, nodes])
+    showNodeContextMenu(nodeId, event.clientX, event.clientY)
+  }, [mode, showNodeContextMenu])
 
   useEffect(() => {
     const moveRightPan = (event: PointerEvent) => {
@@ -3199,6 +3270,103 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       window.removeEventListener('blur', cancelRightPan)
     }
   }, [setViewport])
+
+  const restoreNodeDragForTouchPan = useCallback(() => {
+    const snapshot = dragSnapshot.current
+    if (!snapshot) return
+
+    setNodes((current) => current.map((node) => {
+      const originalPosition = node.id === snapshot.rootId
+        ? snapshot.rootPosition
+        : snapshot.descendantPositions.get(node.id) ?? snapshot.selectedPositions.get(node.id)
+      if (!originalPosition
+        || (node.position.x === originalPosition.x && node.position.y === originalPosition.y)) return node
+      return { ...node, position: { ...originalPosition } }
+    }))
+    dragSnapshot.current = null
+    dropTargetIdRef.current = null
+    setDropTargetId(null)
+    cancelHistoryTransaction()
+  }, [cancelHistoryTransaction, setNodes])
+
+  const resetTouchPanBaseline = useCallback((points: { x: number; y: number }[]) => {
+    if (points.length < 2) {
+      touchPanGesture.current = null
+      return
+    }
+
+    const [first, second] = points
+    const [x, y, zoom] = reactFlowStore.getState().transform
+    touchPanGesture.current = {
+      startCentroid: touchPointCentroid(first, second),
+      startDistance: touchPointDistance(first, second),
+      viewport: { x, y, zoom },
+    }
+  }, [reactFlowStore])
+
+  const startTouchPan = useCallback((event: ReactTouchEvent<HTMLElement>) => {
+    if (viewMode !== 'mindmap') return
+    const points = touchPointsWithin(event.currentTarget, event.touches)
+    if (points.length < 2) return
+    event.preventDefault()
+    event.stopPropagation()
+    suppressTouchClickUntil.current = Date.now() + 500
+    if (!touchPanOwned.current) {
+      touchPanOwned.current = true
+      setTouchPanning(true)
+      setNodeContextMenu(null)
+      restoreNodeDragForTouchPan()
+    }
+    resetTouchPanBaseline(points)
+  }, [resetTouchPanBaseline, restoreNodeDragForTouchPan, viewMode])
+
+  const moveTouchPan = useCallback((event: ReactTouchEvent<HTMLElement>) => {
+    if (!touchPanOwned.current) return
+
+    event.preventDefault()
+    event.stopPropagation()
+    const gesture = touchPanGesture.current
+    const [first, second] = touchPointsWithin(event.currentTarget, event.touches)
+    if (!gesture || !first || !second) return
+
+    const nextViewport = viewportForTouchGesture({
+      startCentroid: gesture.startCentroid,
+      currentCentroid: touchPointCentroid(first, second),
+      startDistance: gesture.startDistance,
+      currentDistance: touchPointDistance(first, second),
+      viewport: gesture.viewport,
+      minZoom: MINDMAP_MIN_ZOOM,
+      maxZoom: MINDMAP_MAX_ZOOM,
+    })
+    suppressTouchClickUntil.current = Date.now() + 500
+    void setViewport(nextViewport, { duration: 0 })
+  }, [setViewport])
+
+  const finishTouchPan = useCallback((event: ReactTouchEvent<HTMLElement>) => {
+    if (!touchPanOwned.current) return
+    event.preventDefault()
+    suppressTouchClickUntil.current = Date.now() + 500
+    const remainingPoints = touchPointsWithin(event.currentTarget, event.touches)
+    if (remainingPoints.length >= 2) {
+      resetTouchPanBaseline(remainingPoints)
+      return
+    }
+    touchPanGesture.current = null
+    if (remainingPoints.length === 0) {
+      touchPanOwned.current = false
+      setTouchPanning(false)
+    }
+  }, [resetTouchPanBaseline])
+
+  useEffect(() => {
+    const cancelTouchPan = () => {
+      touchPanGesture.current = null
+      touchPanOwned.current = false
+      setTouchPanning(false)
+    }
+    window.addEventListener('blur', cancelTouchPan)
+    return () => window.removeEventListener('blur', cancelTouchPan)
+  }, [])
 
   const copyNode = useCallback((nodeId: string) => {
     const node = nodes.find((candidate) => candidate.id === nodeId)
@@ -4097,6 +4265,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   }
 
   const onSelectionChange = useCallback(({ nodes: selected }: OnSelectionChangeParams<MindMapNode, MindMapEdge>) => {
+    if (touchPanOwned.current) return
     const currentSelectedId = selectedIdRef.current
     if (currentSelectedId && selected.some((node) => node.id === currentSelectedId)) return
 
@@ -4104,6 +4273,11 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   }, [])
 
   const onNodeClick = useCallback((event: ReactMouseEvent, node: MindMapNode) => {
+    if (Date.now() < suppressTouchClickUntil.current) {
+      event.preventDefault()
+      event.stopPropagation()
+      return
+    }
     if (knowledgeConnection) {
       event.preventDefault()
       event.stopPropagation()
@@ -4132,7 +4306,8 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     setKnowledgeConnectionMessage('')
   }, [knowledgeConnection])
 
-  const onNodeDragStart = useCallback((_event: MouseEvent | TouchEvent, draggedNode: MindMapNode) => {
+  const startNodeDrag = useCallback((draggedNode: MindMapNode) => {
+    if (touchPanOwned.current) return
     beginHistoryTransaction()
     dropTargetIdRef.current = null
     setDropTargetId(null)
@@ -4172,11 +4347,16 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     }
   }, [beginHistoryTransaction, hierarchyEdges, nodes])
 
-  const onNodeDrag = useCallback((event: MouseEvent | TouchEvent, draggedNode: MindMapNode) => {
+  const onNodeDragStart = useCallback((_event: MouseEvent | TouchEvent, draggedNode: MindMapNode) => {
+    startNodeDrag(draggedNode)
+  }, [startNodeDrag])
+
+  const moveNodeDrag = useCallback((draggedNode: MindMapNode, snapToGrid: boolean) => {
+    if (touchPanOwned.current) return
     const snapshot = dragSnapshot.current
     if (!snapshot || snapshot.rootId !== draggedNode.id) return
 
-    const draggedPosition = event.altKey ? snapMindMapPosition(draggedNode.position) : draggedNode.position
+    const draggedPosition = snapToGrid ? snapMindMapPosition(draggedNode.position) : draggedNode.position
     const deltaX = draggedPosition.x - snapshot.rootPosition.x
     const deltaY = draggedPosition.y - snapshot.rootPosition.y
 
@@ -4186,7 +4366,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       }
 
       const initialPosition = snapshot.descendantPositions.get(node.id)
-        ?? (event.altKey ? snapshot.selectedPositions.get(node.id) : undefined)
+        ?? (snapToGrid ? snapshot.selectedPositions.get(node.id) : undefined)
       if (!initialPosition) return node
 
       return {
@@ -4244,10 +4424,14 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     setSavedAt('저장 중…')
   }, [hierarchyEdges, nodes, setNodes])
 
-  const onNodeDragStop = useCallback((event: MouseEvent | TouchEvent, draggedNode: MindMapNode) => {
+  const onNodeDrag = useCallback((event: MouseEvent | TouchEvent, draggedNode: MindMapNode) => {
+    moveNodeDrag(draggedNode, event.altKey)
+  }, [moveNodeDrag])
+
+  const stopNodeDrag = useCallback((draggedNode: MindMapNode, snapToGrid: boolean) => {
     const snapshot = dragSnapshot.current
     const targetId = dropTargetIdRef.current
-    const draggedPosition = event.altKey ? snapMindMapPosition(draggedNode.position) : draggedNode.position
+    const draggedPosition = snapToGrid ? snapMindMapPosition(draggedNode.position) : draggedNode.position
 
     if (snapshot && targetId) {
       const target = nodes.find((node) => node.id === targetId)
@@ -4257,7 +4441,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
           x: childMindMapHorizontalPosition(target.position, nodeDimensions(target).width),
           y: target.position.y + childCount * 150 - 40,
         }
-        const desiredPosition = event.altKey ? snapMindMapPosition(automaticPosition) : automaticPosition
+        const desiredPosition = snapToGrid ? snapMindMapPosition(automaticPosition) : automaticPosition
         const rootDelta = {
           x: desiredPosition.x - snapshot.rootPosition.x,
           y: desiredPosition.y - snapshot.rootPosition.y,
@@ -4292,7 +4476,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         setSelectedId(draggedNode.id)
         setSavedAt('부모 노드 변경됨')
       }
-    } else if (snapshot && event.altKey) {
+    } else if (snapshot && snapToGrid) {
       const deltaX = draggedPosition.x - snapshot.rootPosition.x
       const deltaY = draggedPosition.y - snapshot.rootPosition.y
       setNodes((current) => current.map((node) => {
@@ -4311,6 +4495,141 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     setDropTargetId(null)
     endHistoryTransaction()
   }, [endHistoryTransaction, hierarchyEdges, nodes, setEdges, setNodes])
+
+  const onNodeDragStop = useCallback((event: MouseEvent | TouchEvent, draggedNode: MindMapNode) => {
+    stopNodeDrag(draggedNode, event.altKey)
+  }, [stopNodeDrag])
+
+  const cancelTouchCardGesture = useCallback((restorePosition: boolean) => {
+    const gesture = touchCardGesture.current
+    if (!gesture) return
+    if (gesture.timer !== null) window.clearTimeout(gesture.timer)
+    touchCardGesture.current = null
+    if (gesture.phase === 'armed' || gesture.phase === 'dragging') setNodeContextMenu(null)
+    if (restorePosition && gesture.phase === 'dragging') restoreNodeDragForTouchPan()
+  }, [restoreNodeDragForTouchPan])
+
+  const startTouchCardGesture = useCallback((event: ReactTouchEvent<HTMLElement>) => {
+    if (mode !== 'editor' || viewMode !== 'mindmap' || knowledgeConnection || touchPanOwned.current) return
+    if (event.touches.length !== 1) return
+    const target = event.target
+    if (!(target instanceof Element)
+      || target.closest('button, a, input, textarea, select, [contenteditable="true"], .nodrag, .react-flow__handle, .react-flow__resize-control')) return
+    const nodeElement = target.closest<HTMLElement>('.react-flow__node[data-id]')
+    const nodeId = nodeElement?.dataset.id
+    const touch = event.touches.item(0)
+    const node = nodeId ? nodesRef.current.find((candidate) => candidate.id === nodeId) : undefined
+    if (!nodeId || !touch || !node) return
+
+    event.preventDefault()
+    event.stopPropagation()
+    cancelTouchCardGesture(true)
+    suppressTouchClickUntil.current = Date.now() + TOUCH_CARD_LONG_PRESS_MS + 800
+    suppressTouchContextMenu.current = {
+      nodeId,
+      until: Date.now() + TOUCH_CARD_LONG_PRESS_MS + 2_000,
+    }
+    const gesture: TouchCardGesture = {
+      identifier: touch.identifier,
+      nodeId,
+      startClient: { x: touch.clientX, y: touch.clientY },
+      startFlow: screenToFlowPosition({ x: touch.clientX, y: touch.clientY }),
+      startPosition: { ...node.position },
+      currentPosition: { ...node.position },
+      phase: 'pressing',
+      timer: null,
+    }
+    gesture.timer = window.setTimeout(() => {
+      if (touchCardGesture.current !== gesture || gesture.phase !== 'pressing') return
+      gesture.timer = null
+      gesture.phase = 'armed'
+      setNodes((current) => synchronizeNodeSelection(current, gesture.nodeId))
+      showNodeContextMenu(gesture.nodeId, gesture.startClient.x, gesture.startClient.y)
+    }, TOUCH_CARD_LONG_PRESS_MS)
+    touchCardGesture.current = gesture
+  }, [cancelTouchCardGesture, knowledgeConnection, mode, screenToFlowPosition, setNodes, showNodeContextMenu, viewMode])
+
+  const moveTouchCardGesture = useCallback((event: ReactTouchEvent<HTMLElement>) => {
+    const gesture = touchCardGesture.current
+    if (!gesture || touchPanOwned.current) return
+    const touch = touchWithIdentifier(event.touches, gesture.identifier)
+    if (!touch) return
+
+    event.preventDefault()
+    event.stopPropagation()
+    suppressTouchClickUntil.current = Date.now() + 500
+    const clientDistance = Math.hypot(
+      touch.clientX - gesture.startClient.x,
+      touch.clientY - gesture.startClient.y,
+    )
+    if (gesture.phase === 'pressing') {
+      if (clientDistance <= TOUCH_CARD_MOVE_THRESHOLD) return
+      if (gesture.timer !== null) window.clearTimeout(gesture.timer)
+      gesture.timer = null
+      gesture.phase = 'cancelled'
+      return
+    }
+    if (gesture.phase === 'cancelled' || clientDistance <= TOUCH_CARD_MOVE_THRESHOLD) return
+
+    const node = nodesRef.current.find((candidate) => candidate.id === gesture.nodeId)
+    if (!node) {
+      cancelTouchCardGesture(true)
+      return
+    }
+    if (gesture.phase === 'armed') {
+      gesture.phase = 'dragging'
+      setNodeContextMenu(null)
+      startNodeDrag({ ...node, selected: true })
+    }
+
+    const flowPoint = screenToFlowPosition({ x: touch.clientX, y: touch.clientY })
+    const position = snapMindMapPosition({
+      x: gesture.startPosition.x + flowPoint.x - gesture.startFlow.x,
+      y: gesture.startPosition.y + flowPoint.y - gesture.startFlow.y,
+    })
+    gesture.currentPosition = position
+    moveNodeDrag({ ...node, position, selected: true }, true)
+  }, [cancelTouchCardGesture, moveNodeDrag, screenToFlowPosition, startNodeDrag])
+
+  const finishTouchCardGesture = useCallback((event: ReactTouchEvent<HTMLElement>) => {
+    const gesture = touchCardGesture.current
+    if (!gesture || !touchWithIdentifier(event.changedTouches, gesture.identifier)) return
+    event.preventDefault()
+    event.stopPropagation()
+    suppressTouchClickUntil.current = Date.now() + 500
+
+    if (event.type === 'touchcancel') {
+      cancelTouchCardGesture(true)
+      return
+    }
+    if (gesture.timer !== null) window.clearTimeout(gesture.timer)
+    gesture.timer = null
+    touchCardGesture.current = null
+
+    if (gesture.phase === 'pressing') {
+      setNodes((current) => synchronizeNodeSelection(current, gesture.nodeId))
+      setSelectedId(gesture.nodeId)
+      return
+    }
+    if (gesture.phase !== 'dragging') return
+    const node = nodesRef.current.find((candidate) => candidate.id === gesture.nodeId)
+    if (node) stopNodeDrag({ ...node, position: gesture.currentPosition, selected: true }, true)
+    else restoreNodeDragForTouchPan()
+  }, [cancelTouchCardGesture, restoreNodeDragForTouchPan, setNodes, stopNodeDrag])
+
+  useEffect(() => {
+    const cancelOnBlur = () => cancelTouchCardGesture(true)
+    window.addEventListener('blur', cancelOnBlur)
+    return () => {
+      window.removeEventListener('blur', cancelOnBlur)
+      const gesture = touchCardGesture.current
+      if (gesture?.timer != null) window.clearTimeout(gesture.timer)
+    }
+  }, [cancelTouchCardGesture])
+
+  useEffect(() => {
+    cancelTouchCardGesture(true)
+  }, [activeMapId, cancelTouchCardGesture, viewMode])
 
   const renderDocumentListItem = (document: MapSummary, location: { type: 'top'; item: DocumentLayoutItem } | { type: 'group'; groupId: string }) => {
     const hasLoadedActiveDocument = document.id === activeMapId && loadedMapId === activeMapId
@@ -4856,10 +5175,30 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         {viewMode === 'mindmap' ? (
         <section
           ref={canvasWrapRef}
-          className={`canvas-wrap ${rightPanning ? 'right-panning' : ''} ${knowledgeConnection ? `knowledge-connecting ${knowledgeConnection.policy === 'reuse-first' ? 'primary' : 'secondary'}` : ''}`}
+          className={`canvas-wrap ${rightPanning ? 'right-panning' : ''} ${touchPanning ? 'touch-panning' : ''} ${knowledgeConnection ? `knowledge-connecting ${knowledgeConnection.policy === 'reuse-first' ? 'primary' : 'secondary'}` : ''}`}
           onPointerDownCapture={(event) => {
             prepareResizeGridSnap(event)
             startNodeRightPan(event)
+          }}
+          onTouchStartCapture={(event) => {
+            if (touchPointsWithin(event.currentTarget, event.touches).length >= 2) {
+              cancelTouchCardGesture(true)
+              startTouchPan(event)
+              return
+            }
+            startTouchCardGesture(event)
+          }}
+          onTouchMoveCapture={(event) => {
+            if (touchPanOwned.current) moveTouchPan(event)
+            else moveTouchCardGesture(event)
+          }}
+          onTouchEndCapture={(event) => {
+            if (touchPanOwned.current) finishTouchPan(event)
+            else finishTouchCardGesture(event)
+          }}
+          onTouchCancelCapture={(event) => {
+            if (touchPanOwned.current) finishTouchPan(event)
+            else finishTouchCardGesture(event)
           }}
           onPointerEnter={trackCanvasPointer}
           onPointerMove={trackCanvasPointer}
@@ -4892,7 +5231,12 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
             edges={loadedMapId === activeMapId ? flowEdges : []}
             nodeTypes={nodeTypes}
             edgeTypes={edgeTypes}
-            onNodesChange={onNodesChange}
+            onNodesChange={(changes) => {
+              const applicableChanges = touchPanOwned.current
+                ? changes.filter((change) => change.type !== 'position' && change.type !== 'select')
+                : changes
+              if (applicableChanges.length > 0) onNodesChange(applicableChanges)
+            }}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
             onInit={() => setMiniMapReadyMapId(activeMapId)}
@@ -4904,26 +5248,35 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
             onNodeMouseEnter={onKnowledgeTargetEnter}
             onNodeMouseLeave={onKnowledgeTargetLeave}
             onSelectionChange={onSelectionChange}
-            onPaneClick={() => { cancelKnowledgeConnection(); setSelectedId(null); setNodeContextMenu(null) }}
+            onPaneClick={(event) => {
+              if (Date.now() < suppressTouchClickUntil.current) {
+                event.preventDefault()
+                return
+              }
+              cancelKnowledgeConnection()
+              setSelectedId(null)
+              setNodeContextMenu(null)
+            }}
             onPaneContextMenu={(event) => event.preventDefault()}
             onDoubleClick={(event) => {
               if (mode === 'editor' && (event.target as HTMLElement).classList.contains('react-flow__pane')) {
                 addNode(undefined, screenToFlowPosition({ x: event.clientX, y: event.clientY }))
               }
             }}
-            nodesDraggable={mode === 'editor' && !knowledgeConnection}
-            nodesConnectable={mode === 'editor' && !knowledgeConnection}
+            nodesDraggable={mode === 'editor' && !knowledgeConnection && !touchPanning}
+            nodesConnectable={mode === 'editor' && !knowledgeConnection && !touchPanning}
             edgesReconnectable={mode === 'editor'}
             snapToGrid={resizeSnapToGrid}
             snapGrid={MINDMAP_SNAP_GRID}
             nodeClickDistance={4}
             nodeDragThreshold={4}
-            panOnDrag={[0, 1, 2]}
+            panOnDrag={touchPanning ? false : [0, 1, 2]}
+            zoomOnPinch={!touchPanning}
             deleteKeyCode={mode === 'editor' ? ['Backspace', 'Delete'] : null}
             fitView
             fitViewOptions={{ padding: 0.2 }}
-            minZoom={0.25}
-            maxZoom={1.8}
+            minZoom={MINDMAP_MIN_ZOOM}
+            maxZoom={MINDMAP_MAX_ZOOM}
             defaultEdgeOptions={{ style: { strokeWidth: 2, stroke: 'var(--theme-edge)' } }}
             proOptions={{ hideAttribution: true }}
           >
