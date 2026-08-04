@@ -1,6 +1,7 @@
 .app-shell {
   min-width: 1080px;
-  height: 100vh;
+  height: 100%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -663,7 +664,8 @@
 .comment-form > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 5px; }
 .comment-form small { color: #aaa4af; font-size: 6px; }
 .comment-form button { display: flex; align-items: center; gap: 4px; padding: 6px 8px; color: white; border: 0; border-radius: 6px; background: #6657d9; font-size: 8px; font-weight: 700; cursor: pointer; }
-.comment-form .comment-detail-toggle { width: 100%; justify-content: space-between; margin-top: 5px; padding: 6px 7px; color: #6c6278; border: 1px solid #e0dce6; background: #f3f1f6; }
+.comment-form .comment-detail-toggle { width: 100%; justify-content: space-between; margin-top: 5px; padding: 6px 7px; color: #6c6278; border: 1px solid #e0dce6; background: #f3f1f6; transform: translateY(-8px); }
+.comment-form .comment-detail-toggle.open + .comment-detail-editor { transform: translateY(-8px); }
 .comment-form .comment-detail-toggle:hover { color: #5b4fc2; border-color: #cec7eb; background: #eeebfa; }
 .comment-form .comment-detail-toggle .icon { transition: transform .14s; }
 .comment-form .comment-detail-toggle.open .icon { transform: rotate(180deg); }
@@ -717,7 +719,7 @@
   .subscription-usage-pill strong { display: none; }
 }
 
-.session-loading { width: 100%; height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 13px; color: #898390; background: #f8f7fb; font-size: 11px; }
+.session-loading { width: 100%; height: 100%; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 13px; color: #898390; background: #f8f7fb; font-size: 11px; }
 .login-page { width: 100%; min-height: 100vh; min-height: 100dvh; display: grid; grid-template-columns: minmax(0, 1.12fr) minmax(380px, .88fr); background: #fff; }
 .login-intro { position: relative; min-width: 0; overflow: hidden; display: flex; flex-direction: column; justify-content: center; padding: clamp(48px, 7vw, 112px); color: white; background: radial-gradient(circle at 75% 18%, rgba(151, 136, 247, .45), transparent 30%), linear-gradient(145deg, #5545c3, #7364dc 58%, #8778e8); }
 .login-intro::after { content: ''; position: absolute; width: 420px; height: 420px; right: -150px; bottom: -200px; border: 1px solid rgba(255,255,255,.15); border-radius: 50%; box-shadow: 0 0 0 70px rgba(255,255,255,.03), 0 0 0 140px rgba(255,255,255,.025); }
