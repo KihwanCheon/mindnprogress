@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { resolveScopedAttribution } from '../server/lib/attributionScope.mjs'
+import { resolveAttributionWithoutToken, resolveScopedAttribution } from '../server/lib/attributionScope.mjs'
 
 const NOW = 1_785_400_000_000
 
@@ -121,6 +121,48 @@ test('만료되었거나 다른 문서의 귀속은 후보에서 제외한다', 
   const expired = attribution('card-a', 3, { expiresAt: NOW - 1 })
   const otherMap = attribution('card-a', 4, { mapId: 'map-other' })
   const result = resolveScopedAttribution({ mapId: 'map-test', cardId: 'card-a' }, [expired, otherMap], new Map(), NOW)
+  assert.equal(result.attribution, null)
+  assert.equal(result.match, null)
+})
+
+test('토큰이 없어도 직접 밝힌 AI 종류와 모델을 연결 대화보다 우선한다', () => {
+  const conversation = { authorName: 'Claude Code(Opus)', mapId: 'map-test', cardId: 'card-a' }
+  const result = resolveAttributionWithoutToken(
+    { mapId: 'map-test', cardId: 'card-a' },
+    'Codex CLI(GPT-5.6-Sol)',
+    [],
+    new Map([['map-test:card-a', conversation]]),
+    NOW,
+  )
+  assert.equal(result.authorName, 'Codex CLI(GPT-5.6-Sol)')
+  assert.equal(result.attribution, null)
+  assert.equal(result.match, 'self-declared')
+})
+
+test('토큰과 직접 식별 정보가 없으면 카드에 연결된 대화 귀속을 사용한다', () => {
+  const conversation = { authorName: 'Codex CLI(GPT-5.6-Sol)', mapId: 'map-test', cardId: 'card-a' }
+  const result = resolveAttributionWithoutToken(
+    { mapId: 'map-test', cardId: 'card-a' },
+    '',
+    [],
+    new Map([['map-test:card-a', conversation]]),
+    NOW,
+  )
+  assert.equal(result.authorName, '')
+  assert.equal(result.attribution, conversation)
+  assert.equal(result.match, 'conversation')
+})
+
+test('토큰이 없는 요청도 다른 카드의 대화 귀속은 사용하지 않는다', () => {
+  const conversation = { authorName: 'Codex CLI(GPT-5.6-Sol)', mapId: 'map-test', cardId: 'card-b' }
+  const result = resolveAttributionWithoutToken(
+    { mapId: 'map-test', cardId: 'card-a' },
+    '',
+    [],
+    new Map([['map-test:card-b', conversation]]),
+    NOW,
+  )
+  assert.equal(result.authorName, '')
   assert.equal(result.attribution, null)
   assert.equal(result.match, null)
 })

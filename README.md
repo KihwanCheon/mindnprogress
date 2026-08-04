@@ -174,6 +174,7 @@ npm run dev
 | `MNP_DATA_DIR` | `server/data` | 문서와 운영 데이터 저장 경로 |
 | `MNP_IMAGE_MAX_BYTES` | `15000000` | 이미지 파일 1개의 최대 업로드 크기(바이트) |
 | `MNP_AIONUI_URL` | 자동 탐색 | AionUi 백엔드 주소 강제 지정 |
+| `MNP_AIONUI_WEB_URL` | `MNP_PUBLIC_URL` 호스트의 7777 포트 | 원격 브라우저에서 AI 대화를 열 AionUi WebUI 주소 |
 | `MNP_AIONUI_DISCOVERY_FILE` | OS 임시 폴더의 `aionui-backend.json` | AionUi 가변 포트 탐색 파일 |
 | `MNP_AI_ATTRIBUTION_DURATION_MS` | 8시간 | AI 종류·모델 작성자 귀속 정보의 유지 시간(ms) |
 | `MNP_DOORAY_API_KEY` | Claude 설정에서 조회 | Dooray API 키 환경변수 우선 지정 |
@@ -202,6 +203,8 @@ npm run dev
 ## AionUi 연동
 
 MindNProgress는 AionUi가 OS 임시 디렉터리에 게시하는 `aionui-backend.json`을 요청할 때마다 읽어 실행 중인 백엔드 포트를 찾습니다. 탐색 파일을 사용할 수 없으면 `127.0.0.1:1986`, `127.0.0.1:5830` 순서로 호환 연결을 시도합니다. 고정 주소를 사용한다면 `MNP_AIONUI_URL`로 지정할 수 있습니다.
+
+다른 PC의 브라우저에서 `AI 대화 열기`를 누르면 AionUi WebUI의 `/#/conversation/{대화 ID}`를 매번 새 탭으로 엽니다. 닫힌 탭의 이름을 브라우저가 보존해 다음 실행이 무반응이 되는 상황을 피하기 위한 동작입니다. 기본 WebUI 주소는 `MNP_PUBLIC_URL`과 같은 호스트의 7777 포트이며, 주소나 포트가 다르면 `MNP_AIONUI_WEB_URL`을 지정합니다. `localhost` 또는 `127.0.0.1`로 접속한 브라우저는 기존 AionUi 데스크톱 딥링크를 사용하지만, `MNP_AIONUI_WEB_URL`을 명시하면 WebUI 열기가 우선됩니다.
 
 `AI 대화 시작`의 작업공간은 로그인 계정과 문서별 마지막 입력값을 유지합니다. 실제 대화를 시작한 작업공간은 로그인 계정의 서버 이력에 최대 10개까지 저장되어 PC와 4175 웹에서 같은 계정으로 접속하면 함께 표시되며, 각 항목의 `×` 버튼으로 양쪽 이력에서 제거할 수 있습니다. 기존 브라우저 이력은 처음 열 때 현재 로그인 계정의 서버 이력과 한 번 병합됩니다.
 

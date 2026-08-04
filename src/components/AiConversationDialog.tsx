@@ -148,13 +148,14 @@ function encodeBase64Json(value: unknown) {
   return btoa(binary)
 }
 
-export function AiConversationDialog({ userId, documentId, documentTitle, cardId, cardTitle, knowledgeSources, onClose }: {
+export function AiConversationDialog({ userId, documentId, documentTitle, cardId, cardTitle, knowledgeSources, launchInWebUi, onClose }: {
   userId: string
   documentId: string
   documentTitle: string
   cardId: string
   cardTitle: string
   knowledgeSources: { id: string; label: string; policy: KnowledgePolicy }[]
+  launchInWebUi: boolean
   onClose: () => void
 }) {
   const [options, setOptions] = useState<AionOptions | null>(null)
@@ -305,6 +306,22 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
 
   const launch = async () => {
     if (!options || !selectedAgent || !modelId || !request.trim()) return
+    let launchTab: Window | null = null
+    if (launchInWebUi) {
+      launchTab = window.open('about:blank', '_blank')
+      if (!launchTab) {
+        setLaunchError('AionUi 대화 탭을 열지 못했습니다. 브라우저의 팝업 차단을 해제한 뒤 다시 시도해 주세요.')
+        return
+      }
+      try {
+        launchTab.document.title = 'AionUi 대화 준비 중'
+        launchTab.document.body.textContent = 'AionUi 대화를 준비하는 중…'
+        launchTab.document.body.style.cssText = 'margin:0;display:grid;place-items:center;min-height:100vh;font:14px system-ui;color:#666;background:#f7f7f8'
+        launchTab.opener = null
+      } catch {
+        // 빈 탭 상태 안내를 만들 수 없어도 ticket 발급과 이동은 계속합니다.
+      }
+    }
     setLaunching(true)
     setLaunchError('')
     try {
@@ -341,11 +358,32 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
         workspace: workspace.trim() || undefined,
         autoSend: true,
       }
-      const data = encodeURIComponent(encodeBase64Json({ payload: JSON.stringify(launchPayload) }))
       void rememberWorkspace(workspace)
-      window.location.href = `${options.protocol}?v=1&data=${data}`
+      if (launchInWebUi) {
+        const launchResponse = await fetch('/api/integrations/aionui/external-conversation-launches', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(launchPayload),
+        })
+        const launchResult = await launchResponse.json().catch(() => ({})) as { launchUrl?: string; error?: string }
+        if (!launchResponse.ok || !launchResult.launchUrl) {
+          throw new Error(launchResult.error ?? 'AionUi WebUI 대화 시작 정보를 발급하지 못했습니다.')
+        }
+        if (!launchTab || launchTab.closed) {
+          launchTab = null
+          throw new Error('준비 중이던 AionUi 탭이 닫혔습니다. 다시 시도해 주세요.')
+        }
+        launchTab.location.href = launchResult.launchUrl
+        launchTab.focus()
+        launchTab = null
+      } else {
+        const data = encodeURIComponent(encodeBase64Json({ payload: JSON.stringify(launchPayload) }))
+        window.location.href = `${options.protocol}?v=1&data=${data}`
+      }
       onClose()
     } catch (launchFailure) {
+      if (launchTab && !launchTab.closed) launchTab.close()
       setLaunchError(launchFailure instanceof Error ? launchFailure.message : 'AI 대화를 시작하지 못했습니다.')
     } finally {
       setLaunching(false)

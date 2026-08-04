@@ -22,6 +22,8 @@ let activeAiType = ''
 let activeAiModel = ''
 let activeMapId = ''
 let activeCardId = ''
+const attributionContinuationToken = Symbol('attributionContinuationToken')
+let commentAttributionQueue = Promise.resolve()
 
 function snapMindMapPosition(position) {
   return {
@@ -143,7 +145,7 @@ async function integrationToken() {
 
 async function apiRequest(pathname, init = {}) {
   const token = await integrationToken()
-  const { aiMapId, aiCardId, ...requestInit } = init
+  const { aiMapId, aiCardId, requestAttributionContinuation, ...requestInit } = init
   const pathnameMapId = pathname.match(/^\/api\/maps\/([^/?]+)/)?.[1]
   const scopedMapId = String(aiMapId ?? (pathnameMapId ? decodeURIComponent(pathnameMapId) : '')).trim()
   const scopedCardId = String(aiCardId ?? (scopedMapId && scopedMapId === activeMapId ? activeCardId : '')).trim()
@@ -159,6 +161,7 @@ async function apiRequest(pathname, init = {}) {
         : {}),
       ...(scopedMapId ? { 'X-MNP-AI-Map-Id': scopedMapId } : {}),
       ...(scopedCardId ? { 'X-MNP-AI-Card-Id': scopedCardId } : {}),
+      ...(requestAttributionContinuation ? { 'X-MNP-AI-Request-Attribution-Continuation': 'true' } : {}),
       ...(requestInit.body ? { 'Content-Type': 'application/json' } : {}),
       ...requestInit.headers,
     },
@@ -171,7 +174,7 @@ async function apiRequest(pathname, init = {}) {
       body = JSON.parse(responseText)
     } catch {
       if (!response.ok) throw new Error(`MindNProgress 요청 실패 (${response.status})`)
-      return { ok: true, status: response.status }
+      body = { ok: true, status: response.status }
     }
   }
   if (!response.ok) {
@@ -180,7 +183,28 @@ async function apiRequest(pathname, init = {}) {
     error.code = body?.code
     throw error
   }
-  return body ?? { ok: true, status: response.status }
+  const result = body ?? { ok: true, status: response.status }
+  if (requestAttributionContinuation && result && typeof result === 'object') {
+    const continuationToken = String(response.headers.get('x-mnp-ai-attribution-continuation') ?? '').trim()
+    if (continuationToken.length >= 32 && continuationToken.length <= 200) {
+      Object.defineProperty(result, attributionContinuationToken, { value: continuationToken })
+    }
+  }
+  return result
+}
+
+function adoptAttributionContinuation(result) {
+  const continuationToken = result?.[attributionContinuationToken]
+  if (!continuationToken) return
+  activeAttributionToken = continuationToken
+  activeAiType = ''
+  activeAiModel = ''
+}
+
+function runCommentWithAttribution(operation) {
+  const queued = commentAttributionQueue.catch(() => undefined).then(operation)
+  commentAttributionQueue = queued.then(() => undefined, () => undefined)
+  return queued
 }
 
 function toolResult(value, compact = false) {
@@ -633,7 +657,7 @@ async function main() {
     activeAiType = attributionToken ? '' : (aiType ?? '')
     activeAiModel = attributionToken ? '' : (aiModel ?? '')
     const [documentResult, commentsResult, usersResult, health] = await Promise.all([
-      apiRequest(`/api/maps/${encodeURIComponent(mapId)}`),
+      apiRequest(`/api/maps/${encodeURIComponent(mapId)}`, { aiCardId: cardId, requestAttributionContinuation: true }),
       apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments?includeDetail=false`),
       apiRequest('/api/assignees'),
       apiRequest('/api/health'),
@@ -641,6 +665,7 @@ async function main() {
     const map = documentResult.map
     const selectedCard = map.nodes.find((node) => node.id === cardId)
     if (!selectedCard) throw new Error(`선택 카드를 찾을 수 없습니다: ${cardId}`)
+    adoptAttributionContinuation(documentResult)
 
     const hierarchyEdges = map.edges.filter(isHierarchyEdge)
     const knowledgeEdges = map.edges.filter(isKnowledgeEdge)
@@ -1256,8 +1281,12 @@ async function main() {
     const body = summary !== undefined
       ? { nodeId, summary, detail, parentId }
       : { nodeId, text, parentId }
-    return apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments`, {
-      method: 'POST', aiCardId: nodeId, body: JSON.stringify(body),
+    return runCommentWithAttribution(async () => {
+      const result = await apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments`, {
+        method: 'POST', aiCardId: nodeId, requestAttributionContinuation: true, body: JSON.stringify(body),
+      })
+      adoptAttributionContinuation(result)
+      return result
     })
   })
   registerTool(server, 'mindnprogress_update_comment', '기존 댓글 또는 답글의 요약과 상세를 제자리에서 수정합니다. summary를 보내면 기존 단일 본문 댓글도 summary-detail 형식으로 전환되므로, 향후 마이그레이션에서는 원문을 확인한 뒤 summary와 detail을 함께 보내세요. 댓글 ID, 작성자, 생성 시각, 답글 관계, 반응과 해결 상태는 유지됩니다.', {

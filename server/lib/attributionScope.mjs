@@ -21,3 +21,25 @@ export function resolveScopedAttribution(scope, attributionList, conversationAtt
   if (conversation) return { attribution: conversation, match: 'conversation', scope }
   return { attribution: null, match: null, scope }
 }
+
+export function resolveAttributionWithoutToken(
+  scope,
+  declaredAuthorName,
+  attributionList,
+  conversationAttributionsByKey,
+  now = Date.now(),
+) {
+  const normalizedDeclaredAuthorName = String(declaredAuthorName ?? '').trim()
+  if (normalizedDeclaredAuthorName) {
+    return {
+      attribution: null,
+      authorName: normalizedDeclaredAuthorName,
+      match: 'self-declared',
+      scope,
+    }
+  }
+  return {
+    ...resolveScopedAttribution(scope, attributionList, conversationAttributionsByKey, now),
+    authorName: '',
+  }
+}

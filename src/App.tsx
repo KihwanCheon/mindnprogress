@@ -74,6 +74,26 @@ const SUPPORTED_IMAGE_FILE_PATTERN = /\.(?:png|jpe?g|gif|webp)$/i
 const SIDEBAR_MIN_WIDTH = 190
 const SIDEBAR_AI_ACTIVITY_MIN_WIDTH = 208
 const SIDEBAR_MAX_WIDTH = 420
+const AIONUI_WEB_DEFAULT_PORT = '7777'
+
+function isLoopbackHostname(hostname: string) {
+  const normalized = hostname.trim().toLowerCase().replace(/^\[|\]$/g, '')
+  return normalized === 'localhost' || normalized === '::1' || normalized.startsWith('127.')
+}
+
+function defaultAionUiWebBaseUrl() {
+  const url = new URL(window.location.origin)
+  url.port = AIONUI_WEB_DEFAULT_PORT
+  return url.toString().replace(/\/+$/, '')
+}
+
+function aionUiConversationWebUrl(baseUrl: string, conversationId: string) {
+  const url = new URL(baseUrl)
+  url.pathname = '/'
+  url.search = ''
+  url.hash = `/conversation/${encodeURIComponent(conversationId)}`
+  return url.toString()
+}
 
 function snapMindMapPosition(position: { x: number; y: number }) {
   return {
@@ -1560,6 +1580,10 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const [accountMenuOpen, setAccountMenuOpen] = useState(false)
   const [passwordDialogOpen, setPasswordDialogOpen] = useState(false)
   const [aiDialogOpen, setAiDialogOpen] = useState(false)
+  const [aionUiWebNavigation, setAionUiWebNavigation] = useState(() => ({
+    baseUrl: defaultAionUiWebBaseUrl(),
+    configured: false,
+  }))
   const [previewImageNodeId, setPreviewImageNodeId] = useState<string | null>(null)
   const [nodeLinkCopyStatus, setNodeLinkCopyStatus] = useState<'idle' | 'copied' | 'failed'>('idle')
   const [doorayUrlDraft, setDoorayUrlDraft] = useState('')
@@ -1723,6 +1747,20 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     Object.keys(localStorage)
       .filter((key) => key === 'mindnprogress-demo-v1' || key.startsWith('mindnprogress-demo-v1:'))
       .forEach((key) => localStorage.removeItem(key))
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    void apiRequest<{ aionUiWebBaseUrl?: string; aionUiWebConfigured?: boolean }>('/api/health')
+      .then((health) => {
+        if (cancelled || !health.aionUiWebBaseUrl) return
+        setAionUiWebNavigation({
+          baseUrl: health.aionUiWebBaseUrl.replace(/\/+$/, ''),
+          configured: health.aionUiWebConfigured === true,
+        })
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
   }, [])
 
   const selectedNode = nodes.find((node) => node.id === selectedId) ?? null
@@ -2788,6 +2826,22 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       }).catch((error) => {
         console.warn('[AI conversation attribution refresh]', error)
       })
+    }
+    const useWebUi = aionUiWebNavigation.configured || !isLoopbackHostname(window.location.hostname)
+    if (useWebUi) {
+      try {
+        const conversationUrl = aionUiConversationWebUrl(aionUiWebNavigation.baseUrl, conversationId)
+        const aionUiTab = window.open(conversationUrl, '_blank')
+        if (!aionUiTab) {
+          window.alert('AionUi 대화 탭을 열지 못했습니다. 브라우저의 팝업 차단을 해제한 뒤 다시 시도해 주세요.')
+          return
+        }
+        aionUiTab.opener = null
+        aionUiTab.focus()
+      } catch {
+        window.alert('AionUi WebUI 주소가 올바르지 않습니다. MNP_AIONUI_WEB_URL 설정을 확인해 주세요.')
+      }
+      return
     }
     const route = encodeURIComponent(`/conversation/${conversationId}`)
     window.location.href = `aionui://navigate?route=${route}`
@@ -6344,6 +6398,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
             const source = nodes.find((node) => node.id === edge.source)
             return source ? [{ id: source.id, label: source.data.label, policy: knowledgePolicyOf(edge) }] : []
           })}
+          launchInWebUi={aionUiWebNavigation.configured || !isLoopbackHostname(window.location.hostname)}
           onClose={() => setAiDialogOpen(false)}
         />
       )}

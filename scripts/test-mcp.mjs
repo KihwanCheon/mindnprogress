@@ -532,6 +532,15 @@ async function main() {
       repairedNotifications.notifications.find((notification) => notification.commentId === unspecifiedComment.comment.id)?.actor.name,
       'Claude Code(Claude Test Model)',
     )
+    const repairedAuthorNotificationsResponse = await fetch(`${apiBaseUrl}/api/notifications`, {
+      headers: { Cookie: editorSessionCookie },
+    })
+    assert.equal(repairedAuthorNotificationsResponse.status, 200)
+    const repairedAuthorNotifications = await repairedAuthorNotificationsResponse.json()
+    assert.ok(
+      !repairedAuthorNotifications.notifications.some((notification) => notification.commentId === unspecifiedComment.comment.id),
+      '댓글 작성자 귀속을 복구한 뒤 작성자 본인의 알림이 남았습니다.',
+    )
     documentResult = await invoke('mindnprogress_get_document', { mapId })
     assert.equal(documentResult.map.version, versionBeforeConversationLink + 1, 'AI 대화 ID 연결은 문서 버전을 한 번 증가시켜야 합니다.')
     assert.equal(documentResult.map.nodes.find((node) => node.id === 'task-a')?.data.aiConversationId, 'conversation-test')
@@ -549,6 +558,18 @@ async function main() {
     await invokeExpectError('mindnprogress_get_ai_conversation_transcript', {
       mapId, cardId: 'branch-a',
     }, /카드에 연결된 AI 대화가 없습니다/)
+
+    const unlinkedAttributionResponse = await fetch(`${apiBaseUrl}/api/integrations/aionui/attributions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: editorSessionCookie },
+      body: JSON.stringify({
+        agentId: 'agent-claude-test',
+        modelId: 'claude-test-model',
+        mapId: secondaryMapId,
+        cardId: secondaryRootId,
+      }),
+    })
+    assert.equal(unlinkedAttributionResponse.status, 201)
 
     apiServer.kill()
     await new Promise((resolve) => apiServer.once('exit', resolve))
@@ -580,17 +601,38 @@ async function main() {
     const freshClient = new Client({ name: 'mindnprogress-attribution-reconnect', version: '1.0.0' })
     await freshClient.connect(freshTransport)
     try {
+      const unlinkedCardComment = parseToolResult('mindnprogress_add_comment', await freshClient.callTool({
+        name: 'mindnprogress_add_comment',
+        arguments: { mapId: secondaryMapId, nodeId: secondaryRootId, text: '연결 완료 전 카드 귀속의 요청 한정 적용 검증' },
+      }))
+      assert.equal(unlinkedCardComment.comment.author.name, 'Claude Code(Claude Test Model)')
+
+      parseToolResult('mindnprogress_update_card', await freshClient.callTool({
+        name: 'mindnprogress_update_card',
+        arguments: { mapId, nodeId: 'task-a', data: { label: '업무 A' } },
+      }))
+
       const mapScopedComment = parseToolResult('mindnprogress_add_comment', await freshClient.callTool({
         name: 'mindnprogress_add_comment',
-        arguments: { mapId, nodeId: 'branch-b', text: '서버 재시작 후 다른 카드 오귀속 방지 검증' },
+        arguments: { mapId, nodeId: 'branch-b', text: '댓글 전 카드 작업의 세션 오귀속 방지 검증' },
       }))
       assert.equal(mapScopedComment.comment.author.name, 'AI(모델 미지정)')
 
-      const reconnectedComment = parseToolResult('mindnprogress_add_comment', await freshClient.callTool({
-        name: 'mindnprogress_add_comment',
-        arguments: { mapId, nodeId: 'task-a', text: 'MCP 재연결 후 모델 귀속 검증' },
-      }))
-      assert.equal(reconnectedComment.comment.author.name, 'AI(모델 미지정)')
+      const [reconnectedResult, continuedResult] = await Promise.all([
+        freshClient.callTool({
+          name: 'mindnprogress_add_comment',
+          arguments: { mapId, nodeId: 'task-a', text: 'MCP 재연결 후 연결 대화 모델 귀속 검증' },
+        }),
+        freshClient.callTool({
+          name: 'mindnprogress_add_comment',
+          arguments: { mapId, nodeId: 'branch-b', text: '첫 댓글에서 복구한 AI 귀속의 병렬 카드 연속 적용 검증' },
+        }),
+      ])
+      const reconnectedComment = parseToolResult('mindnprogress_add_comment', reconnectedResult)
+      assert.equal(reconnectedComment.comment.author.name, 'Claude Code(Claude Test Model)')
+
+      const continuedComment = parseToolResult('mindnprogress_add_comment', continuedResult)
+      assert.equal(continuedComment.comment.author.name, 'Claude Code(Claude Test Model)')
 
       parseToolResult('mindnprogress_get_context', await freshClient.callTool({
         name: 'mindnprogress_get_context',
@@ -613,11 +655,16 @@ async function main() {
         name: 'mindnprogress_get_context',
         arguments: { mapId, cardId: 'task-a', editorId: attribution.editorId },
       }))
+      const contextContinuedComment = parseToolResult('mindnprogress_add_comment', await freshClient.callTool({
+        name: 'mindnprogress_add_comment',
+        arguments: { mapId, nodeId: 'branch-b', text: '컨텍스트에서 복구한 AI 귀속의 다른 카드 연속 적용 검증' },
+      }))
+      assert.equal(contextContinuedComment.comment.author.name, 'Claude Code(Claude Test Model)')
       const clearedIdentityComment = parseToolResult('mindnprogress_add_comment', await freshClient.callTool({
         name: 'mindnprogress_add_comment',
-        arguments: { mapId, nodeId: 'task-a', text: '다음 컨텍스트에서 이전 자기 식별이 남지 않는지 검증' },
+        arguments: { mapId, nodeId: 'task-a', text: '자기 식별 해제 후 연결 대화 귀속 복원 검증' },
       }))
-      assert.equal(clearedIdentityComment.comment.author.name, `${testEditor.name}의 AI`)
+      assert.equal(clearedIdentityComment.comment.author.name, 'Claude Code(Claude Test Model)')
     } finally {
       await freshClient.close()
     }
@@ -1093,9 +1140,9 @@ async function main() {
     try {
       const persistedComment = parseToolResult('mindnprogress_add_comment', await postExpiryClient.callTool({
         name: 'mindnprogress_add_comment',
-        arguments: { mapId, nodeId: 'task-a', text: '토큰 없는 새 MCP 세션의 오귀속 방지 검증' },
+        arguments: { mapId, nodeId: 'task-a', text: '토큰 만료 후 새 MCP 세션의 연결 대화 귀속 검증' },
       }))
-      assert.equal(persistedComment.comment.author.name, 'AI(모델 미지정)')
+      assert.equal(persistedComment.comment.author.name, 'Claude Code(Claude Test Model)')
     } finally {
       await postExpiryClient.close()
     }

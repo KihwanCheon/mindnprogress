@@ -6,7 +6,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { applyProgressRollup } from './lib/progressRollup.mjs'
 import { detectReleasedWaitingItems } from './lib/waitingItems.mjs'
-import { resolveScopedAttribution } from './lib/attributionScope.mjs'
+import { resolveAttributionWithoutToken, resolveScopedAttribution } from './lib/attributionScope.mjs'
 import { readAionUiSubscriptionUsage } from './lib/aionUiSubscriptionUsage.mjs'
 import {
   detectImageAssetType,
@@ -33,6 +33,12 @@ import {
   rememberAiWorkspace,
   removeAiWorkspace,
 } from '../src/utils/aiWorkspaceHistory.mjs'
+import {
+  AionUiExternalLaunchPayloadError,
+  createAionUiWebLaunchUrl,
+  normalizeAionUiExternalLaunchPayload,
+  parseMindNProgressCompletionToken,
+} from './lib/aionUiExternalLaunch.mjs'
 
 const serverDirectory = path.dirname(fileURLToPath(import.meta.url))
 const projectDirectory = path.resolve(serverDirectory, '..')
@@ -55,6 +61,7 @@ const host = process.env.MNP_API_HOST ?? '127.0.0.1'
 const webPort = Number(process.env.MNP_WEB_PORT ?? 4175)
 const configuredAionUiBaseUrl = String(process.env.MNP_AIONUI_URL ?? '').trim()
 const configuredAionUiBaseUrls = configuredAionUiBaseUrl ? [configuredAionUiBaseUrl.replace(/\/+$/, '')] : []
+const configuredAionUiWebBaseUrl = String(process.env.MNP_AIONUI_WEB_URL ?? '').trim()
 const fallbackAionUiBaseUrls = ['http://127.0.0.1:1986', 'http://127.0.0.1:5830']
 const aionUiDiscoveryFile = path.resolve(
   String(process.env.MNP_AIONUI_DISCOVERY_FILE ?? '').trim() || path.join(tmpdir(), 'aionui-backend.json'),
@@ -118,6 +125,33 @@ function resolvePublicBaseUrl() {
 
 const publicBaseUrl = resolvePublicBaseUrl()
 
+function resolveAionUiWebBaseUrl() {
+  const candidate = configuredAionUiWebBaseUrl || (() => {
+    const url = new URL(publicBaseUrl)
+    url.port = '7777'
+    return url.toString()
+  })()
+
+  try {
+    const url = new URL(/^https?:\/\//i.test(candidate) ? candidate : `http://${candidate}`)
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('UNSUPPORTED_PROTOCOL')
+    url.pathname = '/'
+    url.search = ''
+    url.hash = ''
+    return url.toString().replace(/\/+$/, '')
+  } catch {
+    console.warn('[Mind & Progress] MNP_AIONUI_WEB_URL이 올바르지 않아 공개 주소의 7777 포트를 사용합니다.')
+    const fallback = new URL(publicBaseUrl)
+    fallback.port = '7777'
+    fallback.pathname = '/'
+    fallback.search = ''
+    fallback.hash = ''
+    return fallback.toString().replace(/\/+$/, '')
+  }
+}
+
+const aionUiWebBaseUrl = resolveAionUiWebBaseUrl()
+
 function hashPassword(password, salt) {
   return scryptSync(password, salt, 64)
 }
@@ -179,6 +213,7 @@ const aiAttributions = new Map()
 const aiConversationAttributions = new Map()
 const aiConversationLaunches = new Map()
 const aiWorkspaceHistories = new Map()
+const aiAttributionContinuationToken = Symbol('aiAttributionContinuationToken')
 let aiAttributionWriteQueue = Promise.resolve()
 let aiConversationAttributionWriteQueue = Promise.resolve()
 let aiWorkspaceHistoryWriteQueue = Promise.resolve()
@@ -333,7 +368,45 @@ function traceAttribution(request, source, user, scope, attributionToken = '') {
     actorId: user?.id ?? null,
     authorName: user?.name ?? null,
     tokenHashPrefix: attributionToken ? sessionTokenKey(attributionToken).slice(0, 12) : null,
+    continuationIssued: Boolean(request[aiAttributionContinuationToken]),
   }))
+}
+
+function canContinueScopedAttribution(attribution, scope, match) {
+  // 카드에 잠시 발급된 귀속만으로는 현재 호출자와 같은 AI인지 알 수 없다.
+  // 영속 대화 귀속이거나 동일 conversationId로 검증된 카드 귀속만 세션으로 이어간다.
+  if (match === 'conversation') return true
+  if (match !== 'card' || !attribution.conversationId) return false
+  const conversation = aiConversationAttributions.get(conversationAttributionKey(scope.mapId, scope.cardId))
+  return Boolean(conversation
+    && conversation.conversationId === attribution.conversationId
+    && conversation.authorName === attribution.authorName
+    && conversation.startedBy === attribution.startedBy)
+}
+
+function issueAttributionContinuation(request, attribution, scope, match) {
+  if (String(request.headers['x-mnp-ai-request-attribution-continuation'] ?? '').trim().toLowerCase() !== 'true') return
+  if (!attribution?.authorName || !scope.mapId || !scope.cardId) return
+  if (!canContinueScopedAttribution(attribution, scope, match)) return
+
+  const token = randomBytes(32).toString('base64url')
+  const now = Date.now()
+  aiAttributions.set(sessionTokenKey(token), {
+    authorName: attribution.authorName,
+    agentId: attribution.agentId ?? null,
+    agentName: attribution.agentName ?? null,
+    modelId: attribution.modelId ?? null,
+    modelName: attribution.modelName ?? null,
+    providerId: attribution.providerId ?? null,
+    mapId: scope.mapId,
+    cardId: scope.cardId,
+    startedBy: attribution.startedBy ?? null,
+    createdAt: now,
+    expiresAt: now + aiAttributionDurationMs,
+    ...(attribution.conversationId ? { conversationId: attribution.conversationId } : {}),
+  })
+  request[aiAttributionContinuationToken] = token
+  void persistAiAttributions().catch((error) => console.error('[AI attribution persistence]', error))
 }
 
 function attributedIntegrationUser(request) {
@@ -342,22 +415,36 @@ function attributedIntegrationUser(request) {
     ? users.find((candidate) => candidate.id === editorId && candidate.active !== false && canEdit(candidate))
     : null
   const attributionToken = String(request.headers['x-mnp-ai-attribution'] ?? '').trim()
-  const scoped = attributionToken
-    ? scopedAttribution(request)
-    : { attribution: null, match: null, scope: integrationRequestScope(request) }
   if (!attributionToken) {
     const declaredAuthorName = requestDeclaredAiAuthorName(request)
-    const user = declaredAuthorName
-      ? { ...(editor ?? integrationUser), name: declaredAuthorName }
-      : editor ? { ...editor, name: `${editor.name}의 AI` } : integrationUser
-    traceAttribution(request, declaredAuthorName ? 'self-declared' : editor ? 'editor-fallback' : 'model-unspecified', user, scoped.scope)
+    const resolved = resolveAttributionWithoutToken(
+      integrationRequestScope(request),
+      declaredAuthorName,
+      [...aiAttributions.values()],
+      aiConversationAttributions,
+    )
+    if (resolved.authorName) {
+      const user = { ...(editor ?? integrationUser), name: resolved.authorName }
+      traceAttribution(request, 'self-declared', user, resolved.scope)
+      return user
+    }
+    if (resolved.attribution) {
+      const user = attributionUser(resolved.attribution)
+      issueAttributionContinuation(request, resolved.attribution, resolved.scope, resolved.match)
+      traceAttribution(request, `${resolved.match}-scope-fallback`, user, resolved.scope)
+      return user
+    }
+    const user = editor ? { ...editor, name: `${editor.name}의 AI` } : integrationUser
+    traceAttribution(request, editor ? 'editor-fallback' : 'model-unspecified', user, resolved.scope)
     return user
   }
+  const scoped = scopedAttribution(request)
   const tokenKey = sessionTokenKey(attributionToken)
   const attribution = aiAttributions.get(tokenKey)
   if (!attribution) {
     if (scoped.attribution) {
       const user = attributionUser(scoped.attribution)
+      issueAttributionContinuation(request, scoped.attribution, scoped.scope, scoped.match)
       traceAttribution(request, `unknown-token-${scoped.match}-scope-fallback`, user, scoped.scope, attributionToken)
       return user
     }
@@ -370,6 +457,7 @@ function attributedIntegrationUser(request) {
     void persistAiAttributions().catch((error) => console.error('[AI attribution persistence]', error))
     if (scoped.attribution) {
       const user = attributionUser(scoped.attribution)
+      issueAttributionContinuation(request, scoped.attribution, scoped.scope, scoped.match)
       traceAttribution(request, `expired-token-${scoped.match}-scope-fallback`, user, scoped.scope, attributionToken)
       return user
     }
@@ -454,6 +542,8 @@ async function readBinaryBody(request, maxBytes) {
 
 function requireUser(request, response) {
   const user = getCurrentUser(request)
+  const continuationToken = request[aiAttributionContinuationToken]
+  if (user && continuationToken) response.setHeader('X-MNP-AI-Attribution-Continuation', continuationToken)
   if (!user) sendJson(response, 401, { error: '로그인이 필요합니다.' })
   return user
 }
@@ -1069,19 +1159,24 @@ async function aionUiCandidateBaseUrls() {
   ].filter(Boolean))]
 }
 
-async function fetchAionUi(pathname, { timeoutMs = 8_000 } = {}) {
+async function fetchAionUi(pathname, { timeoutMs = 8_000, method = 'GET', body } = {}) {
   let lastError = null
   const candidates = await aionUiCandidateBaseUrls()
   for (const baseUrl of candidates) {
     try {
       const response = await fetch(`${baseUrl}${pathname}`, {
-        headers: { Accept: 'application/json' },
+        method,
+        headers: {
+          Accept: 'application/json',
+          ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
         signal: AbortSignal.timeout(timeoutMs),
       })
-      const body = await response.json().catch(() => ({}))
-      if (!response.ok || body?.success === false) throw new Error(`AIONUI_REQUEST_FAILED:${response.status}`)
+      const responseBody = await response.json().catch(() => ({}))
+      if (!response.ok || responseBody?.success === false) throw new Error(`AIONUI_REQUEST_FAILED:${response.status}`)
       activeAionUiBaseUrl = baseUrl
-      return body?.data ?? body
+      return responseBody?.data ?? responseBody
     } catch (error) {
       lastError = error
     }
@@ -1422,23 +1517,41 @@ async function repairUnspecifiedConversationNotifications(attribution) {
     })
     if (!notifications) continue
     const repaired = []
-    const updated = notifications.map((notification) => {
+    const removed = []
+    const updated = notifications.flatMap((notification) => {
       const comment = attributableComments.get(notification.commentId)
       if (!comment
         || notification.mapId !== attribution.mapId
         || notification.nodeId !== attribution.cardId
         || notification.actor?.id !== integrationUser.id
         || notification.actor?.name !== integrationUser.name) {
-        return notification
+        return [notification]
+      }
+      if (notification.userId === comment.author.id) {
+        removed.push(notification)
+        return []
       }
       const next = { ...notification, actor: comment.author }
       repaired.push(next)
-      return next
+      return [next]
     })
-    if (repaired.length === 0) continue
+    if (repaired.length === 0 && removed.length === 0) continue
     await writeStoredArray(filePath, updated)
-    repairedCount += repaired.length
+    repairedCount += repaired.length + removed.length
     for (const notification of repaired) broadcastNotification(notification)
+    const removedByUser = new Map()
+    for (const notification of removed) {
+      const userNotifications = removedByUser.get(notification.userId) ?? []
+      userNotifications.push(notification)
+      removedByUser.set(notification.userId, userNotifications)
+    }
+    for (const [userId, userNotifications] of removedByUser) {
+      broadcastEvent({
+        type: 'notifications-removed',
+        userId,
+        notificationIds: userNotifications.map((notification) => notification.id),
+      }, (client) => client.user.id === userId)
+    }
   }
   return repairedCount
 }
@@ -2258,7 +2371,12 @@ const server = createServer(async (request, response) => {
 
   try {
     if (request.method === 'GET' && url.pathname === '/api/health') {
-      return sendJson(response, 200, { status: 'ok', publicBaseUrl })
+      return sendJson(response, 200, {
+        status: 'ok',
+        publicBaseUrl,
+        aionUiWebBaseUrl,
+        aionUiWebConfigured: Boolean(configuredAionUiWebBaseUrl),
+      })
     }
 
     if (request.method === 'POST' && url.pathname === '/api/auth/login') {
@@ -2445,6 +2563,54 @@ const server = createServer(async (request, response) => {
       } catch (error) {
         console.error('[AionUi attribution]', error)
         return sendJson(response, 503, { error: 'AionUi에서 선택한 AI 정보를 확인할 수 없습니다.' })
+      }
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/integrations/aionui/external-conversation-launches') {
+      const user = requireUser(request, response)
+      if (!user) return
+      if (!canEdit(user)) return sendJson(response, 403, { error: '편집자만 AI 대화를 시작할 수 있습니다.' })
+
+      try {
+        const payload = normalizeAionUiExternalLaunchPayload(await readJsonBody(request))
+        const completionToken = parseMindNProgressCompletionToken(payload.completionUrl, port)
+        if (!completionToken) {
+          return sendJson(response, 400, { error: 'AI 대화 완료 통보 주소가 올바르지 않습니다.' })
+        }
+
+        const launch = aiConversationLaunches.get(sessionTokenKey(completionToken))
+        if (!launch || launch.expiresAt <= Date.now()) {
+          if (launch) aiConversationLaunches.delete(sessionTokenKey(completionToken))
+          return sendJson(response, 404, { error: 'AI 대화 시작 정보를 찾을 수 없습니다. 다시 시도해 주세요.' })
+        }
+        if (launch.startedBy !== user.id) {
+          return sendJson(response, 403, { error: '다른 편집자의 AI 대화 시작 정보는 사용할 수 없습니다.' })
+        }
+
+        const attribution = aiAttributions.get(launch.attributionKey)
+        if (!attribution
+          || attribution.agentId !== payload.agentId
+          || attribution.modelId !== payload.modelId
+          || (payload.providerId && attribution.providerId && attribution.providerId !== payload.providerId)) {
+          return sendJson(response, 409, { error: 'AI 종류와 모델 정보가 작성자 귀속 정보와 일치하지 않습니다.' })
+        }
+
+        const ticket = await fetchAionUi('/api/internal/external-conversation-launches', {
+          method: 'POST',
+          body: payload,
+        })
+        const launchUrl = createAionUiWebLaunchUrl(aionUiWebBaseUrl, ticket?.launchId)
+        return sendJson(response, 201, {
+          launchId: ticket.launchId,
+          expiresAt: ticket.expiresAt ?? null,
+          launchUrl,
+        })
+      } catch (error) {
+        if (error instanceof AionUiExternalLaunchPayloadError) {
+          return sendJson(response, 400, { error: error.message })
+        }
+        console.error('[AionUi external conversation launch]', error)
+        return sendJson(response, 503, { error: 'AionUi WebUI 대화 시작 정보를 발급하지 못했습니다.' })
       }
     }
 
