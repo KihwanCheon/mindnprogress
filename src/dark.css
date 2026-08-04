@@ -230,6 +230,34 @@
   color: var(--theme-text-muted);
 }
 
+[data-theme="dark"] .knowledge-connection-guide {
+  color: var(--theme-knowledge-primary-text);
+  border-color: #346b59;
+  background: rgba(25, 55, 46, .97);
+}
+
+[data-theme="dark"] .knowledge-connection-guide.secondary {
+  color: var(--theme-knowledge-fallback-text);
+  border-color: #70552b;
+  background: rgba(58, 45, 24, .97);
+}
+
+[data-theme="dark"] .knowledge-connection-guide.invalid {
+  color: #ffb0b0;
+  border-color: #7f4242;
+  background: rgba(67, 34, 38, .98);
+}
+
+[data-theme="dark"] .node-context-menu > button.knowledge-connect.primary .context-icon {
+  color: var(--theme-knowledge-primary-text);
+  background: var(--theme-knowledge-primary-bg);
+}
+
+[data-theme="dark"] .node-context-menu > button.knowledge-connect.secondary .context-icon {
+  color: var(--theme-knowledge-fallback-text);
+  background: var(--theme-knowledge-fallback-bg);
+}
+
 [data-theme="dark"] .account-popover > button {
   color: var(--theme-text-secondary);
 }
@@ -433,7 +461,7 @@
   background: var(--theme-surface-soft);
 }
 
-[data-theme="dark"] .image-inspector-name span,
+[data-theme="dark"] .image-inspector-name > span,
 [data-theme="dark"] .image-inspector-meta dt {
   color: var(--theme-text-muted);
 }
@@ -441,6 +469,12 @@
 [data-theme="dark"] .image-inspector-name strong,
 [data-theme="dark"] .image-inspector-meta dd {
   color: var(--theme-text-secondary);
+}
+
+[data-theme="dark"] .image-inspector-name .image-inspector-extension {
+  color: var(--theme-text-secondary);
+  border-color: var(--theme-border-strong);
+  background: var(--theme-surface-soft);
 }
 
 [data-theme="dark"] .image-inspector-meta > div {

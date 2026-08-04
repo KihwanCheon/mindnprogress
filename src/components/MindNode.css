@@ -84,5 +84,7 @@
 .mind-node .react-flow__handle { width: 9px; height: 9px; border: 2px solid white; background: #8173dd; opacity: 0; pointer-events: none; transition: opacity .18s, transform .18s; }
 .mind-node.selected .react-flow__handle { opacity: 1; pointer-events: auto; }
 .mind-node .react-flow__handle:hover { transform: scale(1.35); }
+.mind-node .knowledge-route-handle,
+.mind-node.selected .knowledge-route-handle { width: 1px; height: 1px; border: 0; background: transparent; opacity: 0; pointer-events: none; }
 .react-flow__node.drop-target .mind-node { border-color: #35a77f; box-shadow: 0 0 0 4px rgba(67,183,142,.17), 0 12px 28px rgba(40,139,104,.2); transform: scale(1.025); }
 .react-flow__node.drop-target::after { content: '여기에 자식으로 이동'; position: absolute; left: 50%; bottom: -26px; z-index: 5; padding: 4px 7px; color: white; border-radius: 6px; background: #35a77f; box-shadow: 0 5px 12px rgba(40,139,104,.22); font-size: 8px; font-weight: 700; white-space: nowrap; transform: translateX(-50%); pointer-events: none; }

@@ -54,7 +54,8 @@ const DOCUMENT_COLORS = [
 ] as const
 
 const MINDMAP_GRID_SIZE = 24
-const MINDMAP_CHILD_HORIZONTAL_OFFSET = MINDMAP_GRID_SIZE * 13
+const MINDMAP_SNAP_GRID: [number, number] = [MINDMAP_GRID_SIZE, MINDMAP_GRID_SIZE]
+const MINDMAP_CHILD_HORIZONTAL_GAP = MINDMAP_GRID_SIZE * 4
 const MINDMAP_WORK_NODE_VERTICAL_STEP = MINDMAP_GRID_SIZE * 6
 const MINDMAP_IMAGE_MAX_WIDTH = 480
 const MINDMAP_IMAGE_MAX_HEIGHT = 360
@@ -71,13 +72,24 @@ function snapMindMapPosition(position: { x: number; y: number }) {
   }
 }
 
-function defaultChildMindMapPosition(parentPosition: { x: number; y: number }, siblingPositions: { x: number; y: number }[]) {
+function childMindMapHorizontalPosition(parentPosition: { x: number; y: number }, parentWidth = MINDMAP_DOORAY_TASK_DEFAULT_WIDTH) {
+  const alignedParentPosition = snapMindMapPosition(parentPosition)
+  const normalizedParentWidth = Number.isFinite(parentWidth) && parentWidth > 0
+    ? parentWidth
+    : MINDMAP_DOORAY_TASK_DEFAULT_WIDTH
+  return snapMindMapPosition({
+    x: alignedParentPosition.x + normalizedParentWidth + MINDMAP_CHILD_HORIZONTAL_GAP,
+    y: alignedParentPosition.y,
+  }).x
+}
+
+function defaultChildMindMapPosition(parentPosition: { x: number; y: number }, siblingPositions: { x: number; y: number }[], parentWidth = MINDMAP_DOORAY_TASK_DEFAULT_WIDTH) {
   const alignedParentPosition = snapMindMapPosition(parentPosition)
   const nextY = siblingPositions.length > 0
     ? Math.max(...siblingPositions.map((position) => snapMindMapPosition(position).y)) + MINDMAP_WORK_NODE_VERTICAL_STEP
     : alignedParentPosition.y
   return {
-    x: alignedParentPosition.x + MINDMAP_CHILD_HORIZONTAL_OFFSET,
+    x: childMindMapHorizontalPosition(alignedParentPosition, parentWidth),
     y: nextY,
   }
 }
@@ -167,6 +179,58 @@ type ViewMode = 'mindmap' | 'kanban' | 'timeline' | 'dashboard'
 type NodeFilter = 'all' | 'work' | 'planned' | 'in-progress' | 'done' | 'blocked'
 type NodePasteMode = 'copy' | 'clone' | 'reference'
 
+type KnowledgeConnectionDraft = {
+  sourceId: string
+  policy: KnowledgePolicy
+}
+
+type CanvasRect = {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+type NodeSide = 'top' | 'right' | 'bottom' | 'left'
+
+type NodeSideAnchor = {
+  side: NodeSide
+  x: number
+  y: number
+}
+
+function nodeDimensions(node: MindMapNode) {
+  return {
+    width: node.data.image?.displayWidth ?? node.measured?.width ?? node.width ?? 218,
+    height: node.data.image?.displayHeight ?? node.measured?.height ?? node.height ?? 112,
+  }
+}
+
+function nodeSideAnchors(node: MindMapNode): NodeSideAnchor[] {
+  const { width, height } = nodeDimensions(node)
+  const { x, y } = node.position
+  return [
+    { side: 'top', x: x + width / 2, y },
+    { side: 'right', x: x + width, y: y + height / 2 },
+    { side: 'bottom', x: x + width / 2, y: y + height },
+    { side: 'left', x, y: y + height / 2 },
+  ]
+}
+
+function nearestImageKnowledgeHandles(source: MindMapNode, target: MindMapNode) {
+  let nearest: { source: NodeSideAnchor; target: NodeSideAnchor; distance: number } | null = null
+  for (const sourceAnchor of nodeSideAnchors(source)) {
+    for (const targetAnchor of nodeSideAnchors(target)) {
+      const distance = Math.hypot(targetAnchor.x - sourceAnchor.x, targetAnchor.y - sourceAnchor.y)
+      if (!nearest || distance < nearest.distance) nearest = { source: sourceAnchor, target: targetAnchor, distance }
+    }
+  }
+  return nearest ? {
+    sourceHandle: `image-source-${nearest.source.side}`,
+    targetHandle: `knowledge-target-${nearest.target.side}`,
+  } : undefined
+}
+
 type CopiedNodeItem = {
   sourceNodeId: string
   position: { x: number; y: number }
@@ -189,6 +253,20 @@ type WorkspaceDeepLink = {
   viewMode: ViewMode
   mapId: string | null
   nodeId: string | null
+}
+
+function knowledgeConnectionIssue(sourceId: string, targetId: string, nodes: MindMapNode[], edges: MindMapEdge[]) {
+  const source = nodes.find((node) => node.id === sourceId)
+  const target = nodes.find((node) => node.id === targetId)
+  if (!source || !target) return '연결할 카드를 찾을 수 없습니다.'
+  if (sourceId === targetId) return '같은 카드는 지식으로 연결할 수 없습니다.'
+  if (target.data.kind === 'image') return '이미지는 대상 카드로 선택할 수 없습니다.'
+  const knowledgeEdges = edges.filter(isKnowledgeEdge)
+  if (knowledgeEdges.some((edge) => edge.source === sourceId && edge.target === targetId)) {
+    return '이미 연결된 선행 지식입니다.'
+  }
+  if (createsKnowledgeCycle(sourceId, targetId, knowledgeEdges)) return '순환 지식선은 추가할 수 없습니다.'
+  return ''
 }
 
 const VIEW_MODE_PATHS: Record<string, ViewMode> = {
@@ -799,6 +877,67 @@ function Icon({ name, size = 18 }: { name: string; size?: number }) {
   )
 }
 
+function KnowledgeConnectionPreview({ canvas, source, policy, issue }: {
+  canvas: HTMLElement | null
+  source: CanvasRect
+  policy: KnowledgePolicy
+  issue: string
+}) {
+  const sourceCenter = {
+    x: source.x + source.width / 2,
+    y: source.y + source.height / 2,
+  }
+  const [pointer, setPointer] = useState(sourceCenter)
+
+  useEffect(() => {
+    if (!canvas) return
+    const followPointer = (event: PointerEvent) => {
+      const bounds = canvas.getBoundingClientRect()
+      setPointer({ x: event.clientX - bounds.left, y: event.clientY - bounds.top })
+    }
+    window.addEventListener('pointermove', followPointer)
+    return () => window.removeEventListener('pointermove', followPointer)
+  }, [canvas])
+
+  const deltaX = pointer.x - sourceCenter.x
+  const deltaY = pointer.y - sourceCenter.y
+  const boundaryRatio = Math.max(
+    Math.abs(deltaX) / Math.max(1, source.width / 2),
+    Math.abs(deltaY) / Math.max(1, source.height / 2),
+  )
+  const boundaryScale = boundaryRatio > 1 ? 1 / boundaryRatio : 0
+  const start = {
+    x: sourceCenter.x + deltaX * boundaryScale,
+    y: sourceCenter.y + deltaY * boundaryScale,
+  }
+  const direction = deltaX >= 0 ? 1 : -1
+  const controlOffset = Math.min(220, Math.max(55, Math.abs(deltaX) * .5))
+  const path = `M ${start.x} ${start.y} C ${start.x + direction * controlOffset} ${start.y}, ${pointer.x - direction * controlOffset} ${pointer.y}, ${pointer.x} ${pointer.y}`
+  const primary = policy === 'reuse-first'
+
+  return (
+    <>
+      <svg className={`knowledge-connection-preview ${primary ? 'primary' : 'secondary'} ${issue ? 'invalid' : ''}`} aria-hidden="true">
+        <defs>
+          <marker id="knowledge-connection-preview-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+            <path d="M 0 0 L 8 4 L 0 8 z" />
+          </marker>
+        </defs>
+        <path d={path} markerEnd="url(#knowledge-connection-preview-arrow)" />
+        <circle cx={pointer.x} cy={pointer.y} r="4" />
+      </svg>
+      <div
+        className={`knowledge-connection-guide ${primary ? 'primary' : 'secondary'} ${issue ? 'invalid' : ''}`}
+        style={{ left: pointer.x, top: pointer.y }}
+        role="status"
+      >
+        <strong>{primary ? '주요 지식 연결' : '보조 지식 연결'}</strong>
+        <span>{issue || '대상 카드 클릭 · Esc로 취소'}</span>
+      </div>
+    </>
+  )
+}
+
 function ThemeToggle({ theme, onToggle, className = '' }: { theme: UiTheme; onToggle: () => void; className?: string }) {
   const darkMode = theme === 'dark'
   const nextThemeLabel = darkMode ? '라이트 모드' : '다크 모드'
@@ -1065,6 +1204,27 @@ function defaultImageDisplaySize(naturalWidth: number, naturalHeight: number) {
     width: Math.max(1, Math.round(naturalWidth * scale)),
     height: Math.max(1, Math.round(naturalHeight * scale)),
   }
+}
+
+const IMAGE_FILE_EXTENSIONS: Record<MindImageData['mimeType'], string[]> = {
+  'image/png': ['.png'],
+  'image/jpeg': ['.jpeg', '.jpg'],
+  'image/gif': ['.gif'],
+  'image/webp': ['.webp'],
+}
+
+function splitImageFileName(fileName: string, mimeType: MindImageData['mimeType']) {
+  const trimmedFileName = fileName.trim()
+  const matchedExtension = IMAGE_FILE_EXTENSIONS[mimeType]
+    .find((extension) => trimmedFileName.toLowerCase().endsWith(extension)
+      && trimmedFileName.length > extension.length)
+  const extension = matchedExtension
+    ? trimmedFileName.slice(-matchedExtension.length)
+    : IMAGE_FILE_EXTENSIONS[mimeType][0]
+  const name = matchedExtension
+    ? trimmedFileName.slice(0, -matchedExtension.length)
+    : trimmedFileName
+  return { name: name || '이미지', extension }
 }
 
 function imageAssetUrl(mapId: string, assetId: string) {
@@ -1390,6 +1550,9 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const [editingChecklist, setEditingChecklist] = useState<{ id: string; text: string } | null>(null)
   const [checklistTooltip, setChecklistTooltip] = useState<{ text: string; x: number; y: number } | null>(null)
   const [nodeContextMenu, setNodeContextMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null)
+  const [knowledgeConnection, setKnowledgeConnection] = useState<KnowledgeConnectionDraft | null>(null)
+  const [knowledgeConnectionTargetId, setKnowledgeConnectionTargetId] = useState<string | null>(null)
+  const [knowledgeConnectionMessage, setKnowledgeConnectionMessage] = useState('')
   const [documentContextMenu, setDocumentContextMenu] = useState<{ x: number; y: number; mapId: string } | null>(null)
   const [aiConversationContextMenu, setAiConversationContextMenu] = useState<{ x: number; y: number } | null>(null)
   const [copiedNodes, setCopiedNodes] = useState<CopiedNodes | null>(null)
@@ -1413,6 +1576,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const effectiveSidebarWidth = Math.max(sidebarMinWidth, sidebarWidth)
   const skipChecklistCommit = useRef(false)
   const waitingBlockRef = useRef<HTMLDivElement | null>(null)
+  const canvasWrapRef = useRef<HTMLElement | null>(null)
   const sidebarResizeStart = useRef({ pointerX: 0, width: 226 })
   const inspectorResizeStart = useRef({ pointerX: 0, width: 278 })
   const dropTargetIdRef = useRef<string | null>(null)
@@ -1440,6 +1604,18 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const nodesInitialized = useNodesInitialized()
   const updateNodeInternals = useUpdateNodeInternals()
   const viewport = useViewport()
+  const knowledgeConnectionSourceBox = useMemo<CanvasRect | null>(() => {
+    if (!knowledgeConnection) return null
+    const source = nodes.find((node) => node.id === knowledgeConnection.sourceId)
+    if (!source) return null
+    const { width, height } = nodeDimensions(source)
+    return {
+      x: source.position.x * viewport.zoom + viewport.x,
+      y: source.position.y * viewport.zoom + viewport.y,
+      width: width * viewport.zoom,
+      height: height * viewport.zoom,
+    }
+  }, [knowledgeConnection, nodes, viewport.x, viewport.y, viewport.zoom])
 
   useEffect(() => {
     Object.keys(localStorage)
@@ -1506,6 +1682,11 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const edgeTypes = useMemo<EdgeTypes>(() => ({ 'knowledge-parallel': KnowledgeEdge }), [])
   const hierarchyEdges = useMemo(() => edges.filter(isHierarchyEdge), [edges])
   const knowledgeEdges = useMemo(() => edges.filter(isKnowledgeEdge), [edges])
+  const hoveredKnowledgeConnectionIssue = useMemo(() => (
+    knowledgeConnection && knowledgeConnectionTargetId
+      ? knowledgeConnectionIssue(knowledgeConnection.sourceId, knowledgeConnectionTargetId, nodes, knowledgeEdges)
+      : ''
+  ), [knowledgeConnection, knowledgeConnectionTargetId, knowledgeEdges, nodes])
   const selectedKnowledgeEdges = useMemo(() => selectedNode
     ? knowledgeEdges.filter((edge) => edge.target === selectedNode.id)
     : [], [knowledgeEdges, selectedNode])
@@ -1660,23 +1841,36 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       className: [
         node.className,
         node.id === dropTargetId ? 'drop-target' : '',
+        node.id === knowledgeConnection?.sourceId ? `knowledge-link-source ${knowledgeConnection.policy === 'reuse-first' ? 'primary' : 'secondary'}` : '',
+        node.id === knowledgeConnectionTargetId ? `knowledge-link-target ${hoveredKnowledgeConnectionIssue ? 'invalid' : 'valid'}` : '',
         normalizedNodeSearch && searchMatchedNodeIds.has(node.id) ? 'search-match' : '',
         normalizedNodeSearch && !searchMatchedNodeIds.has(node.id) && !hidden ? 'search-dim' : '',
         filterActive && filterVisibleNodeIds.has(node.id) && !filterMatchedNodeIds.has(node.id) ? 'filter-context' : '',
       ].filter(Boolean).join(' '),
     }
-  }), [activeMapId, aiConversationRuntimes, beginHistoryTransaction, collapsedHiddenNodeIds, collapsedNodeIds, collapsibleNodeIds, commentStats, descendantCounts, dropTargetId, endHistoryTransaction, filterActive, filterMatchedNodeIds, filterVisibleNodeIds, mode, nodes, normalizedNodeSearch, openWaitingItems, referenceCommentStats, searchContextNodeIds, searchMatchedNodeIds, setNodes, teamMembers])
+  }), [activeMapId, aiConversationRuntimes, beginHistoryTransaction, collapsedHiddenNodeIds, collapsedNodeIds, collapsibleNodeIds, commentStats, descendantCounts, dropTargetId, endHistoryTransaction, filterActive, filterMatchedNodeIds, filterVisibleNodeIds, hoveredKnowledgeConnectionIssue, knowledgeConnection, knowledgeConnectionTargetId, mode, nodes, normalizedNodeSearch, openWaitingItems, referenceCommentStats, searchContextNodeIds, searchMatchedNodeIds, setNodes, teamMembers])
   const visibleFlowNodeIds = useMemo(() => new Set(flowNodes.filter((node) => !node.hidden).map((node) => node.id)), [flowNodes])
   const visibleFlowNodeIdsKey = useMemo(() => [...visibleFlowNodeIds].sort().join('\u0000'), [visibleFlowNodeIds])
   const flowEdges = useMemo(() => {
     const pairKey = (edge: MindMapEdge) => JSON.stringify([edge.source, edge.target])
     const hierarchyPairs = new Set(edges.filter(isHierarchyEdge).map(pairKey))
+    const nodesById = new Map(nodes.map((node) => [node.id, node]))
     return edges.map((edge) => {
       const hidden = !visibleFlowNodeIds.has(edge.source) || !visibleFlowNodeIds.has(edge.target)
-      if (!isKnowledgeEdge(edge)) return { ...edge, hidden }
+      const sourceNode = nodesById.get(edge.source)
+      if (!isKnowledgeEdge(edge)) return {
+        ...edge,
+        sourceHandle: sourceNode?.data.kind === 'image' ? 'image-source-right' : edge.sourceHandle,
+        hidden,
+      }
       const primary = knowledgePolicyOf(edge) === 'reuse-first'
+      const targetNode = nodesById.get(edge.target)
+      const imageHandles = sourceNode?.data.kind === 'image' && targetNode
+        ? nearestImageKnowledgeHandles(sourceNode, targetNode)
+        : undefined
       return {
         ...edge,
+        ...imageHandles,
         type: 'knowledge-parallel',
         hidden,
         reconnectable: false,
@@ -1694,7 +1888,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         markerEnd: { type: MarkerType.ArrowClosed, width: 18, height: 18, color: primary ? 'var(--theme-knowledge-primary)' : 'var(--theme-knowledge-fallback)' },
       }
     })
-  }, [edges, visibleFlowNodeIds])
+  }, [edges, nodes, visibleFlowNodeIds])
 
   useLayoutEffect(() => {
     if (viewMode !== 'mindmap' || loadedMapId !== activeMapId || !visibleFlowNodeIdsKey) return
@@ -2405,28 +2599,48 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     setDependencyError('')
   }
 
-  const addKnowledgeSource = () => {
-    if (!selectedNode || !knowledgeCandidate || mode !== 'editor') return
-    if (createsKnowledgeCycle(knowledgeCandidate, selectedNode.id, knowledgeEdges)) {
-      setKnowledgeError('순환 지식선은 추가할 수 없습니다.')
-      return
-    }
-    if (selectedKnowledgeEdges.some((edge) => edge.source === knowledgeCandidate)) {
-      setKnowledgeError('이미 연결된 선행 지식입니다.')
-      return
-    }
+  const connectKnowledgeCards = useCallback((sourceId: string, targetId: string, policy: KnowledgePolicy) => {
+    if (mode !== 'editor') return '편집자만 지식선을 연결할 수 있습니다.'
+    const issue = knowledgeConnectionIssue(sourceId, targetId, nodes, edges)
+    if (issue) return issue
     setEdges((current) => [...current, {
-      id: `knowledge-${knowledgeCandidate}-${selectedNode.id}-${Date.now()}`,
-      source: knowledgeCandidate,
-      target: selectedNode.id,
+      id: `knowledge-${sourceId}-${targetId}-${Date.now()}`,
+      source: sourceId,
+      target: targetId,
       type: 'default',
       reconnectable: false,
-      data: { relation: 'knowledge', knowledgePolicy },
+      data: { relation: 'knowledge', knowledgePolicy: policy },
       markerEnd: { type: MarkerType.ArrowClosed, width: 18, height: 18 },
     }])
+    setSavedAt('저장 중…')
+    return ''
+  }, [edges, mode, nodes, setEdges])
+
+  const cancelKnowledgeConnection = useCallback(() => {
+    setKnowledgeConnection(null)
+    setKnowledgeConnectionTargetId(null)
+    setKnowledgeConnectionMessage('')
+  }, [])
+
+  const startKnowledgeConnectionFromMenu = useCallback((policy: KnowledgePolicy) => {
+    if (!nodeContextMenu || mode !== 'editor' || viewMode !== 'mindmap') return
+    setSelectedId(nodeContextMenu.nodeId)
+    setKnowledgeConnection({ sourceId: nodeContextMenu.nodeId, policy })
+    setKnowledgeConnectionTargetId(null)
+    setKnowledgeConnectionMessage('')
+    setKnowledgeError('')
+    setNodeContextMenu(null)
+  }, [mode, nodeContextMenu, viewMode])
+
+  const addKnowledgeSource = () => {
+    if (!selectedNode || !knowledgeCandidate || mode !== 'editor') return
+    const issue = connectKnowledgeCards(knowledgeCandidate, selectedNode.id, knowledgePolicy)
+    if (issue) {
+      setKnowledgeError(issue)
+      return
+    }
     setKnowledgeCandidate('')
     setKnowledgeError('')
-    setSavedAt('저장 중…')
   }
 
   const updateKnowledgePolicy = (edgeId: string, policy: KnowledgePolicy) => {
@@ -2495,7 +2709,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     const siblingPositions = nodes.filter((node) => childIds.has(node.id)).map((node) => node.position)
     const id = `node-${Date.now()}`
     const automaticPosition = parent
-      ? defaultChildMindMapPosition(parent.position, siblingPositions)
+      ? defaultChildMindMapPosition(parent.position, siblingPositions, nodeDimensions(parent).width)
       : snapMindMapPosition({ x: 160, y: 120 })
     const nextPosition = position ?? automaticPosition
     const node: MindMapNode = {
@@ -2517,6 +2731,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         id: `edge-${parent.id}-${id}`,
         source: parent.id,
         target: id,
+        sourceHandle: parent.data.kind === 'image' ? 'image-source-right' : undefined,
         type: 'default',
         data: { relation: 'hierarchy' },
         markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
@@ -2650,7 +2865,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     setDocumentContextMenu(null)
     setAiConversationContextMenu(null)
     setSelectedId(nodeId)
-    const menuHeight = nodes.find((node) => node.id === nodeId)?.data.kind === 'image' ? 125 : 330
+    const menuHeight = nodes.find((node) => node.id === nodeId)?.data.kind === 'image' ? 240 : 440
     setNodeContextMenu({
       x: Math.max(8, Math.min(event.clientX, window.innerWidth - 230)),
       y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight)),
@@ -2740,7 +2955,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     const sourceMinX = Math.min(...copiedNodes.nodes.map((item) => item.position.x))
     const sourceMinY = Math.min(...copiedNodes.nodes.map((item) => item.position.y))
     const targetOrigin = {
-      x: parent.position.x + 320,
+      x: childMindMapHorizontalPosition(parent.position, nodeDimensions(parent).width),
       y: parent.position.y + childCount * 150 - 40,
     }
     const nodeIdMap = new Map(copiedNodes.nodes.map((item, index) => [item.sourceNodeId, `node-${timestamp}-${index}`]))
@@ -2807,6 +3022,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         id: `edge-${parentId}-${timestamp}-root-${index}`,
         source: parentId,
         target: nodeIdMap.get(item.sourceNodeId) as string,
+        sourceHandle: parent.data.kind === 'image' ? 'image-source-right' : undefined,
         type: 'default',
         data: { relation: 'hierarchy' },
         markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
@@ -2832,6 +3048,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     }
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
+        cancelKnowledgeConnection()
         setNodeContextMenu(null)
         setDocumentContextMenu(null)
         setAiConversationContextMenu(null)
@@ -2845,13 +3062,20 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       window.removeEventListener('pointerdown', closeContextMenu)
       window.removeEventListener('keydown', closeOnEscape)
     }
-  }, [])
+  }, [cancelKnowledgeConnection])
 
   useEffect(() => {
+    cancelKnowledgeConnection()
     setNodeContextMenu(null)
     setDocumentContextMenu(null)
     setAiConversationContextMenu(null)
-  }, [activeMapId, viewMode])
+  }, [activeMapId, cancelKnowledgeConnection, viewMode])
+
+  useEffect(() => {
+    if (knowledgeConnection && !nodes.some((node) => node.id === knowledgeConnection.sourceId)) {
+      cancelKnowledgeConnection()
+    }
+  }, [cancelKnowledgeConnection, knowledgeConnection, nodes])
 
   useEffect(() => {
     setPreviewImageNodeId(null)
@@ -3521,9 +3745,34 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     setSelectedId(selected.at(-1)?.id ?? null)
   }, [])
 
-  const onNodeClick = useCallback((_event: ReactMouseEvent, node: MindMapNode) => {
+  const onNodeClick = useCallback((event: ReactMouseEvent, node: MindMapNode) => {
+    if (knowledgeConnection) {
+      event.preventDefault()
+      event.stopPropagation()
+      const issue = connectKnowledgeCards(knowledgeConnection.sourceId, node.id, knowledgeConnection.policy)
+      if (issue) {
+        setKnowledgeConnectionTargetId(node.id)
+        setKnowledgeConnectionMessage(issue)
+        return
+      }
+      cancelKnowledgeConnection()
+      setSelectedId(node.id)
+      return
+    }
     setSelectedId(node.id)
-  }, [])
+  }, [cancelKnowledgeConnection, connectKnowledgeCards, knowledgeConnection])
+
+  const onKnowledgeTargetEnter = useCallback((_event: ReactMouseEvent, node: MindMapNode) => {
+    if (!knowledgeConnection) return
+    setKnowledgeConnectionTargetId(node.id)
+    setKnowledgeConnectionMessage(knowledgeConnectionIssue(knowledgeConnection.sourceId, node.id, nodes, edges))
+  }, [edges, knowledgeConnection, nodes])
+
+  const onKnowledgeTargetLeave = useCallback((_event: ReactMouseEvent, node: MindMapNode) => {
+    if (!knowledgeConnection) return
+    setKnowledgeConnectionTargetId((current) => current === node.id ? null : current)
+    setKnowledgeConnectionMessage('')
+  }, [knowledgeConnection])
 
   const onNodeDragStart = useCallback((_event: MouseEvent | TouchEvent, draggedNode: MindMapNode) => {
     beginHistoryTransaction()
@@ -3647,7 +3896,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       if (target) {
         const childCount = hierarchyEdges.filter((edge) => edge.source === targetId && edge.target !== draggedNode.id).length
         const automaticPosition = {
-          x: target.position.x + 320,
+          x: childMindMapHorizontalPosition(target.position, nodeDimensions(target).width),
           y: target.position.y + childCount * 150 - 40,
         }
         const desiredPosition = event.altKey ? snapMindMapPosition(automaticPosition) : automaticPosition
@@ -3676,6 +3925,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
             id: `edge-${targetId}-${draggedNode.id}-${Date.now()}`,
             source: targetId,
             target: draggedNode.id,
+            sourceHandle: target.data.kind === 'image' ? 'image-source-right' : undefined,
             type: 'default',
             data: { relation: 'hierarchy' },
             markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
@@ -4247,7 +4497,8 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
 
         {viewMode === 'mindmap' ? (
         <section
-          className={`canvas-wrap ${rightPanning ? 'right-panning' : ''}`}
+          ref={canvasWrapRef}
+          className={`canvas-wrap ${rightPanning ? 'right-panning' : ''} ${knowledgeConnection ? `knowledge-connecting ${knowledgeConnection.policy === 'reuse-first' ? 'primary' : 'secondary'}` : ''}`}
           onPointerDownCapture={startNodeRightPan}
           onPointerEnter={trackCanvasPointer}
           onPointerMove={trackCanvasPointer}
@@ -4289,16 +4540,18 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
             onNodeDrag={onNodeDrag}
             onNodeDragStop={onNodeDragStop}
             onNodeClick={onNodeClick}
+            onNodeMouseEnter={onKnowledgeTargetEnter}
+            onNodeMouseLeave={onKnowledgeTargetLeave}
             onSelectionChange={onSelectionChange}
-            onPaneClick={() => { setSelectedId(null); setNodeContextMenu(null) }}
+            onPaneClick={() => { cancelKnowledgeConnection(); setSelectedId(null); setNodeContextMenu(null) }}
             onPaneContextMenu={(event) => event.preventDefault()}
             onDoubleClick={(event) => {
               if (mode === 'editor' && (event.target as HTMLElement).classList.contains('react-flow__pane')) {
                 addNode(undefined, screenToFlowPosition({ x: event.clientX, y: event.clientY }))
               }
             }}
-            nodesDraggable={mode === 'editor'}
-            nodesConnectable={mode === 'editor'}
+            nodesDraggable={mode === 'editor' && !knowledgeConnection}
+            nodesConnectable={mode === 'editor' && !knowledgeConnection}
             edgesReconnectable={mode === 'editor'}
             nodeClickDistance={4}
             nodeDragThreshold={4}
@@ -4379,9 +4632,20 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
               {filterActive && <button type="button" className="filter-reset" onClick={() => { setNodeFilter('all'); setAssigneeFilter('all') }}>초기화</button>}
             </Panel>
             <Panel position="bottom-right" className="hint-pill">
-              {mode === 'editor' ? '이미지 드롭·Ctrl+V · Alt+드래그로 눈금 맞춤 · 우클릭 드래그로 이동 · Insert로 하위 노드 추가' : '우클릭 드래그로 이동 · 읽기 전용'}
+              {knowledgeConnection
+                ? `${knowledgeConnection.policy === 'reuse-first' ? '주요' : '보조'} 지식으로 사용할 대상 카드를 클릭하세요 · Esc로 취소`
+                : mode === 'editor' ? '이미지 드롭·Ctrl+V · Alt+드래그로 눈금 맞춤 · 우클릭 드래그로 이동 · Insert로 하위 노드 추가' : '우클릭 드래그로 이동 · 읽기 전용'}
             </Panel>
           </ReactFlow>
+          {knowledgeConnection && knowledgeConnectionSourceBox && (
+            <KnowledgeConnectionPreview
+              key={`${knowledgeConnection.sourceId}-${knowledgeConnection.policy}`}
+              canvas={canvasWrapRef.current}
+              source={knowledgeConnectionSourceBox}
+              policy={knowledgeConnection.policy}
+              issue={knowledgeConnectionMessage || hoveredKnowledgeConnectionIssue}
+            />
+          )}
           <div className="live-cursors" aria-hidden="true">
             {Object.values(liveCursors).map((cursor) => (
               <div
@@ -4508,7 +4772,48 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                 </div>
                 <div className="image-inspector-name">
                   <span>파일 이름</span>
-                  <strong>{selectedNode.data.image.fileName}</strong>
+                  {mode === 'editor' ? (() => {
+                    const image = selectedNode.data.image
+                    const fileNameParts = splitImageFileName(image.fileName, image.mimeType)
+                    const commitFileName = (input: HTMLInputElement) => {
+                      const nextName = input.value.trim()
+                      if (!nextName) {
+                        input.value = fileNameParts.name
+                        return
+                      }
+                      const nextFileName = `${nextName}${fileNameParts.extension}`
+                      if (nextFileName === image.fileName) return
+                      updateNode(selectedNode.id, {
+                        label: nextFileName,
+                        image: { ...image, fileName: nextFileName },
+                      })
+                    }
+                    return (
+                      <div className="image-inspector-name-editor">
+                        <input
+                          key={`${selectedNode.id}-${image.fileName}`}
+                          type="text"
+                          defaultValue={fileNameParts.name}
+                          maxLength={Math.max(1, 240 - fileNameParts.extension.length)}
+                          aria-label="이미지 파일 이름"
+                          title="파일 확장자는 변경할 수 없습니다."
+                          spellCheck={false}
+                          onBlur={(event) => commitFileName(event.currentTarget)}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter') {
+                              event.preventDefault()
+                              event.currentTarget.blur()
+                            } else if (event.key === 'Escape') {
+                              event.preventDefault()
+                              event.currentTarget.value = fileNameParts.name
+                              event.currentTarget.blur()
+                            }
+                          }}
+                        />
+                        <span className="image-inspector-extension" title="파일 확장자는 변경할 수 없습니다.">{fileNameParts.extension}</span>
+                      </div>
+                    )
+                  })() : <strong>{selectedNode.data.image.fileName}</strong>}
                 </div>
                 <label className="description-field image-description-field">
                   <span>설명</span>
@@ -5240,6 +5545,19 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
             <span>{contextMenuNode?.data.kind === 'image' ? '이미지 메뉴' : '노드 메뉴'}</span>
             <strong>{contextMenuNode?.data.label}</strong>
           </div>
+          {viewMode === 'mindmap' && (
+            <>
+              <button className="knowledge-connect primary" role="menuitem" onClick={() => startKnowledgeConnectionFromMenu('reuse-first')}>
+                <span className="context-icon"><Icon name="share" size={15} /></span>
+                <span><strong>주요 지식 연결</strong><small>이 카드를 먼저 활용할 대상 카드 선택</small></span>
+              </button>
+              <button className="knowledge-connect secondary" role="menuitem" onClick={() => startKnowledgeConnectionFromMenu('inspect-if-insufficient')}>
+                <span className="context-icon"><Icon name="share" size={15} /></span>
+                <span><strong>보조 지식 연결</strong><small>정보가 부족할 때 확인할 대상 선택</small></span>
+              </button>
+              <div className="context-divider" />
+            </>
+          )}
           {contextMenuNode?.data.kind === 'image' ? (
             <>
               <button className="danger" role="menuitem" onClick={() => { void deleteImageNodeById(nodeContextMenu.nodeId) }}>

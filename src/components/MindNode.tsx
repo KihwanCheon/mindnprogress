@@ -43,6 +43,21 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
   return (
     <article className={`mind-node ${data.kind} status-${displayStatus} ${isCompleted ? 'completed' : ''} ${selected ? 'selected' : ''}`}>
       <Handle type="target" position={Position.Left} isConnectable={isConnectable} />
+      {([
+        ['top', Position.Top],
+        ['right', Position.Right],
+        ['bottom', Position.Bottom],
+        ['left', Position.Left],
+      ] as const).map(([side, position]) => (
+        <Handle
+          key={side}
+          id={`knowledge-target-${side}`}
+          className="knowledge-route-handle"
+          type="target"
+          position={position}
+          isConnectable={false}
+        />
+      ))}
       {waitingItems.length > 0 && (
         <button
           type="button"

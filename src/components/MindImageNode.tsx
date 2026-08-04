@@ -1,4 +1,4 @@
-import { NodeResizer } from '@xyflow/react'
+import { Handle, NodeResizer, Position } from '@xyflow/react'
 import type { MindNodeData } from '../types/mindMap'
 import './MindImageNode.css'
 
@@ -25,6 +25,21 @@ export function MindImageNode({ data, selected }: { data: MindNodeData; selected
         onResizeStart={() => data.onImageResizeStart?.()}
         onResizeEnd={(_event, params) => data.onImageResizeEnd?.(params.width, params.height)}
       />
+      {([
+        ['top', Position.Top],
+        ['right', Position.Right],
+        ['bottom', Position.Bottom],
+        ['left', Position.Left],
+      ] as const).map(([side, position]) => (
+        <Handle
+          key={side}
+          id={`image-source-${side}`}
+          className="mind-image-knowledge-handle"
+          type="source"
+          position={position}
+          isConnectable={false}
+        />
+      ))}
       <figure
         className={`mind-image-node ${selected ? 'selected' : ''}`}
         title={tooltip}

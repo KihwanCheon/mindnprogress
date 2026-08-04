@@ -13,8 +13,9 @@ const apiBaseUrl = String(process.env.MNP_API_URL ?? 'http://127.0.0.1:4176').re
 const contextSchemaVersion = '2.0'
 const contextCommentLimit = 20
 const mindMapGridSize = 24
-const mindMapChildHorizontalOffset = mindMapGridSize * 13
+const mindMapChildHorizontalGap = mindMapGridSize * 4
 const mindMapWorkNodeVerticalStep = mindMapGridSize * 6
+const mindMapDefaultNodeWidth = 218
 let activeAttributionToken = ''
 let activeEditorId = ''
 let activeAiType = ''
@@ -29,13 +30,19 @@ function snapMindMapPosition(position) {
   }
 }
 
-function defaultChildMindMapPosition(parentPosition, siblingPositions) {
+function defaultChildMindMapPosition(parentPosition, siblingPositions, parentWidth = mindMapDefaultNodeWidth) {
   const alignedParentPosition = snapMindMapPosition(parentPosition)
+  const normalizedParentWidth = Number.isFinite(parentWidth) && parentWidth > 0
+    ? parentWidth
+    : mindMapDefaultNodeWidth
   const nextY = siblingPositions.length > 0
     ? Math.max(...siblingPositions.map((position) => snapMindMapPosition(position).y)) + mindMapWorkNodeVerticalStep
     : alignedParentPosition.y
   return {
-    x: alignedParentPosition.x + mindMapChildHorizontalOffset,
+    x: snapMindMapPosition({
+      x: alignedParentPosition.x + normalizedParentWidth + mindMapChildHorizontalGap,
+      y: alignedParentPosition.y,
+    }).x,
     y: nextY,
   }
 }
@@ -978,7 +985,11 @@ async function main() {
       id: nodeId,
       type: 'mind',
       position: position ?? (parent
-        ? defaultChildMindMapPosition(parent.position, siblingPositions)
+        ? defaultChildMindMapPosition(
+          parent.position,
+          siblingPositions,
+          parent.data?.image?.displayWidth ?? parent.data?.externalLink?.displayWidth ?? mindMapDefaultNodeWidth,
+        )
         : snapMindMapPosition({ x: 0, y: map.nodes.length * mindMapWorkNodeVerticalStep })),
       data: {
         ...data,
@@ -990,6 +1001,7 @@ async function main() {
       id: `edge-${parentId}-${nodeId}`,
       source: parentId,
       target: nodeId,
+      sourceHandle: parent?.data?.kind === 'image' ? 'image-source-right' : undefined,
       type: 'default',
       data: { relation: 'hierarchy' },
       markerEnd: { type: 'arrowclosed', width: 16, height: 16 },
