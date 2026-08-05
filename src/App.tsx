@@ -44,6 +44,7 @@ import { snapAspectResizeToGrid, snapFreeResizeToGrid } from './utils/resizeGrid
 import type { ResizeSnapRequest } from './utils/resizeGrid.mjs'
 import { extractTextLinks } from './utils/textLinks'
 import { touchPointCentroid, touchPointDistance, viewportForTouchGesture } from './utils/touchViewport.mjs'
+import { normalizeWorkspaceLocation, restorableWorkspaceLocation, workspaceLocationStorageKey } from './utils/workspaceLocation.mjs'
 import { appliedUiTheme, applyUiTheme, storedUiTheme, UI_THEME_STORAGE_KEY, type UiTheme } from './theme'
 
 const DOCUMENT_COLORS = [
@@ -156,6 +157,63 @@ function synchronizeNodeSelection(nodes: MindMapNode[], selectedId: string | nul
 
 const CLIENT_ID_KEY = 'mindnprogress-client-id'
 const LAST_LOGIN_EMAIL_KEY = 'mindnprogress-last-login-email'
+const INSPECTOR_TEXTAREA_HEIGHTS_STORAGE_PREFIX = 'mindnprogress-inspector-textarea-heights'
+const INSPECTOR_TEXTAREA_MIN_HEIGHT = 32
+const INSPECTOR_TEXTAREA_MAX_HEIGHT = 10_000
+
+type InspectorTextareaField = 'description' | 'sharedKnowledge'
+type InspectorTextareaHeights = Partial<Record<InspectorTextareaField, number>>
+
+function inspectorTextareaHeightsStorageKey(userId: string) {
+  return `${INSPECTOR_TEXTAREA_HEIGHTS_STORAGE_PREFIX}:${userId}`
+}
+
+function readStoredWorkspaceLocation(userId: string) {
+  const storageKey = workspaceLocationStorageKey(userId)
+  if (!storageKey) return null
+  try {
+    return normalizeWorkspaceLocation(JSON.parse(localStorage.getItem(storageKey) ?? 'null'))
+  } catch {
+    return null
+  }
+}
+
+function storeWorkspaceLocation(userId: string, location: { mapId: string; viewMode: ViewMode; nodeId: string | null }) {
+  const storageKey = workspaceLocationStorageKey(userId)
+  const normalizedLocation = normalizeWorkspaceLocation(location)
+  if (!storageKey || !normalizedLocation) return null
+  try {
+    localStorage.setItem(storageKey, JSON.stringify(normalizedLocation))
+    return normalizedLocation
+  } catch {
+    return null
+  }
+}
+
+function readInspectorTextareaHeights(userId: string): InspectorTextareaHeights {
+  try {
+    const storedValue: unknown = JSON.parse(
+      localStorage.getItem(inspectorTextareaHeightsStorageKey(userId)) ?? '{}',
+    )
+    if (!storedValue || typeof storedValue !== 'object' || Array.isArray(storedValue)) return {}
+
+    const storedHeights = storedValue as Record<string, unknown>
+    return (['description', 'sharedKnowledge'] as const).reduce<InspectorTextareaHeights>((heights, field) => {
+      const height = storedHeights[field]
+      if (
+        typeof height === 'number'
+        && Number.isFinite(height)
+        && height >= INSPECTOR_TEXTAREA_MIN_HEIGHT
+        && height <= INSPECTOR_TEXTAREA_MAX_HEIGHT
+      ) {
+        heights[field] = height
+      }
+      return heights
+    }, {})
+  } catch {
+    return {}
+  }
+}
 
 function createClientId() {
   if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID()
@@ -1642,7 +1700,8 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const [doorayUrlDraft, setDoorayUrlDraft] = useState('')
   const [doorayUrlUpdateState, setDoorayUrlUpdateState] = useState<'idle' | 'updating' | 'error'>('idle')
   const [doorayUrlUpdateError, setDoorayUrlUpdateError] = useState('')
-  const [viewMode, setViewMode] = useState<ViewMode>(initialDeepLink?.viewMode ?? 'mindmap')
+  const lastWorkspaceLocation = useRef(readStoredWorkspaceLocation(user.id))
+  const [viewMode, setViewMode] = useState<ViewMode>(initialDeepLink?.viewMode ?? lastWorkspaceLocation.current?.viewMode ?? 'mindmap')
   const [documents, setDocuments] = useState<MapSummary[]>([])
   const [documentLayout, setDocumentLayout] = useState<DocumentLayout>(EMPTY_DOCUMENT_LAYOUT)
   const [collapsedDocumentGroupIds, setCollapsedDocumentGroupIds] = useState<Set<string>>(() => {
@@ -1733,6 +1792,9 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     const savedWidth = Number(localStorage.getItem('mindnprogress-inspector-width'))
     return Number.isFinite(savedWidth) ? Math.min(520, Math.max(240, savedWidth)) : 278
   })
+  const [inspectorTextareaHeights, setInspectorTextareaHeights] = useState<InspectorTextareaHeights>(
+    () => readInspectorTextareaHeights(user.id),
+  )
   const [resizingSidebar, setResizingSidebar] = useState(false)
   const [resizingInspector, setResizingInspector] = useState(false)
   const sidebarMinWidth = Object.values(aiConversationActiveCounts).some((count) => count > 0)
@@ -1744,6 +1806,8 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const canvasWrapRef = useRef<HTMLElement | null>(null)
   const sidebarResizeStart = useRef({ pointerX: 0, width: 226 })
   const inspectorResizeStart = useRef({ pointerX: 0, width: 278 })
+  const descriptionTextareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const sharedKnowledgeTextareaRef = useRef<HTMLTextAreaElement | null>(null)
   const dropTargetIdRef = useRef<string | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [savedAt, setSavedAt] = useState('서버에서 불러오는 중…')
@@ -2269,7 +2333,17 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
           const requestedDocument = deepLink?.mapId
             ? maps.find((map) => map.id === deepLink.mapId) ?? null
             : null
-          const targetDocument = requestedDocument ?? maps[0]
+          const storedLocation = deepLink?.mapId
+            ? null
+            : restorableWorkspaceLocation(lastWorkspaceLocation.current, maps.map((map) => map.id))
+          const restoredDocument = storedLocation
+            ? maps.find((map) => map.id === storedLocation.mapId) ?? null
+            : null
+          const targetDocument = requestedDocument ?? restoredDocument ?? maps[0]
+          if (!deepLink && storedLocation) {
+            setViewMode(storedLocation.viewMode)
+            pendingSelection.current = storedLocation.nodeId
+          }
           if (deepLink) {
             pendingDeepLink.current = {
               ...deepLink,
@@ -2295,6 +2369,16 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       })
     return () => { active = false }
   }, [mode, setEdges, setNodes])
+
+  useEffect(() => {
+    if (!activeMapId || loadedMapId !== activeMapId) return
+    const storedLocation = storeWorkspaceLocation(user.id, {
+      mapId: activeMapId,
+      viewMode,
+      nodeId: selectedId,
+    })
+    if (storedLocation) lastWorkspaceLocation.current = storedLocation
+  }, [activeMapId, loadedMapId, selectedId, user.id, viewMode])
 
   useEffect(() => {
     void Promise.all([
@@ -3138,6 +3222,51 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   useEffect(() => {
     localStorage.setItem('mindnprogress-inspector-width', String(inspectorWidth))
   }, [inspectorWidth])
+
+  const rememberInspectorTextareaHeight = useCallback((field: InspectorTextareaField, height: number) => {
+    if (
+      !Number.isFinite(height)
+      || height < INSPECTOR_TEXTAREA_MIN_HEIGHT
+      || height > INSPECTOR_TEXTAREA_MAX_HEIGHT
+    ) return
+
+    setInspectorTextareaHeights((current) => {
+      if (current[field] === height) return current
+
+      const next = { ...current, [field]: height }
+      try {
+        localStorage.setItem(inspectorTextareaHeightsStorageKey(user.id), JSON.stringify(next))
+      } catch {
+        // 저장소를 사용할 수 없는 환경에서도 현재 세션의 크기 조절은 유지한다.
+      }
+      return next
+    })
+  }, [user.id])
+
+  useEffect(() => {
+    if (typeof ResizeObserver === 'undefined' || selectedReferenceReadOnly) return undefined
+
+    const textareas: Array<[InspectorTextareaField, HTMLTextAreaElement | null]> = [
+      ['description', descriptionTextareaRef.current],
+      ['sharedKnowledge', sharedKnowledgeTextareaRef.current],
+    ]
+    const observers = textareas.flatMap(([field, textarea]) => {
+      if (!textarea) return []
+
+      let previousHeight = Math.round(textarea.getBoundingClientRect().height)
+      const observer = new ResizeObserver(() => {
+        const height = Math.round(textarea.getBoundingClientRect().height)
+        if (height === previousHeight) return
+
+        previousHeight = height
+        rememberInspectorTextareaHeight(field, height)
+      })
+      observer.observe(textarea)
+      return [observer]
+    })
+
+    return () => observers.forEach((observer) => observer.disconnect())
+  }, [rememberInspectorTextareaHeight, selectedId, selectedReferenceReadOnly])
 
   const addNode = useCallback((parentId?: string, position?: { x: number; y: number }) => {
     if (mode === 'viewer') return
@@ -5914,7 +6043,15 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                   <span>업무 설명</span>
                   {mode === 'editor' && !selectedNode.data.reference ? (
                     <>
-                      <textarea value={selectedNode.data.description} onChange={(event) => updateNode(selectedNode.id, { description: event.target.value })} rows={3} />
+                      <textarea
+                        ref={descriptionTextareaRef}
+                        value={selectedNode.data.description}
+                        onChange={(event) => updateNode(selectedNode.id, { description: event.target.value })}
+                        rows={3}
+                        style={inspectorTextareaHeights.description === undefined
+                          ? undefined
+                          : { height: inspectorTextareaHeights.description }}
+                      />
                       {extractTextLinks(selectedNode.data.description).length > 0 && (
                         <div className="description-links">
                           {extractTextLinks(selectedNode.data.description).map((link) => (
@@ -5942,12 +6079,16 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                   {mode === 'editor' && !selectedNode.data.reference ? (
                     <>
                       <textarea
+                        ref={sharedKnowledgeTextareaRef}
                         value={selectedNode.data.sharedKnowledge ?? ''}
                         onChange={(event) => updateSharedKnowledge(selectedNode.id, event.target.value)}
                         rows={4}
                         maxLength={10_000}
                         placeholder="예: 적용하기로 한 정책, 재사용할 조사 결과, 구현 제약과 사용 방법"
                         aria-label="공유 지식"
+                        style={inspectorTextareaHeights.sharedKnowledge === undefined
+                          ? undefined
+                          : { height: inspectorTextareaHeights.sharedKnowledge }}
                       />
                       {extractTextLinks(selectedNode.data.sharedKnowledge ?? '').length > 0 && (
                         <div className="description-links">

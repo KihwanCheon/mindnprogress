@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev.mjs",
+    "dev:4177": "vite --port 4177 --strictPort",
     "dev:client": "vite",
     "dev:server": "node --watch server/index.mjs",
     "build": "tsc -b && vite build",
