@@ -42,6 +42,7 @@ import {
   normalizeAionUiExternalLaunchPayload,
   parseMindNProgressCompletionToken,
 } from './lib/aionUiExternalLaunch.mjs'
+import { localLoopbackRedirectLocation } from './lib/localLoopbackRedirect.mjs'
 
 const serverDirectory = path.dirname(fileURLToPath(import.meta.url))
 const projectDirectory = path.resolve(serverDirectory, '..')
@@ -2387,6 +2388,15 @@ if (adminBootstrapped) {
 }
 
 const server = createServer(async (request, response) => {
+  const loopbackLocation = localLoopbackRedirectLocation(request)
+  if (loopbackLocation) {
+    response.writeHead(307, {
+      Location: loopbackLocation,
+      'Cache-Control': 'no-store',
+    })
+    response.end()
+    return
+  }
   const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`)
 
   try {
