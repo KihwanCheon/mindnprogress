@@ -2,6 +2,7 @@ import { useLayoutEffect, useRef, useState } from 'react'
 import { Handle, NodeResizer, Position } from '@xyflow/react'
 import type { MindNodeData } from '../types/mindMap'
 import { normalizedDoorayKnowledgeUrl } from '../utils/externalLinks'
+import { beginResizeGesture, finishResizeGesture, updateResizeGesture, type ResizeGesture } from '../utils/resizeGesture'
 import './DoorayTaskNode.css'
 
 export function DoorayTaskNode({ data, selected, isConnectable }: {
@@ -13,6 +14,7 @@ export function DoorayTaskNode({ data, selected, isConnectable }: {
   const sourceUrl = normalizedDoorayKnowledgeUrl(data.taskUrl ?? '')
   const titleRef = useRef<HTMLHeadingElement | null>(null)
   const titleBoxRef = useRef<HTMLDivElement | null>(null)
+  const resizeGesture = useRef<ResizeGesture | null>(null)
   const [titleLines, setTitleLines] = useState(2)
 
   useLayoutEffect(() => {
@@ -58,8 +60,15 @@ export function DoorayTaskNode({ data, selected, isConnectable }: {
         maxHeight={800}
         lineClassName="dooray-task-resize-line"
         handleClassName="dooray-task-resize-handle"
-        onResizeStart={() => data.onExternalLinkResizeStart?.()}
-        onResizeEnd={(_event, params) => data.onExternalLinkResizeEnd?.(params.width, params.height)}
+        onResizeStart={(event, params) => {
+          resizeGesture.current = beginResizeGesture(event, params)
+          data.onExternalLinkResizeStart?.()
+        }}
+        onResize={(event, params) => data.onExternalLinkResize?.(updateResizeGesture(event, params, resizeGesture.current))}
+        onResizeEnd={(event, params) => {
+          data.onExternalLinkResizeEnd?.(finishResizeGesture(event, params, resizeGesture.current))
+          resizeGesture.current = null
+        }}
       />
       <article className={`mind-node dooray-task-node ${closed ? 'closed' : ''} ${selected ? 'selected' : ''}`} title={tooltip}>
         {waitingItems.length > 0 && (

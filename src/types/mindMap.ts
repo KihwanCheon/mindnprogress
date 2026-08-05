@@ -1,3 +1,5 @@
+import type { ResizeSnapRequest } from '../utils/resizeGrid.mjs'
+
 export type ChecklistItem = {
   id: string
   text: string
@@ -99,11 +101,13 @@ export type MindNodeData = {
   imageAssetUrl?: string
   imageEditable?: boolean
   onImageResizeStart?: () => void
-  onImageResizeEnd?: (width: number, height: number) => void
+  onImageResize?: (resize: ResizeSnapRequest) => void
+  onImageResizeEnd?: (resize: ResizeSnapRequest) => void
   onOpenImagePreview?: () => void
   externalLinkEditable?: boolean
   onExternalLinkResizeStart?: () => void
-  onExternalLinkResizeEnd?: (width: number, height: number) => void
+  onExternalLinkResize?: (resize: ResizeSnapRequest) => void
+  onExternalLinkResizeEnd?: (resize: ResizeSnapRequest) => void
   taskUrl?: string
   aiConversationId?: string
   reference?: MindNodeReference

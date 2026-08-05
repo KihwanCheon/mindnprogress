@@ -1,9 +1,12 @@
+import { useRef } from 'react'
 import { Handle, NodeResizer, Position } from '@xyflow/react'
 import type { MindNodeData } from '../types/mindMap'
+import { beginResizeGesture, finishResizeGesture, updateResizeGesture, type ResizeGesture } from '../utils/resizeGesture'
 import './MindImageNode.css'
 
 export function MindImageNode({ data, selected }: { data: MindNodeData; selected: boolean }) {
   const image = data.image
+  const resizeGesture = useRef<ResizeGesture | null>(null)
   if (!image) return null
   const description = data.description?.trim() ?? ''
   const tooltip = [
@@ -22,8 +25,15 @@ export function MindImageNode({ data, selected }: { data: MindNodeData; selected
         maxHeight={2_000}
         lineClassName="mind-image-resize-line"
         handleClassName="mind-image-resize-handle"
-        onResizeStart={() => data.onImageResizeStart?.()}
-        onResizeEnd={(_event, params) => data.onImageResizeEnd?.(params.width, params.height)}
+        onResizeStart={(event, params) => {
+          resizeGesture.current = beginResizeGesture(event, params)
+          data.onImageResizeStart?.()
+        }}
+        onResize={(event, params) => data.onImageResize?.(updateResizeGesture(event, params, resizeGesture.current))}
+        onResizeEnd={(event, params) => {
+          data.onImageResizeEnd?.(finishResizeGesture(event, params, resizeGesture.current))
+          resizeGesture.current = null
+        }}
       />
       {([
         ['top', Position.Top],

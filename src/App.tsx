@@ -40,6 +40,8 @@ import { blockingNodes, createsDependencyCycle, dependentNodes, prerequisiteNode
 import { createsKnowledgeCycle, isHierarchyEdge, isKnowledgeEdge, knowledgePolicyOf } from './utils/knowledgeEdges'
 import { isSameDoorayKnowledgeUrl, normalizedDoorayKnowledgeUrl, taskUrlProvider } from './utils/externalLinks'
 import { mergeMapContent } from './utils/mergeMapContent.mjs'
+import { snapAspectResizeToGrid, snapFreeResizeToGrid } from './utils/resizeGrid.mjs'
+import type { ResizeSnapRequest } from './utils/resizeGrid.mjs'
 import { extractTextLinks } from './utils/textLinks'
 import { touchPointCentroid, touchPointDistance, viewportForTouchGesture } from './utils/touchViewport.mjs'
 import { appliedUiTheme, applyUiTheme, storedUiTheme, UI_THEME_STORAGE_KEY, type UiTheme } from './theme'
@@ -58,7 +60,6 @@ const DOCUMENT_COLORS = [
 ] as const
 
 const MINDMAP_GRID_SIZE = 24
-const MINDMAP_SNAP_GRID: [number, number] = [MINDMAP_GRID_SIZE, MINDMAP_GRID_SIZE]
 const MINDMAP_MIN_ZOOM = 0.25
 const MINDMAP_MAX_ZOOM = 1.8
 const TOUCH_CARD_LONG_PRESS_MS = 500
@@ -1724,7 +1725,6 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const [dropTargetId, setDropTargetId] = useState<string | null>(null)
   const [rightPanning, setRightPanning] = useState(false)
   const [touchPanning, setTouchPanning] = useState(false)
-  const [resizeSnapToGrid, setResizeSnapToGrid] = useState(false)
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const savedWidth = Number(localStorage.getItem('mindnprogress-sidebar-width'))
     return Number.isFinite(savedWidth) ? Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, savedWidth)) : 226
@@ -1753,7 +1753,6 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const touchPanGesture = useRef<TouchPanGesture | null>(null)
   const touchPanOwned = useRef(false)
   const touchCardGesture = useRef<TouchCardGesture | null>(null)
-  const resizeGestureActive = useRef(false)
   const suppressNodeContextMenuUntil = useRef(0)
   const suppressTouchClickUntil = useRef(0)
   const suppressTouchContextMenu = useRef<{ nodeId: string; until: number } | null>(null)
@@ -2006,6 +2005,63 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     const externalLink = isDoorayKnowledgeCard(node.data)
       ? node.data.externalLink
       : undefined
+    const applyImageResize = image ? (resize: ResizeSnapRequest) => {
+      const resized = resize.snapAxis
+        ? snapAspectResizeToGrid(resize, {
+            gridSize: MINDMAP_GRID_SIZE,
+            aspectRatio: image.naturalWidth / image.naturalHeight,
+            minWidth: 48,
+            minHeight: 48,
+            maxWidth: 2_000,
+            maxHeight: 2_000,
+          })
+        : resize
+      const displayWidth = Math.max(1, Math.min(2_000, resized.width))
+      const displayHeight = displayWidth * image.naturalHeight / image.naturalWidth
+      setNodes((current) => current.map((candidate) => candidate.id === node.id
+        ? {
+            ...candidate,
+            width: displayWidth,
+            height: displayHeight,
+            measured: { width: displayWidth, height: displayHeight },
+            ...(resize.snapAxis ? { position: { x: resized.x, y: resized.y } } : {}),
+            data: {
+              ...candidate.data,
+              image: candidate.data.image
+                ? { ...candidate.data.image, displayWidth, displayHeight }
+                : candidate.data.image,
+            },
+          }
+        : candidate))
+    } : undefined
+    const applyExternalLinkResize = externalLink ? (resize: ResizeSnapRequest) => {
+      const resized = resize.snapAxis
+        ? snapFreeResizeToGrid(resize, {
+            gridSize: MINDMAP_GRID_SIZE,
+            minWidth: 160,
+            minHeight: 96,
+            maxWidth: 1_200,
+            maxHeight: 800,
+          })
+        : resize
+      const displayWidth = Math.max(160, Math.min(1_200, resized.width))
+      const displayHeight = Math.max(96, Math.min(800, resized.height))
+      setNodes((current) => current.map((candidate) => candidate.id === node.id
+        ? {
+            ...candidate,
+            width: displayWidth,
+            height: displayHeight,
+            measured: { width: displayWidth, height: displayHeight },
+            ...(resize.snapAxis ? { position: { x: resized.x, y: resized.y } } : {}),
+            data: {
+              ...candidate.data,
+              externalLink: candidate.data.externalLink
+                ? { ...candidate.data.externalLink, displayWidth, displayHeight }
+                : candidate.data.externalLink,
+            },
+          }
+        : candidate))
+    } : undefined
     return {
       ...node,
       hidden,
@@ -2023,41 +2079,29 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         imageEditable: Boolean(image && mode === 'editor'),
         onOpenImagePreview: image ? () => setPreviewImageNodeId(node.id) : undefined,
         onImageResizeStart: image ? beginHistoryTransaction : undefined,
-        onImageResizeEnd: image ? (width: number) => {
-          const displayWidth = Math.max(1, Math.min(2_000, width))
-          const displayHeight = displayWidth * image.naturalHeight / image.naturalWidth
-          setNodes((current) => current.map((candidate) => candidate.id === node.id
-            ? {
-                ...candidate,
-                data: {
-                  ...candidate.data,
-                  image: candidate.data.image
-                    ? { ...candidate.data.image, displayWidth, displayHeight }
-                    : candidate.data.image,
-                },
-              }
-            : candidate))
-          setSavedAt('이미지 크기 변경됨')
-          endHistoryTransaction()
+        onImageResize: image ? (resize: ResizeSnapRequest) => {
+          if (!resize.snapAxis) return
+          queueMicrotask(() => applyImageResize?.(resize))
+        } : undefined,
+        onImageResizeEnd: image ? (resize: ResizeSnapRequest) => {
+          queueMicrotask(() => {
+            applyImageResize?.(resize)
+            setSavedAt('이미지 크기 변경됨')
+            endHistoryTransaction()
+          })
         } : undefined,
         externalLinkEditable: Boolean(externalLink && mode === 'editor'),
         onExternalLinkResizeStart: externalLink ? beginHistoryTransaction : undefined,
-        onExternalLinkResizeEnd: externalLink ? (width: number, height: number) => {
-          const displayWidth = Math.max(160, Math.min(1_200, width))
-          const displayHeight = Math.max(96, Math.min(800, height))
-          setNodes((current) => current.map((candidate) => candidate.id === node.id
-            ? {
-                ...candidate,
-                data: {
-                  ...candidate.data,
-                  externalLink: candidate.data.externalLink
-                    ? { ...candidate.data.externalLink, displayWidth, displayHeight }
-                    : candidate.data.externalLink,
-                },
-              }
-            : candidate))
-          setSavedAt('Dooray 카드 크기 변경됨')
-          endHistoryTransaction()
+        onExternalLinkResize: externalLink ? (resize: ResizeSnapRequest) => {
+          if (!resize.snapAxis) return
+          queueMicrotask(() => applyExternalLinkResize?.(resize))
+        } : undefined,
+        onExternalLinkResizeEnd: externalLink ? (resize: ResizeSnapRequest) => {
+          queueMicrotask(() => {
+            applyExternalLinkResize?.(resize)
+            setSavedAt('Dooray 카드 크기 변경됨')
+            endHistoryTransaction()
+          })
         } : undefined,
         assignee: teamMembers.find((member) => member.id === node.data.assigneeId),
         unresolvedDependencyCount: blockingNodes(node, nodes).length,
@@ -3244,42 +3288,6 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       contextMenuSuppressed: false,
     }
   }, [viewMode, viewport.x, viewport.y, viewport.zoom])
-
-  const setResizeGridSnap = useCallback((active: boolean) => {
-    reactFlowStore.setState({ snapToGrid: active, snapGrid: MINDMAP_SNAP_GRID })
-    setResizeSnapToGrid(active)
-  }, [reactFlowStore])
-
-  const prepareResizeGridSnap = useCallback((event: ReactPointerEvent<HTMLElement>) => {
-    if (event.button !== 0 || !(event.target as Element).closest('.react-flow__resize-control')) return
-    resizeGestureActive.current = true
-    setResizeGridSnap(event.altKey)
-  }, [setResizeGridSnap])
-
-  useEffect(() => {
-    const updateResizeGridSnap = (event: KeyboardEvent) => {
-      if (!resizeGestureActive.current || event.key !== 'Alt') return
-      setResizeGridSnap(event.type === 'keydown')
-    }
-    const finishResize = () => {
-      if (!resizeGestureActive.current) return
-      resizeGestureActive.current = false
-      setResizeGridSnap(false)
-    }
-
-    window.addEventListener('keydown', updateResizeGridSnap)
-    window.addEventListener('keyup', updateResizeGridSnap)
-    window.addEventListener('pointerup', finishResize)
-    window.addEventListener('pointercancel', finishResize)
-    window.addEventListener('blur', finishResize)
-    return () => {
-      window.removeEventListener('keydown', updateResizeGridSnap)
-      window.removeEventListener('keyup', updateResizeGridSnap)
-      window.removeEventListener('pointerup', finishResize)
-      window.removeEventListener('pointercancel', finishResize)
-      window.removeEventListener('blur', finishResize)
-    }
-  }, [setResizeGridSnap])
 
   const showNodeContextMenu = useCallback((nodeId: string, clientX: number, clientY: number) => {
     if (mode !== 'editor') return
@@ -5265,7 +5273,6 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
           ref={canvasWrapRef}
           className={`canvas-wrap ${rightPanning ? 'right-panning' : ''} ${touchPanning ? 'touch-panning' : ''} ${knowledgeConnection ? `knowledge-connecting ${knowledgeConnection.policy === 'reuse-first' ? 'primary' : 'secondary'}` : ''}`}
           onPointerDownCapture={(event) => {
-            prepareResizeGridSnap(event)
             startNodeRightPan(event)
           }}
           onTouchStartCapture={(event) => {
@@ -5354,8 +5361,6 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
             nodesDraggable={mode === 'editor' && !knowledgeConnection && !touchPanning}
             nodesConnectable={mode === 'editor' && !knowledgeConnection && !touchPanning}
             edgesReconnectable={mode === 'editor'}
-            snapToGrid={resizeSnapToGrid}
-            snapGrid={MINDMAP_SNAP_GRID}
             nodeClickDistance={4}
             nodeDragThreshold={4}
             panOnDrag={touchPanning ? false : [0, 1, 2]}

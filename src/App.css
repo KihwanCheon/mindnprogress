@@ -664,7 +664,7 @@
 .comment-detail > summary::before { width: 0; height: 0; content: ''; border-top: 4px solid transparent; border-bottom: 4px solid transparent; border-left: 5px solid #8175a1; transition: transform .14s; }
 .comment-detail[open] > summary::before { transform: rotate(90deg); }
 .comment-detail > summary small { margin-left: auto; color: #9d96a7; font-size: 6px; font-weight: 500; }
-.comment-detail > div { margin-top: 5px; padding: 9px; color: #5f5967; border: 1px solid #ddd9e4; border-radius: 7px; background: #f7f6f9; font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; font-size: 8px; line-height: 1.6; overflow-wrap: anywhere; white-space: pre-wrap; }
+.comment-detail > div { margin-top: 5px; padding: 9px; color: #5f5967; border: 1px solid #ddd9e4; border-radius: 7px; background: #f7f6f9; font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; font-size: 9px; line-height: 1.6; overflow-wrap: anywhere; white-space: pre-wrap; }
 .comment-detail > div a { color: #5d50ca; font-weight: 650; text-decoration: underline; text-underline-offset: 2px; }
 .comment-item > button { padding: 3px; color: #b0aab5; border: 0; border-radius: 5px; background: transparent; cursor: pointer; }
 .comment-item > button:hover { color: #c45b5b; background: #fff0f0; }
