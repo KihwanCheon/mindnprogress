@@ -4,7 +4,7 @@ import { AiConversationRuntimeBadge } from './AiConversationRuntimeBadge'
 import { AssigneeTooltip } from './AssigneeTooltip'
 import { DoorayTaskNode } from './DoorayTaskNode'
 import { MindImageNode } from './MindImageNode'
-import { normalizedDoorayTaskUrl } from '../utils/externalLinks'
+import { isSameDoorayKnowledgeUrl, normalizedDoorayKnowledgeUrl, taskUrlProvider } from '../utils/externalLinks'
 import './MindNode.css'
 
 type MindNodeType = Node<MindNodeData, 'mind'>
@@ -23,8 +23,9 @@ const statusIcon: Record<MindNodeData['status'], string> = {
 
 export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeType>) {
   if (data.kind === 'image') return <MindImageNode data={data} selected={selected} />
-  const doorayTaskUrl = normalizedDoorayTaskUrl(data.taskUrl ?? '')
-  if (doorayTaskUrl && data.externalLink?.provider === 'dooray-task' && data.externalLink.url === doorayTaskUrl) {
+  const doorayUrl = normalizedDoorayKnowledgeUrl(data.taskUrl ?? '')
+  const isDoorayWiki = taskUrlProvider(doorayUrl ?? '') === 'dooray-wiki'
+  if (doorayUrl && data.externalLink && isSameDoorayKnowledgeUrl(data.externalLink.url, doorayUrl)) {
     return <DoorayTaskNode data={data} selected={selected} isConnectable={isConnectable} />
   }
 
@@ -101,17 +102,25 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
         )}
         <strong>{data.progress}%</strong>
       </div>
-      {doorayTaskUrl ? (
+      {doorayUrl ? (
         <div className="node-title-row dooray-linked-title">
-          <span className="dooray-linked-icon" title="Dooray 업무" aria-label="Dooray 업무">D</span>
+          <span className="dooray-linked-icon" title={isDoorayWiki ? 'Dooray Wiki' : 'Dooray 업무'} aria-label={isDoorayWiki ? 'Dooray Wiki' : 'Dooray 업무'}>D</span>
+          {isDoorayWiki && (
+            <span className="dooray-wiki-icon" title="Wiki" aria-label="Wiki">
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M3.25 1.75h6.2l3.3 3.3v8.2a1 1 0 0 1-1 1h-8.5a1 1 0 0 1-1-1v-10.5a1 1 0 0 1 1-1Z" />
+                <path d="M9.25 1.9v3.35h3.35M4.75 8h5.5M4.75 10.5h5.5" />
+              </svg>
+            </span>
+          )}
           <h3>{data.label}</h3>
           <a
             className="dooray-linked-open nodrag nopan"
-            href={doorayTaskUrl}
+            href={doorayUrl}
             target="_blank"
             rel="noopener noreferrer"
-            aria-label="Dooray 업무 원본 열기"
-            title="Dooray 업무 원본 열기"
+            aria-label={isDoorayWiki ? 'Dooray Wiki 원본 열기' : 'Dooray 업무 원본 열기'}
+            title={isDoorayWiki ? 'Dooray Wiki 원본 열기' : 'Dooray 업무 원본 열기'}
             onPointerDown={(event) => event.stopPropagation()}
             onClick={(event) => event.stopPropagation()}
           >

@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import { Handle, NodeResizer, Position } from '@xyflow/react'
 import type { MindNodeData } from '../types/mindMap'
-import { normalizedDoorayTaskUrl } from '../utils/externalLinks'
+import { normalizedDoorayKnowledgeUrl } from '../utils/externalLinks'
 import './DoorayTaskNode.css'
 
 export function DoorayTaskNode({ data, selected, isConnectable }: {
@@ -10,7 +10,7 @@ export function DoorayTaskNode({ data, selected, isConnectable }: {
   isConnectable: boolean
 }) {
   const externalLink = data.externalLink
-  const taskUrl = normalizedDoorayTaskUrl(data.taskUrl ?? '')
+  const sourceUrl = normalizedDoorayKnowledgeUrl(data.taskUrl ?? '')
   const titleRef = useRef<HTMLHeadingElement | null>(null)
   const titleBoxRef = useRef<HTMLDivElement | null>(null)
   const [titleLines, setTitleLines] = useState(2)
@@ -29,10 +29,12 @@ export function DoorayTaskNode({ data, selected, isConnectable }: {
     return () => observer.disconnect()
   }, [])
 
-  if (!taskUrl) return null
-  const closed = externalLink?.closed ?? data.progress >= 100
-  const statusLabel = externalLink?.workflowName
-    || (closed ? '완료' : data.status === 'in-progress' ? '진행 중' : '할 일')
+  if (!sourceUrl || !externalLink) return null
+  const isWiki = externalLink.provider === 'dooray-wiki'
+  const closed = externalLink.provider === 'dooray-task' && (externalLink.closed || data.progress >= 100)
+  const statusLabel = isWiki
+    ? 'Wiki'
+    : externalLink.workflowName || (closed ? '완료' : data.status === 'in-progress' ? '진행 중' : '할 일')
   const cardTitle = externalLink?.title?.trim() || data.label
   const knowledgeDescription = data.description?.trim() ?? ''
   const tooltip = [
@@ -101,8 +103,34 @@ export function DoorayTaskNode({ data, selected, isConnectable }: {
             isConnectable={false}
           />
         ))}
+        {([
+          ['top', Position.Top],
+          ['right', Position.Right],
+          ['bottom', Position.Bottom],
+          ['left', Position.Left],
+        ] as const).map(([side, position]) => (
+          <Handle
+            key={`knowledge-source-${side}`}
+            id={`dooray-knowledge-source-${side}`}
+            className="knowledge-route-handle"
+            type="source"
+            position={position}
+            isConnectable={false}
+          />
+        ))}
         <header className="dooray-task-heading">
-          <span className="dooray-task-provider"><i aria-hidden="true">D</i>Dooray 업무</span>
+          <span className="dooray-task-provider">
+            <i aria-hidden="true">D</i>
+            {isWiki && (
+              <span className="dooray-wiki-icon" title="Wiki" aria-label="Wiki">
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M3.25 1.75h6.2l3.3 3.3v8.2a1 1 0 0 1-1 1h-8.5a1 1 0 0 1-1-1v-10.5a1 1 0 0 1 1-1Z" />
+                  <path d="M9.25 1.9v3.35h3.35M4.75 8h5.5M4.75 10.5h5.5" />
+                </svg>
+              </span>
+            )}
+            {isWiki ? 'Dooray Wiki' : 'Dooray 업무'}
+          </span>
           {Boolean(data.commentCount) && (
             <span className={`node-comments-badge ${data.unresolvedCommentCount ? 'unresolved' : ''}`} title={`댓글 ${data.commentCount}개 · 미해결 스레드 ${data.unresolvedCommentCount ?? 0}개`}>
               <span aria-hidden="true">💬</span>{data.commentCount}
@@ -114,14 +142,16 @@ export function DoorayTaskNode({ data, selected, isConnectable }: {
           <h3 ref={titleRef} style={{ WebkitLineClamp: titleLines }}>{cardTitle}</h3>
         </div>
         <footer className="dooray-task-footer">
-          <span title={externalLink?.taskNumber}>{externalLink?.taskNumber || 'Dooray 원본'}</span>
+          <span title={isWiki ? externalLink.pageId : externalLink.taskNumber}>
+            {isWiki ? 'Wiki 페이지' : externalLink.taskNumber || 'Dooray 원본'}
+          </span>
           <a
             className="nodrag nopan"
-            href={taskUrl}
+            href={sourceUrl}
             target="_blank"
             rel="noopener noreferrer"
-            aria-label="Dooray 업무 원본 열기"
-            title="Dooray 업무 원본 열기"
+            aria-label={isWiki ? 'Dooray Wiki 원본 열기' : 'Dooray 업무 원본 열기'}
+            title={isWiki ? 'Dooray Wiki 원본 열기' : 'Dooray 업무 원본 열기'}
             onPointerDown={(event) => event.stopPropagation()}
             onClick={(event) => event.stopPropagation()}
           >

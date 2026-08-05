@@ -56,6 +56,25 @@
   line-height: 1;
 }
 
+.dooray-wiki-icon {
+  width: 15px;
+  height: 15px;
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  color: #4f79d8;
+}
+
+.dooray-wiki-icon svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.35;
+}
+
 .dooray-task-status {
   max-width: 45%;
   margin-left: auto;

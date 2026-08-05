@@ -59,6 +59,20 @@ export type MindDoorayTaskData = {
   displayHeight: number
 }
 
+export type MindDoorayWikiData = {
+  provider: 'dooray-wiki'
+  url: string
+  hostname: string
+  wikiId: string
+  pageId: string
+  title?: string
+  resolvedAt: string
+  displayWidth: number
+  displayHeight: number
+}
+
+export type MindDoorayLinkData = MindDoorayTaskData | MindDoorayWikiData
+
 export type AiConversationRuntime = {
   conversationId: string
   state: 'running' | 'waiting-confirmation' | 'idle' | 'unknown'
@@ -81,7 +95,7 @@ export type MindNodeData = {
   status: 'planned' | 'in-progress' | 'done'
   kind: 'root' | 'branch' | 'task' | 'image'
   image?: MindImageData
-  externalLink?: MindDoorayTaskData
+  externalLink?: MindDoorayLinkData
   imageAssetUrl?: string
   imageEditable?: boolean
   onImageResizeStart?: () => void

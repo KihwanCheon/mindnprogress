@@ -699,8 +699,10 @@ async function main() {
       try {
         const parsed = new URL(url)
         if (parsed.protocol === 'https:'
-          && /^(?:[a-z0-9-]+\.)+dooray\.com$/i.test(parsed.hostname)
-          && /^\/task\/\d+\/\d+\/?$/.test(parsed.pathname)) provider = 'dooray-task'
+          && /^(?:[a-z0-9-]+\.)+dooray\.com$/i.test(parsed.hostname)) {
+          if (/^\/(?:task\/\d+\/\d+|project\/tasks\/\d+)\/?$/.test(parsed.pathname)) provider = 'dooray-task'
+          else if (/^\/(?:wiki\/\d+\/\d+|project\/pages\/\d+)\/?$/.test(parsed.pathname)) provider = 'dooray-wiki'
+        }
       } catch {
         provider = 'unknown'
       }
@@ -713,10 +715,15 @@ async function main() {
         ...(externalLink ? {
           preview: {
             title: externalLink.title ?? card.data?.label ?? card.id,
-            taskNumber: externalLink.taskNumber,
-            workflowName: externalLink.workflowName,
-            closed: externalLink.closed,
             resolvedAt: externalLink.resolvedAt,
+            ...(externalLink.provider === 'dooray-task' ? {
+              taskNumber: externalLink.taskNumber,
+              workflowName: externalLink.workflowName,
+              closed: externalLink.closed,
+            } : {
+              wikiId: externalLink.wikiId,
+              pageId: externalLink.pageId,
+            }),
           },
         } : {}),
       }

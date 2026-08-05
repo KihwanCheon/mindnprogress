@@ -1,18 +1,28 @@
 import { useEffect, useMemo, useState } from 'react'
-import { normalizedDoorayTaskUrl } from '../utils/externalLinks'
+import { parseDoorayTaskUrl } from '../utils/externalLinks'
 
-type DoorayTaskTitle = { url: string; title: string }
+type DoorayTaskTitle = {
+  key?: string
+  url: string
+  title: string
+  comment?: { id: string; authorName: string }
+}
 
-const resolvedTitles = new Map<string, string>()
-const waitingListeners = new Map<string, Set<(title: string | null) => void>>()
-const queuedUrls = new Set<string>()
-const inFlightUrls = new Set<string>()
+type ResolvedDoorayTaskLabel = {
+  title: string
+  commentAuthorName: string | null
+}
+
+const resolvedLabels = new Map<string, ResolvedDoorayTaskLabel>()
+const waitingListeners = new Map<string, Set<(label: ResolvedDoorayTaskLabel | null) => void>>()
+const queuedUrls = new Map<string, string>()
+const inFlightKeys = new Set<string>()
 let flushTimer: ReturnType<typeof setTimeout> | null = null
 
-function notifyTitle(url: string, title: string | null) {
-  const listeners = waitingListeners.get(url)
-  listeners?.forEach((listener) => listener(title))
-  if (title) waitingListeners.delete(url)
+function notifyLabel(key: string, label: ResolvedDoorayTaskLabel | null) {
+  const listeners = waitingListeners.get(key)
+  listeners?.forEach((listener) => listener(label))
+  if (label) waitingListeners.delete(key)
 }
 
 function scheduleTitleLookup() {
@@ -24,10 +34,11 @@ function scheduleTitleLookup() {
 }
 
 async function flushTitleLookup() {
-  const urls = [...queuedUrls].slice(0, 50)
-  urls.forEach((url) => {
-    queuedUrls.delete(url)
-    inFlightUrls.add(url)
+  const entries = [...queuedUrls].slice(0, 50)
+  const urls = entries.map(([, url]) => url)
+  entries.forEach(([key]) => {
+    queuedUrls.delete(key)
+    inFlightKeys.add(key)
   })
   if (urls.length === 0) return
 
@@ -40,52 +51,73 @@ async function flushTitleLookup() {
     })
     const body = await response.json().catch(() => ({})) as { tasks?: DoorayTaskTitle[] }
     if (!response.ok) throw new Error('DOORAY_TASK_TITLE_LOOKUP_FAILED')
-    const tasks = new Map((body.tasks ?? []).map((task) => [task.url, task.title]))
-    urls.forEach((url) => {
-      const title = tasks.get(url)?.trim() || null
-      if (title) resolvedTitles.set(url, title)
-      notifyTitle(url, title)
+    const tasks = new Map((body.tasks ?? []).map((task) => [
+      task.key ?? parseDoorayTaskUrl(task.url)?.labelKey,
+      {
+        title: task.title,
+        commentAuthorName: task.comment?.authorName?.trim() || null,
+      },
+    ]))
+    entries.forEach(([key]) => {
+      const task = tasks.get(key)
+      const label = task?.title.trim() ? { ...task, title: task.title.trim() } : null
+      if (label) resolvedLabels.set(key, label)
+      notifyLabel(key, label)
     })
   } catch {
-    urls.forEach((url) => notifyTitle(url, null))
+    entries.forEach(([key]) => notifyLabel(key, null))
   } finally {
-    urls.forEach((url) => inFlightUrls.delete(url))
+    entries.forEach(([key]) => inFlightKeys.delete(key))
     if (queuedUrls.size > 0) scheduleTitleLookup()
   }
 }
 
-function requestTitle(url: string) {
-  if (resolvedTitles.has(url) || queuedUrls.has(url) || inFlightUrls.has(url)) return
-  queuedUrls.add(url)
+function requestTitle(key: string, url: string) {
+  if (resolvedLabels.has(key) || queuedUrls.has(key) || inFlightKeys.has(key)) return
+  queuedUrls.set(key, url)
   scheduleTitleLookup()
 }
 
 export function DoorayTaskLinkLabel({ href, fallback }: { href: string; fallback: string }) {
-  const url = useMemo(() => normalizedDoorayTaskUrl(href), [href])
-  const [title, setTitle] = useState<string | null>(() => url ? resolvedTitles.get(url) ?? null : null)
+  const task = useMemo(() => parseDoorayTaskUrl(href), [href])
+  const [label, setLabel] = useState<ResolvedDoorayTaskLabel | null>(() => task ? resolvedLabels.get(task.labelKey) ?? null : null)
 
   useEffect(() => {
-    if (!url) {
-      setTitle(null)
+    if (!task) {
+      setLabel(null)
       return
     }
 
-    const cached = resolvedTitles.get(url)
+    const cached = resolvedLabels.get(task.labelKey)
     if (cached) {
-      setTitle(cached)
+      setLabel(cached)
       return
     }
 
-    setTitle(null)
-    const listeners = waitingListeners.get(url) ?? new Set()
-    listeners.add(setTitle)
-    waitingListeners.set(url, listeners)
-    requestTitle(url)
+    setLabel(null)
+    const listeners = waitingListeners.get(task.labelKey) ?? new Set()
+    listeners.add(setLabel)
+    waitingListeners.set(task.labelKey, listeners)
+    requestTitle(task.labelKey, task.url)
     return () => {
-      listeners.delete(setTitle)
-      if (listeners.size === 0) waitingListeners.delete(url)
+      listeners.delete(setLabel)
+      if (listeners.size === 0) waitingListeners.delete(task.labelKey)
     }
-  }, [url])
+  }, [task])
 
-  return <>{title || fallback}</>
+  return <>
+    {label?.title || fallback}
+    {label?.title && task?.commentId && (
+      <>
+        <span className="dooray-comment-link-icon" title="Dooray 코멘트" aria-label="Dooray 코멘트">
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M3.25 2.5h9.5A1.75 1.75 0 0 1 14.5 4.25v5.5a1.75 1.75 0 0 1-1.75 1.75H7l-3.8 2.25.55-2.25h-.5A1.75 1.75 0 0 1 1.5 9.75v-5.5A1.75 1.75 0 0 1 3.25 2.5Z" />
+          </svg>
+        </span>
+        <span className="dooray-comment-author" title={`코멘트 작성자: ${label.commentAuthorName || '확인 불가'}`}>
+          {label.commentAuthorName || '작성자 미상'}
+        </span>
+      </>
+    )}
+  </>
 }

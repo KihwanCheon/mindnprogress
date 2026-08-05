@@ -35,10 +35,10 @@ import { AiConversationDialog } from './components/AiConversationDialog'
 import { AiConversationActivityIndicator } from './components/AiConversationRuntimeBadge'
 import { ImagePreviewDialog } from './components/ImagePreviewDialog'
 import { DashboardView, KanbanView, TimelineView } from './components/WorkViews'
-import type { AiConversationRuntime, ChecklistItem, KnowledgePolicy, MindDoorayTaskData, MindImageData, MindMapEdgeData, MindNodeData, TeamMember, WaitingItem } from './types/mindMap'
+import type { AiConversationRuntime, ChecklistItem, KnowledgePolicy, MindDoorayLinkData, MindDoorayTaskData, MindDoorayWikiData, MindImageData, MindMapEdgeData, MindNodeData, TeamMember, WaitingItem } from './types/mindMap'
 import { blockingNodes, createsDependencyCycle, dependentNodes, prerequisiteNodes } from './utils/dependencies'
 import { createsKnowledgeCycle, isHierarchyEdge, isKnowledgeEdge, knowledgePolicyOf } from './utils/knowledgeEdges'
-import { normalizedDoorayTaskUrl, taskUrlProvider } from './utils/externalLinks'
+import { isSameDoorayKnowledgeUrl, normalizedDoorayKnowledgeUrl, taskUrlProvider } from './utils/externalLinks'
 import { mergeMapContent } from './utils/mergeMapContent.mjs'
 import { extractTextLinks } from './utils/textLinks'
 import { touchPointCentroid, touchPointDistance, viewportForTouchGesture } from './utils/touchViewport.mjs'
@@ -259,7 +259,7 @@ function nodeSideAnchors(node: MindMapNode): NodeSideAnchor[] {
   ]
 }
 
-function nearestImageKnowledgeHandles(source: MindMapNode, target: MindMapNode) {
+function nearestKnowledgeHandles(source: MindMapNode, target: MindMapNode, sourceHandlePrefix: string) {
   let nearest: { source: NodeSideAnchor; target: NodeSideAnchor; distance: number } | null = null
   for (const sourceAnchor of nodeSideAnchors(source)) {
     for (const targetAnchor of nodeSideAnchors(target)) {
@@ -268,7 +268,7 @@ function nearestImageKnowledgeHandles(source: MindMapNode, target: MindMapNode) 
     }
   }
   return nearest ? {
-    sourceHandle: `image-source-${nearest.source.side}`,
+    sourceHandle: `${sourceHandlePrefix}-${nearest.source.side}`,
     targetHandle: `knowledge-target-${nearest.target.side}`,
   } : undefined
 }
@@ -301,11 +301,44 @@ type DoorayTaskPreview = Omit<MindDoorayTaskData, 'displayWidth' | 'displayHeigh
   subject: string
 }
 
-function isDoorayKnowledgeCard(data: MindNodeData): data is MindNodeData & { externalLink: MindDoorayTaskData } {
-  const taskUrl = normalizedDoorayTaskUrl(data.taskUrl ?? '')
-  return Boolean(taskUrl
-    && data.externalLink?.provider === 'dooray-task'
-    && data.externalLink.url === taskUrl)
+type DoorayWikiPreview = Omit<MindDoorayWikiData, 'displayWidth' | 'displayHeight'> & {
+  subject: string
+}
+
+type DoorayKnowledgePreview = DoorayTaskPreview | DoorayWikiPreview
+
+function isDoorayKnowledgeCard(data: MindNodeData): data is MindNodeData & { externalLink: MindDoorayLinkData } {
+  const sourceUrl = normalizedDoorayKnowledgeUrl(data.taskUrl ?? '')
+  return Boolean(sourceUrl
+    && data.externalLink
+    && isSameDoorayKnowledgeUrl(data.externalLink.url, sourceUrl))
+}
+
+function doorayKnowledgeState(preview: DoorayKnowledgePreview): Pick<MindNodeData, 'status' | 'progress'> {
+  if (preview.provider === 'dooray-wiki') return { status: 'planned', progress: 0 }
+  return {
+    status: preview.closed ? 'done' : preview.workflowClass === 'working' ? 'in-progress' : 'planned',
+    progress: preview.closed ? 100 : 0,
+  }
+}
+
+function isSameDoorayKnowledgePreview(current: MindDoorayLinkData, preview: DoorayKnowledgePreview, subject: string) {
+  if (current.provider !== preview.provider
+    || current.url !== preview.url
+    || current.hostname !== preview.hostname
+    || current.title !== subject) return false
+  if (current.provider === 'dooray-wiki' && preview.provider === 'dooray-wiki') {
+    return current.wikiId === preview.wikiId && current.pageId === preview.pageId
+  }
+  if (current.provider === 'dooray-task' && preview.provider === 'dooray-task') {
+    return current.projectId === preview.projectId
+      && current.postId === preview.postId
+      && current.taskNumber === preview.taskNumber
+      && current.workflowName === preview.workflowName
+      && current.workflowClass === preview.workflowClass
+      && current.closed === preview.closed
+  }
+  return false
 }
 
 function knowledgeConnectionIssue(sourceId: string, targetId: string, nodes: MindMapNode[], edges: MindMapEdge[]) {
@@ -1259,6 +1292,25 @@ async function apiRequest<T>(pathname: string, init?: RequestInit) {
   return body
 }
 
+async function fetchDoorayKnowledgePreview(url: string): Promise<DoorayKnowledgePreview> {
+  const provider = taskUrlProvider(url)
+  if (provider === 'dooray-task') {
+    const { task } = await apiRequest<{ task: DoorayTaskPreview }>('/api/integrations/dooray/task-preview', {
+      method: 'POST',
+      body: JSON.stringify({ url }),
+    })
+    return task
+  }
+  if (provider === 'dooray-wiki') {
+    const { wiki } = await apiRequest<{ wiki: DoorayWikiPreview }>('/api/integrations/dooray/wiki-preview', {
+      method: 'POST',
+      body: JSON.stringify({ url }),
+    })
+    return wiki
+  }
+  throw new Error('올바른 Dooray 업무 또는 Wiki URL을 입력해 주세요.')
+}
+
 async function uploadMindMapImage(mapId: string, file: File) {
   const response = await fetch(`/api/maps/${encodeURIComponent(mapId)}/images`, {
     method: 'POST',
@@ -1768,6 +1820,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     ? selectedNode
     : null
   const selectedDoorayKnowledgeLink = selectedDoorayKnowledgeNode?.data.externalLink ?? null
+  const selectedDoorayKnowledgeIsWiki = selectedDoorayKnowledgeLink?.provider === 'dooray-wiki'
   const selectedDoorayKnowledgeEditable = mode === 'editor' && !selectedDoorayKnowledgeNode?.data.reference
   const previewImageNode = previewImageNodeId
     ? nodes.find((node) => node.id === previewImageNodeId && node.data.kind === 'image') ?? null
@@ -2049,12 +2102,15 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       }
       const primary = knowledgePolicyOf(edge) === 'reuse-first'
       const targetNode = nodesById.get(edge.target)
-      const imageHandles = sourceNode?.data.kind === 'image' && targetNode
-        ? nearestImageKnowledgeHandles(sourceNode, targetNode)
+      const sourceHandlePrefix = sourceNode?.data.kind === 'image'
+        ? 'image-source'
+        : sourceNode && isDoorayKnowledgeCard(sourceNode.data) ? 'dooray-knowledge-source' : null
+      const nearestHandles = sourceHandlePrefix && sourceNode && targetNode
+        ? nearestKnowledgeHandles(sourceNode, targetNode, sourceHandlePrefix)
         : undefined
       return {
         ...edge,
-        ...imageHandles,
+        ...nearestHandles,
         type: 'knowledge-parallel',
         hidden,
         reconnectable: false,
@@ -2459,46 +2515,32 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
 
   const refreshDoorayKnowledgeCard = useCallback((mapId: string, nodeId: string, url: string) => {
     if (mode !== 'editor') return
-    const normalizedUrl = normalizedDoorayTaskUrl(url)
+    const normalizedUrl = normalizedDoorayKnowledgeUrl(url)
     if (!normalizedUrl) return
     const requestKey = `${mapId}\u0000${nodeId}`
     if (refreshingDoorayKnowledgeCards.current.has(requestKey)) return
     refreshingDoorayKnowledgeCards.current.add(requestKey)
 
-    void apiRequest<{ task: DoorayTaskPreview }>('/api/integrations/dooray/task-preview', {
-      method: 'POST',
-      body: JSON.stringify({ url: normalizedUrl }),
-    })
-      .then(({ task }) => {
+    void fetchDoorayKnowledgePreview(normalizedUrl)
+      .then((preview) => {
         if (activeMapIdRef.current !== mapId) return
         if (pendingDooraySourceUrls.current.has(requestKey)) return
-        const { subject, ...remoteLink } = task
-        const remoteStatus: MindNodeData['status'] = task.closed
-          ? 'done'
-          : task.workflowClass === 'working' ? 'in-progress' : 'planned'
-        const remoteProgress = task.closed ? 100 : 0
+        const { subject, ...remoteLink } = preview
+        const remoteState = doorayKnowledgeState(preview)
         setNodes((current) => current.map((node) => {
-          if (node.id !== nodeId || !isDoorayKnowledgeCard(node.data) || node.data.externalLink.url !== normalizedUrl) return node
+          if (node.id !== nodeId || !isDoorayKnowledgeCard(node.data) || !isSameDoorayKnowledgeUrl(node.data.externalLink.url, normalizedUrl)) return node
           const currentLink = node.data.externalLink
           const remoteChanged = node.data.label !== subject
-            || node.data.status !== remoteStatus
-            || node.data.progress !== remoteProgress
-            || currentLink.title !== subject
-            || currentLink.hostname !== remoteLink.hostname
-            || currentLink.projectId !== remoteLink.projectId
-            || currentLink.postId !== remoteLink.postId
-            || currentLink.taskNumber !== remoteLink.taskNumber
-            || currentLink.workflowName !== remoteLink.workflowName
-            || currentLink.workflowClass !== remoteLink.workflowClass
-            || currentLink.closed !== remoteLink.closed
+            || node.data.status !== remoteState.status
+            || node.data.progress !== remoteState.progress
+            || !isSameDoorayKnowledgePreview(currentLink, preview, subject)
           if (!remoteChanged) return node
           return {
             ...node,
             data: {
               ...node.data,
               label: subject,
-              status: remoteStatus,
-              progress: remoteProgress,
+              ...remoteState,
               taskUrl: remoteLink.url,
               externalLink: {
                 ...remoteLink,
@@ -2524,10 +2566,10 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     if (mode !== 'editor') return
     const currentNode = nodesRef.current.find((node) => node.id === nodeId)
     if (!currentNode || !isDoorayKnowledgeCard(currentNode.data) || currentNode.data.reference) return
-    const normalizedUrl = normalizedDoorayTaskUrl(value)
+    const normalizedUrl = normalizedDoorayKnowledgeUrl(value)
     if (!normalizedUrl) {
       setDoorayUrlUpdateState('error')
-      setDoorayUrlUpdateError('올바른 Dooray 업무 URL을 입력해 주세요.')
+      setDoorayUrlUpdateError('올바른 Dooray 업무 또는 Wiki URL을 입력해 주세요.')
       return
     }
 
@@ -2538,9 +2580,9 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       return
     }
     if (nodesRef.current.some((node) => node.id !== nodeId
-      && normalizedDoorayTaskUrl(node.data.taskUrl ?? '') === normalizedUrl)) {
+      && isSameDoorayKnowledgeUrl(node.data.taskUrl ?? '', normalizedUrl))) {
       setDoorayUrlUpdateState('error')
-      setDoorayUrlUpdateError('이미 이 Dooray 업무를 사용하는 카드가 있습니다.')
+      setDoorayUrlUpdateError('이미 이 Dooray 원본을 사용하는 카드가 있습니다.')
       return
     }
 
@@ -2550,16 +2592,11 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     setDoorayUrlUpdateState('updating')
     setDoorayUrlUpdateError('')
 
-    void apiRequest<{ task: DoorayTaskPreview }>('/api/integrations/dooray/task-preview', {
-      method: 'POST',
-      body: JSON.stringify({ url: normalizedUrl }),
-    })
-      .then(({ task }) => {
+    void fetchDoorayKnowledgePreview(normalizedUrl)
+      .then((preview) => {
         if (activeMapIdRef.current !== mapId || pendingDooraySourceUrls.current.get(requestKey) !== normalizedUrl) return
-        const { subject, ...remoteLink } = task
-        const remoteStatus: MindNodeData['status'] = task.closed
-          ? 'done'
-          : task.workflowClass === 'working' ? 'in-progress' : 'planned'
+        const { subject, ...remoteLink } = preview
+        const remoteState = doorayKnowledgeState(preview)
         setNodes((current) => current.map((node) => {
           if (node.id !== nodeId || !isDoorayKnowledgeCard(node.data)) return node
           return {
@@ -2567,8 +2604,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
             data: {
               ...node.data,
               label: subject,
-              status: remoteStatus,
-              progress: task.closed ? 100 : 0,
+              ...remoteState,
               taskUrl: remoteLink.url,
               externalLink: {
                 ...remoteLink,
@@ -2590,7 +2626,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
           || pendingDooraySourceUrls.current.get(requestKey) !== normalizedUrl
           || selectedIdRef.current !== nodeId) return
         setDoorayUrlUpdateState('error')
-        setDoorayUrlUpdateError(error instanceof Error ? error.message : 'Dooray 업무를 조회하지 못했습니다.')
+        setDoorayUrlUpdateError(error instanceof Error ? error.message : 'Dooray 원본을 조회하지 못했습니다.')
       })
       .finally(() => {
         if (pendingDooraySourceUrls.current.get(requestKey) === normalizedUrl) {
@@ -4103,17 +4139,18 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     if (lastError) setSaveError(`일부 이미지를 추가하지 못했습니다. ${lastError}`)
   }, [activeMapId, loadedMapId, mode, screenToFlowPosition, setNodes, viewMode])
 
-  const addDoorayTaskAtPoint = useCallback(async (url: string, clientPoint: { x: number; y: number }) => {
+  const addDoorayKnowledgeAtPoint = useCallback(async (url: string, clientPoint: { x: number; y: number }) => {
     if (mode !== 'editor' || viewMode !== 'mindmap' || !activeMapId || loadedMapId !== activeMapId) return
-    const normalizedUrl = normalizedDoorayTaskUrl(url)
+    const normalizedUrl = normalizedDoorayKnowledgeUrl(url)
     if (!normalizedUrl) return
-    const existing = nodes.find((node) => normalizedDoorayTaskUrl(node.data.taskUrl ?? '') === normalizedUrl)
+    const sourceLabel = taskUrlProvider(normalizedUrl) === 'dooray-wiki' ? 'Dooray Wiki' : 'Dooray 업무'
+    const existing = nodes.find((node) => isSameDoorayKnowledgeUrl(node.data.taskUrl ?? '', normalizedUrl))
     if (existing) {
       const { width, height } = nodeDimensions(existing)
       setNodes((current) => current.map((node) => ({ ...node, selected: node.id === existing.id })))
       setSelectedId(existing.id)
       setCenter(existing.position.x + width / 2, existing.position.y + height / 2, { duration: 350 })
-      setSavedAt('이미 추가된 Dooray 업무를 선택함')
+      setSavedAt(`이미 추가된 ${sourceLabel}를 선택함`)
       return
     }
     if (resolvingDoorayUrls.current.has(normalizedUrl)) return
@@ -4122,21 +4159,19 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     const flowPoint = screenToFlowPosition(clientPoint)
     resolvingDoorayUrls.current.add(normalizedUrl)
     setSaveError('')
-    setSavedAt('Dooray 업무 조회 중…')
+    setSavedAt(`${sourceLabel} 조회 중…`)
     try {
-      const result = await apiRequest<{ task: DoorayTaskPreview }>('/api/integrations/dooray/task-preview', {
-        method: 'POST',
-        body: JSON.stringify({ url: normalizedUrl }),
-      })
+      const preview = await fetchDoorayKnowledgePreview(normalizedUrl)
       if (activeMapIdRef.current !== targetMapId) {
-        setSavedAt('Dooray 업무 추가 취소됨')
+        setSavedAt(`${sourceLabel} 추가 취소됨`)
         return
       }
-      const { subject, ...task } = result.task
-      const createdId = `dooray-${task.postId}-${crypto.randomUUID()}`
-      const status = task.closed ? 'done' : task.workflowClass === 'working' ? 'in-progress' : 'planned'
-      const externalLink: MindDoorayTaskData = {
-        ...task,
+      const { subject, ...source } = preview
+      const sourceId = preview.provider === 'dooray-wiki' ? preview.pageId : preview.postId
+      const createdId = `dooray-${sourceId}-${crypto.randomUUID()}`
+      const remoteState = doorayKnowledgeState(preview)
+      const externalLink: MindDoorayLinkData = {
+        ...source,
         title: subject,
         displayWidth: MINDMAP_DOORAY_TASK_DEFAULT_WIDTH,
         displayHeight: MINDMAP_DOORAY_TASK_DEFAULT_HEIGHT,
@@ -4154,19 +4189,18 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
           data: {
             label: subject,
             description: '',
-            progress: task.closed ? 100 : 0,
-            status,
+            ...remoteState,
             kind: 'task',
-            taskUrl: task.url,
+            taskUrl: source.url,
             externalLink,
           },
         },
       ])
       setSelectedId(createdId)
-      setSavedAt('Dooray 업무 추가됨')
+      setSavedAt(`${sourceLabel} 추가됨`)
     } catch (error) {
-      setSaveError(error instanceof Error ? error.message : 'Dooray 업무를 추가하지 못했습니다.')
-      setSavedAt('Dooray 업무 추가 실패')
+      setSaveError(error instanceof Error ? error.message : `${sourceLabel}를 추가하지 못했습니다.`)
+      setSavedAt(`${sourceLabel} 추가 실패`)
     } finally {
       resolvingDoorayUrls.current.delete(normalizedUrl)
     }
@@ -4191,15 +4225,15 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         void addImageFilesAtPoint(files, { x: pointer.x, y: pointer.y })
         return
       }
-      const doorayUrl = normalizedDoorayTaskUrl(event.clipboardData?.getData('text/plain') ?? '')
+      const doorayUrl = normalizedDoorayKnowledgeUrl(event.clipboardData?.getData('text/plain') ?? '')
       if (!doorayUrl) return
       event.preventDefault()
-      void addDoorayTaskAtPoint(doorayUrl, { x: pointer.x, y: pointer.y })
+      void addDoorayKnowledgeAtPoint(doorayUrl, { x: pointer.x, y: pointer.y })
     }
 
     window.addEventListener('paste', handleClipboardContent)
     return () => window.removeEventListener('paste', handleClipboardContent)
-  }, [addDoorayTaskAtPoint, addImageFilesAtPoint, mode, viewMode])
+  }, [addDoorayKnowledgeAtPoint, addImageFilesAtPoint, mode, viewMode])
 
   const submitComment = async () => {
     const summary = newComment.trim()
@@ -5636,15 +5670,25 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                 <div className="dooray-knowledge-origin">
                   <div className="dooray-knowledge-provider-row">
                     <span className="dooray-linked-icon" aria-hidden="true">D</span>
-                    <span>Dooray 업무</span>
-                    <small>{selectedDoorayKnowledgeLink.workflowName
-                      || (selectedDoorayKnowledgeLink.closed ? '완료' : '진행 중')}</small>
+                    {selectedDoorayKnowledgeIsWiki && (
+                      <span className="dooray-wiki-icon" title="Wiki" aria-label="Wiki">
+                        <svg viewBox="0 0 16 16" aria-hidden="true">
+                          <path d="M3.25 1.75h6.2l3.3 3.3v8.2a1 1 0 0 1-1 1h-8.5a1 1 0 0 1-1-1v-10.5a1 1 0 0 1 1-1Z" />
+                          <path d="M9.25 1.9v3.35h3.35M4.75 8h5.5M4.75 10.5h5.5" />
+                        </svg>
+                      </span>
+                    )}
+                    <span>{selectedDoorayKnowledgeIsWiki ? 'Dooray Wiki' : 'Dooray 업무'}</span>
+                    <small>{selectedDoorayKnowledgeLink.provider === 'dooray-wiki'
+                      ? 'Wiki'
+                      : selectedDoorayKnowledgeLink.workflowName
+                        || (selectedDoorayKnowledgeLink.closed ? '완료' : '진행 중')}</small>
                   </div>
                   <strong title={selectedDoorayKnowledgeLink.title || selectedDoorayKnowledgeNode.data.label}>
                     {selectedDoorayKnowledgeLink.title || selectedDoorayKnowledgeNode.data.label}
                   </strong>
                   <label className="dooray-knowledge-url-field">
-                    <span>Dooray 업무 URL</span>
+                    <span>{selectedDoorayKnowledgeIsWiki ? 'Dooray Wiki URL' : 'Dooray 업무 URL'}</span>
                     <input
                       type="url"
                       value={doorayUrlDraft}
@@ -5660,7 +5704,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                         setDoorayUrlUpdateState('idle')
                         setDoorayUrlUpdateError('')
                         if (doorayUrlCommitTimer.current !== null) window.clearTimeout(doorayUrlCommitTimer.current)
-                        const normalizedUrl = normalizedDoorayTaskUrl(value)
+                        const normalizedUrl = normalizedDoorayKnowledgeUrl(value)
                         if (!normalizedUrl || normalizedUrl === selectedDoorayKnowledgeLink.url) return
                         doorayUrlCommitTimer.current = window.setTimeout(() => {
                           updateDoorayKnowledgeSource(activeMapId, selectedDoorayKnowledgeNode.id, value)
@@ -5684,7 +5728,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                         }
                       }}
                     />
-                    {doorayUrlUpdateState === 'updating' && <small className="updating">새 업무의 제목을 불러오는 중…</small>}
+                    {doorayUrlUpdateState === 'updating' && <small className="updating">새 원본의 제목을 불러오는 중…</small>}
                     {doorayUrlUpdateState === 'error' && <small className="error" role="alert">{doorayUrlUpdateError}</small>}
                   </label>
                   <a
@@ -5695,7 +5739,9 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                     title={selectedDoorayKnowledgeLink.url}
                   >
                     <Icon name="external" size={15} />
-                    <span>{selectedDoorayKnowledgeLink.taskNumber || 'Dooray 원본 업무'}</span>
+                    <span>{selectedDoorayKnowledgeLink.provider === 'dooray-wiki'
+                      ? 'Dooray 원본 Wiki'
+                      : selectedDoorayKnowledgeLink.taskNumber || 'Dooray 원본 업무'}</span>
                     <strong>원본 열기</strong>
                   </a>
                 </div>
@@ -5707,7 +5753,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                         value={selectedDoorayKnowledgeNode.data.description ?? ''}
                         onChange={(event) => updateNode(selectedDoorayKnowledgeNode.id, { description: event.target.value })}
                         rows={6}
-                        placeholder="이 Dooray 업무를 지식으로 활용할 때 참고할 내용을 입력하세요"
+                        placeholder={`이 ${selectedDoorayKnowledgeIsWiki ? 'Dooray Wiki' : 'Dooray 업무'}를 지식으로 활용할 때 참고할 내용을 입력하세요`}
                         aria-label="Dooray 지식 설명"
                       />
                       {extractTextLinks(selectedDoorayKnowledgeNode.data.description ?? '').length > 0 && (
@@ -5728,7 +5774,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                 </label>
                 <div className="image-inspector-help dooray-knowledge-help">
                   <strong>지식 카드</strong>
-                  <span>설명에 AI가 이 업무를 지식으로 활용할 때 참고할 맥락을 기록하세요.</span>
+                  <span>설명에 AI가 이 {selectedDoorayKnowledgeIsWiki ? 'Wiki' : '업무'}를 지식으로 활용할 때 참고할 맥락을 기록하세요.</span>
                   <span>카드의 우클릭 메뉴에서 주요 지식 또는 보조 지식으로 연결할 수 있습니다.</span>
                 </div>
               </div>
@@ -5803,7 +5849,9 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                     <span>업무 링크</span>
                     <small>{taskUrlProvider(selectedNode.data.taskUrl ?? '') === 'dooray-task'
                       ? 'Dooray 업무'
-                      : taskUrlProvider(selectedNode.data.taskUrl ?? '') === 'web' ? '웹 링크' : '선택사항'}</small>
+                      : taskUrlProvider(selectedNode.data.taskUrl ?? '') === 'dooray-wiki'
+                        ? 'Dooray Wiki'
+                        : taskUrlProvider(selectedNode.data.taskUrl ?? '') === 'web' ? '웹 링크' : '선택사항'}</small>
                   </div>
                   {mode === 'editor' && !selectedNode.data.reference && (
                     <input
@@ -5811,7 +5859,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                       value={selectedNode.data.taskUrl ?? ''}
                       onChange={(event) => {
                         const taskUrl = event.target.value
-                        const normalizedUrl = normalizedDoorayTaskUrl(taskUrl)
+                        const normalizedUrl = normalizedDoorayKnowledgeUrl(taskUrl)
                         const externalLink = selectedNode.data.externalLink?.url === normalizedUrl
                           ? selectedNode.data.externalLink
                           : undefined

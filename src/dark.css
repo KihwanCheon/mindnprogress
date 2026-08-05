@@ -579,6 +579,14 @@
   background: var(--theme-accent-soft);
 }
 
+[data-theme="dark"] .dooray-comment-link-icon {
+  color: #ffb85c;
+}
+
+[data-theme="dark"] .dooray-comment-author {
+  color: #f2c47f;
+}
+
 [data-theme="dark"] .shared-knowledge-field,
 [data-theme="dark"] .knowledge-item,
 [data-theme="dark"] .comment-thread.resolved > .comment-item {

@@ -449,6 +449,9 @@
 .empty-shared-knowledge { padding: 12px 9px; color: #91a59d; border: 1px dashed #cfe2da; border-radius: 8px; background: rgba(255,255,255,.7); font-size: 8px; text-align: center; }
 .text-link { color: #5d50ca; font-weight: 650; text-decoration: underline; text-decoration-color: #c9c3ef; text-underline-offset: 2px; }
 .text-link:hover { color: #493bb5; text-decoration-color: currentColor; }
+.dooray-comment-link-icon { display: inline-flex; width: 1em; height: 1em; margin-left: .38em; color: #d97706; vertical-align: -.16em; }
+.dooray-comment-link-icon svg { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 1.35; stroke-linejoin: round; }
+.dooray-comment-author { margin-left: .2em; color: #9a5a13; font-size: .88em; font-weight: 700; white-space: nowrap; }
 .progress-field > span { display: flex; justify-content: space-between; }
 .progress-field > span strong { color: #6153cf; }
 .progress-field input[type="range"] { width: 100%; accent-color: #6657d9; cursor: pointer; }

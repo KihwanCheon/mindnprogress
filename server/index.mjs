@@ -21,10 +21,13 @@ import {
 } from './lib/commentContent.mjs'
 import {
   DoorayTaskError,
+  fetchDoorayCommentAuthor,
   fetchDoorayTaskPreview,
-  isValidDoorayTaskLinkData,
+  fetchDoorayWikiPreview,
+  isValidDoorayKnowledgeLinkData,
   loadDoorayApiConfig,
   parseDoorayTaskUrl,
+  parseDoorayWikiUrl,
 } from './lib/doorayTasks.mjs'
 import {
   AI_WORKSPACE_HISTORY_LIMIT,
@@ -76,7 +79,8 @@ const aionUiSubscriptionUsageStaleAfterMs = Math.max(
 const imageAssetMaxBytes = Math.max(1_000_000, Number(process.env.MNP_IMAGE_MAX_BYTES) || 15_000_000)
 let activeAionUiBaseUrl = configuredAionUiBaseUrls[0] ?? fallbackAionUiBaseUrls[0]
 let doorayApiConfigPromise = null
-const doorayTaskTitleCache = new Map()
+const doorayTaskPreviewCache = new Map()
+const doorayCommentAuthorCache = new Map()
 const doorayTaskTitleCacheDurationMs = 5 * 60 * 1000
 const doorayTaskTitleBatchLimit = 50
 const sessionDurationMs = 8 * 60 * 60 * 1000
@@ -517,16 +521,32 @@ function getDoorayApiConfig() {
   return doorayApiConfigPromise
 }
 
-async function resolveDoorayTaskTitle(parsed, config) {
-  const cached = doorayTaskTitleCache.get(parsed.url)
-  if (cached && cached.expiresAt > Date.now()) return cached.title
+async function resolveDoorayTaskPreview(parsed, config) {
+  const cached = doorayTaskPreviewCache.get(parsed.key)
+  if (cached && cached.expiresAt > Date.now()) return cached.task
 
   const task = await fetchDoorayTaskPreview(parsed, config)
-  doorayTaskTitleCache.set(parsed.url, {
-    title: task.subject,
+  doorayTaskPreviewCache.set(parsed.key, {
+    task,
     expiresAt: Date.now() + doorayTaskTitleCacheDurationMs,
   })
-  return task.subject
+  return task
+}
+
+async function resolveDoorayComment(parsed, task, config) {
+  if (!parsed.commentId) return null
+  const cached = doorayCommentAuthorCache.get(parsed.labelKey)
+  if (cached && cached.expiresAt > Date.now()) return cached.comment
+
+  const comment = await fetchDoorayCommentAuthor({
+    ...parsed,
+    projectId: task.projectId,
+  }, config)
+  doorayCommentAuthorCache.set(parsed.labelKey, {
+    comment,
+    expiresAt: Date.now() + doorayTaskTitleCacheDurationMs,
+  })
+  return comment
 }
 
 async function readBinaryBody(request, maxBytes) {
@@ -572,7 +592,7 @@ function isValidMap(map) {
     && node.id.length <= 120
     && (node.data?.kind !== 'image' || isValidImageNodeData(node.data?.image))
     && (node.data?.externalLink === undefined
-      || (isValidDoorayTaskLinkData(node.data.externalLink)
+      || (isValidDoorayKnowledgeLinkData(node.data.externalLink)
         && node.data.taskUrl === node.data.externalLink.url))
     && (node.data?.sharedKnowledge === undefined
       || (typeof node.data.sharedKnowledge === 'string' && node.data.sharedKnowledge.length <= 10_000))
@@ -2437,6 +2457,21 @@ const server = createServer(async (request, response) => {
       }
     }
 
+    if (request.method === 'POST' && url.pathname === '/api/integrations/dooray/wiki-preview') {
+      const user = requireUser(request, response)
+      if (!user) return
+      if (!canEdit(user)) return sendJson(response, 403, { error: '편집자만 Dooray Wiki를 추가할 수 있습니다.' })
+      const body = await readJsonBody(request)
+      try {
+        const parsed = parseDoorayWikiUrl(body.url)
+        const wiki = await fetchDoorayWikiPreview(parsed, await getDoorayApiConfig())
+        return sendJson(response, 200, { wiki })
+      } catch (error) {
+        if (error instanceof DoorayTaskError) return sendJson(response, error.status, { error: error.message, code: error.code })
+        throw error
+      }
+    }
+
     if (request.method === 'POST' && url.pathname === '/api/integrations/dooray/task-titles') {
       const user = requireUser(request, response)
       if (!user) return
@@ -2447,14 +2482,28 @@ const server = createServer(async (request, response) => {
 
       let tasks
       try {
-        const parsedTasks = [...new Map(body.urls.map((taskUrl) => {
+        const parsedTaskMap = new Map()
+        body.urls.forEach((taskUrl) => {
           const parsed = parseDoorayTaskUrl(taskUrl)
-          return [parsed.url, parsed]
-        })).values()]
+          if (!parsedTaskMap.has(parsed.labelKey)) parsedTaskMap.set(parsed.labelKey, parsed)
+        })
+        const parsedTasks = [...parsedTaskMap.values()]
         const config = await getDoorayApiConfig()
+        const taskRequests = new Map()
+        const getTask = (parsed) => {
+          if (!taskRequests.has(parsed.key)) taskRequests.set(parsed.key, resolveDoorayTaskPreview(parsed, config))
+          return taskRequests.get(parsed.key)
+        }
         tasks = (await Promise.all(parsedTasks.map(async (parsed) => {
           try {
-            return { url: parsed.url, title: await resolveDoorayTaskTitle(parsed, config) }
+            const task = await getTask(parsed)
+            const comment = await resolveDoorayComment(parsed, task, config).catch(() => null)
+            return {
+              key: parsed.labelKey,
+              url: parsed.url,
+              title: task.subject,
+              ...(parsed.commentId ? { comment: comment ?? { id: parsed.commentId, authorName: '' } } : {}),
+            }
           } catch (error) {
             if (error instanceof DoorayTaskError) return null
             throw error

@@ -25,13 +25,45 @@ async function waitForServer(baseUrl, timeoutMs = 15_000) {
 test('인증된 편집자가 Dooray URL로 업무 제목 미리보기를 조회한다', { timeout: 30_000 }, async () => {
   const dataDirectory = await mkdtemp(path.join(tmpdir(), 'mindnprogress-dooray-api-'))
   let receivedAuthorization = ''
+  let upstreamRequestCount = 0
   const upstream = createServer((request, response) => {
+    upstreamRequestCount += 1
     receivedAuthorization = String(request.headers.authorization ?? '')
     response.writeHead(200, { 'Content-Type': 'application/json' })
+    if (request.url?.includes('/logs/4392183234846238852')) {
+      response.end(JSON.stringify({
+        header: { isSuccessful: true },
+        result: {
+          id: '4392183234846238852',
+          creator: { member: { organizationMemberId: '2061738478145755782', name: null } },
+        },
+      }))
+      return
+    }
+    if (request.url?.includes('/common/v1/members/2061738478145755782')) {
+      response.end(JSON.stringify({
+        header: { isSuccessful: true },
+        result: { id: '2061738478145755782', name: '이미경' },
+      }))
+      return
+    }
+    if (request.url?.includes('/wiki/v1/pages/4351699055666424190')) {
+      response.end(JSON.stringify({
+        header: { isSuccessful: true },
+        result: {
+          id: '4351699055666424190',
+          wikiId: '4337958144906302855',
+          subject: 'Dooray Wiki API 연동 테스트',
+          body: { mimeType: 'text/x-markdown', content: '미리보기에는 포함하지 않습니다.' },
+        },
+      }))
+      return
+    }
     response.end(JSON.stringify({
       header: { isSuccessful: true },
       result: {
         subject: 'Dooray API 연동 테스트',
+        project: { id: '4337958142554469981' },
         taskNumber: '테스트/17',
         workflowClass: 'working',
         workflow: { name: '진행 중' },
@@ -67,6 +99,7 @@ test('인증된 편집자가 Dooray URL로 업무 제목 미리보기를 조회�
       'Content-Type': 'application/json',
     }
     const taskUrl = 'https://nhnent.dooray.com/task/4337958142554469981/4372040364315909997'
+    const commentTaskUrl = 'https://nhnent.dooray.com/project/tasks/4372040364315909997#comment-4392183234846238852'
     const response = await fetch(`${baseUrl}/api/integrations/dooray/task-preview`, {
       method: 'POST',
       headers,
@@ -90,15 +123,48 @@ test('인증된 편집자가 Dooray URL로 업무 제목 미리보기를 조회�
     })
     assert.equal(Number.isFinite(Date.parse(body.task.resolvedAt)), true)
 
+    const wikiUrl = 'https://nhnent.dooray.com/wiki/4337958142554469981/4351699055666424190'
+    const wikiResponse = await fetch(`${baseUrl}/api/integrations/dooray/wiki-preview`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ url: wikiUrl }),
+    })
+    assert.equal(wikiResponse.status, 200)
+    const wikiBody = await wikiResponse.json()
+    assert.deepEqual(wikiBody.wiki, {
+      provider: 'dooray-wiki',
+      url: wikiUrl,
+      hostname: 'nhnent.dooray.com',
+      wikiId: '4337958144906302855',
+      pageId: '4351699055666424190',
+      subject: 'Dooray Wiki API 연동 테스트',
+      resolvedAt: wikiBody.wiki.resolvedAt,
+    })
+    assert.equal(Number.isFinite(Date.parse(wikiBody.wiki.resolvedAt)), true)
+
     const editorTitlesResponse = await fetch(`${baseUrl}/api/integrations/dooray/task-titles`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ urls: [taskUrl] }),
+      body: JSON.stringify({ urls: [
+        taskUrl,
+        'https://nhnent.dooray.com/project/tasks/4372040364315909997',
+        commentTaskUrl,
+      ] }),
     })
     assert.equal(editorTitlesResponse.status, 200)
     assert.deepEqual(await editorTitlesResponse.json(), {
-      tasks: [{ url: taskUrl, title: 'Dooray API 연동 테스트' }],
+      tasks: [{
+        key: 'nhnent.dooray.com:4372040364315909997',
+        url: taskUrl,
+        title: 'Dooray API 연동 테스트',
+      }, {
+        key: 'nhnent.dooray.com:4372040364315909997#comment-4392183234846238852',
+        url: commentTaskUrl,
+        title: 'Dooray API 연동 테스트',
+        comment: { id: '4392183234846238852', authorName: '이미경' },
+      }],
     })
+    assert.equal(upstreamRequestCount, 5)
 
     const viewerAccessResponse = await fetch(`${baseUrl}/api/auth/viewer-access`, { method: 'POST' })
     assert.equal(viewerAccessResponse.status, 200)
@@ -111,8 +177,13 @@ test('인증된 편집자가 Dooray URL로 업무 제목 미리보기를 조회�
     })
     assert.equal(viewerTitlesResponse.status, 200)
     assert.deepEqual(await viewerTitlesResponse.json(), {
-      tasks: [{ url: taskUrl, title: 'Dooray API 연동 테스트' }],
+      tasks: [{
+        key: 'nhnent.dooray.com:4372040364315909997',
+        url: taskUrl,
+        title: 'Dooray API 연동 테스트',
+      }],
     })
+    assert.equal(upstreamRequestCount, 5)
 
     const invalidResponse = await fetch(`${baseUrl}/api/integrations/dooray/task-preview`, {
       method: 'POST',
