@@ -194,7 +194,7 @@ async function main() {
 
     const guide = await invoke('mindnprogress_read_me_first')
     assert.equal(guide.guide.product.name, 'MindNProgress')
-    assert.equal(guide.guide.version, '1.6')
+    assert.equal(guide.guide.version, '1.7')
     assert.match(guide.guide.dataModel.cardContent.sharedKnowledge, /재사용/)
     assert.match(guide.guide.authoringRules.join('\n'), /모든 isWork=true 업무 진행률을 동일 가중치 평균/)
     assert.match(guide.guide.operationRules.join('\n'), /변경할 필드만 보내고/)
@@ -203,6 +203,7 @@ async function main() {
     assert.match(guide.guide.commentRules.detail, /작업을 이어가거나 결과를 검증/)
     assert.match(guide.guide.commentRules.legacy, /자동 분리하거나 다시 쓰지 않음/)
     assert.match(guide.guide.operationRules.join('\n'), /waitingItems가 해제되면 서버가 관련 사용자에게 알림/)
+    assert.match(guide.guide.operationRules.join('\n'), /kind=image.*imageAccess\.localPath.*로컬 이미지 열람 도구/)
 
     const createdMindmap = await invoke('mindnprogress_create_mindmap', {
       title: 'MCP 전체 회귀 문서',
@@ -430,7 +431,7 @@ async function main() {
       editorId: attribution.editorId,
       attributionToken: attribution.attributionToken,
     })
-    assert.equal(context.contextSchemaVersion, '2.0')
+    assert.equal(context.contextSchemaVersion, '2.1')
     assert.equal(context.detailLevel, 'focused')
     assert.equal(context.document.nodes, undefined)
     assert.equal(context.document.outline.length, 4)
@@ -786,6 +787,79 @@ async function main() {
       instruction: 'primarySources의 sharedKnowledge, 설명과 댓글을 먼저 사용하세요. 그래도 현재 작업에 필요한 결정 근거, 예외 조건 또는 이전 실패 원인이 구체적으로 부족할 때만 sources 중 필요한 카드의 toolArguments로 대화 기록을 조회하세요.',
       evidenceRule: '대화 내용은 보조 근거로 취급합니다. 실제 코드와 산출물로 검증하고, 대화 전문을 댓글이나 sharedKnowledge에 복사하지 말며, 검증된 재사용 가능 결론만 sharedKnowledge에 요약하세요.',
     })
+
+    const sourceImage = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    const imageUploadResponse = await fetch(`${apiBaseUrl}/api/maps/${encodeURIComponent(mapId)}/images`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'image/png', Cookie: sessionCookie },
+      body: sourceImage,
+    })
+    assert.equal(imageUploadResponse.status, 201)
+    const uploadedImage = (await imageUploadResponse.json()).image
+    const imageCardId = 'image-primary-knowledge'
+    const imageNode = {
+      id: imageCardId,
+      type: 'mind',
+      position: { x: 700, y: 500 },
+      data: {
+        label: 'image.png',
+        description: '화면 기획 원본',
+        progress: 0,
+        status: 'planned',
+        kind: 'image',
+        image: {
+          assetId: uploadedImage.assetId,
+          fileName: 'image.png',
+          mimeType: uploadedImage.mimeType,
+          naturalWidth: 1920,
+          naturalHeight: 1080,
+          displayWidth: 640,
+          displayHeight: 360,
+        },
+      },
+    }
+    await invoke('mindnprogress_save_document', {
+      mapId,
+      baseVersion: knowledgeSaved.map.version,
+      nodes: [...knowledgeSaved.map.nodes, imageNode],
+      edges: [
+        ...knowledgeSaved.map.edges,
+        {
+          id: 'knowledge-image-task-a',
+          source: imageCardId,
+          target: 'task-a',
+          data: { relation: 'knowledge', knowledgePolicy: 'reuse-first' },
+        },
+      ],
+    })
+
+    const expectedImageLocalPath = path.resolve(testDataDirectory, '_assets', mapId, uploadedImage.assetId)
+    await access(expectedImageLocalPath)
+    const imageKnowledgeContext = await invoke('mindnprogress_get_context', {
+      mapId,
+      cardId: 'task-a',
+      editorId: attribution.editorId,
+      attributionToken: attribution.attributionToken,
+    })
+    const primaryImageSource = imageKnowledgeContext.selection.knowledgeSources.primary
+      .find((source) => source.card.id === imageCardId)
+    assert.equal(primaryImageSource.imageAccess.mode, 'local-file')
+    assert.equal(primaryImageSource.imageAccess.localPath, expectedImageLocalPath)
+    assert.equal(primaryImageSource.imageAccess.mimeType, 'image/png')
+    const startupImageSource = imageKnowledgeContext.selection.taskLinks.startupInspection.primarySources
+      .find((source) => source.cardId === imageCardId)
+    assert.equal(startupImageSource.kind, 'image')
+    assert.equal(startupImageSource.imageAccess.localPath, expectedImageLocalPath)
+    assert.match(imageKnowledgeContext.selection.taskLinks.startupInspection.instruction, /imageAccess\.localPath.*로컬 이미지 열람 도구/)
+
+    const imageCardDetail = await invoke('mindnprogress_get_card', { mapId, cardId: imageCardId })
+    assert.equal(imageCardDetail.card.imageAccess.localPath, expectedImageLocalPath)
+    assert.equal(imageCardDetail.card.data.description, '화면 기획 원본')
+    const imageDocument = await invoke('mindnprogress_get_document', { mapId })
+    assert.equal(
+      imageDocument.access.cards.find((card) => card.cardId === imageCardId)?.imageAccess.localPath,
+      expectedImageLocalPath,
+    )
 
     const cardDetail = await invoke('mindnprogress_get_card', {
       mapId,

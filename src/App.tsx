@@ -39,6 +39,7 @@ import type { AiConversationRuntime, ChecklistItem, KnowledgePolicy, MindDoorayL
 import { blockingNodes, createsDependencyCycle, dependentNodes, prerequisiteNodes } from './utils/dependencies'
 import { createsKnowledgeCycle, isHierarchyEdge, isKnowledgeEdge, knowledgePolicyOf } from './utils/knowledgeEdges'
 import { isSameDoorayKnowledgeUrl, normalizedDoorayKnowledgeUrl, taskUrlProvider } from './utils/externalLinks'
+import { splitImageFileName, uniqueImageFileName } from './utils/imageFileNames.mjs'
 import { mergeMapContent } from './utils/mergeMapContent.mjs'
 import { snapAspectResizeToGrid, snapFreeResizeToGrid } from './utils/resizeGrid.mjs'
 import type { ResizeSnapRequest } from './utils/resizeGrid.mjs'
@@ -1419,27 +1420,6 @@ function defaultImageDisplaySize(naturalWidth: number, naturalHeight: number) {
     width: Math.max(1, Math.round(naturalWidth * scale)),
     height: Math.max(1, Math.round(naturalHeight * scale)),
   }
-}
-
-const IMAGE_FILE_EXTENSIONS: Record<MindImageData['mimeType'], string[]> = {
-  'image/png': ['.png'],
-  'image/jpeg': ['.jpeg', '.jpg'],
-  'image/gif': ['.gif'],
-  'image/webp': ['.webp'],
-}
-
-function splitImageFileName(fileName: string, mimeType: MindImageData['mimeType']) {
-  const trimmedFileName = fileName.trim()
-  const matchedExtension = IMAGE_FILE_EXTENSIONS[mimeType]
-    .find((extension) => trimmedFileName.toLowerCase().endsWith(extension)
-      && trimmedFileName.length > extension.length)
-  const extension = matchedExtension
-    ? trimmedFileName.slice(-matchedExtension.length)
-    : IMAGE_FILE_EXTENSIONS[mimeType][0]
-  const name = matchedExtension
-    ? trimmedFileName.slice(0, -matchedExtension.length)
-    : trimmedFileName
-  return { name: name || '이미지', extension }
 }
 
 function imageAssetUrl(mapId: string, assetId: string) {
@@ -4267,10 +4247,30 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     }
 
     const selectedImageId = createdNodes.at(-1)?.id ?? null
-    setNodes((current) => [
-      ...current.map((node) => node.selected ? { ...node, selected: false } : node),
-      ...createdNodes.map((node) => ({ ...node, selected: node.id === selectedImageId })),
-    ])
+    setNodes((current) => {
+      const usedFileNames = new Set(current.flatMap((node) => {
+        if (!node.data.image) return []
+        const { name, extension } = splitImageFileName(node.data.image.fileName, node.data.image.mimeType)
+        return [`${name}${extension}`.toLowerCase()]
+      }))
+      const uniquelyNamedNodes = createdNodes.map((node) => {
+        if (!node.data.image) return node
+        const fileName = uniqueImageFileName(node.data.image.fileName, node.data.image.mimeType, usedFileNames)
+        usedFileNames.add(fileName.toLowerCase())
+        return {
+          ...node,
+          data: {
+            ...node.data,
+            label: fileName,
+            image: { ...node.data.image, fileName },
+          },
+        }
+      })
+      return [
+        ...current.map((node) => node.selected ? { ...node, selected: false } : node),
+        ...uniquelyNamedNodes.map((node) => ({ ...node, selected: node.id === selectedImageId })),
+      ]
+    })
     setSelectedId(selectedImageId)
     setSavedAt(createdNodes.length > 1 ? `이미지 ${createdNodes.length}개 추가됨` : '이미지 추가됨')
     if (lastError) setSaveError(`일부 이미지를 추가하지 못했습니다. ${lastError}`)

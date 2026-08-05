@@ -5,12 +5,13 @@ import { randomBytes } from 'node:crypto'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
+import { imageCardLocalAccess } from './imageAccess.mjs'
 
 const projectDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const dataDirectory = path.resolve(String(process.env.MNP_DATA_DIR ?? '').trim() || path.join(projectDirectory, 'server', 'data'))
 const tokenFile = path.resolve(String(process.env.MNP_TOKEN_FILE ?? '').trim() || path.join(dataDirectory, '_integration-token'))
 const apiBaseUrl = String(process.env.MNP_API_URL ?? 'http://127.0.0.1:4176').replace(/\/+$/, '')
-const contextSchemaVersion = '2.0'
+const contextSchemaVersion = '2.1'
 const contextCommentLimit = 20
 const mindMapGridSize = 24
 const mindMapChildHorizontalGap = mindMapGridSize * 4
@@ -49,9 +50,9 @@ function defaultChildMindMapPosition(parentPosition, siblingPositions, parentWid
   }
 }
 
-const serverInstructions = `MindNProgress는 마인드맵과 업무 진행 관리를 결합한 웹 서비스입니다. MindNProgress 밖에서 시작해 문서 ID나 카드 ID가 없다면 mindnprogress_read_me_first를 먼저 호출하세요. 선택 문서와 카드가 있다면 mindnprogress_get_context로 제품 규칙과 최신 문서 구조를 먼저 확인하세요. AionUi가 발급한 attributionToken이 없는 외부 MCP 세션은 자신이 현재 AI 종류와 모델을 정확히 알고 있을 때 get_context의 aiType과 aiModel에 함께 전달하고, 알지 못하면 추측하지 마세요. get_context의 selection.taskLinks.startupInspection을 따르세요. mode가 knowledge-guided이면 primary 선행 지식의 sharedKnowledge를 먼저 재사용하고 설명과 댓글로 보완하며, fallbackSources와 fallbackTargets는 정보가 부족할 때만 선택적으로 조사합니다. mode가 default이고 required가 true이면 targets의 업무 본문, 댓글, 첨부파일 목록과 관련 링크를 조사하세요. 진행 과정과 결과는 댓글에 기록하고, 다른 카드나 후속 세션이 재사용할 안정적인 사실·결정·제약은 카드의 sharedKnowledge에 요약하세요. AI 댓글은 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 충실히 담은 detail로 작성하며, 요약 때문에 상세를 축약하지 마세요. 외부 전달물이나 결정 대기는 waitingItems로 기록하고 제목에 대기 문구를 붙이지 마세요. 대기를 등록할 때는 [차단], 해제할 때는 [진행] 댓글로 이유와 재개 상태를 기록하세요. 카드 일부 필드만 변경할 때는 mindnprogress_update_card의 data에 변경할 필드만 보내고 현재 카드 전체 데이터를 재전송하지 마세요. 일반 카드에서 생략한 필드와 위치는 보존되지만 완료 상태 또는 진행률 100 적용 시 waitingItems는 자동으로 해제되며, Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 지식선만 변경할 때는 전체 문서를 다시 보내지 말고 지식선 전용 도구를 사용하세요. 조회 도구는 문서 버전을 변경하지 않지만 카드·관계 편집과 AI 대화 ID 연결은 버전을 증가시킬 수 있습니다. 특정 자료가 있다고 가정하지 마세요. 여러 카드로 구성된 새 문서는 mindnprogress_create_mindmap으로 한 번에 생성하고, 변경 후에는 최신 문서를 다시 조회해 결과를 검증하세요. 비밀번호 변경과 계정 관리 작업은 지원하지 않습니다.`
+const serverInstructions = `MindNProgress는 마인드맵과 업무 진행 관리를 결합한 웹 서비스입니다. MindNProgress 밖에서 시작해 문서 ID나 카드 ID가 없다면 mindnprogress_read_me_first를 먼저 호출하세요. 선택 문서와 카드가 있다면 mindnprogress_get_context로 제품 규칙과 최신 문서 구조를 먼저 확인하세요. AionUi가 발급한 attributionToken이 없는 외부 MCP 세션은 자신이 현재 AI 종류와 모델을 정확히 알고 있을 때 get_context의 aiType과 aiModel에 함께 전달하고, 알지 못하면 추측하지 마세요. get_context의 selection.taskLinks.startupInspection을 따르세요. mode가 knowledge-guided이면 primary 선행 지식 중 kind=image인 항목은 imageAccess.localPath의 원본을 사용 가능한 로컬 이미지 열람 도구로 직접 확인하고 설명과 댓글을 함께 사용하며, 일반 카드는 sharedKnowledge를 먼저 재사용하고 설명과 댓글로 보완합니다. fallbackSources와 fallbackTargets는 정보가 부족할 때만 선택적으로 조사합니다. mode가 default이고 required가 true이면 targets의 업무 본문, 댓글, 첨부파일 목록과 관련 링크를 조사하세요. 진행 과정과 결과는 댓글에 기록하고, 다른 카드나 후속 세션이 재사용할 안정적인 사실·결정·제약은 카드의 sharedKnowledge에 요약하세요. AI 댓글은 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 충실히 담은 detail로 작성하며, 요약 때문에 상세를 축약하지 마세요. 외부 전달물이나 결정 대기는 waitingItems로 기록하고 제목에 대기 문구를 붙이지 마세요. 대기를 등록할 때는 [차단], 해제할 때는 [진행] 댓글로 이유와 재개 상태를 기록하세요. 카드 일부 필드만 변경할 때는 mindnprogress_update_card의 data에 변경할 필드만 보내고 현재 카드 전체 데이터를 재전송하지 마세요. 일반 카드에서 생략한 필드와 위치는 보존되지만 완료 상태 또는 진행률 100 적용 시 waitingItems는 자동으로 해제되며, Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 지식선만 변경할 때는 전체 문서를 다시 보내지 말고 지식선 전용 도구를 사용하세요. 조회 도구는 문서 버전을 변경하지 않지만 카드·관계 편집과 AI 대화 ID 연결은 버전을 증가시킬 수 있습니다. 특정 자료가 있다고 가정하지 마세요. 여러 카드로 구성된 새 문서는 mindnprogress_create_mindmap으로 한 번에 생성하고, 변경 후에는 최신 문서를 다시 조회해 결과를 검증하세요. 비밀번호 변경과 계정 관리 작업은 지원하지 않습니다.`
 const productGuide = {
-  version: '1.6',
+  version: '1.7',
   product: {
     name: 'MindNProgress',
     purpose: '아이디어를 계층형 마인드맵으로 구조화하고 실행 업무의 진행 상황을 같은 문서에서 관리하는 웹 서비스',
@@ -74,6 +75,7 @@ const productGuide = {
       root: '문서의 최상위 주제',
       branch: '주제나 영역을 묶는 중간 분류',
       task: '구체적인 실행 항목. 실제 업무라면 isWork=true로 설정',
+      image: '마인드맵에 배치한 이미지 지식. MCP 응답의 imageAccess.localPath를 로컬 이미지 열람 도구로 직접 확인하고 description을 보조 설명으로 사용',
     },
     workFields: {
       progress: '0~100의 진행률. 100이면 완료로 표시. 최상위 카드의 진행률·상태는 저장 시 서버가 계층 안의 모든 isWork=true 업무 진행률을 동일 가중치로 평균해 자동 재계산함',
@@ -115,7 +117,7 @@ const productGuide = {
   ],
   operationRules: [
     '분석과 편집 전에 mindnprogress_get_context로 최신 버전과 제품 규칙을 확인',
-    'get_context의 startupInspection.mode가 knowledge-guided이면 주요 선행 지식을 먼저 활용하고 fallback은 정보가 부족할 때만 조사',
+    'get_context의 startupInspection.mode가 knowledge-guided이면 주요 선행 지식을 먼저 활용하되 kind=image인 source는 imageAccess.localPath의 원본을 로컬 이미지 열람 도구로 직접 확인하고, fallback은 정보가 부족할 때만 조사',
     'startupInspection.mode가 default이고 조사가 요구되면 실제 작업 전에 선택 카드와 최상위 카드의 업무 링크를 조사하되 특정 첨부나 자료가 있다고 가정하지 않음',
     '여러 카드로 새 문서를 만들 때 mindnprogress_create_mindmap을 한 번만 호출',
     '문서 그룹이나 혼합 순서를 변경할 때 먼저 전체 문서와 documentLayout을 조회하고 모든 활성 문서를 정확히 한 번 유지',
@@ -339,11 +341,13 @@ function compactRelatedCards(ids, nodes) {
   return nodes.filter((node) => idSet.has(node.id)).map(compactCard)
 }
 
-function contentCard(node) {
+function contentCard(node, mapId = '') {
+  const imageAccess = imageCardLocalAccess(dataDirectory, mapId, node)
   return {
     id: node.id,
     type: node.type ?? 'mind',
     data: node.data ?? {},
+    ...(imageAccess ? { imageAccess } : {}),
   }
 }
 
@@ -468,7 +472,7 @@ const nodeDataSchema = z.object({
   sharedKnowledge: z.string().max(10_000).default(''),
   progress: z.number().min(0).max(100).default(0),
   status: z.enum(['planned', 'in-progress', 'done']).default('planned'),
-  kind: z.enum(['root', 'branch', 'task']).default('branch'),
+  kind: z.enum(['root', 'branch', 'task', 'image']).default('branch'),
   taskUrl: z.string().optional(),
   isWork: z.boolean().optional(),
   assigneeId: z.string().optional(),
@@ -742,9 +746,11 @@ async function main() {
       .map((edge) => {
         const sourceCard = map.nodes.find((node) => node.id === edge.source)
         if (!sourceCard) return null
+        const imageAccess = imageCardLocalAccess(dataDirectory, mapId, sourceCard)
         return {
           policy: knowledgePolicyOf(edge),
           card: sourceCard,
+          ...(imageAccess ? { imageAccess } : {}),
           accessUrl: cardAccessUrl(health.publicBaseUrl, map.id, sourceCard.id),
           comments: allComments.filter((comment) => comment.nodeId === sourceCard.id),
           taskLink: taskLinkFor(sourceCard),
@@ -801,12 +807,22 @@ async function main() {
       mode: 'knowledge-guided',
       required: knowledgePrimaryTargets.length > 0,
       targets: knowledgePrimaryTargets,
-      primarySources: primaryKnowledge.map((source) => ({ cardId: source.card.id, label: source.card.data?.label ?? source.card.id })),
-      fallbackSources: fallbackKnowledge.map((source) => ({ cardId: source.card.id, label: source.card.data?.label ?? source.card.id })),
+      primarySources: primaryKnowledge.map((source) => ({
+        cardId: source.card.id,
+        label: source.card.data?.label ?? source.card.id,
+        kind: source.card.data?.kind,
+        ...(source.imageAccess ? { imageAccess: source.imageAccess } : {}),
+      })),
+      fallbackSources: fallbackKnowledge.map((source) => ({
+        cardId: source.card.id,
+        label: source.card.data?.label ?? source.card.id,
+        kind: source.card.data?.kind,
+        ...(source.imageAccess ? { imageAccess: source.imageAccess } : {}),
+      })),
       fallbackTargets: knowledgeFallbackTargets,
       conversationInspection,
-      checks: ['현재 카드에 직접 연결된 업무 요구사항', '선행 지식 카드의 공유 지식과 설명', '선행 지식 카드의 댓글'],
-      instruction: 'primarySources의 sharedKnowledge를 먼저 재사용하고 카드 설명과 댓글로 보완하세요. targets는 현재 카드에 직접 연결된 업무가 있을 때만 조사합니다. 최상위 업무와 선행 지식 원본을 처음부터 다시 조사하지 마세요.',
+      checks: ['현재 카드에 직접 연결된 업무 요구사항', '이미지 선행 지식의 원본과 설명', '일반 선행 지식 카드의 공유 지식과 설명', '선행 지식 카드의 댓글'],
+      instruction: 'primarySources 중 kind=image인 항목은 imageAccess.localPath의 원본 파일을 사용 가능한 로컬 이미지 열람 도구로 직접 확인하고 설명과 댓글을 함께 사용하세요. 일반 카드는 sharedKnowledge를 먼저 재사용하고 설명과 댓글로 보완합니다. targets는 현재 카드에 직접 연결된 업무가 있을 때만 조사하며 최상위 업무와 선행 지식 원본을 처음부터 다시 조사하지 마세요.',
       fallback: '현재 작업에 필요한 정보가 구체적으로 부족할 때만 fallbackSources와 fallbackTargets에서 필요한 범위를 선택적으로 확인하세요. 외부 업무 도구가 없거나 조회에 실패하면 확인된 카드와 댓글로 가능한 작업은 계속 진행하세요.',
     } : {
       mode: 'default',
@@ -830,6 +846,7 @@ async function main() {
     const focusedPrimaryKnowledge = primaryKnowledge.map((source) => ({
       policy: source.policy,
       card: contentCard(source.card),
+      ...(source.imageAccess ? { imageAccess: source.imageAccess } : {}),
       accessUrl: source.accessUrl,
       ...focusedCommentWindow(source.comments, mapId, source.card.id),
       taskLink: source.taskLink,
@@ -839,6 +856,7 @@ async function main() {
     const focusedFallbackKnowledge = fallbackKnowledge.map((source) => ({
       policy: source.policy,
       card: compactCard(source.card),
+      ...(source.imageAccess ? { imageAccess: source.imageAccess } : {}),
       accessUrl: source.accessUrl,
       comments: [],
       commentsPage: {
@@ -865,9 +883,10 @@ async function main() {
         : '선택 카드와 최상위 카드의 업무 링크를 독립적으로 유지합니다. 작업 시작 전에 startupInspection을 따르며, 두 링크가 모두 있으면 중복 URL을 제외하고 모두 조사합니다. 링크를 다른 카드 데이터에 상속하거나 복사하지 않습니다.',
     }
     const knowledgeRule = hasKnowledgeGuidance
-      ? 'primary의 sharedKnowledge를 먼저 사용하고 설명과 댓글로 보완합니다. fallback 및 각 source의 taskLink는 현재 작업에 필요한 정보가 부족할 때만 확인합니다.'
+      ? 'primary 중 kind=image인 source는 imageAccess.localPath의 원본을 로컬 이미지 열람 도구로 직접 확인하고 설명과 댓글을 함께 사용합니다. 일반 source는 sharedKnowledge를 먼저 사용하고 설명과 댓글로 보완합니다. fallback 및 각 source의 taskLink는 현재 작업에 필요한 정보가 부족할 때만 확인합니다.'
       : '들어오는 지식선이 없어 기본 업무 조사 절차를 사용합니다.'
     const full = detailLevel === 'full'
+    const selectedImageAccess = imageCardLocalAccess(dataDirectory, mapId, selectedCard)
 
     return {
       contextSchemaVersion,
@@ -885,7 +904,9 @@ async function main() {
         accessUrl: documentAccessUrl(health.publicBaseUrl, map.id),
       } : focusedDocument(map, health.publicBaseUrl),
       selection: {
-        card: full ? selectedCard : contentCard(selectedCard),
+        card: full
+          ? { ...selectedCard, ...(selectedImageAccess ? { imageAccess: selectedImageAccess } : {}) }
+          : contentCard(selectedCard, mapId),
         accessUrl: cardAccessUrl(health.publicBaseUrl, map.id, selectedCard.id),
         parents: full ? relatedCards(parentIds, map.nodes) : compactRelatedCards(parentIds, map.nodes),
         children: full ? relatedCards(childIds, map.nodes) : compactRelatedCards(childIds, map.nodes),
@@ -913,7 +934,7 @@ async function main() {
     }
   }, { compactResult: true })
 
-  registerTool(server, 'mindnprogress_get_document', '문서의 모든 카드와 연결 관계 및 외부에서 접근 가능한 URL을 조회합니다.', mapIdSchema, async ({ mapId }) => {
+  registerTool(server, 'mindnprogress_get_document', '문서의 모든 카드와 연결 관계, 외부 접근 URL 및 이미지 카드의 로컬 원본 경로를 조회합니다.', mapIdSchema, async ({ mapId }) => {
     const [documentResult, health] = await Promise.all([
       apiRequest(`/api/maps/${encodeURIComponent(mapId)}`),
       apiRequest('/api/health'),
@@ -923,17 +944,22 @@ async function main() {
       access: {
         publicBaseUrl: health.publicBaseUrl,
         documentUrl: documentAccessUrl(health.publicBaseUrl, documentResult.map.id),
-        cards: documentResult.map.nodes.map((node) => ({
-          cardId: node.id,
-          label: node.data?.label ?? node.id,
-          accessUrl: cardAccessUrl(health.publicBaseUrl, documentResult.map.id, node.id),
-        })),
-        rule: '링크를 기록할 때 localhost나 127.0.0.1로 재작성하지 말고 accessUrl을 그대로 사용하세요.',
+        cards: documentResult.map.nodes.map((node) => {
+          const imageAccess = imageCardLocalAccess(dataDirectory, documentResult.map.id, node)
+          return {
+            cardId: node.id,
+            label: node.data?.label ?? node.id,
+            kind: node.data?.kind,
+            accessUrl: cardAccessUrl(health.publicBaseUrl, documentResult.map.id, node.id),
+            ...(imageAccess ? { imageAccess } : {}),
+          }
+        }),
+        rule: '웹 링크를 기록할 때 localhost나 127.0.0.1로 재작성하지 말고 accessUrl을 그대로 사용하세요. 이미지 카드의 imageAccess.localPath는 기록용 링크가 아니라 로컬 원본을 직접 열람할 때만 사용하세요.',
       },
     }
   }, { compactResult: true })
 
-  registerTool(server, 'mindnprogress_get_card', '한 카드의 설명, 공유 지식, 업무 필드와 댓글을 선택적으로 조회합니다. get_context의 fallback 카드 또는 간략 개요에서 원문이 필요할 때 사용하세요.', {
+  registerTool(server, 'mindnprogress_get_card', '한 카드의 설명, 공유 지식, 업무 필드와 댓글을 선택적으로 조회합니다. 이미지 카드는 로컬 원본 경로도 반환합니다. get_context의 fallback 카드 또는 간략 개요에서 원문이 필요할 때 사용하세요.', {
     mapId: z.string().min(1),
     cardId: z.string().min(1),
     commentOffset: z.number().int().nonnegative().default(0),
@@ -961,7 +987,7 @@ async function main() {
         updatedAt: documentResult.map.updatedAt,
         updatedBy: documentResult.map.updatedBy,
       },
-      card: contentCard(card),
+      card: contentCard(card, mapId),
       accessUrl: cardAccessUrl(health.publicBaseUrl, documentResult.map.id, card.id),
       comments: commentPage.items,
       commentsPage: commentPage.page,
