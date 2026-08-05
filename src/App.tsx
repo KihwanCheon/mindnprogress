@@ -1411,7 +1411,7 @@ function LoginScreen({ onAuthenticated, theme, onToggleTheme }: { onAuthenticate
   const loginButtonRef = useRef<HTMLButtonElement>(null)
   const [email, setEmail] = useState(() => localStorage.getItem(LAST_LOGIN_EMAIL_KEY) ?? '')
   const [password, setPassword] = useState('')
-  const [rememberMe, setRememberMe] = useState(false)
+  const [rememberMe, setRememberMe] = useState(true)
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
