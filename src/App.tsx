@@ -1762,7 +1762,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const [knowledgePolicy, setKnowledgePolicy] = useState<KnowledgePolicy>('reuse-first')
   const [knowledgeError, setKnowledgeError] = useState('')
   const [editingChecklist, setEditingChecklist] = useState<{ id: string; text: string } | null>(null)
-  const [checklistTooltip, setChecklistTooltip] = useState<{ text: string; x: number; y: number } | null>(null)
+  const [contentTooltip, setContentTooltip] = useState<{ text: string; x: number; y: number } | null>(null)
   const [nodeContextMenu, setNodeContextMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null)
   const [knowledgeConnection, setKnowledgeConnection] = useState<KnowledgeConnectionDraft | null>(null)
   const [knowledgeConnectionTargetId, setKnowledgeConnectionTargetId] = useState<string | null>(null)
@@ -3295,7 +3295,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     setNewWaitingLabel('')
     setWaitingLabelDrafts({})
     setEditingChecklist(null)
-    setChecklistTooltip(null)
+    setContentTooltip(null)
     setDependencyCandidate('')
     setDependencyError('')
     setKnowledgeCandidate('')
@@ -6404,6 +6404,15 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                                   value={waitingLabelDrafts[item.id] ?? item.label}
                                   onChange={(event) => setWaitingLabelDrafts((current) => ({ ...current, [item.id]: event.target.value }))}
                                   onBlur={() => commitWaitingLabel(item)}
+                                  onFocus={() => setContentTooltip(null)}
+                                  onMouseEnter={(event) => {
+                                    const text = waitingLabelDrafts[item.id] ?? item.label
+                                    if (text.trim()) setContentTooltip({ text, x: event.clientX, y: event.clientY })
+                                  }}
+                                  onMouseMove={(event) => {
+                                    setContentTooltip((current) => current ? { ...current, x: event.clientX, y: event.clientY } : null)
+                                  }}
+                                  onMouseLeave={() => setContentTooltip(null)}
                                   onKeyDown={(event) => {
                                     if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
                                       event.preventDefault()
@@ -6430,6 +6439,14 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                                 onChange={(event) => updateWaitingItems((selectedNode.data.waitingItems ?? []).map((current) => (
                                   current.id === item.id ? { ...current, note: event.target.value || undefined } : current
                                 )))}
+                                onFocus={() => setContentTooltip(null)}
+                                onMouseEnter={(event) => {
+                                  if (item.note?.trim()) setContentTooltip({ text: item.note, x: event.clientX, y: event.clientY })
+                                }}
+                                onMouseMove={(event) => {
+                                  setContentTooltip((current) => current ? { ...current, x: event.clientX, y: event.clientY } : null)
+                                }}
+                                onMouseLeave={() => setContentTooltip(null)}
                                 placeholder="메모 (선택)"
                                 maxLength={1000}
                                 readOnly={selectedReferenceReadOnly}
@@ -6440,6 +6457,14 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                                 onChange={(event) => updateWaitingItems((selectedNode.data.waitingItems ?? []).map((current) => (
                                   current.id === item.id ? { ...current, resumeCondition: event.target.value || undefined } : current
                                 )))}
+                                onFocus={() => setContentTooltip(null)}
+                                onMouseEnter={(event) => {
+                                  if (item.resumeCondition?.trim()) setContentTooltip({ text: item.resumeCondition, x: event.clientX, y: event.clientY })
+                                }}
+                                onMouseMove={(event) => {
+                                  setContentTooltip((current) => current ? { ...current, x: event.clientX, y: event.clientY } : null)
+                                }}
+                                onMouseLeave={() => setContentTooltip(null)}
                                 placeholder="재개 조건 (선택)"
                                 maxLength={500}
                                 readOnly={selectedReferenceReadOnly}
@@ -6507,16 +6532,16 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                                   className="checklist-text"
                                   onMouseEnter={(event) => {
                                     if (isTextTruncated(event.currentTarget)) {
-                                      setChecklistTooltip({ text: item.text, x: event.clientX, y: event.clientY })
+                                      setContentTooltip({ text: item.text, x: event.clientX, y: event.clientY })
                                     }
                                   }}
                                   onMouseMove={(event) => {
-                                    setChecklistTooltip((current) => current ? { ...current, x: event.clientX, y: event.clientY } : null)
+                                    setContentTooltip((current) => current ? { ...current, x: event.clientX, y: event.clientY } : null)
                                   }}
-                                  onMouseLeave={() => setChecklistTooltip(null)}
+                                  onMouseLeave={() => setContentTooltip(null)}
                                   onDoubleClick={() => {
                                   if (mode === 'editor' && !selectedNode.data.reference) {
-                                    setChecklistTooltip(null)
+                                    setContentTooltip(null)
                                     skipChecklistCommit.current = false
                                     setEditingChecklist({ id: item.id, text: item.text })
                                   }
@@ -6720,16 +6745,16 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
           onClose={() => setPreviewImageNodeId(null)}
         />
       )}
-      {checklistTooltip && (
+      {contentTooltip && (
         <div
-          className="checklist-tooltip"
+          className="content-tooltip"
           style={{
-            left: Math.max(8, Math.min(checklistTooltip.x + 12, window.innerWidth - 340)),
-            top: Math.max(8, Math.min(checklistTooltip.y + 14, window.innerHeight - 90)),
+            left: Math.max(8, Math.min(contentTooltip.x + 12, window.innerWidth - 340)),
+            top: Math.max(8, Math.min(contentTooltip.y + 14, window.innerHeight - 90)),
           }}
           role="tooltip"
         >
-          {checklistTooltip.text}
+          {contentTooltip.text}
         </div>
       )}
       {nodeContextMenu && mode === 'editor' && (
