@@ -37,6 +37,7 @@ import { ImagePreviewDialog } from './components/ImagePreviewDialog'
 import { DashboardView, KanbanView, TimelineView } from './components/WorkViews'
 import type { AiConversationRuntime, ChecklistItem, KnowledgePolicy, MindDoorayLinkData, MindDoorayTaskData, MindDoorayWikiData, MindImageData, MindMapEdgeData, MindNodeData, TeamMember, WaitingItem } from './types/mindMap'
 import { blockingNodes, createsDependencyCycle, dependentNodes, prerequisiteNodes } from './utils/dependencies'
+import { collapsedDocumentGroupsStorageKey, initialCollapsedDocumentGroupIds, normalizeCollapsedDocumentGroupIds } from './utils/documentGroupCollapse.mjs'
 import { createsKnowledgeCycle, isHierarchyEdge, isKnowledgeEdge, knowledgePolicyOf } from './utils/knowledgeEdges'
 import { isSameDoorayKnowledgeUrl, normalizedDoorayKnowledgeUrl, taskUrlProvider } from './utils/externalLinks'
 import { splitImageFileName, uniqueImageFileName } from './utils/imageFileNames.mjs'
@@ -186,6 +187,18 @@ function storeWorkspaceLocation(userId: string, location: { mapId: string; viewM
   try {
     localStorage.setItem(storageKey, JSON.stringify(normalizedLocation))
     return normalizedLocation
+  } catch {
+    return null
+  }
+}
+
+function readStoredCollapsedDocumentGroupIds(userId: string) {
+  const storageKey = collapsedDocumentGroupsStorageKey(userId)
+  if (!storageKey) return null
+  const saved = localStorage.getItem(storageKey)
+  if (saved === null) return null
+  try {
+    return normalizeCollapsedDocumentGroupIds(JSON.parse(saved))
   } catch {
     return null
   }
@@ -1684,14 +1697,10 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const [viewMode, setViewMode] = useState<ViewMode>(initialDeepLink?.viewMode ?? lastWorkspaceLocation.current?.viewMode ?? 'mindmap')
   const [documents, setDocuments] = useState<MapSummary[]>([])
   const [documentLayout, setDocumentLayout] = useState<DocumentLayout>(EMPTY_DOCUMENT_LAYOUT)
-  const [collapsedDocumentGroupIds, setCollapsedDocumentGroupIds] = useState<Set<string>>(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem(`mindnprogress-collapsed-document-groups:${user.id}`) ?? '[]')
-      return new Set(Array.isArray(saved) ? saved.filter((groupId) => typeof groupId === 'string') : [])
-    } catch {
-      return new Set()
-    }
-  })
+  const storedCollapsedDocumentGroupIds = useRef(readStoredCollapsedDocumentGroupIds(user.id))
+  const collapsedDocumentGroupsInitialized = useRef(false)
+  const knownDocumentGroupIds = useRef(new Set<string>())
+  const [collapsedDocumentGroupIds, setCollapsedDocumentGroupIds] = useState<Set<string>>(() => new Set())
   const [trashedDocuments, setTrashedDocuments] = useState<MapSummary[]>([])
   const [selectedTrashIds, setSelectedTrashIds] = useState<Set<string>>(() => new Set())
   const [trashDeleting, setTrashDeleting] = useState(false)
@@ -2274,22 +2283,27 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   }, [trashedDocuments])
 
   useEffect(() => {
+    if (!collapsedDocumentGroupsInitialized.current) return
+    const storageKey = collapsedDocumentGroupsStorageKey(user.id)
+    if (!storageKey) return
     localStorage.setItem(
-      `mindnprogress-collapsed-document-groups:${user.id}`,
+      storageKey,
       JSON.stringify([...collapsedDocumentGroupIds]),
     )
   }, [collapsedDocumentGroupIds, user.id])
 
   useEffect(() => {
-    const activeGroup = documentLayout.groups.find((group) => group.mapIds.includes(activeMapId))
-    if (!activeGroup) return
+    if (!collapsedDocumentGroupsInitialized.current) return
+    const availableGroupIds = new Set(documentLayout.groups.map((group) => group.id))
     setCollapsedDocumentGroupIds((current) => {
-      if (!current.has(activeGroup.id)) return current
-      const next = new Set(current)
-      next.delete(activeGroup.id)
-      return next
+      const next = new Set([...current].filter((groupId) => availableGroupIds.has(groupId)))
+      availableGroupIds.forEach((groupId) => {
+        if (!knownDocumentGroupIds.current.has(groupId)) next.add(groupId)
+      })
+      knownDocumentGroupIds.current = availableGroupIds
+      return next.size === current.size && [...next].every((groupId) => current.has(groupId)) ? current : next
     })
-  }, [activeMapId, documentLayout.groups])
+  }, [documentLayout.groups])
 
   useEffect(() => {
     if (selectedId && !visibleFlowNodeIds.has(selectedId)) setSelectedId(null)
@@ -2307,6 +2321,15 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         if (!active) return
         setTrashedDocuments(trash)
         setDocumentLayout(loadedDocumentLayout)
+        if (!collapsedDocumentGroupsInitialized.current) {
+          const initialCollapsedGroupIds = initialCollapsedDocumentGroupIds(
+            storedCollapsedDocumentGroupIds.current,
+            loadedDocumentLayout.groups.map((group) => group.id),
+          )
+          knownDocumentGroupIds.current = new Set(loadedDocumentLayout.groups.map((group) => group.id))
+          collapsedDocumentGroupsInitialized.current = true
+          setCollapsedDocumentGroupIds(new Set(initialCollapsedGroupIds))
+        }
         if (maps.length > 0) {
           setDocuments(maps)
           const deepLink = pendingDeepLink.current
@@ -4025,6 +4048,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     }
     setCreatingGroup(false)
     setNewGroupName('')
+    setCollapsedDocumentGroupIds((current) => new Set(current).add(group.id))
     void saveDocumentLayout(nextLayout, '문서 그룹 생성됨')
   }
 
