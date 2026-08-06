@@ -225,7 +225,7 @@ AI가 MindNProgress 밖에서 시작되었다면 먼저 `mindnprogress_read_me_f
 
 ## MindNProgress MCP 명령어
 
-현재 MCP 서버는 36개 도구를 제공합니다. 카드가 선택된 작업은 먼저 `mindnprogress_get_context`로 최신 버전과 제품 규칙을 확인하고, 변경 후에는 `mindnprogress_get_document`로 실제 저장 결과를 다시 확인하는 흐름을 권장합니다. 조회 도구는 문서 버전을 변경하지 않으며 카드·관계 편집과 AI 대화 ID 연결 같은 저장 작업만 버전을 증가시킵니다.
+현재 MCP 서버는 37개 도구를 제공합니다. 카드가 선택된 작업은 먼저 `mindnprogress_get_context`로 최신 버전과 제품 규칙을 확인하고, 변경 후에는 `mindnprogress_get_document`로 실제 저장 결과를 다시 확인하는 흐름을 권장합니다. 조회 도구는 문서 버전을 변경하지 않으며 카드·관계 편집과 AI 대화 ID 연결 같은 저장 작업만 버전을 증가시킵니다. 선택 카드 이외의 형제·하위·선행 카드를 함께 수정할 때는 `mindnprogress_get_ai_work_states`로 다른 AI가 작업 중인지 먼저 확인합니다.
 
 ### 시작과 조회
 
@@ -236,6 +236,7 @@ AI가 MindNProgress 밖에서 시작되었다면 먼저 `mindnprogress_read_me_f
 | `mindnprogress_get_context` | 선택 카드와 문서 구조, 관계, 댓글, 담당자, 업무 링크 및 선행 지식을 작업 문맥으로 조회합니다. `detailLevel`은 `focused` 또는 `full`을 사용합니다. |
 | `mindnprogress_get_document` | 문서의 모든 카드와 연결 관계 및 외부 접근 URL을 조회합니다. |
 | `mindnprogress_get_card` | 특정 카드의 설명, 공유 지식, 업무 필드와 댓글을 페이지 단위로 조회합니다. |
+| `mindnprogress_get_ai_work_states` | 지정한 카드 또는 문서 전체에서 연결된 AI 대화의 현재 작업·승인 대기·유휴·확인 불가 상태를 조회합니다. 문서 버전은 변경하지 않습니다. |
 | `mindnprogress_get_ai_conversation_transcript` | 카드에 연결된 AionUi 대화 전문을 `전체 복사`와 같은 텍스트 형식으로 조회합니다. |
 | `mindnprogress_list_users` | 담당자로 지정할 수 있는 편집자 계정 목록을 조회합니다. |
 

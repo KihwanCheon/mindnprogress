@@ -89,6 +89,7 @@ const rememberedSessionDurationMs = 30 * 24 * 60 * 60 * 1000
 const sessions = new Map()
 let sessionWriteQueue = Promise.resolve()
 const eventClients = new Map()
+const eventHeartbeatIntervalMs = Math.max(100, Number(process.env.MNP_EVENT_HEARTBEAT_INTERVAL_MS) || 25_000)
 const aiConversationRuntimeStates = new Map()
 const aiConversationRuntimeRefreshes = new Map()
 const aiConversationRuntimeRequests = new Map()
@@ -260,6 +261,12 @@ function requestClientId(request) {
   return String(request.headers['x-mnp-client'] ?? '').slice(0, 120) || null
 }
 
+function removeEventClient(client) {
+  const clientInfo = eventClients.get(client)
+  if (!eventClients.delete(client) || !clientInfo?.mapId) return
+  queueMicrotask(() => broadcastPresence(clientInfo.mapId))
+}
+
 async function replaceFileWithRetry(temporaryFile, targetFile) {
   const retryableCodes = new Set(['EACCES', 'EBUSY', 'EEXIST', 'EPERM'])
   for (let attempt = 0; attempt < 6; attempt += 1) {
@@ -280,10 +287,14 @@ function broadcastEvent(payload, predicate = () => true) {
   const message = `data: ${JSON.stringify(payload)}\n\n`
   for (const [client, clientInfo] of eventClients) {
     if (!predicate(clientInfo)) continue
+    if (client.destroyed || client.writableEnded) {
+      removeEventClient(client)
+      continue
+    }
     try {
       client.write(message)
     } catch {
-      eventClients.delete(client)
+      removeEventClient(client)
     }
   }
 }
@@ -1258,6 +1269,52 @@ function aiConversationRuntimeSummary(mapId) {
   return {
     mapId,
     activeCount: aiConversationRuntimeSnapshot(mapId).filter((item) => item.runtime.state === 'running').length,
+  }
+}
+
+async function aiConversationWorkStates(mapId, requestedCardIds = []) {
+  const map = await readMap(mapId)
+  if (!map || map.trashedAt) return null
+
+  const requestedIds = [...new Set(requestedCardIds)]
+  const nodesById = new Map(map.nodes.map((node) => [node.id, node]))
+  const missingCardIds = requestedIds.filter((cardId) => !nodesById.has(cardId))
+  if (missingCardIds.length > 0) {
+    return { error: 'CARD_NOT_FOUND', missingCardIds }
+  }
+
+  const runtimes = await refreshAiConversationRuntimeForMap(mapId)
+  const runtimesByNodeId = new Map(runtimes.map((item) => [item.nodeId, item.runtime]))
+  const nodes = requestedIds.length > 0 ? requestedIds.map((cardId) => nodesById.get(cardId)) : map.nodes
+  const cards = nodes.map((node) => {
+    const conversationId = typeof node.data?.aiConversationId === 'string' ? node.data.aiConversationId.trim() : ''
+    const runtime = conversationId ? runtimesByNodeId.get(node.id) : null
+    const state = runtime?.state ?? (conversationId ? 'unknown' : 'unlinked')
+    return {
+      cardId: node.id,
+      label: node.data?.label ?? node.id,
+      conversationId: conversationId || null,
+      state,
+      isActive: state === 'running' || state === 'waiting-confirmation',
+      isProcessing: runtime?.isProcessing ?? false,
+      pendingConfirmations: runtime?.pendingConfirmations ?? 0,
+      turnId: runtime?.turnId ?? null,
+      observedAt: runtime?.observedAt ?? null,
+    }
+  })
+
+  return {
+    mapId,
+    mapVersion: map.version,
+    cards,
+    activeCardIds: cards.filter((card) => card.isActive).map((card) => card.cardId),
+    stateGuide: {
+      running: 'AI가 현재 응답을 생성하거나 도구를 실행하는 중',
+      'waiting-confirmation': 'AI 작업이 사용자 승인 또는 확인을 기다리는 중',
+      idle: '연결된 AI 대화가 현재 작업 중이 아님. 카드 업무 완료를 뜻하지 않음',
+      unknown: '대화는 연결되어 있지만 AionUi 런타임 상태를 확인하지 못함',
+      unlinked: '연결된 AI 대화가 없음',
+    },
   }
 }
 
@@ -3081,10 +3138,10 @@ const server = createServer(async (request, response) => {
           }
         })
         .catch((error) => console.warn('[AI conversation runtime initial refresh]', error))
-      request.on('close', () => {
-        eventClients.delete(response)
-        broadcastPresence(mapId)
-      })
+      const cleanup = () => removeEventClient(response)
+      request.on('close', cleanup)
+      request.on('aborted', cleanup)
+      response.on('error', cleanup)
       return
     }
 
@@ -3747,6 +3804,27 @@ const server = createServer(async (request, response) => {
       })
     }
 
+    const aiConversationWorkStatesRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/ai-conversation-work-states$/)
+    if (aiConversationWorkStatesRoute && request.method === 'GET') {
+      const mapId = decodeURIComponent(aiConversationWorkStatesRoute[1])
+      if (!isValidMapId(mapId)) return sendJson(response, 400, { error: '올바르지 않은 문서 ID입니다.' })
+      const user = requireUser(request, response)
+      if (!user) return
+      const requestedCardIds = url.searchParams.getAll('cardId').map((cardId) => cardId.trim()).filter(Boolean)
+      if (requestedCardIds.length > 200 || requestedCardIds.some((cardId) => cardId.length > 120)) {
+        return sendJson(response, 400, { error: '조회할 카드 ID가 올바르지 않습니다.' })
+      }
+      const result = await aiConversationWorkStates(mapId, requestedCardIds)
+      if (!result) return sendJson(response, 404, { error: '마인드맵을 찾을 수 없습니다.' })
+      if (result.error === 'CARD_NOT_FOUND') {
+        return sendJson(response, 404, {
+          error: '카드를 찾을 수 없습니다.',
+          missingCardIds: result.missingCardIds,
+        })
+      }
+      return sendJson(response, 200, result)
+    }
+
     const mapRoute = url.pathname.match(/^\/api\/maps\/([^/]+)$/)
     if (mapRoute) {
       const mapId = decodeURIComponent(mapRoute[1])
@@ -3867,14 +3945,8 @@ const server = createServer(async (request, response) => {
 })
 
 setInterval(() => {
-  for (const [client] of eventClients) {
-    try {
-      client.write(': keep-alive\n\n')
-    } catch {
-      eventClients.delete(client)
-    }
-  }
-}, 25_000).unref()
+  broadcastEvent({ type: 'heartbeat', sentAt: new Date().toISOString() })
+}, eventHeartbeatIntervalMs).unref()
 
 setInterval(() => {
   void refreshVisibleAiConversationRuntimes().catch((error) => console.warn('[AI conversation runtime poll]', error))

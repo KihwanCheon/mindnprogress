@@ -21,6 +21,15 @@
   background: #fff9e9;
 }
 
+.ai-conversation-runtime-badge.running {
+  --ai-runtime-border-dim: #dfa3e4;
+  --ai-runtime-border-bright: #cf2bd8;
+  --ai-runtime-glow-near: rgba(207, 43, 216, .42);
+  --ai-runtime-glow-mid: rgba(207, 43, 216, .2);
+  --ai-runtime-glow-far: rgba(207, 43, 216, .08);
+  animation: ai-conversation-runtime-border 1.8s ease-in-out infinite;
+}
+
 .ai-conversation-runtime-dot {
   width: 5px;
   height: 5px;
@@ -73,11 +82,38 @@
   background: rgba(126, 83, 10, .2);
 }
 
+.mind-node.root .ai-conversation-runtime-badge.running {
+  --ai-runtime-border-dim: rgba(255, 126, 222, .5);
+  --ai-runtime-border-bright: #ff9ce8;
+  --ai-runtime-glow-near: rgba(255, 105, 218, .46);
+  --ai-runtime-glow-mid: rgba(255, 105, 218, .22);
+  --ai-runtime-glow-far: rgba(255, 105, 218, .09);
+}
+
+@keyframes ai-conversation-runtime-border {
+  0%, 100% {
+    border-color: var(--ai-runtime-border-dim);
+    box-shadow: 0 0 0 transparent, 0 0 0 transparent, 0 0 0 transparent;
+  }
+  50% {
+    border-color: var(--ai-runtime-border-bright);
+    box-shadow:
+      0 0 3px var(--ai-runtime-glow-near),
+      0 0 8px var(--ai-runtime-glow-mid),
+      0 0 14px var(--ai-runtime-glow-far);
+  }
+}
+
 @keyframes ai-conversation-runtime-typing {
   0%, 60%, 100% { opacity: .45; transform: translateY(0); }
   30% { opacity: 1; transform: translateY(-3px); }
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .ai-conversation-runtime-badge.running {
+    border-color: var(--ai-runtime-border-bright);
+    box-shadow: 0 0 5px var(--ai-runtime-glow-mid);
+    animation: none;
+  }
   .ai-conversation-runtime-typing > span { animation: none; opacity: 1; }
 }

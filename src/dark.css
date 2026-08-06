@@ -1232,6 +1232,15 @@
   background: var(--theme-warning-soft);
 }
 
+[data-theme="dark"] .ai-conversation-runtime-badge.running,
+[data-theme="dark"] .mind-node.root .ai-conversation-runtime-badge.running {
+  --ai-runtime-border-dim: #6d4a23;
+  --ai-runtime-border-bright: #ffb454;
+  --ai-runtime-glow-near: rgba(255, 180, 84, .42);
+  --ai-runtime-glow-mid: rgba(255, 180, 84, .18);
+  --ai-runtime-glow-far: rgba(255, 180, 84, .07);
+}
+
 /* High-contrast tuning for dense desktop use */
 [data-theme="dark"] .rename-form input,
 [data-theme="dark"] .new-map-form input,

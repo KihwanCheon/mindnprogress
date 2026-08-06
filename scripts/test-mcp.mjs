@@ -66,6 +66,14 @@ async function startMockAionUi({
         created_at: conversationCreatedAt,
         modified_at: conversationCreatedAt + 60_000,
         extra: { agent_id: agentId, current_model_id: conversationModelId, backend: 'claude' },
+        runtime: {
+          state: 'running',
+          is_processing: true,
+          task_status: 'running',
+          can_send_message: false,
+          pending_confirmations: 0,
+          turn_id: 'turn-mcp-runtime-test',
+        },
       })
     }
     if (request.url === `/api/conversations/${conversationId}/messages?limit=10000&content_mode=full`) {
@@ -178,7 +186,7 @@ async function main() {
     await client.connect(transport)
     const listedTools = await client.listTools()
     const registeredToolNames = listedTools.tools.map((tool) => tool.name).sort()
-    assert.equal(registeredToolNames.length, 36, `예상과 다른 MCP 도구 수: ${registeredToolNames.length}`)
+    assert.equal(registeredToolNames.length, 37, `예상과 다른 MCP 도구 수: ${registeredToolNames.length}`)
 
     const invoke = async (name, args = {}) => {
       calledTools.set(name, (calledTools.get(name) ?? 0) + 1)
@@ -194,11 +202,12 @@ async function main() {
 
     const guide = await invoke('mindnprogress_read_me_first')
     assert.equal(guide.guide.product.name, 'MindNProgress')
-    assert.equal(guide.guide.version, '1.7')
+    assert.equal(guide.guide.version, '1.8')
     assert.match(guide.guide.dataModel.cardContent.sharedKnowledge, /재사용/)
     assert.match(guide.guide.authoringRules.join('\n'), /모든 isWork=true 업무 진행률을 동일 가중치 평균/)
     assert.match(guide.guide.operationRules.join('\n'), /변경할 필드만 보내고/)
     assert.match(guide.guide.operationRules.join('\n'), /조회 도구는 문서 version을 변경하지 않으며/)
+    assert.match(guide.guide.operationRules.join('\n'), /mindnprogress_get_ai_work_states.*동시에 수정하지 않음/)
     assert.match(guide.guide.operationRules.join('\n'), /댓글 summary는 \[진행\].*\[차단\].*\[결과\]/)
     assert.match(guide.guide.commentRules.detail, /작업을 이어가거나 결과를 검증/)
     assert.match(guide.guide.commentRules.legacy, /자동 분리하거나 다시 쓰지 않음/)
@@ -431,7 +440,7 @@ async function main() {
       editorId: attribution.editorId,
       attributionToken: attribution.attributionToken,
     })
-    assert.equal(context.contextSchemaVersion, '2.1')
+    assert.equal(context.contextSchemaVersion, '2.2')
     assert.equal(context.detailLevel, 'focused')
     assert.equal(context.document.nodes, undefined)
     assert.equal(context.document.outline.length, 4)
@@ -445,6 +454,9 @@ async function main() {
     assert.equal(context.selection.taskLinks.startupInspection.conversationInspection.mode, 'not-applicable')
     assert.deepEqual(context.selection.taskLinks.startupInspection.conversationInspection.sources, [])
     assert.equal(context.selection.knowledgeSources.all, undefined)
+    assert.equal(context.selection.aiWorkCoordination.tool, 'mindnprogress_get_ai_work_states')
+    assert.deepEqual(context.selection.aiWorkCoordination.siblingCardIds, [])
+    assert.equal(context.selection.aiWorkCoordination.toolArguments, null)
     assert.equal(context.selection.accessUrl, `https://mindnprogress.test/mindmap/${mapId}/task-a`)
     assert.equal(context.selection.commentsPage.total, 1)
     assert.equal(context.selection.commentsPage.hasMore, false)
@@ -545,6 +557,25 @@ async function main() {
     documentResult = await invoke('mindnprogress_get_document', { mapId })
     assert.equal(documentResult.map.version, versionBeforeConversationLink + 1, 'AI 대화 ID 연결은 문서 버전을 한 번 증가시켜야 합니다.')
     assert.equal(documentResult.map.nodes.find((node) => node.id === 'task-a')?.data.aiConversationId, 'conversation-test')
+    const versionBeforeAiWorkStateRead = documentResult.map.version
+    const aiWorkStates = await invoke('mindnprogress_get_ai_work_states', {
+      mapId,
+      cardIds: ['task-a', 'branch-a'],
+    })
+    assert.equal(aiWorkStates.mapVersion, versionBeforeAiWorkStateRead)
+    assert.deepEqual(aiWorkStates.activeCardIds, ['task-a'])
+    assert.equal(aiWorkStates.cards.find((card) => card.cardId === 'task-a')?.state, 'running')
+    assert.equal(aiWorkStates.cards.find((card) => card.cardId === 'task-a')?.isActive, true)
+    assert.equal(aiWorkStates.cards.find((card) => card.cardId === 'task-a')?.turnId, 'turn-mcp-runtime-test')
+    assert.equal(aiWorkStates.cards.find((card) => card.cardId === 'branch-a')?.state, 'unlinked')
+    assert.equal(aiWorkStates.cards.find((card) => card.cardId === 'branch-a')?.isActive, false)
+    assert.match(aiWorkStates.coordinationRule, /동시에 수정하지 마세요/)
+    const afterAiWorkStateRead = await invoke('mindnprogress_get_document', { mapId })
+    assert.equal(afterAiWorkStateRead.map.version, versionBeforeAiWorkStateRead, 'AI 작업 상태 조회가 문서 버전을 변경했습니다.')
+    await invokeExpectError('mindnprogress_get_ai_work_states', {
+      mapId,
+      cardIds: ['missing-card'],
+    }, /카드를 찾을 수 없습니다/)
     const conversationTranscript = await invoke('mindnprogress_get_ai_conversation_transcript', { mapId, cardId: 'task-a' })
     assert.equal(conversationTranscript.conversation.id, 'conversation-test')
     assert.equal(conversationTranscript.card.cardId, 'task-a')

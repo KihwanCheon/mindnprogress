@@ -41,6 +41,7 @@ import { collapsedDocumentGroupsStorageKey, initialCollapsedDocumentGroupIds, no
 import { createsKnowledgeCycle, isHierarchyEdge, isKnowledgeEdge, knowledgePolicyOf } from './utils/knowledgeEdges'
 import { isSameDoorayKnowledgeUrl, normalizedDoorayKnowledgeUrl, taskUrlProvider } from './utils/externalLinks'
 import { splitImageFileName, uniqueImageFileName } from './utils/imageFileNames.mjs'
+import { shouldReconnectEventStream } from './utils/eventStreamHealth.mjs'
 import { mergeMapContent } from './utils/mergeMapContent.mjs'
 import { snapAspectResizeToGrid, snapFreeResizeToGrid } from './utils/resizeGrid.mjs'
 import type { ResizeSnapRequest } from './utils/resizeGrid.mjs'
@@ -712,6 +713,7 @@ type AiConversationRuntimeSummarySnapshotEvent = {
 type NotificationEvent = { type: 'notification'; notification: UserNotification }
 type NotificationsReadEvent = { type: 'notifications-read'; userId: string; notificationId: string | null; readAt: string }
 type NotificationsRemovedEvent = { type: 'notifications-removed'; userId: string; notificationIds: string[] }
+type HeartbeatEvent = { type: 'heartbeat'; sentAt: string }
 
 function buildCommentStats(comments: NodeComment[]): NodeCommentStats {
   return comments.reduce<NodeCommentStats>((stats, comment) => {
@@ -2492,10 +2494,58 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
 
   useEffect(() => {
     setAiConversationRuntimes({})
-    const eventSource = new EventSource(`/api/events?clientId=${encodeURIComponent(CLIENT_ID)}&mapId=${encodeURIComponent(activeMapId)}`)
-    eventSource.onmessage = (message) => {
+    let disposed = false
+    let eventSource: EventSource | null = null
+    let lastEventAt = Date.now()
+
+    const synchronizeAfterReconnect = async () => {
+      const [notificationResult, library, trashResult] = await Promise.all([
+        user.publicAccess
+          ? Promise.resolve(null)
+          : apiRequest<{ notifications: UserNotification[] }>('/api/notifications').catch(() => null),
+        apiRequest<DocumentLibraryResponse>('/api/maps').catch(() => null),
+        mode === 'editor'
+          ? apiRequest<{ maps: MapSummary[] }>('/api/maps/trash').catch(() => null)
+          : Promise.resolve(null),
+      ])
+      if (disposed) return
+      if (notificationResult) setNotifications(notificationResult.notifications)
+      if (!library) return
+
+      setDocuments(library.maps)
+      setDocumentLayout(library.documentLayout)
+      if (trashResult) setTrashedDocuments(trashResult.maps)
+
+      const remoteMap = library.maps.find((map) => map.id === activeMapId) ?? null
+      if (activeMapId && !remoteMap) {
+        setActiveMapId(library.maps[0]?.id ?? '')
+        return
+      }
+
+      const baseline = serverBaseline.current
+      if (!remoteMap || baseline?.id !== activeMapId || remoteMap.version <= baseline.version || !remoteMap.updatedBy) {
+        refreshResolvedReferences()
+        return
+      }
+
+      const missedChange: MapChangeEvent = {
+        type: 'map-changed',
+        mapId: remoteMap.id,
+        action: 'content',
+        sourceClientId: null,
+        updatedAt: remoteMap.updatedAt ?? new Date().toISOString(),
+        updatedBy: remoteMap.updatedBy,
+      }
+      if (mode === 'viewer') setMapReloadToken((current) => current + 1)
+      else setExternalChange(missedChange)
+      refreshResolvedReferences()
+    }
+
+    const handleEventMessage = (message: MessageEvent<string>) => {
+      lastEventAt = Date.now()
       try {
-        const event = JSON.parse(message.data) as MapChangeEvent | PresenceEvent | CursorEvent | CommentChangeEvent | AiConversationLinkedEvent | AiConversationRuntimeEvent | AiConversationRuntimeSnapshotEvent | AiConversationRuntimeSummaryEvent | AiConversationRuntimeSummarySnapshotEvent | NotificationEvent | NotificationsReadEvent | NotificationsRemovedEvent | { type: 'connected' }
+        const event = JSON.parse(message.data) as MapChangeEvent | PresenceEvent | CursorEvent | CommentChangeEvent | AiConversationLinkedEvent | AiConversationRuntimeEvent | AiConversationRuntimeSnapshotEvent | AiConversationRuntimeSummaryEvent | AiConversationRuntimeSummarySnapshotEvent | NotificationEvent | NotificationsReadEvent | NotificationsRemovedEvent | HeartbeatEvent | { type: 'connected' }
+        if (event.type === 'heartbeat') return
         if (event.type === 'presence') {
           if (event.mapId === activeMapId) setPresenceClients(event.clients)
           return
@@ -2629,8 +2679,48 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         // 연결 확인 이벤트 외의 잘못된 메시지는 무시합니다.
       }
     }
-    return () => eventSource.close()
-  }, [activeMapId, mode, refreshResolvedReferences, setNodes, user.id])
+
+    const connectEventSource = () => {
+      eventSource?.close()
+      lastEventAt = Date.now()
+      const nextEventSource = new EventSource(`/api/events?clientId=${encodeURIComponent(CLIENT_ID)}&mapId=${encodeURIComponent(activeMapId)}`)
+      eventSource = nextEventSource
+      nextEventSource.onmessage = handleEventMessage
+      nextEventSource.onopen = () => {
+        if (disposed || eventSource !== nextEventSource) return
+        lastEventAt = Date.now()
+        void synchronizeAfterReconnect()
+      }
+    }
+
+    const reconnectIfNeeded = (force = false) => {
+      if (disposed || !shouldReconnectEventStream({
+        lastEventAt,
+        online: navigator.onLine,
+        visibilityState: document.visibilityState,
+        force,
+      })) return
+      connectEventSource()
+    }
+
+    connectEventSource()
+    const watchdog = window.setInterval(() => reconnectIfNeeded(), 15_000)
+    const handleVisibilityChange = () => reconnectIfNeeded()
+    const handleOnline = () => reconnectIfNeeded(true)
+    const handleFocus = () => reconnectIfNeeded()
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    window.addEventListener('online', handleOnline)
+    window.addEventListener('focus', handleFocus)
+
+    return () => {
+      disposed = true
+      window.clearInterval(watchdog)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+      window.removeEventListener('online', handleOnline)
+      window.removeEventListener('focus', handleFocus)
+      eventSource?.close()
+    }
+  }, [activeMapId, mode, refreshResolvedReferences, setNodes, user.id, user.publicAccess])
 
   useEffect(() => {
     const timer = window.setInterval(() => {
