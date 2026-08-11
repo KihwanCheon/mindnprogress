@@ -155,7 +155,7 @@ export function DoorayTaskNode({ data, selected, isConnectable }: {
             {isWiki ? 'Wiki 페이지' : externalLink.taskNumber || 'Dooray 원본'}
           </span>
           <a
-            className="nodrag nopan"
+            className="node-source-open nodrag nopan"
             href={sourceUrl}
             target="_blank"
             rel="noopener noreferrer"

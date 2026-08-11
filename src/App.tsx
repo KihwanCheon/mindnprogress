@@ -69,7 +69,7 @@ const MINDMAP_GRID_SIZE = 24
 const MINDMAP_MIN_ZOOM = 0.25
 const MINDMAP_MAX_ZOOM = 1.8
 const TOUCH_CARD_LONG_PRESS_MS = 500
-const TOUCH_CARD_MOVE_THRESHOLD = 8
+const TOUCH_DRAG_MOVE_THRESHOLD = 8
 const MINDMAP_CHILD_HORIZONTAL_GAP = MINDMAP_GRID_SIZE * 4
 const MINDMAP_WORK_NODE_VERTICAL_STEP = MINDMAP_GRID_SIZE * 6
 const MINDMAP_IMAGE_MAX_WIDTH = 480
@@ -834,6 +834,13 @@ type TouchPanGesture = {
   viewport: { x: number; y: number; zoom: number }
 }
 
+type TouchCanvasPanGesture = {
+  identifier: number
+  startClient: { x: number; y: number }
+  viewport: { x: number; y: number; zoom: number }
+  active: boolean
+}
+
 type TouchCardGesture = {
   identifier: number
   nodeId: string
@@ -841,7 +848,7 @@ type TouchCardGesture = {
   startFlow: { x: number; y: number }
   startPosition: { x: number; y: number }
   currentPosition: { x: number; y: number }
-  phase: 'pressing' | 'armed' | 'dragging' | 'cancelled'
+  phase: 'pressing' | 'armed' | 'dragging'
   timer: number | null
 }
 
@@ -1812,6 +1819,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const dragSnapshot = useRef<DragSnapshot | null>(null)
   const rightPanGesture = useRef<RightPanGesture | null>(null)
   const touchPanGesture = useRef<TouchPanGesture | null>(null)
+  const touchCanvasPanGesture = useRef<TouchCanvasPanGesture | null>(null)
   const touchPanOwned = useRef(false)
   const touchCardGesture = useRef<TouchCardGesture | null>(null)
   const suppressNodeContextMenuUntil = useRef(0)
@@ -3524,10 +3532,18 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     if (selectedId && selectedNode?.data.kind !== 'image') deleteNodeById(selectedId)
   }, [deleteNodeById, selectedId, selectedNode?.data.kind])
 
-  const startNodeRightPan = useCallback((event: ReactPointerEvent<HTMLElement>) => {
+  const startCanvasRightPan = useCallback((event: ReactPointerEvent<HTMLElement>) => {
     if (event.button !== 2 || viewMode !== 'mindmap') return
-    const target = event.target as HTMLElement
-    if (!target.closest('.react-flow__node') || target.closest('button, input, textarea, select, a, [contenteditable="true"]')) return
+    if (!(event.target instanceof Element)) return
+    const target = event.target
+    const nodeTarget = target.closest('.react-flow__node')
+    const edgeTarget = target.closest('.react-flow__edge, .react-flow__edge-textwrapper')
+    if (!nodeTarget && !edgeTarget) return
+    const interactiveTarget = target.closest('button, input, textarea, select, a, [contenteditable="true"]')
+    if (interactiveTarget
+      && !interactiveTarget.classList.contains('node-collapse-toggle')
+      && !interactiveTarget.classList.contains('node-source-open')
+      && !interactiveTarget.classList.contains('node-waiting')) return
     event.preventDefault()
     event.stopPropagation()
     setNodeContextMenu(null)
@@ -3655,6 +3671,73 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     }
   }, [reactFlowStore])
 
+  const cancelTouchCanvasPan = useCallback(() => {
+    const wasActive = touchCanvasPanGesture.current?.active === true
+    touchCanvasPanGesture.current = null
+    if (!wasActive) return
+    touchPanOwned.current = false
+    setTouchPanning(false)
+  }, [])
+
+  const startTouchCanvasPan = useCallback((event: ReactTouchEvent<HTMLElement>) => {
+    if (viewMode !== 'mindmap' || knowledgeConnection || touchPanOwned.current || event.touches.length !== 1) return
+    const target = event.target
+    if (!(target instanceof Element)) return
+    const panTarget = target.closest('.react-flow__node, .react-flow__edge, .react-flow__edge-textwrapper')
+    if (!panTarget) return
+    const allowedControl = target.closest('.node-collapse-toggle, .node-source-open, .node-waiting')
+    const blockedTarget = target.closest('button, a, input, textarea, select, [contenteditable="true"], .nodrag, .react-flow__handle, .react-flow__resize-control')
+    if (blockedTarget && !allowedControl) return
+
+    const touch = event.touches.item(0)
+    if (!touch) return
+    const [x, y, zoom] = reactFlowStore.getState().transform
+    touchCanvasPanGesture.current = {
+      identifier: touch.identifier,
+      startClient: { x: touch.clientX, y: touch.clientY },
+      viewport: { x, y, zoom },
+      active: false,
+    }
+  }, [knowledgeConnection, reactFlowStore, viewMode])
+
+  const moveTouchCanvasPan = useCallback((event: ReactTouchEvent<HTMLElement>) => {
+    const gesture = touchCanvasPanGesture.current
+    if (!gesture) return
+    const touch = touchWithIdentifier(event.touches, gesture.identifier)
+    if (!touch) return
+    const deltaX = touch.clientX - gesture.startClient.x
+    const deltaY = touch.clientY - gesture.startClient.y
+    if (!gesture.active) {
+      if (Math.hypot(deltaX, deltaY) <= TOUCH_DRAG_MOVE_THRESHOLD) return
+      gesture.active = true
+      touchPanOwned.current = true
+      setTouchPanning(true)
+      setNodeContextMenu(null)
+    }
+
+    event.preventDefault()
+    event.stopPropagation()
+    suppressTouchClickUntil.current = Date.now() + 500
+    void setViewport({
+      x: gesture.viewport.x + deltaX,
+      y: gesture.viewport.y + deltaY,
+      zoom: gesture.viewport.zoom,
+    }, { duration: 0 })
+  }, [setViewport])
+
+  const finishTouchCanvasPan = useCallback((event: ReactTouchEvent<HTMLElement>) => {
+    const gesture = touchCanvasPanGesture.current
+    if (!gesture || !touchWithIdentifier(event.changedTouches, gesture.identifier)) return
+    touchCanvasPanGesture.current = null
+    if (!gesture.active) return
+
+    event.preventDefault()
+    event.stopPropagation()
+    suppressTouchClickUntil.current = Date.now() + 500
+    touchPanOwned.current = false
+    setTouchPanning(false)
+  }, [])
+
   const startTouchPan = useCallback((event: ReactTouchEvent<HTMLElement>) => {
     if (viewMode !== 'mindmap') return
     const points = touchPointsWithin(event.currentTarget, event.touches)
@@ -3712,6 +3795,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   useEffect(() => {
     const cancelTouchPan = () => {
       touchPanGesture.current = null
+      touchCanvasPanGesture.current = null
       touchPanOwned.current = false
       setTouchPanning(false)
     }
@@ -4915,6 +4999,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       if (touchCardGesture.current !== gesture || gesture.phase !== 'pressing') return
       gesture.timer = null
       gesture.phase = 'armed'
+      touchCanvasPanGesture.current = null
       setNodes((current) => synchronizeNodeSelection(current, gesture.nodeId))
       showNodeContextMenu(gesture.nodeId, gesture.startClient.x, gesture.startClient.y)
     }, TOUCH_CARD_LONG_PRESS_MS)
@@ -4935,13 +5020,14 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       touch.clientY - gesture.startClient.y,
     )
     if (gesture.phase === 'pressing') {
-      if (clientDistance <= TOUCH_CARD_MOVE_THRESHOLD) return
+      if (clientDistance <= TOUCH_DRAG_MOVE_THRESHOLD) return
       if (gesture.timer !== null) window.clearTimeout(gesture.timer)
       gesture.timer = null
-      gesture.phase = 'cancelled'
+      touchCardGesture.current = null
+      moveTouchCanvasPan(event)
       return
     }
-    if (gesture.phase === 'cancelled' || clientDistance <= TOUCH_CARD_MOVE_THRESHOLD) return
+    if (clientDistance <= TOUCH_DRAG_MOVE_THRESHOLD) return
 
     const node = nodesRef.current.find((candidate) => candidate.id === gesture.nodeId)
     if (!node) {
@@ -4961,7 +5047,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     })
     gesture.currentPosition = position
     moveNodeDrag({ ...node, position, selected: true }, true)
-  }, [cancelTouchCardGesture, moveNodeDrag, screenToFlowPosition, startNodeDrag])
+  }, [cancelTouchCardGesture, moveNodeDrag, moveTouchCanvasPan, screenToFlowPosition, startNodeDrag])
 
   const finishTouchCardGesture = useCallback((event: ReactTouchEvent<HTMLElement>) => {
     const gesture = touchCardGesture.current
@@ -5001,7 +5087,8 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
 
   useEffect(() => {
     cancelTouchCardGesture(true)
-  }, [activeMapId, cancelTouchCardGesture, viewMode])
+    cancelTouchCanvasPan()
+  }, [activeMapId, cancelTouchCanvasPan, cancelTouchCardGesture, viewMode])
 
   const renderDocumentListItem = (document: MapSummary, location: { type: 'top'; item: DocumentLayoutItem } | { type: 'group'; groupId: string }) => {
     const hasLoadedActiveDocument = document.id === activeMapId && loadedMapId === activeMapId
@@ -5549,27 +5636,52 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
           ref={canvasWrapRef}
           className={`canvas-wrap ${rightPanning ? 'right-panning' : ''} ${touchPanning ? 'touch-panning' : ''} ${knowledgeConnection ? `knowledge-connecting ${knowledgeConnection.policy === 'reuse-first' ? 'primary' : 'secondary'}` : ''}`}
           onPointerDownCapture={(event) => {
-            startNodeRightPan(event)
+            startCanvasRightPan(event)
+          }}
+          onContextMenuCapture={(event) => {
+            if (!(event.target instanceof Element)) return
+            const overEdge = event.target.closest('.react-flow__edge, .react-flow__edge-textwrapper')
+            if (overEdge || rightPanGesture.current?.moved || Date.now() < suppressNodeContextMenuUntil.current) {
+              event.preventDefault()
+            }
+          }}
+          onClickCapture={(event) => {
+            if (Date.now() >= suppressTouchClickUntil.current || !(event.target instanceof Element)) return
+            if (!event.target.closest('.react-flow__node, .react-flow__edge, .react-flow__edge-textwrapper')) return
+            event.preventDefault()
+            event.stopPropagation()
           }}
           onTouchStartCapture={(event) => {
             if (touchPointsWithin(event.currentTarget, event.touches).length >= 2) {
               cancelTouchCardGesture(true)
+              cancelTouchCanvasPan()
               startTouchPan(event)
               return
             }
             startTouchCardGesture(event)
+            startTouchCanvasPan(event)
           }}
           onTouchMoveCapture={(event) => {
-            if (touchPanOwned.current) moveTouchPan(event)
-            else moveTouchCardGesture(event)
+            if (touchCanvasPanGesture.current?.active) moveTouchCanvasPan(event)
+            else if (touchPanOwned.current) moveTouchPan(event)
+            else if (touchCardGesture.current) moveTouchCardGesture(event)
+            else moveTouchCanvasPan(event)
           }}
           onTouchEndCapture={(event) => {
-            if (touchPanOwned.current) finishTouchPan(event)
-            else finishTouchCardGesture(event)
+            if (touchCanvasPanGesture.current?.active) finishTouchCanvasPan(event)
+            else if (touchPanOwned.current) finishTouchPan(event)
+            else if (touchCardGesture.current) {
+              finishTouchCardGesture(event)
+              finishTouchCanvasPan(event)
+            } else finishTouchCanvasPan(event)
           }}
           onTouchCancelCapture={(event) => {
-            if (touchPanOwned.current) finishTouchPan(event)
-            else finishTouchCardGesture(event)
+            if (touchCanvasPanGesture.current?.active) finishTouchCanvasPan(event)
+            else if (touchPanOwned.current) finishTouchPan(event)
+            else if (touchCardGesture.current) {
+              finishTouchCardGesture(event)
+              finishTouchCanvasPan(event)
+            } else finishTouchCanvasPan(event)
           }}
           onPointerEnter={trackCanvasPointer}
           onPointerMove={trackCanvasPointer}

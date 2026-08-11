@@ -115,7 +115,7 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
           )}
           <h3>{data.label}</h3>
           <a
-            className="dooray-linked-open nodrag nopan"
+            className="dooray-linked-open node-source-open nodrag nopan"
             href={doorayUrl}
             target="_blank"
             rel="noopener noreferrer"
