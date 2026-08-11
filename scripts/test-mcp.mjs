@@ -202,7 +202,7 @@ async function main() {
 
     const guide = await invoke('mindnprogress_read_me_first')
     assert.equal(guide.guide.product.name, 'MindNProgress')
-    assert.equal(guide.guide.version, '1.8')
+    assert.equal(guide.guide.version, '1.9')
     assert.match(guide.guide.dataModel.cardContent.sharedKnowledge, /재사용/)
     assert.match(guide.guide.authoringRules.join('\n'), /모든 isWork=true 업무 진행률을 동일 가중치 평균/)
     assert.match(guide.guide.operationRules.join('\n'), /변경할 필드만 보내고/)
@@ -440,7 +440,7 @@ async function main() {
       editorId: attribution.editorId,
       attributionToken: attribution.attributionToken,
     })
-    assert.equal(context.contextSchemaVersion, '2.2')
+    assert.equal(context.contextSchemaVersion, '2.3')
     assert.equal(context.detailLevel, 'focused')
     assert.equal(context.document.nodes, undefined)
     assert.equal(context.document.outline.length, 4)
@@ -557,6 +557,21 @@ async function main() {
     documentResult = await invoke('mindnprogress_get_document', { mapId })
     assert.equal(documentResult.map.version, versionBeforeConversationLink + 1, 'AI 대화 ID 연결은 문서 버전을 한 번 증가시켜야 합니다.')
     assert.equal(documentResult.map.nodes.find((node) => node.id === 'task-a')?.data.aiConversationId, 'conversation-test')
+    const linkedConversations = documentResult.map.nodes.find((node) => node.id === 'task-a')?.data.aiConversations
+    assert.equal(linkedConversations.length, 1)
+    assert.equal(linkedConversations[0].conversationId, 'conversation-test')
+    assert.equal(linkedConversations[0].agent.label, 'Claude Code')
+    assert.equal(linkedConversations[0].model.label, 'Claude Test Model')
+    assert.equal(linkedConversations[0].startedBy.label, 'MCP 테스트 편집자')
+    const conversationListResponse = await fetch(`${apiBaseUrl}/api/maps/${encodeURIComponent(mapId)}/cards/task-a/ai-conversations`, {
+      headers: { Cookie: editorSessionCookie },
+    })
+    assert.equal(conversationListResponse.status, 200)
+    const conversationList = await conversationListResponse.json()
+    assert.equal(conversationList.latestConversationId, 'conversation-test')
+    assert.equal(conversationList.conversations.length, 1)
+    assert.equal(conversationList.conversations[0].runtime.state, 'running')
+    assert.equal(conversationList.conversations[0].available, true)
     const versionBeforeAiWorkStateRead = documentResult.map.version
     const aiWorkStates = await invoke('mindnprogress_get_ai_work_states', {
       mapId,
@@ -566,6 +581,8 @@ async function main() {
     assert.deepEqual(aiWorkStates.activeCardIds, ['task-a'])
     assert.equal(aiWorkStates.cards.find((card) => card.cardId === 'task-a')?.state, 'running')
     assert.equal(aiWorkStates.cards.find((card) => card.cardId === 'task-a')?.isActive, true)
+    assert.equal(aiWorkStates.cards.find((card) => card.cardId === 'task-a')?.conversationCount, 1)
+    assert.deepEqual(aiWorkStates.cards.find((card) => card.cardId === 'task-a')?.activeConversationIds, ['conversation-test'])
     assert.equal(aiWorkStates.cards.find((card) => card.cardId === 'task-a')?.turnId, 'turn-mcp-runtime-test')
     assert.equal(aiWorkStates.cards.find((card) => card.cardId === 'branch-a')?.state, 'unlinked')
     assert.equal(aiWorkStates.cards.find((card) => card.cardId === 'branch-a')?.isActive, false)

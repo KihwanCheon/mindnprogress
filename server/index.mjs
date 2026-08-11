@@ -37,6 +37,15 @@ import {
   removeAiWorkspace,
 } from '../src/utils/aiWorkspaceHistory.mjs'
 import {
+  aiConversationIdsFromData,
+  aiConversationLinkFromAionUiConversation,
+  aiConversationLinksFromData,
+  aggregateAiConversationRuntime,
+  appendAiConversationLink,
+  isAiConversationLinked,
+  normalizeAiConversationLink,
+} from '../src/utils/aiConversations.mjs'
+import {
   AionUiExternalLaunchPayloadError,
   createAionUiWebLaunchUrl,
   normalizeAionUiExternalLaunchPayload,
@@ -685,8 +694,27 @@ function normalizeMapAssignees(map) {
   }
 }
 
+function normalizeMapAiConversations(map) {
+  if (!map || !Array.isArray(map.nodes)) return map
+  return {
+    ...map,
+    nodes: map.nodes.map((node) => {
+      const links = aiConversationLinksFromData(node.data)
+      const data = { ...(node.data ?? {}) }
+      if (links.length === 0) {
+        delete data.aiConversationId
+        delete data.aiConversations
+      } else {
+        data.aiConversations = links
+        if (!isAiConversationLinked(data, data.aiConversationId)) data.aiConversationId = links.at(-1).conversationId
+      }
+      return { ...node, data }
+    }),
+  }
+}
+
 function normalizeMapForPersistence(map) {
-  return applyProgressRollup(normalizeMapAssignees(normalizeMapRuntimeState(normalizeMapEdges(map))))
+  return applyProgressRollup(normalizeMapAiConversations(normalizeMapAssignees(normalizeMapRuntimeState(normalizeMapEdges(map)))))
 }
 
 function normalizeSharedKnowledgeMetadata(existing, map, user, updatedAt) {
@@ -1256,6 +1284,8 @@ function sameAiConversationRuntime(first, second) {
     && first?.isProcessing === second?.isProcessing
     && first?.pendingConfirmations === second?.pendingConfirmations
     && first?.turnId === second?.turnId
+    && first?.conversationCount === second?.conversationCount
+    && JSON.stringify(first?.activeConversationIds ?? []) === JSON.stringify(second?.activeConversationIds ?? [])
 }
 
 function aiConversationRuntimeSnapshot(mapId) {
@@ -1287,13 +1317,16 @@ async function aiConversationWorkStates(mapId, requestedCardIds = []) {
   const runtimesByNodeId = new Map(runtimes.map((item) => [item.nodeId, item.runtime]))
   const nodes = requestedIds.length > 0 ? requestedIds.map((cardId) => nodesById.get(cardId)) : map.nodes
   const cards = nodes.map((node) => {
-    const conversationId = typeof node.data?.aiConversationId === 'string' ? node.data.aiConversationId.trim() : ''
-    const runtime = conversationId ? runtimesByNodeId.get(node.id) : null
-    const state = runtime?.state ?? (conversationId ? 'unknown' : 'unlinked')
+    const conversationIds = aiConversationIdsFromData(node.data)
+    const conversationId = typeof node.data?.aiConversationId === 'string' ? node.data.aiConversationId.trim() : conversationIds.at(-1) ?? ''
+    const runtime = conversationIds.length > 0 ? runtimesByNodeId.get(node.id) : null
+    const state = runtime?.state ?? (conversationIds.length > 0 ? 'unknown' : 'unlinked')
     return {
       cardId: node.id,
       label: node.data?.label ?? node.id,
       conversationId: conversationId || null,
+      conversationCount: conversationIds.length,
+      activeConversationIds: runtime?.activeConversationIds ?? [],
       state,
       isActive: state === 'running' || state === 'waiting-confirmation',
       isProcessing: runtime?.isProcessing ?? false,
@@ -1366,8 +1399,8 @@ function refreshAiConversationRuntimeForMap(mapId) {
     const map = await readMap(mapId)
     const targets = map && !map.trashedAt
       ? map.nodes.flatMap((node) => {
-          const conversationId = typeof node.data?.aiConversationId === 'string' ? node.data.aiConversationId.trim() : ''
-          return conversationId ? [{ nodeId: node.id, conversationId }] : []
+          const conversationIds = aiConversationIdsFromData(node.data)
+          return conversationIds.length > 0 ? [{ nodeId: node.id, conversationIds }] : []
         })
       : []
     const targetKeys = new Set(targets.map((target) => conversationAttributionKey(mapId, target.nodeId)))
@@ -1380,7 +1413,7 @@ function refreshAiConversationRuntimeForMap(mapId) {
     }
 
     const observedAt = new Date().toISOString()
-    const conversationIds = [...new Set(targets.map((target) => target.conversationId))]
+    const conversationIds = [...new Set(targets.flatMap((target) => target.conversationIds))]
     const runtimesByConversation = new Map(await Promise.all(conversationIds.map(async (conversationId) => {
       try {
         const conversation = await fetchAiConversationRuntime(conversationId)
@@ -1393,8 +1426,10 @@ function refreshAiConversationRuntimeForMap(mapId) {
 
     for (const target of targets) {
       const key = conversationAttributionKey(mapId, target.nodeId)
-      const runtime = runtimesByConversation.get(target.conversationId)
-        ?? normalizeAiConversationRuntime(target.conversationId, null, observedAt)
+      const runtime = aggregateAiConversationRuntime(target.conversationIds.map((conversationId) => (
+        runtimesByConversation.get(conversationId) ?? normalizeAiConversationRuntime(conversationId, null, observedAt)
+      )))
+      if (!runtime) continue
       const previous = aiConversationRuntimeStates.get(key)
       aiConversationRuntimeStates.set(key, runtime)
       if (!sameAiConversationRuntime(previous, runtime)) {
@@ -1529,6 +1564,50 @@ function normalizeAionUiAgent(agent, providers) {
     ),
     thoughtLevels: Array.isArray(thoughtOption?.options) ? thoughtOption.options.map(normalizeAionUiOption) : [],
     defaultThoughtLevel: String(thoughtOption?.currentValue ?? thoughtOption?.current_value ?? ''),
+  }
+}
+
+function normalizeAionUiSkills(skills) {
+  return (Array.isArray(skills) ? skills : []).map((skill) => ({
+    id: String(skill.name),
+    name: String(skill.name),
+    description: String(skill.description ?? ''),
+    autoInject: skill.is_auto_inject === true,
+  }))
+}
+
+function normalizeAionUiMcpServers(mcpServers) {
+  return (Array.isArray(mcpServers) ? mcpServers : [])
+    .filter((server) => server?.enabled !== false)
+    .map((server) => ({
+      id: String(server.id),
+      name: String(server.name ?? server.id),
+      description: String(server.description ?? ''),
+      toolCount: Array.isArray(server.tools) ? server.tools.length : 0,
+      required: String(server.name ?? '').toLowerCase() === 'mindnprogress',
+    }))
+}
+
+function aiConversationSelectionSnapshot(body, agent, model, skills, mcpServers) {
+  const enabledSkillIds = new Set(Array.isArray(body.enabledSkillIds) ? body.enabledSkillIds.map(String) : [])
+  const disabledBuiltinSkillIds = new Set(Array.isArray(body.disabledBuiltinSkillIds) ? body.disabledBuiltinSkillIds.map(String) : [])
+  const selectedMcpIds = new Set(Array.isArray(body.mcpIds) ? body.mcpIds.map(String) : [])
+  const mode = agent.modes.find((item) => item.id === String(body.mode ?? ''))
+  const thoughtLevel = agent.thoughtLevels.find((item) => item.id === String(body.thoughtLevel ?? ''))
+  return {
+    agent: { id: agent.id, label: agent.name },
+    model: { id: model.id, label: model.label },
+    providerId: model.providerId ?? null,
+    ...(mode ? { mode: { id: mode.id, label: mode.label } } : {}),
+    ...(thoughtLevel ? { thoughtLevel: { id: thoughtLevel.id, label: thoughtLevel.label } } : {}),
+    skills: skills
+      .filter((skill) => skill.autoInject ? !disabledBuiltinSkillIds.has(skill.id) : enabledSkillIds.has(skill.id))
+      .map((skill) => ({ id: skill.id, label: skill.name })),
+    mcpServers: mcpServers
+      .filter((server) => server.required || selectedMcpIds.has(server.id))
+      .map((server) => ({ id: server.id, label: server.name })),
+    workspace: String(body.workspace ?? '').trim().slice(0, 4_096) || null,
+    requestPreview: String(body.requestPreview ?? '').replace(/\s+/g, ' ').trim().slice(0, 240) || null,
   }
 }
 
@@ -1679,10 +1758,12 @@ async function resolveConversationAttribution(mapId, cardId, conversationId, sta
   }
 }
 
-async function refreshConversationAttribution(mapId, cardId, conversationId, startedBy = null, fallback = null) {
+async function refreshConversationAttribution(mapId, cardId, conversationId, startedBy = null, fallback = null, { makeCurrent = true } = {}) {
   const attribution = await resolveConversationAttribution(mapId, cardId, conversationId, startedBy, fallback)
-  aiConversationAttributions.set(conversationAttributionKey(mapId, cardId), attribution)
-  await persistAiConversationAttributions()
+  if (makeCurrent) {
+    aiConversationAttributions.set(conversationAttributionKey(mapId, cardId), attribution)
+    await persistAiConversationAttributions()
+  }
   const fallbackModelId = String(fallback?.modelId ?? '')
   const malformedFallbackAuthor = (fallbackModelId.includes('[') || fallbackModelId.includes(']')) ? fallback?.authorName : null
   const repairedComments = await repairUnspecifiedConversationComments(attribution, [malformedFallbackAuthor])
@@ -1818,6 +1899,7 @@ const referenceContentKeys = [
   'taskUrl',
   'externalLink',
   'aiConversationId',
+  'aiConversations',
   'isWork',
   'assigneeId',
   'dueDate',
@@ -2625,13 +2707,17 @@ const server = createServer(async (request, response) => {
       }
 
       try {
-        const [agents, providers] = await Promise.all([
+        const [agents, providers, skills, mcpServers] = await Promise.all([
           fetchAionUi('/api/agents/management'),
           fetchAionUi('/api/providers'),
+          fetchAionUi('/api/skills'),
+          fetchAionUi('/api/mcp/servers'),
         ])
         const normalizedAgents = (Array.isArray(agents) ? agents : [])
           .filter((agent) => agent?.enabled !== false && agent?.installed === true)
           .map((agent) => normalizeAionUiAgent(agent, Array.isArray(providers) ? providers.filter((item) => item?.enabled !== false) : []))
+        const normalizedSkills = normalizeAionUiSkills(skills)
+        const normalizedMcpServers = normalizeAionUiMcpServers(mcpServers)
         const agent = normalizedAgents.find((candidate) => candidate.id === agentId)
         const model = agent?.models.find((candidate) => candidate.id === modelId
           && (!providerId || !candidate.providerId || candidate.providerId === providerId))
@@ -2659,6 +2745,7 @@ const server = createServer(async (request, response) => {
           mapId,
           cardId,
           startedBy: user.id,
+          selection: aiConversationSelectionSnapshot(body, agent, model, normalizedSkills, normalizedMcpServers),
           createdAt: Date.now(),
           expiresAt,
         })
@@ -2756,13 +2843,34 @@ const server = createServer(async (request, response) => {
           return sendJson(response, 404, { error: 'AI 대화를 연결할 문서 또는 카드를 찾을 수 없습니다.' })
         }
         const actor = users.find((candidate) => candidate.id === launch.startedBy) ?? integrationUser
+        const attribution = aiAttributions.get(launch.attributionKey)
+        const selection = attribution?.selection ?? {
+          agent: attribution?.agentId ? { id: attribution.agentId, label: attribution.agentName ?? attribution.agentId } : null,
+          model: attribution?.modelId ? { id: attribution.modelId, label: attribution.modelName ?? attribution.modelId } : null,
+          providerId: attribution?.providerId ?? null,
+          skills: [],
+          mcpServers: [],
+        }
+        const conversationLink = normalizeAiConversationLink({
+          conversationId,
+          ...selection,
+          startedBy: { id: actor.id, label: actor.name },
+          startedAt: normalizedIsoDate(conversation.created_at),
+          linkedAt: new Date().toISOString(),
+        })
         const updatedMap = await saveMap(launch.mapId, {
           nodes: map.nodes.map((node) => node.id === launch.cardId
-            ? { ...node, data: { ...node.data, aiConversationId: conversationId } }
+            ? {
+                ...node,
+                data: {
+                  ...node.data,
+                  aiConversationId: conversationId,
+                  aiConversations: appendAiConversationLink(node.data, conversationLink),
+                },
+              }
             : node),
           edges: map.edges,
         }, actor, map.title, map.color, 'content')
-        const attribution = aiAttributions.get(launch.attributionKey)
         if (attribution) {
           attribution.conversationId = conversationId
           await persistAiAttributions()
@@ -2794,6 +2902,7 @@ const server = createServer(async (request, response) => {
           mapId: launch.mapId,
           nodeId: launch.cardId,
           conversationId,
+          conversation: conversationLink,
           sourceClientId: null,
           updatedAt: updatedMap.updatedAt,
           updatedBy: publicUser(actor),
@@ -2809,6 +2918,88 @@ const server = createServer(async (request, response) => {
     }
 
     const aionUiConversationTranscriptRoute = url.pathname.match(/^\/api\/integrations\/aionui\/conversations\/([^/]+)\/transcript$/)
+
+    const cardAiConversationsRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/cards\/([^/]+)\/ai-conversations$/)
+    if (cardAiConversationsRoute && request.method === 'GET') {
+      const user = requireUser(request, response)
+      if (!user) return
+      if (!canEdit(user)) return sendJson(response, 403, { error: '편집자만 AI 대화 목록을 확인할 수 있습니다.' })
+      const mapId = decodeURIComponent(cardAiConversationsRoute[1])
+      const cardId = decodeURIComponent(cardAiConversationsRoute[2])
+      if (!isValidMapId(mapId) || !cardId || cardId.length > 120) {
+        return sendJson(response, 400, { error: '문서와 카드 ID가 올바르지 않습니다.' })
+      }
+      const map = await readMap(mapId)
+      const card = map?.nodes.find((node) => node.id === cardId)
+      if (!map || map.trashedAt || !card) return sendJson(response, 404, { error: '카드를 찾을 수 없습니다.' })
+      const currentAttribution = aiConversationAttributions.get(conversationAttributionKey(mapId, cardId))
+      const links = aiConversationLinksFromData(card.data).map((link) => {
+        if (link.conversationId !== currentAttribution?.conversationId) return link
+        return normalizeAiConversationLink({
+          ...link,
+          agent: link.agent ?? (currentAttribution.agentId ? {
+            id: currentAttribution.agentId,
+            label: currentAttribution.agentName ?? currentAttribution.agentId,
+          } : null),
+          model: link.model ?? (currentAttribution.modelId ? {
+            id: currentAttribution.modelId,
+            label: currentAttribution.modelName ?? currentAttribution.modelId,
+          } : null),
+          providerId: link.providerId ?? currentAttribution.providerId,
+          startedBy: link.startedBy ?? (currentAttribution.startedBy ? {
+            id: currentAttribution.startedBy,
+            label: users.find((candidate) => candidate.id === currentAttribution.startedBy)?.name ?? currentAttribution.startedBy,
+          } : null),
+          startedAt: link.startedAt ?? currentAttribution.linkedAt,
+          linkedAt: link.linkedAt ?? currentAttribution.linkedAt,
+        })
+      }).filter(Boolean)
+      const observedAt = new Date().toISOString()
+      const conversations = await Promise.all(links.map(async (link) => {
+        try {
+          const conversation = await fetchAiConversationRuntime(link.conversationId)
+          if (!conversation || String(conversation.id) !== link.conversationId) throw new Error('AIONUI_CONVERSATION_NOT_FOUND')
+          const recoveredLink = aiConversationLinkFromAionUiConversation(conversation)
+          const enrichedLink = normalizeAiConversationLink({
+            ...link,
+            agent: link.agent ?? recoveredLink?.agent,
+            model: link.model ?? recoveredLink?.model,
+            providerId: link.providerId ?? recoveredLink?.providerId,
+            mode: link.mode ?? recoveredLink?.mode,
+            thoughtLevel: link.thoughtLevel ?? recoveredLink?.thoughtLevel,
+            skills: link.skills.length > 0 ? link.skills : recoveredLink?.skills,
+            mcpServers: link.mcpServers.length > 0 ? link.mcpServers : recoveredLink?.mcpServers,
+            workspace: link.workspace ?? recoveredLink?.workspace,
+            startedAt: link.startedAt ?? recoveredLink?.startedAt,
+          }) ?? link
+          return {
+            ...enrichedLink,
+            available: true,
+            name: String(conversation.name ?? ''),
+            startedAt: enrichedLink.startedAt ?? normalizedIsoDate(conversation.created_at),
+            modifiedAt: normalizedIsoDate(conversation.modified_at, enrichedLink.linkedAt ?? null),
+            runtime: normalizeAiConversationRuntime(link.conversationId, conversation, observedAt),
+          }
+        } catch {
+          return {
+            ...link,
+            available: false,
+            name: '',
+            modifiedAt: null,
+            runtime: normalizeAiConversationRuntime(link.conversationId, null, observedAt),
+          }
+        }
+      }))
+      conversations.sort((first, second) => String(second.startedAt ?? second.linkedAt ?? '')
+        .localeCompare(String(first.startedAt ?? first.linkedAt ?? '')))
+      return sendJson(response, 200, {
+        mapId,
+        cardId,
+        latestConversationId: card.data?.aiConversationId ?? null,
+        conversations,
+      })
+    }
+
     if (aionUiConversationTranscriptRoute && request.method === 'GET') {
       const user = requireUser(request, response)
       if (!user) return
@@ -2823,7 +3014,7 @@ const server = createServer(async (request, response) => {
       }
       const map = await readMap(scope.mapId)
       const card = map?.nodes.find((node) => node.id === scope.cardId)
-      if (!map || map.trashedAt || !card || card.data?.aiConversationId !== conversationId) {
+      if (!map || map.trashedAt || !card || !isAiConversationLinked(card.data, conversationId)) {
         return sendJson(response, 404, { error: '카드에 연결된 AI 대화를 찾을 수 없습니다.' })
       }
       try {
@@ -2873,11 +3064,13 @@ const server = createServer(async (request, response) => {
       if (!isValidMapId(mapId) || !cardId) return sendJson(response, 400, { error: '문서와 카드 ID가 필요합니다.' })
       const map = await readMap(mapId)
       const card = map?.nodes.find((node) => node.id === cardId)
-      if (!map || map.trashedAt || !card || card.data?.aiConversationId !== conversationId) {
+      if (!map || map.trashedAt || !card || !isAiConversationLinked(card.data, conversationId)) {
         return sendJson(response, 404, { error: '연결된 AI 대화의 문서 또는 카드를 찾을 수 없습니다.' })
       }
       try {
-        const result = await refreshConversationAttribution(mapId, cardId, conversationId, user.id)
+        const result = await refreshConversationAttribution(mapId, cardId, conversationId, user.id, null, {
+          makeCurrent: card.data?.aiConversationId === conversationId,
+        })
         return sendJson(response, 200, result)
       } catch (error) {
         console.error('[AionUi conversation attribution refresh]', error)
@@ -2959,21 +3152,8 @@ const server = createServer(async (request, response) => {
           .filter((agent) => agent?.enabled !== false && agent?.installed === true)
           .map((agent) => normalizeAionUiAgent(agent, Array.isArray(providers) ? providers.filter((item) => item?.enabled !== false) : []))
           .filter((agent) => agent.models.length > 0 || agent.backend === 'aionrs')
-        const normalizedSkills = (Array.isArray(skills) ? skills : []).map((skill) => ({
-          id: String(skill.name),
-          name: String(skill.name),
-          description: String(skill.description ?? ''),
-          autoInject: skill.is_auto_inject === true,
-        }))
-        const normalizedMcpServers = (Array.isArray(mcpServers) ? mcpServers : [])
-          .filter((server) => server?.enabled !== false)
-          .map((server) => ({
-            id: String(server.id),
-            name: String(server.name ?? server.id),
-            description: String(server.description ?? ''),
-            toolCount: Array.isArray(server.tools) ? server.tools.length : 0,
-            required: String(server.name ?? '').toLowerCase() === 'mindnprogress',
-          }))
+        const normalizedSkills = normalizeAionUiSkills(skills)
+        const normalizedMcpServers = normalizeAionUiMcpServers(mcpServers)
         return sendJson(response, 200, {
           connected: true,
           aionUiUrl: activeAionUiBaseUrl,

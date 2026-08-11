@@ -11,7 +11,7 @@ const projectDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url
 const dataDirectory = path.resolve(String(process.env.MNP_DATA_DIR ?? '').trim() || path.join(projectDirectory, 'server', 'data'))
 const tokenFile = path.resolve(String(process.env.MNP_TOKEN_FILE ?? '').trim() || path.join(dataDirectory, '_integration-token'))
 const apiBaseUrl = String(process.env.MNP_API_URL ?? 'http://127.0.0.1:4176').replace(/\/+$/, '')
-const contextSchemaVersion = '2.2'
+const contextSchemaVersion = '2.3'
 const contextCommentLimit = 20
 const mindMapGridSize = 24
 const mindMapChildHorizontalGap = mindMapGridSize * 4
@@ -52,7 +52,7 @@ function defaultChildMindMapPosition(parentPosition, siblingPositions, parentWid
 
 const serverInstructions = `MindNProgress는 마인드맵과 업무 진행 관리를 결합한 웹 서비스입니다. MindNProgress 밖에서 시작해 문서 ID나 카드 ID가 없다면 mindnprogress_read_me_first를 먼저 호출하세요. 선택 문서와 카드가 있다면 mindnprogress_get_context로 제품 규칙과 최신 문서 구조를 먼저 확인하세요. AionUi가 발급한 attributionToken이 없는 외부 MCP 세션은 자신이 현재 AI 종류와 모델을 정확히 알고 있을 때 get_context의 aiType과 aiModel에 함께 전달하고, 알지 못하면 추측하지 마세요. get_context의 selection.taskLinks.startupInspection을 따르세요. mode가 knowledge-guided이면 primary 선행 지식 중 kind=image인 항목은 imageAccess.localPath의 원본을 사용 가능한 로컬 이미지 열람 도구로 직접 확인하고 설명과 댓글을 함께 사용하며, 일반 카드는 sharedKnowledge를 먼저 재사용하고 설명과 댓글로 보완합니다. fallbackSources와 fallbackTargets는 정보가 부족할 때만 선택적으로 조사합니다. mode가 default이고 required가 true이면 targets의 업무 본문, 댓글, 첨부파일 목록과 관련 링크를 조사하세요. 진행 과정과 결과는 댓글에 기록하고, 다른 카드나 후속 세션이 재사용할 안정적인 사실·결정·제약은 카드의 sharedKnowledge에 요약하세요. AI 댓글은 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 충실히 담은 detail로 작성하며, 요약 때문에 상세를 축약하지 마세요. 외부 전달물이나 결정 대기는 waitingItems로 기록하고 제목에 대기 문구를 붙이지 마세요. 대기를 등록할 때는 [차단], 해제할 때는 [진행] 댓글로 이유와 재개 상태를 기록하세요. 카드 일부 필드만 변경할 때는 mindnprogress_update_card의 data에 변경할 필드만 보내고 현재 카드 전체 데이터를 재전송하지 마세요. 일반 카드에서 생략한 필드와 위치는 보존되지만 완료 상태 또는 진행률 100 적용 시 waitingItems는 자동으로 해제되며, Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 선택 카드 밖의 형제·하위·선행 카드를 함께 수정하기 전에는 mindnprogress_get_ai_work_states로 해당 카드에 다른 AI 작업이 진행 중인지 확인하세요. running 또는 waiting-confirmation인 카드는 사용자 지시 없이 동시에 수정하지 마세요. 지식선만 변경할 때는 전체 문서를 다시 보내지 말고 지식선 전용 도구를 사용하세요. 조회 도구는 문서 버전을 변경하지 않지만 카드·관계 편집과 AI 대화 ID 연결은 버전을 증가시킬 수 있습니다. 특정 자료가 있다고 가정하지 마세요. 여러 카드로 구성된 새 문서는 mindnprogress_create_mindmap으로 한 번에 생성하고, 변경 후에는 최신 문서를 다시 조회해 결과를 검증하세요. 비밀번호 변경과 계정 관리 작업은 지원하지 않습니다.`
 const productGuide = {
-  version: '1.8',
+  version: '1.9',
   product: {
     name: 'MindNProgress',
     purpose: '아이디어를 계층형 마인드맵으로 구조화하고 실행 업무의 진행 상황을 같은 문서에서 관리하는 웹 서비스',
@@ -70,6 +70,7 @@ const productGuide = {
       description: '업무의 목적, 범위, 요구사항과 완료 조건. 사용자가 작성한 원래 맥락을 보존함',
       sharedKnowledge: '다른 카드나 후속 AI 세션에서 재사용할 안정적인 사실, 결정, 제약, 조사 결과와 사용 방법',
       comments: '시간순 진행 과정, 검증 결과, 차단 사유와 완료 기록. 새 댓글은 요약과 접을 수 있는 상세 내용으로 구분',
+      aiConversations: '카드에서 시작한 AionUi 대화 목록. focused 컨텍스트는 최근 대화 ID와 전체 개수만 제공하며 필요하면 conversationId를 지정해 이전 대화 전문을 조회',
     },
     cardKinds: {
       root: '문서의 최상위 주제',
@@ -344,10 +345,14 @@ function compactRelatedCards(ids, nodes) {
 
 function contentCard(node, mapId = '') {
   const imageAccess = imageCardLocalAccess(dataDirectory, mapId, node)
+  const data = { ...(node.data ?? {}) }
+  const aiConversationCount = Array.isArray(data.aiConversations) ? data.aiConversations.length : data.aiConversationId ? 1 : 0
+  delete data.aiConversations
+  if (aiConversationCount > 0) data.aiConversationCount = aiConversationCount
   return {
     id: node.id,
     type: node.type ?? 'mind',
-    data: node.data ?? {},
+    data,
     ...(imageAccess ? { imageAccess } : {}),
   }
 }
@@ -1368,13 +1373,15 @@ async function main() {
     mapId: z.string().min(1), commentId: z.string().min(1), emoji: z.enum(['👍', '❤️', '🎉', '👀']),
   }, async ({ mapId, commentId, emoji }) => apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments/${encodeURIComponent(commentId)}/reactions`, { method: 'POST', body: JSON.stringify({ emoji }) }))
 
-  registerTool(server, 'mindnprogress_get_ai_conversation_transcript', '카드에 연결된 AionUi 대화의 전체 내용을 AionUi 세션 목록의 "전체 복사"와 같은 텍스트 형식으로 조회합니다. 사용자·어시스턴트·시스템 메시지를 시간순으로 반환하며 도구 호출 메시지는 제외합니다.', {
-    mapId: z.string().min(1), cardId: z.string().min(1),
-  }, async ({ mapId, cardId }) => {
+  registerTool(server, 'mindnprogress_get_ai_conversation_transcript', '카드에 연결된 AionUi 대화의 전체 내용을 AionUi 세션 목록의 "전체 복사"와 같은 텍스트 형식으로 조회합니다. conversationId를 생략하면 최근 연결 대화를 사용하고, 여러 대화 중 하나를 지정할 수 있습니다. 사용자·어시스턴트·시스템 메시지를 시간순으로 반환하며 도구 호출 메시지는 제외합니다.', {
+    mapId: z.string().min(1),
+    cardId: z.string().min(1),
+    conversationId: z.string().min(1).max(120).optional().describe('여러 연결 대화 중 조회할 대화 ID. 생략하면 최근 연결 대화'),
+  }, async ({ mapId, cardId, conversationId: requestedConversationId }) => {
     const map = await getDocument(mapId)
     const card = map.nodes.find((node) => node.id === cardId)
     if (!card) throw new Error('카드를 찾을 수 없습니다.')
-    const conversationId = String(card.data?.aiConversationId ?? '').trim()
+    const conversationId = String(requestedConversationId ?? card.data?.aiConversationId ?? '').trim()
     if (!conversationId) throw new Error('카드에 연결된 AI 대화가 없습니다.')
     return apiRequest(`/api/integrations/aionui/conversations/${encodeURIComponent(conversationId)}/transcript`, {
       aiMapId: mapId,

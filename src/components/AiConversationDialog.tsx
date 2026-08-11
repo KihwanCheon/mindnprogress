@@ -330,6 +330,9 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
     setLaunching(true)
     setLaunchError('')
     try {
+      const enabledSkillIds = options.skills.filter((skill) => !skill.autoInject && selectedSkillIds.has(skill.id)).map((skill) => skill.id)
+      const disabledBuiltinSkillIds = options.skills.filter((skill) => skill.autoInject && !selectedSkillIds.has(skill.id)).map((skill) => skill.id)
+      const mcpIds = options.mcpServers.filter((server) => server.required || selectedMcpIds.has(server.id)).map((server) => server.id)
       const attributionResponse = await fetch('/api/integrations/aionui/attributions', {
         method: 'POST',
         credentials: 'include',
@@ -340,6 +343,13 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
           providerId: selectedModel?.providerId,
           mapId: documentId,
           cardId,
+          mode: mode || undefined,
+          thoughtLevel: thoughtLevel || undefined,
+          enabledSkillIds,
+          disabledBuiltinSkillIds,
+          mcpIds,
+          workspace: workspace.trim() || undefined,
+          requestPreview: request.trim(),
         }),
       })
       const attribution = await attributionResponse.json().catch(() => ({})) as { attributionToken?: string; completionUrl?: string; editorId?: string; error?: string }
@@ -357,9 +367,9 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
         providerId: selectedModel?.providerId,
         mode: mode || undefined,
         thoughtLevel: thoughtLevel || undefined,
-        enabledSkillIds: options.skills.filter((skill) => !skill.autoInject && selectedSkillIds.has(skill.id)).map((skill) => skill.id),
-        disabledBuiltinSkillIds: options.skills.filter((skill) => skill.autoInject && !selectedSkillIds.has(skill.id)).map((skill) => skill.id),
-        mcpIds: options.mcpServers.filter((server) => server.required || selectedMcpIds.has(server.id)).map((server) => server.id),
+        enabledSkillIds,
+        disabledBuiltinSkillIds,
+        mcpIds,
         workspace: workspace.trim() || undefined,
         autoSend: true,
       }

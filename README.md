@@ -62,7 +62,7 @@ Mind & Progress는 아이디어의 구조와 실제 업무 진행 상태를 하�
 ### AionUi와 AI
 
 - 선택 카드에서 AionUi 새 대화 시작
-- 진행 중인 AionUi 대화 다시 열기
+- 카드에서 시작한 여러 AionUi 대화와 당시 선택한 AI·모델·권한·사고 수준·스킬·MCP·작업 공간을 보존하고 선택해 다시 열기
 - 마인드맵 노드 우클릭 메뉴에서 AI 대화 시작 또는 연결된 대화 열기
 - AI 종류, 모델, 권한, 사고 수준, 스킬, MCP, 작업 공간 선택
 - 문서별 작업 공간과 마지막 AI 옵션 기억
@@ -237,7 +237,7 @@ AI가 MindNProgress 밖에서 시작되었다면 먼저 `mindnprogress_read_me_f
 | `mindnprogress_get_document` | 문서의 모든 카드와 연결 관계 및 외부 접근 URL을 조회합니다. |
 | `mindnprogress_get_card` | 특정 카드의 설명, 공유 지식, 업무 필드와 댓글을 페이지 단위로 조회합니다. |
 | `mindnprogress_get_ai_work_states` | 지정한 카드 또는 문서 전체에서 연결된 AI 대화의 현재 작업·승인 대기·유휴·확인 불가 상태를 조회합니다. 문서 버전은 변경하지 않습니다. |
-| `mindnprogress_get_ai_conversation_transcript` | 카드에 연결된 AionUi 대화 전문을 `전체 복사`와 같은 텍스트 형식으로 조회합니다. |
+| `mindnprogress_get_ai_conversation_transcript` | 카드에 연결된 최근 AionUi 대화 또는 `conversationId`로 지정한 이전 대화 전문을 `전체 복사`와 같은 텍스트 형식으로 조회합니다. |
 | `mindnprogress_list_users` | 담당자로 지정할 수 있는 편집자 계정 목록을 조회합니다. |
 
 ### 문서와 카드 편집

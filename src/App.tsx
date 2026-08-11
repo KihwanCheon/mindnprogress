@@ -32,16 +32,18 @@ import { DoorayTaskLinkLabel } from './components/DoorayTaskLinkLabel'
 import { MentionText } from './components/MentionText'
 import { AdminEditorPanel } from './components/AdminEditorPanel'
 import { AiConversationDialog } from './components/AiConversationDialog'
+import { AiConversationPickerDialog } from './components/AiConversationPickerDialog'
 import { AiConversationActivityIndicator } from './components/AiConversationRuntimeBadge'
 import { ImagePreviewDialog } from './components/ImagePreviewDialog'
 import { DashboardView, KanbanView, TimelineView } from './components/WorkViews'
-import type { AiConversationRuntime, ChecklistItem, KnowledgePolicy, MindDoorayLinkData, MindDoorayTaskData, MindDoorayWikiData, MindImageData, MindMapEdgeData, MindNodeData, TeamMember, WaitingItem } from './types/mindMap'
+import type { AiConversationLink, AiConversationRuntime, ChecklistItem, KnowledgePolicy, MindDoorayLinkData, MindDoorayTaskData, MindDoorayWikiData, MindImageData, MindMapEdgeData, MindNodeData, TeamMember, WaitingItem } from './types/mindMap'
 import { blockingNodes, createsDependencyCycle, dependentNodes, prerequisiteNodes } from './utils/dependencies'
 import { collapsedDocumentGroupsStorageKey, initialCollapsedDocumentGroupIds, normalizeCollapsedDocumentGroupIds } from './utils/documentGroupCollapse.mjs'
 import { createsKnowledgeCycle, isHierarchyEdge, isKnowledgeEdge, knowledgePolicyOf } from './utils/knowledgeEdges'
 import { isSameDoorayKnowledgeUrl, normalizedDoorayKnowledgeUrl, taskUrlProvider } from './utils/externalLinks'
 import { splitImageFileName, uniqueImageFileName } from './utils/imageFileNames.mjs'
 import { shouldReconnectEventStream } from './utils/eventStreamHealth.mjs'
+import { aiConversationLinksFromData, appendAiConversationLink } from './utils/aiConversations.mjs'
 import { mergeMapContent } from './utils/mergeMapContent.mjs'
 import { snapAspectResizeToGrid, snapFreeResizeToGrid } from './utils/resizeGrid.mjs'
 import type { ResizeSnapRequest } from './utils/resizeGrid.mjs'
@@ -686,6 +688,7 @@ type AiConversationLinkedEvent = {
   mapId: string
   nodeId: string
   conversationId: string
+  conversation: AiConversationLink | null
   sourceClientId: null
   updatedAt: string
   updatedBy: AuthUser
@@ -749,6 +752,7 @@ function mergeResolvedReferenceData(localData: MindNodeData, resolvedData: MindN
     taskUrl: resolvedData.taskUrl,
     externalLink: resolvedData.externalLink,
     aiConversationId: resolvedData.aiConversationId,
+    aiConversations: resolvedData.aiConversations,
     isWork: resolvedData.isWork,
     assigneeId: resolvedData.assigneeId,
     dueDate: resolvedData.dueDate,
@@ -783,6 +787,7 @@ const REFERENCE_MANAGED_DATA_KEYS = new Set<keyof MindNodeData>([
   'taskUrl',
   'externalLink',
   'aiConversationId',
+  'aiConversations',
   'isWork',
   'assigneeId',
   'dueDate',
@@ -1686,6 +1691,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const [accountMenuOpen, setAccountMenuOpen] = useState(false)
   const [passwordDialogOpen, setPasswordDialogOpen] = useState(false)
   const [aiDialogOpen, setAiDialogOpen] = useState(false)
+  const [aiConversationPicker, setAiConversationPicker] = useState<{ mapId: string; cardId: string; cardTitle: string } | null>(null)
   const [aionUiWebNavigation, setAionUiWebNavigation] = useState(() => ({
     baseUrl: defaultAionUiWebBaseUrl(),
     configured: false,
@@ -2621,7 +2627,14 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         if (event.type === 'ai-conversation-linked') {
           if (event.mapId !== activeMapId) return
           setNodes((current) => current.map((node) => node.id === event.nodeId
-            ? { ...node, data: { ...node.data, aiConversationId: event.conversationId } }
+            ? {
+                ...node,
+                data: {
+                  ...node.data,
+                  aiConversationId: event.conversationId,
+                  aiConversations: appendAiConversationLink(node.data, event.conversation),
+                },
+              }
             : node))
           void apiRequest<{ map: MapDocument }>(`/api/maps/${encodeURIComponent(activeMapId)}`)
             .then(({ map }) => {
@@ -3104,13 +3117,31 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     window.location.href = `aionui://navigate?route=${route}`
   }
 
+  const openAiConversationForNode = (
+    node: MindMapNode,
+    cardId = node.data.reference?.nodeId ?? node.id,
+    mapId = node.data.reference?.mapId ?? activeMapId,
+  ) => {
+    const conversations = aiConversationLinksFromData(node.data)
+    if (conversations.length > 1) {
+      setAiConversationPicker({
+        mapId,
+        cardId,
+        cardTitle: node.data.label.replace(/\s*\(ref\)\s*$/i, ''),
+      })
+      return
+    }
+    const conversationId = conversations.at(-1)?.conversationId ?? node.data.aiConversationId
+    if (conversationId) void openAiConversation(conversationId, cardId, mapId)
+  }
+
   const startOrOpenContextNodeAiConversation = () => {
     if (!contextMenuNode) return
     setNodeContextMenu(null)
     setSelectedId(contextMenuNode.id)
     if (contextMenuNode.data.aiConversationId) {
-      void openAiConversation(
-        contextMenuNode.data.aiConversationId,
+      openAiConversationForNode(
+        contextMenuNode,
         contextMenuNode.data.reference?.nodeId ?? contextMenuNode.id,
         contextMenuNode.data.reference?.mapId ?? activeMapId,
       )
@@ -3700,6 +3731,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       nodes: nodesToCopy.map((candidate) => {
         const copiedData = structuredClone(candidate.data)
         delete copiedData.aiConversationId
+        delete copiedData.aiConversations
         return {
           sourceNodeId: candidate.id,
           position: { ...candidate.position },
@@ -3757,6 +3789,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
           label,
           kind: 'task',
           aiConversationId: undefined,
+          aiConversations: undefined,
           reference: pasteMode === 'reference' ? originalReference : pasteMode === 'clone' ? undefined : copiedData.reference,
           blockedBy: remappedBlockedBy.length > 0 ? remappedBlockedBy : undefined,
           unresolvedDependencyCount: undefined,
@@ -6044,13 +6077,14 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                     <button
                       className="ai-conversation-button"
                       onClick={() => {
-                        if (mode === 'editor') void openAiConversation(selectedNode.data.aiConversationId as string)
+                        if (mode === 'editor') openAiConversationForNode(selectedNode, selectedCommentNodeId ?? selectedNode.id, selectedCommentMapId)
                         else showAiEditorOnlyAlert()
                       }}
                       onContextMenu={mode === 'editor' ? openAiConversationContextMenu : undefined}
                       title={mode === 'editor' ? '좌클릭: 기존 대화 열기 · 우클릭: 새 대화 시작' : '편집자만 사용 가능'}
                     >
                       <Icon name="sparkles" size={15} /><span>AI 대화 열기</span>
+                      {aiConversationLinksFromData(selectedNode.data).length > 1 && <b>{aiConversationLinksFromData(selectedNode.data).length}</b>}
                     </button>
                   ) : (
                     <button
@@ -6733,6 +6767,24 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
           })}
           launchInWebUi={aionUiWebNavigation.configured || !isLoopbackHostname(window.location.hostname)}
           onClose={() => setAiDialogOpen(false)}
+        />
+      )}
+      {aiConversationPicker && (
+        <AiConversationPickerDialog
+          key={`${aiConversationPicker.mapId}:${aiConversationPicker.cardId}`}
+          mapId={aiConversationPicker.mapId}
+          cardId={aiConversationPicker.cardId}
+          cardTitle={aiConversationPicker.cardTitle}
+          onSelect={(conversationId) => {
+            const target = aiConversationPicker
+            setAiConversationPicker(null)
+            void openAiConversation(conversationId, target.cardId, target.mapId)
+          }}
+          onStartNew={() => {
+            setAiConversationPicker(null)
+            setAiDialogOpen(true)
+          }}
+          onClose={() => setAiConversationPicker(null)}
         />
       )}
       {previewImageNode?.data.image && (

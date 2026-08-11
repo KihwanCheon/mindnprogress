@@ -410,6 +410,7 @@
 .inspector-header .ai-conversation-button { display: flex; align-items: center; gap: 5px; padding: 7px 8px; color: #5d50ca; border: 1px solid #dedaf3; background: #f5f3fd; }
 .inspector-header .ai-conversation-button:hover { border-color: #c8c1ef; background: #ece9fb; }
 .inspector-header .ai-conversation-button span { color: inherit; font-size: 9px; font-weight: 800; letter-spacing: 0; text-transform: none; white-space: nowrap; }
+.inspector-header .ai-conversation-button > b { min-width: 15px; padding: 2px 4px; color: white; border-radius: 7px; background: #6a5dd1; font-size: 7px; text-align: center; }
 .inspector-content { min-height: 0; flex: 1 1 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 20px; }
 .inspector-content label { display: flex; flex-direction: column; gap: 7px; margin-bottom: 17px; }
 .inspector-content label > span { color: #7d7784; font-size: 9px; font-weight: 700; }

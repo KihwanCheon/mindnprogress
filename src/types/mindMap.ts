@@ -82,6 +82,26 @@ export type AiConversationRuntime = {
   pendingConfirmations: number
   turnId: string | null
   observedAt: string
+  conversationCount?: number
+  activeConversationIds?: string[]
+}
+
+export type AiConversationOptionSnapshot = { id: string; label: string }
+
+export type AiConversationLink = {
+  conversationId: string
+  agent?: AiConversationOptionSnapshot
+  model?: AiConversationOptionSnapshot
+  providerId?: string
+  mode?: AiConversationOptionSnapshot
+  thoughtLevel?: AiConversationOptionSnapshot
+  skills: AiConversationOptionSnapshot[]
+  mcpServers: AiConversationOptionSnapshot[]
+  workspace?: string
+  requestPreview?: string
+  startedBy?: AiConversationOptionSnapshot
+  startedAt?: string
+  linkedAt?: string
 }
 
 export type MindNodeData = {
@@ -110,6 +130,7 @@ export type MindNodeData = {
   onExternalLinkResizeEnd?: (resize: ResizeSnapRequest) => void
   taskUrl?: string
   aiConversationId?: string
+  aiConversations?: AiConversationLink[]
   reference?: MindNodeReference
   isWork?: boolean
   assigneeId?: string
