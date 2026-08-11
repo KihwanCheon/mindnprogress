@@ -53,10 +53,6 @@ export function MindImageNode({ data, selected }: { data: MindNodeData; selected
       <figure
         className={`mind-image-node ${selected ? 'selected' : ''}`}
         title={tooltip}
-        onDoubleClick={(event) => {
-          event.stopPropagation()
-          data.onOpenImagePreview?.()
-        }}
       >
         <img
           src={data.imageAssetUrl}

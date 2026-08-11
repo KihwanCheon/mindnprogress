@@ -69,6 +69,8 @@ const MINDMAP_GRID_SIZE = 24
 const MINDMAP_MIN_ZOOM = 0.25
 const MINDMAP_MAX_ZOOM = 1.8
 const TOUCH_CARD_LONG_PRESS_MS = 500
+const TOUCH_CARD_DOUBLE_TAP_MS = 320
+const TOUCH_CARD_DOUBLE_TAP_DISTANCE = 24
 const TOUCH_DRAG_MOVE_THRESHOLD = 8
 const MINDMAP_CHILD_HORIZONTAL_GAP = MINDMAP_GRID_SIZE * 4
 const MINDMAP_WORK_NODE_VERTICAL_STEP = MINDMAP_GRID_SIZE * 6
@@ -850,6 +852,12 @@ type TouchCardGesture = {
   currentPosition: { x: number; y: number }
   phase: 'pressing' | 'armed' | 'dragging'
   timer: number | null
+}
+
+type TouchCardTap = {
+  nodeId: string
+  at: number
+  client: { x: number; y: number }
 }
 
 function touchPointsWithin(
@@ -1822,6 +1830,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const touchCanvasPanGesture = useRef<TouchCanvasPanGesture | null>(null)
   const touchPanOwned = useRef(false)
   const touchCardGesture = useRef<TouchCardGesture | null>(null)
+  const lastTouchCardTap = useRef<TouchCardTap | null>(null)
   const suppressNodeContextMenuUntil = useRef(0)
   const suppressTouchClickUntil = useRef(0)
   const suppressTouchContextMenu = useRef<{ nodeId: string; until: number } | null>(null)
@@ -1834,6 +1843,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const pendingDeepLink = useRef(initialDeepLink)
   const lastLoadedMapId = useRef<string | null>(null)
   const selectedIdRef = useRef<string | null>(selectedId)
+  const focusedNodeIdRef = useRef<string | null>(null)
   const activeMapIdRef = useRef(activeMapId)
   const nodesRef = useRef(nodes)
   const canvasPointerRef = useRef({ inside: false, x: 0, y: 0 })
@@ -1847,6 +1857,26 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   nodesRef.current = nodes
   const { fitView, screenToFlowPosition, setCenter, setViewport } = useReactFlow<MindMapNode, MindMapEdge>()
   const reactFlowStore = useStoreApi<MindMapNode, MindMapEdge>()
+  const showFullMindMap = useCallback((duration = 500) => {
+    focusedNodeIdRef.current = null
+    void fitView({ padding: 0.2, duration })
+  }, [fitView])
+  const toggleNodeFocus = useCallback((nodeId: string) => {
+    if (focusedNodeIdRef.current === nodeId) {
+      showFullMindMap()
+      return
+    }
+
+    const targetNode = nodesRef.current.find((node) => node.id === nodeId)
+    if (!targetNode) return
+    const { width, height } = nodeDimensions(targetNode)
+    focusedNodeIdRef.current = nodeId
+    void setCenter(
+      targetNode.position.x + width / 2,
+      targetNode.position.y + height / 2,
+      { zoom: MINDMAP_MAX_ZOOM, duration: 500 },
+    )
+  }, [setCenter, showFullMindMap])
   const nodesInitialized = useNodesInitialized()
   const updateNodeInternals = useUpdateNodeInternals()
   const viewport = useViewport()
@@ -2271,6 +2301,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     const target = nodeSearchMatches[nextIndex]
     setNodeSearchIndex(nextIndex)
     setSelectedId(target.id)
+    focusedNodeIdRef.current = null
     setCenter(target.position.x + 109, target.position.y + 65, { zoom: Math.max(.85, Math.min(1.2, viewport.zoom)), duration: 420 })
   }
 
@@ -2280,6 +2311,8 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     setNodeFilter('all')
     setAssigneeFilter('all')
     setCollapsedNodeIds(new Set())
+    focusedNodeIdRef.current = null
+    lastTouchCardTap.current = null
   }, [activeMapId])
 
   useEffect(() => {
@@ -2897,6 +2930,9 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   useEffect(() => {
     if (!activeMapId) return
     let active = true
+    const selectedNodeIdBeforeReload = lastLoadedMapId.current === activeMapId
+      ? selectedIdRef.current
+      : null
     setLoadedMapId(null)
     setSavedAt('서버에서 불러오는 중…')
     setSaveError('')
@@ -2914,8 +2950,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         const deepLinkedNodeId = requestedNode && deepLink && canSelectNodeInView(requestedNode, deepLink.viewMode)
           ? requestedNode.id
           : null
-        const retainedNodeId = lastLoadedMapId.current === map.id ? selectedIdRef.current : null
-        const requestedNodeId = pendingSelection.current ?? retainedNodeId
+        const requestedNodeId = pendingSelection.current ?? selectedNodeIdBeforeReload
         const nextSelectedId = deepLinkTargetsMap
           ? deepLinkedNodeId
           : requestedNodeId && map.nodes.some((node) => node.id === requestedNodeId)
@@ -2947,9 +2982,8 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         if (!active) return
         const localMap = readSavedMap(activeMapId)
         if (localMap) {
-          const retainedNodeId = lastLoadedMapId.current === activeMapId ? selectedIdRef.current : null
-          const nextSelectedId = retainedNodeId && localMap.nodes.some((node) => node.id === retainedNodeId)
-            ? retainedNodeId
+          const nextSelectedId = selectedNodeIdBeforeReload && localMap.nodes.some((node) => node.id === selectedNodeIdBeforeReload)
+            ? selectedNodeIdBeforeReload
             : localMap.nodes[0]?.id ?? null
           const loadedNodes = synchronizeNodeSelection(localMap.nodes, nextSelectedId)
           serverBaseline.current = null
@@ -3455,19 +3489,30 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   }, [addNode, mode, selectedId])
 
   useEffect(() => {
-    const handleFitViewShortcut = (event: KeyboardEvent) => {
-      if (event.key !== 'Home' || viewMode !== 'mindmap' || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return
+    const handleViewportShortcut = (event: KeyboardEvent) => {
+      const key = event.key.toLowerCase()
+      if ((key !== 'home' && key !== 'f') || viewMode !== 'mindmap' || event.repeat
+        || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return
       const target = event.target as HTMLElement | null
-      if (target?.matches('input, textarea, select, [contenteditable="true"]')) return
+      if (target?.closest('input, textarea, select, [contenteditable="true"]')) return
       if (document.querySelector('[role="dialog"][aria-modal="true"]')) return
 
+      if (key === 'home') {
+        event.preventDefault()
+        showFullMindMap()
+        return
+      }
+
+      const selectedNodeId = selectedIdRef.current
+      if (!selectedNodeId || !nodesRef.current.some((node) => node.id === selectedNodeId)) return
+
       event.preventDefault()
-      void fitView({ padding: 0.2, duration: 500 })
+      toggleNodeFocus(selectedNodeId)
     }
 
-    window.addEventListener('keydown', handleFitViewShortcut)
-    return () => window.removeEventListener('keydown', handleFitViewShortcut)
-  }, [fitView, viewMode])
+    window.addEventListener('keydown', handleViewportShortcut)
+    return () => window.removeEventListener('keydown', handleViewportShortcut)
+  }, [showFullMindMap, toggleNodeFocus, viewMode])
 
   useEffect(() => {
     const handleHistoryShortcut = (event: KeyboardEvent) => {
@@ -4139,7 +4184,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       setExternalChange(null)
       localStorage.setItem(storageKeyForMap(activeMapId), JSON.stringify({ nodes: result.map.nodes, edges: result.map.edges }))
       setSavedAt('이전 버전 복원됨')
-      window.setTimeout(() => fitView({ padding: 0.2, duration: 400 }), 0)
+      window.setTimeout(() => showFullMindMap(400), 0)
     } catch (error) {
       setHistoryError(error instanceof Error ? error.message : '이전 버전을 복원하지 못했습니다.')
     } finally {
@@ -4172,7 +4217,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       setExternalChange(null)
       localStorage.setItem(storageKeyForMap(activeMapId), JSON.stringify({ nodes: result.map.nodes, edges: result.map.edges }))
       setSavedAt(`${backup.date} 일일 백업 복원됨`)
-      window.setTimeout(() => fitView({ padding: 0.2, duration: 400 }), 0)
+      window.setTimeout(() => showFullMindMap(400), 0)
     } catch (error) {
       setHistoryError(error instanceof Error ? error.message : '일일 백업을 복원하지 못했습니다.')
     } finally {
@@ -4517,6 +4562,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       const { width, height } = nodeDimensions(existing)
       setNodes((current) => current.map((node) => ({ ...node, selected: node.id === existing.id })))
       setSelectedId(existing.id)
+      focusedNodeIdRef.current = null
       setCenter(existing.position.x + width / 2, existing.position.y + height / 2, { duration: 350 })
       setSavedAt(`이미 추가된 ${sourceLabel}를 선택함`)
       return
@@ -4804,6 +4850,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   }, [beginHistoryTransaction, hierarchyEdges, nodes])
 
   const onNodeDragStart = useCallback((_event: MouseEvent | TouchEvent, draggedNode: MindMapNode) => {
+    focusedNodeIdRef.current = null
     startNodeDrag(draggedNode)
   }, [startNodeDrag])
 
@@ -4966,7 +5013,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   }, [restoreNodeDragForTouchPan])
 
   const startTouchCardGesture = useCallback((event: ReactTouchEvent<HTMLElement>) => {
-    if (mode !== 'editor' || viewMode !== 'mindmap' || knowledgeConnection || touchPanOwned.current) return
+    if (viewMode !== 'mindmap' || knowledgeConnection || touchPanOwned.current) return
     if (event.touches.length !== 1) return
     const target = event.target
     if (!(target instanceof Element)
@@ -4981,10 +5028,6 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     event.stopPropagation()
     cancelTouchCardGesture(true)
     suppressTouchClickUntil.current = Date.now() + TOUCH_CARD_LONG_PRESS_MS + 800
-    suppressTouchContextMenu.current = {
-      nodeId,
-      until: Date.now() + TOUCH_CARD_LONG_PRESS_MS + 2_000,
-    }
     const gesture: TouchCardGesture = {
       identifier: touch.identifier,
       nodeId,
@@ -4995,15 +5038,22 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       phase: 'pressing',
       timer: null,
     }
-    gesture.timer = window.setTimeout(() => {
-      if (touchCardGesture.current !== gesture || gesture.phase !== 'pressing') return
-      gesture.timer = null
-      gesture.phase = 'armed'
-      touchCanvasPanGesture.current = null
-      setNodes((current) => synchronizeNodeSelection(current, gesture.nodeId))
-      showNodeContextMenu(gesture.nodeId, gesture.startClient.x, gesture.startClient.y)
-    }, TOUCH_CARD_LONG_PRESS_MS)
     touchCardGesture.current = gesture
+    if (mode === 'editor') {
+      suppressTouchContextMenu.current = {
+        nodeId,
+        until: Date.now() + TOUCH_CARD_LONG_PRESS_MS + 2_000,
+      }
+      gesture.timer = window.setTimeout(() => {
+        if (touchCardGesture.current !== gesture || gesture.phase !== 'pressing') return
+        gesture.timer = null
+        gesture.phase = 'armed'
+        lastTouchCardTap.current = null
+        touchCanvasPanGesture.current = null
+        setNodes((current) => synchronizeNodeSelection(current, gesture.nodeId))
+        showNodeContextMenu(gesture.nodeId, gesture.startClient.x, gesture.startClient.y)
+      }, TOUCH_CARD_LONG_PRESS_MS)
+    }
   }, [cancelTouchCardGesture, knowledgeConnection, mode, screenToFlowPosition, setNodes, showNodeContextMenu, viewMode])
 
   const moveTouchCardGesture = useCallback((event: ReactTouchEvent<HTMLElement>) => {
@@ -5024,6 +5074,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       if (gesture.timer !== null) window.clearTimeout(gesture.timer)
       gesture.timer = null
       touchCardGesture.current = null
+      lastTouchCardTap.current = null
       moveTouchCanvasPan(event)
       return
     }
@@ -5051,7 +5102,8 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
 
   const finishTouchCardGesture = useCallback((event: ReactTouchEvent<HTMLElement>) => {
     const gesture = touchCardGesture.current
-    if (!gesture || !touchWithIdentifier(event.changedTouches, gesture.identifier)) return
+    const touch = gesture ? touchWithIdentifier(event.changedTouches, gesture.identifier) : null
+    if (!gesture || !touch) return
     event.preventDefault()
     event.stopPropagation()
     suppressTouchClickUntil.current = Date.now() + 500
@@ -5067,13 +5119,23 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     if (gesture.phase === 'pressing') {
       setNodes((current) => synchronizeNodeSelection(current, gesture.nodeId))
       setSelectedId(gesture.nodeId)
+      const now = Date.now()
+      const previousTap = lastTouchCardTap.current
+      const isDoubleTap = Boolean(previousTap
+        && previousTap.nodeId === gesture.nodeId
+        && now - previousTap.at <= TOUCH_CARD_DOUBLE_TAP_MS
+        && Math.hypot(touch.clientX - previousTap.client.x, touch.clientY - previousTap.client.y) <= TOUCH_CARD_DOUBLE_TAP_DISTANCE)
+      lastTouchCardTap.current = isDoubleTap
+        ? null
+        : { nodeId: gesture.nodeId, at: now, client: { x: touch.clientX, y: touch.clientY } }
+      if (isDoubleTap) toggleNodeFocus(gesture.nodeId)
       return
     }
     if (gesture.phase !== 'dragging') return
     const node = nodesRef.current.find((candidate) => candidate.id === gesture.nodeId)
     if (node) stopNodeDrag({ ...node, position: gesture.currentPosition, selected: true }, true)
     else restoreNodeDragForTouchPan()
-  }, [cancelTouchCardGesture, restoreNodeDragForTouchPan, setNodes, stopNodeDrag])
+  }, [cancelTouchCardGesture, restoreNodeDragForTouchPan, setNodes, stopNodeDrag, toggleNodeFocus])
 
   useEffect(() => {
     const cancelOnBlur = () => cancelTouchCardGesture(true)
@@ -5194,7 +5256,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
               onClick={() => {
                 if (id !== 'mindmap' && selectedNode && !selectedNode.data.isWork) setSelectedId(null)
                 setViewMode(id)
-                if (id === 'mindmap') window.setTimeout(() => fitView({ padding: 0.2, duration: 400 }), 0)
+                if (id === 'mindmap') window.setTimeout(() => showFullMindMap(400), 0)
               }}
               aria-pressed={viewMode === id}
               title={label}
@@ -5651,6 +5713,25 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
             event.preventDefault()
             event.stopPropagation()
           }}
+          onDoubleClickCapture={(event) => {
+            if (!(event.target instanceof Element)) return
+            const nodeElement = event.target.closest<HTMLElement>('.react-flow__node[data-id]')
+            if (!nodeElement) return
+            const suppressTouchDoubleClick = Date.now() < suppressTouchClickUntil.current
+            if (!suppressTouchDoubleClick
+              && (knowledgeConnection
+                || event.target.closest('button, a, input, textarea, select, [contenteditable="true"], .nodrag, .react-flow__handle, .react-flow__resize-control'))) return
+
+            event.preventDefault()
+            event.stopPropagation()
+            if (suppressTouchDoubleClick) return
+
+            const nodeId = nodeElement.dataset.id
+            if (!nodeId || !nodesRef.current.some((node) => node.id === nodeId)) return
+            setNodes((current) => synchronizeNodeSelection(current, nodeId))
+            setSelectedId(nodeId)
+            toggleNodeFocus(nodeId)
+          }}
           onTouchStartCapture={(event) => {
             if (touchPointsWithin(event.currentTarget, event.touches).length >= 2) {
               cancelTouchCardGesture(true)
@@ -5731,6 +5812,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
             onNodeMouseEnter={onKnowledgeTargetEnter}
             onNodeMouseLeave={onKnowledgeTargetLeave}
             onSelectionChange={onSelectionChange}
+            onMoveStart={(event) => { if (event) focusedNodeIdRef.current = null }}
             onPaneClick={(event) => {
               if (Date.now() < suppressTouchClickUntil.current) {
                 event.preventDefault()
@@ -5783,7 +5865,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                   <span className="tool-divider" />
                 </>
               )}
-              <button onClick={() => fitView({ padding: 0.2, duration: 500 })} title="전체 보기 (Home)" aria-label="전체 보기 (Home)"><Icon name="fit" size={17} /></button>
+              <button onClick={() => showFullMindMap()} title="전체 보기 (Home)" aria-label="전체 보기 (Home)"><Icon name="fit" size={17} /></button>
               {collapsibleNodeIds.size > 0 && (
                 <button
                   onClick={() => setCollapsedNodeIds(collapsedNodeIds.size > 0 ? new Set() : new Set(collapsibleNodeIds))}
