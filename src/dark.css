@@ -14,6 +14,7 @@
   --theme-knowledge-fallback: #d59a3a;
   --theme-knowledge-fallback-text: #9a6a24;
   --theme-knowledge-fallback-bg: #fff5df;
+  --theme-selection-ring: #5f4bd8;
 }
 
 [data-theme="dark"] {
@@ -54,8 +55,30 @@
   --theme-knowledge-fallback: #e3b45b;
   --theme-knowledge-fallback-text: #f2d28c;
   --theme-knowledge-fallback-bg: #3a2d18;
+  --theme-selection-ring: #b0a5ff;
   color: var(--theme-text);
   background: var(--theme-bg);
+}
+
+.mind-node.selected,
+.mind-image-node.selected {
+  outline: 3px solid var(--theme-selection-ring);
+  outline-offset: 1px;
+  animation: selected-mind-card-in .18s ease-out;
+}
+
+@keyframes selected-mind-card-in {
+  from {
+    outline-color: transparent;
+    outline-offset: -1px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mind-node.selected,
+  .mind-image-node.selected {
+    animation: none;
+  }
 }
 
 [data-theme="dark"] body {
