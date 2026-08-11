@@ -5,13 +5,14 @@ import { randomBytes } from 'node:crypto'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
+import { AI_DELEGATION_ID_PATTERN } from '../server/lib/aiDelegations.mjs'
 import { imageCardLocalAccess } from './imageAccess.mjs'
 
 const projectDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const dataDirectory = path.resolve(String(process.env.MNP_DATA_DIR ?? '').trim() || path.join(projectDirectory, 'server', 'data'))
 const tokenFile = path.resolve(String(process.env.MNP_TOKEN_FILE ?? '').trim() || path.join(dataDirectory, '_integration-token'))
 const apiBaseUrl = String(process.env.MNP_API_URL ?? 'http://127.0.0.1:4176').replace(/\/+$/, '')
-const contextSchemaVersion = '2.3'
+const contextSchemaVersion = '2.4'
 const contextCommentLimit = 20
 const mindMapGridSize = 24
 const mindMapChildHorizontalGap = mindMapGridSize * 4
@@ -52,7 +53,7 @@ function defaultChildMindMapPosition(parentPosition, siblingPositions, parentWid
 
 const serverInstructions = `MindNProgress는 마인드맵과 업무 진행 관리를 결합한 웹 서비스입니다. MindNProgress 밖에서 시작해 문서 ID나 카드 ID가 없다면 mindnprogress_read_me_first를 먼저 호출하세요. 선택 문서와 카드가 있다면 mindnprogress_get_context로 제품 규칙과 최신 문서 구조를 먼저 확인하세요. AionUi가 발급한 attributionToken이 없는 외부 MCP 세션은 자신이 현재 AI 종류와 모델을 정확히 알고 있을 때 get_context의 aiType과 aiModel에 함께 전달하고, 알지 못하면 추측하지 마세요. get_context의 selection.taskLinks.startupInspection을 따르세요. mode가 knowledge-guided이면 primary 선행 지식 중 kind=image인 항목은 imageAccess.localPath의 원본을 사용 가능한 로컬 이미지 열람 도구로 직접 확인하고 설명과 댓글을 함께 사용하며, 일반 카드는 sharedKnowledge를 먼저 재사용하고 설명과 댓글로 보완합니다. fallbackSources와 fallbackTargets는 정보가 부족할 때만 선택적으로 조사합니다. mode가 default이고 required가 true이면 targets의 업무 본문, 댓글, 첨부파일 목록과 관련 링크를 조사하세요. 진행 과정과 결과는 댓글에 기록하고, 다른 카드나 후속 세션이 재사용할 안정적인 사실·결정·제약은 카드의 sharedKnowledge에 요약하세요. AI 댓글은 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 충실히 담은 detail로 작성하며, 요약 때문에 상세를 축약하지 마세요. 외부 전달물이나 결정 대기는 waitingItems로 기록하고 제목에 대기 문구를 붙이지 마세요. 대기를 등록할 때는 [차단], 해제할 때는 [진행] 댓글로 이유와 재개 상태를 기록하세요. 카드 일부 필드만 변경할 때는 mindnprogress_update_card의 data에 변경할 필드만 보내고 현재 카드 전체 데이터를 재전송하지 마세요. 일반 카드에서 생략한 필드와 위치는 보존되지만 완료 상태 또는 진행률 100 적용 시 waitingItems는 자동으로 해제되며, Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 선택 카드 밖의 형제·하위·선행 카드를 함께 수정하기 전에는 mindnprogress_get_ai_work_states로 해당 카드에 다른 AI 작업이 진행 중인지 확인하세요. running 또는 waiting-confirmation인 카드는 사용자 지시 없이 동시에 수정하지 마세요. 지식선만 변경할 때는 전체 문서를 다시 보내지 말고 지식선 전용 도구를 사용하세요. 조회 도구는 문서 버전을 변경하지 않지만 카드·관계 편집과 AI 대화 ID 연결은 버전을 증가시킬 수 있습니다. 특정 자료가 있다고 가정하지 마세요. 여러 카드로 구성된 새 문서는 mindnprogress_create_mindmap으로 한 번에 생성하고, 변경 후에는 최신 문서를 다시 조회해 결과를 검증하세요. 비밀번호 변경과 계정 관리 작업은 지원하지 않습니다.`
 const productGuide = {
-  version: '1.9',
+  version: '2.1',
   product: {
     name: 'MindNProgress',
     purpose: '아이디어를 계층형 마인드맵으로 구조화하고 실행 업무의 진행 상황을 같은 문서에서 관리하는 웹 서비스',
@@ -70,7 +71,7 @@ const productGuide = {
       description: '업무의 목적, 범위, 요구사항과 완료 조건. 사용자가 작성한 원래 맥락을 보존함',
       sharedKnowledge: '다른 카드나 후속 AI 세션에서 재사용할 안정적인 사실, 결정, 제약, 조사 결과와 사용 방법',
       comments: '시간순 진행 과정, 검증 결과, 차단 사유와 완료 기록. 새 댓글은 요약과 접을 수 있는 상세 내용으로 구분',
-      aiConversations: '카드에서 시작한 AionUi 대화 목록. focused 컨텍스트는 최근 대화 ID와 전체 개수만 제공하며 필요하면 conversationId를 지정해 이전 대화 전문을 조회',
+      aiConversations: '카드에서 시작한 AionUi 대화 목록. focused 컨텍스트는 최근 대화 ID와 전체 개수만 제공하며, 이어서 작업할 대화를 판단할 때는 mindnprogress_list_ai_conversations로 후보의 실행 환경과 상태를 비교한 뒤 필요한 conversationId만 전문 조회',
     },
     cardKinds: {
       root: '문서의 최상위 주제',
@@ -126,6 +127,8 @@ const productGuide = {
     '지식선 추가·정책 변경·삭제는 전체 save_document 대신 지식선 전용 도구를 사용',
     '카드 일부 필드만 변경할 때 mindnprogress_update_card의 data에는 변경할 필드만 보내고 현재 카드 전체 데이터를 재전송하지 않음. 일반 카드에서 생략한 필드와 위치는 보존되지만 완료 상태 또는 진행률 100 적용 시 waitingItems가 자동으로 해제되며 Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있음',
     '선택 카드 밖의 형제·하위·선행 카드를 함께 수정하기 전에는 mindnprogress_get_ai_work_states로 해당 카드의 AI 작업 상태를 확인하고, running 또는 waiting-confirmation인 카드는 사용자 지시 없이 동시에 수정하지 않음',
+    '하위 카드의 기존 AI 대화를 이어갈지 새로 시작할지 판단할 때는 mindnprogress_list_ai_conversations로 후보를 먼저 비교하고, 같은 업무 흐름이며 idle이고 실행 환경이 호환되는 대화를 우선 이어감. 목적·모델·작업공간이 다르거나 문맥이 독립되어야 할 때만 새 대화를 선택',
+    'unityMCP가 활성화되고 실제 Unity 프로젝트인 같은 workspace의 AI 턴은 AionCore가 프로젝트 단위로 직렬화함. 위임 상태가 waiting-resource이면 다른 세션의 Unity 작업 종료를 기다리는 정상 상태이므로 중복 위임하거나 별도 대화를 시작하지 않음',
     '조회 도구는 문서 version을 변경하지 않으며 카드·관계 편집과 AI 대화 ID 연결 같은 저장 작업만 version을 증가시킴',
     '기존 문서 변경은 최신 version을 기준으로 수행하고 버전 충돌 시 최신 상태를 다시 조회',
     '변경 후 mindnprogress_get_document로 저장 결과를 검증하고 실제 변경 내용을 요약',
@@ -641,7 +644,8 @@ async function main() {
       '진행 과정과 완료 사실은 짧은 summary와 충실한 detail 댓글로 기록하고 재사용할 결과는 sharedKnowledge에도 요약',
       '외부 전달물이나 결정 대기는 waitingItems에 기록하고 카드 제목에는 대기 문구를 추가하지 않음',
       '카드 일부 필드만 변경할 때는 mindnprogress_update_card에 변경할 필드만 전달하고 현재 카드 전체 데이터를 재전송하지 않음',
-      '선택 카드 이외의 관련 카드를 수정하기 전에는 mindnprogress_get_ai_work_states로 다른 AI 작업과의 충돌 여부를 확인',
+    '선택 카드 이외의 관련 카드를 수정하기 전에는 mindnprogress_get_ai_work_states로 다른 AI 작업과의 충돌 여부를 확인',
+    '하위 카드의 기존 AI 대화를 이어갈지 새로 시작할지 판단할 때는 mindnprogress_list_ai_conversations로 후보를 먼저 비교하고, 같은 업무 흐름이며 idle이고 실행 환경이 호환되는 대화를 우선 이어감. 목적·모델·작업공간이 다르거나 문맥이 독립되어야 할 때만 새 대화를 선택',
       '지식선만 변경할 때는 전체 문서를 다시 보내지 않고 지식선 전용 도구를 사용',
       '조회 도구는 문서 version을 올리지 않지만 편집 도구와 AI 대화 ID 연결은 version을 올릴 수 있음',
       '업무 링크, 담당자와 마감일은 실제 값이 있을 때만 지정',
@@ -937,6 +941,12 @@ async function main() {
           siblingCardIds: siblingIds,
           toolArguments: siblingIds.length > 0 ? { mapId, cardIds: siblingIds } : null,
           instruction: '형제 카드를 포함해 선택 카드 이외의 관련 카드를 수정하려면 해당 카드 ID로 AI 작업 상태를 먼저 조회하세요. running 또는 waiting-confirmation이면 다른 AI가 작업 중이므로 사용자 지시 없이 동시에 수정하지 마세요. idle은 AI 대화가 쉬는 상태일 뿐 카드 업무 완료를 뜻하지 않으며, unknown은 충돌 없음으로 간주하지 마세요.',
+          childDelegation: {
+            candidateTool: 'mindnprogress_list_ai_conversations',
+            delegateTool: 'mindnprogress_delegate_ai_work',
+            statusTool: 'mindnprogress_list_ai_delegations',
+            instruction: '현재 카드의 하위 카드에 작업을 맡길 때는 후보 목록과 필요한 대화 전문을 근거로 resume 또는 new를 선택하고 실행 가능한 지시를 전달하세요. 같은 Unity 프로젝트의 unityMCP 대화는 AionCore가 한 번에 한 턴만 실행하며 waiting-resource는 정상 대기 상태입니다. 위임 도구는 하위 AI 턴이 끝난 뒤 결과와 함께 현재 대화를 자동으로 다시 시작하므로 주기적으로 확인하거나 일반적인 다음 작업 제안 문구를 보내지 마세요.',
+          },
         },
         taskLinks,
         comments: full ? selectedComments : focusedSelectedComments.comments,
@@ -984,6 +994,62 @@ async function main() {
       ...result,
       coordinationRule: 'state가 running 또는 waiting-confirmation인 카드는 다른 AI가 작업 중인 것으로 취급하고 사용자 지시 없이 동시에 수정하지 마세요. idle은 카드 업무 완료를 뜻하지 않으며, unknown은 AionUi 상태 확인 실패이므로 충돌 없음으로 간주하지 마세요.',
     }
+  }, { compactResult: true })
+
+  registerTool(server, 'mindnprogress_list_ai_conversations', '카드에서 시작한 모든 AionUi 대화 후보를 최신순으로 조회합니다. 각 대화의 AI·모델·모드·사고 강도·스킬·MCP·작업공간·시작자·최근 활동 시각과 현재 실행 상태를 반환합니다. 기존 대화를 이어갈지 새 대화를 만들지 판단할 때 전문 조회보다 먼저 사용하세요. 이 조회는 문서 버전을 변경하지 않습니다.', {
+    mapId: z.string().min(1).describe('조회할 문서 ID'),
+    cardId: z.string().min(1).max(120).describe('AI 대화 후보를 조회할 카드 ID'),
+  }, async ({ mapId, cardId }) => {
+    const result = await apiRequest(`/api/maps/${encodeURIComponent(mapId)}/cards/${encodeURIComponent(cardId)}/ai-conversations`, {
+      aiMapId: mapId,
+      aiCardId: cardId,
+    })
+    return {
+      ...result,
+      selectionRule: {
+        exclude: 'runtime.state가 running 또는 waiting-confirmation이거나 available=false인 대화는 자동 이어가기 후보에서 제외하세요.',
+        preferResume: '현재 지시가 같은 업무 흐름의 후속 작업이고 실행 환경(agent, model, mode, workspace, MCP)이 호환되는 idle 대화가 있으면 가장 관련성 높은 기존 대화를 우선 이어가세요.',
+        chooseNew: '업무 목적이나 필요한 실행 환경이 다르거나, 독립 검토가 필요하거나, 기존 문맥이 현재 지시를 방해할 가능성이 구체적으로 있을 때만 새 대화를 선택하세요.',
+        inspect: '목록 메타데이터만으로 관련성을 판단하기 어려운 후보에 한해서 mindnprogress_get_ai_conversation_transcript에 conversationId를 지정해 확인하세요.',
+      },
+    }
+  }, { compactResult: true })
+
+  registerTool(server, 'mindnprogress_delegate_ai_work', '현재 카드의 하위 카드 AI 대화에 구체적인 작업을 위임합니다. 기존 대화를 이어가거나 새 대화를 만들 수 있으며, 하위 AI의 해당 턴이 끝나면 결과를 포함한 메시지로 현재 상위 AI 대화를 자동 재개합니다. 먼저 후보 목록과 작업 상태를 확인하고, 현재 문서 version을 sourceRevision으로 전달하세요.', {
+    mapId: z.string().min(1).describe('현재 상위 카드가 속한 문서 ID'),
+    targetCardId: z.string().min(1).max(120).describe('작업을 맡길 현재 카드의 하위 카드 ID'),
+    strategy: z.enum(['resume', 'new']).describe('resume은 연결된 기존 대화 이어가기, new는 새 대화 생성'),
+    conversationId: z.string().min(1).max(120).optional().describe('resume일 때 이어갈 대상 카드의 conversationId'),
+    instruction: z.string().min(1).max(100000).describe('하위 AI가 제안에 그치지 않고 실제로 수행할 구체적인 지시와 완료 조건'),
+    decisionReason: z.string().min(1).max(1000).describe('이 기존 대화를 선택했거나 새 대화가 필요하다고 판단한 근거'),
+    sourceRevision: z.number().int().positive().describe('get_context 또는 get_document에서 확인한 현재 문서 version'),
+    idempotencyKey: z.string().regex(AI_DELEGATION_ID_PATTERN).describe('같은 위임의 중복 실행을 막는 안정적인 키. 영문·숫자로 시작하고 영문·숫자·밑줄·하이픈·콜론을 사용해 sourceRevision과 targetCardId를 포함하는 형식을 권장'),
+    newConversation: z.object({
+      agentId: z.string().min(1).max(512),
+      modelId: z.string().min(1).max(512),
+      modeId: z.string().min(1).max(512).optional(),
+      thoughtLevelId: z.string().min(1).max(512).optional(),
+      enabledSkillIds: z.array(z.string().min(1).max(512)).max(128).optional(),
+      disabledBuiltinSkillIds: z.array(z.string().min(1).max(512)).max(128).optional(),
+      mcpIds: z.array(z.string().min(1).max(512)).max(128).optional(),
+      workspace: z.string().min(1).max(4096).optional(),
+    }).optional().describe('new일 때 명시적으로 사용할 실행 환경. 생략하면 대상 카드의 최근 대화, 그마저 없으면 현재 상위 대화 설정을 상속'),
+  }, async ({ mapId, ...delegation }) => apiRequest(`/api/maps/${encodeURIComponent(mapId)}/ai-delegations`, {
+    method: 'POST',
+    aiMapId: mapId,
+    body: JSON.stringify(delegation),
+  }), { compactResult: true })
+
+  registerTool(server, 'mindnprogress_list_ai_delegations', '문서의 AI 작업 위임 상태와 감사 정보를 조회합니다. Unity 프로젝트 잠금 대기(waiting-resource), 하위 실행, 상위 대기, 상위 재개, 완료 또는 실패 상태와 대상 대화·turnId를 반환하며 문서 버전을 변경하지 않습니다.', {
+    mapId: z.string().min(1),
+    parentCardId: z.string().min(1).max(120).optional().describe('상위 카드로 필터'),
+    targetCardId: z.string().min(1).max(120).optional().describe('하위 대상 카드로 필터'),
+  }, async ({ mapId, parentCardId, targetCardId }) => {
+    const query = new URLSearchParams()
+    if (parentCardId) query.set('parentCardId', parentCardId)
+    if (targetCardId) query.set('targetCardId', targetCardId)
+    const suffix = query.size > 0 ? `?${query}` : ''
+    return apiRequest(`/api/maps/${encodeURIComponent(mapId)}/ai-delegations${suffix}`, { aiMapId: mapId })
   }, { compactResult: true })
 
   registerTool(server, 'mindnprogress_get_card', '한 카드의 설명, 공유 지식, 업무 필드와 댓글을 선택적으로 조회합니다. 이미지 카드는 로컬 원본 경로도 반환합니다. get_context의 fallback 카드 또는 간략 개요에서 원문이 필요할 때 사용하세요.', {

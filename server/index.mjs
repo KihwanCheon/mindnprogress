@@ -9,6 +9,10 @@ import { detectReleasedWaitingItems } from './lib/waitingItems.mjs'
 import { resolveAttributionWithoutToken, resolveScopedAttribution } from './lib/attributionScope.mjs'
 import { readAionUiSubscriptionUsage } from './lib/aionUiSubscriptionUsage.mjs'
 import {
+  initialAiDelegationRuntime,
+  isValidAiDelegationId,
+} from './lib/aiDelegations.mjs'
+import {
   detectImageAssetType,
   imageAssetMimeType,
   isValidImageAssetId,
@@ -65,6 +69,7 @@ const usersFile = path.join(dataDirectory, '_users.json')
 const sessionsFile = path.join(dataDirectory, '_sessions.json')
 const aiAttributionsFile = path.join(dataDirectory, '_ai-attributions.json')
 const aiConversationAttributionsFile = path.join(dataDirectory, '_ai-conversation-attributions.json')
+const aiDelegationsFile = path.join(dataDirectory, '_ai-delegations.json')
 const aiWorkspaceHistoriesFile = path.join(dataDirectory, '_ai-workspace-histories.json')
 const integrationTokenFile = path.join(dataDirectory, '_integration-token')
 const mapOrderFile = path.join(dataDirectory, '_map-order.json')
@@ -103,8 +108,12 @@ const aiConversationRuntimeStates = new Map()
 const aiConversationRuntimeRefreshes = new Map()
 const aiConversationRuntimeRequests = new Map()
 const aiConversationRuntimeSummaries = new Map()
+const aiDelegations = new Map()
+let aiDelegationWriteQueue = Promise.resolve()
+let aiDelegationPollRunning = false
 let aiConversationRuntimeLibraryRefresh = null
 const aiConversationRuntimePollIntervalMs = Math.max(2_000, Number(process.env.MNP_AI_RUNTIME_POLL_INTERVAL_MS) || 4_000)
+const aiDelegationPollIntervalMs = Math.max(100, Number(process.env.MNP_AI_DELEGATION_POLL_INTERVAL_MS) || 3_000)
 const mapColors = ['violet', 'indigo', 'blue', 'cyan', 'teal', 'green', 'amber', 'orange', 'red', 'pink']
 const commentReactions = ['👍', '❤️', '🎉', '👀']
 const serverStartedAt = new Date().toISOString()
@@ -1118,6 +1127,14 @@ function persistAiConversationAttributions() {
   return aiConversationAttributionWriteQueue
 }
 
+function persistAiDelegations() {
+  const storedDelegations = [...aiDelegations.values()]
+    .sort((first, second) => String(first.createdAt).localeCompare(String(second.createdAt)))
+  aiDelegationWriteQueue = aiDelegationWriteQueue.catch(() => {})
+    .then(() => writeStoredArray(aiDelegationsFile, storedDelegations))
+  return aiDelegationWriteQueue
+}
+
 function persistAiWorkspaceHistories() {
   const storedHistories = [...aiWorkspaceHistories.entries()]
     .sort(([firstUserId], [secondUserId]) => firstUserId.localeCompare(secondUserId))
@@ -1150,6 +1167,29 @@ async function loadAiConversationAttributions() {
     aiConversationAttributions.set(conversationAttributionKey(attribution.mapId, attribution.cardId), attribution)
   }
   await persistAiConversationAttributions()
+}
+
+async function loadAiDelegations() {
+  const storedDelegations = await readStoredArray(aiDelegationsFile)
+  let rejectedCount = 0
+  for (const delegation of storedDelegations) {
+    if (!isValidAiDelegationId(delegation?.id)) {
+      rejectedCount += 1
+      continue
+    }
+    if (!isValidMapId(delegation?.mapId)
+      || typeof delegation?.parentCardId !== 'string'
+      || typeof delegation?.targetCardId !== 'string'
+      || typeof delegation?.parentConversationId !== 'string'
+      || typeof delegation?.targetConversationId !== 'string') {
+      rejectedCount += 1
+      continue
+    }
+    aiDelegations.set(delegation.id, delegation)
+  }
+  if (rejectedCount > 0) {
+    console.warn(`[AI delegation storage] ${rejectedCount}개 항목을 무시했으며 원본 파일은 덮어쓰지 않았습니다.`)
+  }
 }
 
 async function loadAiWorkspaceHistories() {
@@ -1234,7 +1274,12 @@ async function fetchAionUi(pathname, { timeoutMs = 8_000, method = 'GET', body }
         signal: AbortSignal.timeout(timeoutMs),
       })
       const responseBody = await response.json().catch(() => ({}))
-      if (!response.ok || responseBody?.success === false) throw new Error(`AIONUI_REQUEST_FAILED:${response.status}`)
+      if (!response.ok || responseBody?.success === false) {
+        const requestError = new Error(`AIONUI_REQUEST_FAILED:${response.status}`)
+        requestError.status = response.status
+        requestError.code = responseBody?.error?.code ?? responseBody?.code ?? null
+        throw requestError
+      }
       activeAionUiBaseUrl = baseUrl
       return responseBody?.data ?? responseBody
     } catch (error) {
@@ -1242,6 +1287,291 @@ async function fetchAionUi(pathname, { timeoutMs = 8_000, method = 'GET', body }
     }
   }
   throw lastError ?? new Error('AIONUI_REQUEST_FAILED')
+}
+
+function requestAiAttribution(request) {
+  const scope = integrationRequestScope(request)
+  const token = String(request.headers['x-mnp-ai-attribution'] ?? '').trim()
+  if (token) {
+    const attribution = aiAttributions.get(sessionTokenKey(token))
+    if (attribution
+      && attribution.expiresAt > Date.now()
+      && attribution.mapId === scope.mapId
+      && attribution.cardId === scope.cardId
+      && (!scope.editorId || attribution.startedBy === scope.editorId)) return attribution
+  }
+  return scopedAttribution(request).attribution
+}
+
+function isHierarchyDescendant(map, parentCardId, targetCardId) {
+  const childrenByParent = new Map()
+  for (const edge of map.edges.filter((edge) => edge.data?.relation !== 'knowledge')) {
+    const children = childrenByParent.get(edge.source) ?? []
+    children.push(edge.target)
+    childrenByParent.set(edge.source, children)
+  }
+  const pending = [...(childrenByParent.get(parentCardId) ?? [])]
+  const visited = new Set()
+  while (pending.length > 0) {
+    const cardId = pending.shift()
+    if (!cardId || visited.has(cardId)) continue
+    if (cardId === targetCardId) return true
+    visited.add(cardId)
+    pending.push(...(childrenByParent.get(cardId) ?? []))
+  }
+  return false
+}
+
+function delegationSelectionFromSource(source) {
+  if (!source || typeof source !== 'object') return null
+  const option = (value, fallbackId = '') => {
+    if (value && typeof value === 'object') {
+      const id = String(value.id ?? '').trim()
+      return id ? { id, label: String(value.label ?? id).trim() || id } : null
+    }
+    const id = String(fallbackId || value || '').trim()
+    return id ? { id, label: id } : null
+  }
+  const agent = option(source.agent, source.agentId)
+  const model = option(source.model, source.modelId)
+  if (!agent || !model) return null
+  const list = (values) => [...new Set((Array.isArray(values) ? values : [])
+    .map((value) => String(value?.id ?? value ?? '').trim()).filter(Boolean))].slice(0, 128)
+  return {
+    agent,
+    model,
+    providerId: String(source.providerId ?? '').trim() || null,
+    mode: option(source.mode, source.modeId),
+    thoughtLevel: option(source.thoughtLevel, source.thoughtLevelId),
+    enabledSkillIds: list(source.enabledSkillIds ?? source.skills),
+    disabledBuiltinSkillIds: list(source.disabledBuiltinSkillIds),
+    mcpIds: list(source.mcpIds ?? source.mcpServers),
+    workspace: String(source.workspace ?? '').trim().slice(0, 4_096) || null,
+  }
+}
+
+async function delegationCreateSelection(targetCard, requestedSelection, parentAttribution) {
+  const linkedConversations = aiConversationLinksFromData(targetCard.data)
+  const latestLink = linkedConversations.at(-1)
+  const selection = delegationSelectionFromSource(requestedSelection)
+    ?? delegationSelectionFromSource(latestLink)
+    ?? delegationSelectionFromSource(parentAttribution?.selection)
+    ?? delegationSelectionFromSource(parentAttribution)
+  if (!selection) throw new AionUiExternalLaunchPayloadError('새 AI 대화에 사용할 AI 종류와 모델을 확인할 수 없습니다.')
+
+  const [agents, providers, rawMcpServers] = await Promise.all([
+    fetchAionUi('/api/agents/management'),
+    fetchAionUi('/api/providers'),
+    fetchAionUi('/api/mcp/servers'),
+  ])
+  const normalizedAgents = (Array.isArray(agents) ? agents : [])
+    .filter((agent) => agent?.enabled !== false && agent?.installed === true)
+    .map((agent) => normalizeAionUiAgent(agent, Array.isArray(providers) ? providers.filter((item) => item?.enabled !== false) : []))
+  const resolvedAgent = normalizedAgents.find((agent) => agent.id === selection.agent.id)
+  const resolvedModel = resolvedAgent?.models.find((model) => model.id === selection.model.id)
+  if (!resolvedAgent || !resolvedModel) {
+    throw new AionUiExternalLaunchPayloadError('새 AI 대화에 사용할 AI 종류 또는 모델을 AionUi에서 확인할 수 없습니다.')
+  }
+  selection.agent = { id: resolvedAgent.id, label: resolvedAgent.name }
+  selection.model = { id: resolvedModel.id, label: resolvedModel.label }
+  selection.providerId = resolvedModel.providerId ?? selection.providerId
+
+  const mcpServers = normalizeAionUiMcpServers(rawMcpServers)
+  const requiredMcpIds = mcpServers.filter((server) => server.required).map((server) => server.id)
+  selection.mcpIds = [...new Set([...selection.mcpIds, ...requiredMcpIds])]
+  return selection
+}
+
+function issueDelegatedAttribution({ mapId, cardId, conversationId, selection, startedBy }) {
+  const token = randomBytes(32).toString('base64url')
+  const now = Date.now()
+  const attribution = {
+    authorName: `${selection.agent.label}(${selection.model.label})`,
+    agentId: selection.agent.id,
+    agentName: selection.agent.label,
+    modelId: selection.model.id,
+    modelName: selection.model.label,
+    providerId: selection.providerId,
+    mapId,
+    cardId,
+    startedBy,
+    selection: {
+      agent: selection.agent,
+      model: selection.model,
+      providerId: selection.providerId,
+      ...(selection.mode ? { mode: selection.mode } : {}),
+      ...(selection.thoughtLevel ? { thoughtLevel: selection.thoughtLevel } : {}),
+      skills: selection.enabledSkillIds.map((id) => ({ id, label: id })),
+      mcpServers: selection.mcpIds.map((id) => ({ id, label: id })),
+      workspace: selection.workspace,
+    },
+    createdAt: now,
+    expiresAt: now + aiAttributionDurationMs,
+    ...(conversationId ? { conversationId } : {}),
+  }
+  aiAttributions.set(sessionTokenKey(token), attribution)
+  return { token, attribution }
+}
+
+function buildDelegatedInstruction({ mapId, cardId, editorId, attributionToken, instruction }) {
+  return `# MindNProgress 하위 카드 위임 작업 요청
+
+가장 먼저 MindNProgress MCP 도구 \`mindnprogress_get_context\`를 아래 값으로 한 번 호출하세요. 이 요청은 상위 카드의 AI가 현재 하위 카드에 실행을 위임한 것이므로, 일반적인 다음 작업 제안에 그치지 말고 아래 "상위 AI 지시"를 실제로 수행하세요. \`editorId\`와 \`attributionToken\`은 이후 MindNProgress MCP 작업이 끝날 때까지 유지하세요.
+
+- mapId: \`${mapId}\`
+- cardId: \`${cardId}\`
+- editorId: \`${editorId}\`
+- attributionToken: \`${attributionToken}\`
+
+MCP 조회 결과의 \`guide\`, \`selection.taskLinks.startupInspection\`, \`selection.aiWorkCoordination\`과 \`nextStep\`을 확인하고 따르세요. 관련 카드를 수정하기 전에는 AI 작업 상태를 확인하고, 실행 결과를 카드 댓글과 공유 지식에 알맞게 기록하세요.
+
+MCP 도구를 사용할 수 없거나 문서 또는 카드를 찾지 못하면 임의로 추측하지 말고 확인 가능한 범위만 수행한 뒤 제약을 명확히 남기세요.
+
+# 상위 AI 지시
+
+${instruction.trim()}`
+}
+
+function delegationPublicView(delegation) {
+  const publicDelegation = { ...delegation }
+  delete publicDelegation.instructionHash
+  delete publicDelegation.requestSignature
+  return publicDelegation
+}
+
+async function updateAiDelegation(id, updates) {
+  const current = aiDelegations.get(id)
+  if (!current) return null
+  const changed = Object.entries(updates).some(([key, value]) => JSON.stringify(current[key]) !== JSON.stringify(value))
+  if (!changed) return current
+  const next = { ...current, ...updates, updatedAt: new Date().toISOString() }
+  aiDelegations.set(id, next)
+  await persistAiDelegations()
+  broadcastEvent({ type: 'ai-delegation-changed', delegation: delegationPublicView(next) })
+  return next
+}
+
+async function latestAssistantResult(conversationId) {
+  try {
+    const messagePage = await fetchAionUi(`/api/conversations/${encodeURIComponent(conversationId)}/messages?limit=100&content_mode=full`, { timeoutMs: 30_000 })
+    const messages = Array.isArray(messagePage?.items) ? messagePage.items : Array.isArray(messagePage) ? messagePage : []
+    const message = [...messages].reverse().find((candidate) => candidate?.position === 'left'
+      && (candidate.type === 'text' || candidate.type === 'tips')
+      && readAionUiMessageContent(candidate).trim())
+    return readAionUiMessageContent(message).trim().slice(0, 12_000)
+  } catch {
+    return ''
+  }
+}
+
+function parentWakeInstruction(delegation, result) {
+  const outcome = delegation.childStatus === 'completed' ? '완료' : `실패 또는 중단 (${delegation.childError ?? '상세 원인 없음'})`
+  return `# MindNProgress 하위 AI 작업 결과
+
+상위 카드에서 위임한 하위 카드 작업이 ${outcome} 상태가 되었습니다.
+
+- 위임 ID: ${delegation.id}
+- 하위 카드: ${delegation.targetCardLabel} (${delegation.targetCardId})
+- 실행 대화: ${delegation.targetConversationId}
+- 선택 방식: ${delegation.strategy === 'resume' ? '기존 대화 이어가기' : '새 대화 시작'}
+- 선택 이유: ${delegation.decisionReason}
+
+${result ? `## 하위 AI의 마지막 응답\n\n${result}\n\n` : ''}MindNProgress에서 하위 카드의 최신 설명·공유 지식·댓글·상태를 다시 확인하고, 결과가 상위 업무와 다른 하위 업무에 미치는 영향을 판단해 다음 작업을 이어가세요. 하위 AI의 응답은 참고 자료이므로 실제 카드와 산출물을 기준으로 검증하세요.`
+}
+
+async function pollAiDelegations() {
+  if (aiDelegationPollRunning) return
+  aiDelegationPollRunning = true
+  try {
+    const active = [...aiDelegations.values()].filter((delegation) =>
+      ['starting', 'waiting-resource', 'running', 'waiting-parent', 'waking-parent'].includes(delegation.state))
+    for (const delegation of active) {
+      if (['starting', 'waiting-resource', 'running'].includes(delegation.state)) {
+        try {
+          const status = await fetchAionUi(`/api/internal/external-conversation-dispatches/${encodeURIComponent(delegation.id)}`)
+          if (['starting', 'waiting_resource', 'running'].includes(status.state)) {
+            await updateAiDelegation(delegation.id, {
+              state: status.state === 'waiting_resource' ? 'waiting-resource' : status.state,
+              childTurnId: status.turnId ?? delegation.childTurnId ?? null,
+              resource: status.resource ?? delegation.resource ?? null,
+            })
+            continue
+          }
+          await updateAiDelegation(delegation.id, {
+            state: 'waiting-parent',
+            childStatus: status.state,
+            childTurnId: status.turnId ?? delegation.childTurnId ?? null,
+            childError: status.errorMessage ?? null,
+            childCompletedAt: new Date().toISOString(),
+          })
+        } catch (error) {
+          if (error?.status !== 404) continue
+          await updateAiDelegation(delegation.id, {
+            state: 'waiting-parent',
+            childStatus: 'interrupted',
+            childError: 'AionUi가 위임 실행 상태를 더 이상 보유하지 않습니다.',
+            childCompletedAt: new Date().toISOString(),
+          })
+        }
+        continue
+      }
+
+      if (delegation.state === 'waiting-parent') {
+        const anotherWakeInProgress = [...aiDelegations.values()].some((candidate) =>
+          candidate.id !== delegation.id
+          && candidate.parentConversationId === delegation.parentConversationId
+          && candidate.state === 'waking-parent')
+        if (anotherWakeInProgress) continue
+        try {
+          const parent = await fetchAiConversationRuntime(delegation.parentConversationId)
+          const runtime = normalizeAiConversationRuntime(delegation.parentConversationId, parent)
+          if (runtime.state !== 'idle') continue
+          const result = await latestAssistantResult(delegation.targetConversationId)
+          const wakeOperationId = `${delegation.id}-wake`
+          const response = await fetchAionUi('/api/internal/external-conversation-dispatches', {
+            method: 'POST',
+            body: {
+              operationId: wakeOperationId,
+              actorConversationId: delegation.parentConversationId,
+              strategy: 'resume',
+              targetConversationId: delegation.parentConversationId,
+              instruction: parentWakeInstruction(delegation, result),
+            },
+          })
+          await updateAiDelegation(delegation.id, {
+            state: 'waking-parent',
+            wakeOperationId,
+            parentTurnId: response.turnId ?? null,
+          })
+        } catch {
+          continue
+        }
+        continue
+      }
+
+      try {
+        const status = await fetchAionUi(`/api/internal/external-conversation-dispatches/${encodeURIComponent(delegation.wakeOperationId)}`)
+        if (['starting', 'waiting_resource', 'running'].includes(status.state)) {
+          await updateAiDelegation(delegation.id, {
+            parentTurnId: status.turnId ?? delegation.parentTurnId ?? null,
+            parentDispatchState: status.state === 'waiting_resource' ? 'waiting-resource' : status.state,
+            parentResource: status.resource ?? delegation.parentResource ?? null,
+          })
+          continue
+        }
+        await updateAiDelegation(delegation.id, {
+          state: status.state === 'completed' ? 'completed' : 'parent-wake-failed',
+          parentTurnId: status.turnId ?? delegation.parentTurnId ?? null,
+          parentError: status.errorMessage ?? null,
+          completedAt: new Date().toISOString(),
+        })
+      } catch {
+        continue
+      }
+    }
+  } finally {
+    aiDelegationPollRunning = false
+  }
 }
 
 function normalizeAiConversationRuntime(conversationId, conversation, observedAt = new Date().toISOString()) {
@@ -2499,6 +2829,7 @@ const adminBootstrapped = await loadUsers()
 await loadSessions()
 await loadAiAttributions()
 await loadAiConversationAttributions()
+await loadAiDelegations()
 await loadAiWorkspaceHistories()
 const metadataMigration = await migrateStoredMapCreationMetadata()
 if (metadataMigration.migratedDocuments > 0) {
@@ -2918,6 +3249,316 @@ const server = createServer(async (request, response) => {
     }
 
     const aionUiConversationTranscriptRoute = url.pathname.match(/^\/api\/integrations\/aionui\/conversations\/([^/]+)\/transcript$/)
+
+    const aiDelegationsRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/ai-delegations$/)
+    if (aiDelegationsRoute && request.method === 'GET') {
+      const user = requireUser(request, response)
+      if (!user) return
+      if (!canEdit(user)) return sendJson(response, 403, { error: '편집자만 AI 위임 목록을 확인할 수 있습니다.' })
+      const mapId = decodeURIComponent(aiDelegationsRoute[1])
+      if (!isValidMapId(mapId)) return sendJson(response, 400, { error: '문서 ID가 올바르지 않습니다.' })
+      const parentCardId = String(url.searchParams.get('parentCardId') ?? '').trim()
+      const targetCardId = String(url.searchParams.get('targetCardId') ?? '').trim()
+      const delegations = [...aiDelegations.values()]
+        .filter((delegation) => delegation.mapId === mapId
+          && (!parentCardId || delegation.parentCardId === parentCardId)
+          && (!targetCardId || delegation.targetCardId === targetCardId))
+        .sort((first, second) => String(second.createdAt).localeCompare(String(first.createdAt)))
+        .map(delegationPublicView)
+      return sendJson(response, 200, { mapId, delegations })
+    }
+
+    if (aiDelegationsRoute && request.method === 'POST') {
+      const user = requireUser(request, response)
+      if (!user) return
+      if (!canEdit(user)) return sendJson(response, 403, { error: '편집자만 AI 작업을 위임할 수 있습니다.' })
+      const mapId = decodeURIComponent(aiDelegationsRoute[1])
+      const scope = integrationRequestScope(request)
+      const parentAttribution = requestAiAttribution(request)
+      if (!isValidMapId(mapId) || scope.mapId !== mapId || !scope.cardId) {
+        return sendJson(response, 400, { error: '현재 상위 카드의 문서와 카드 범위가 필요합니다.' })
+      }
+      if (!parentAttribution?.conversationId || parentAttribution.mapId !== mapId
+        || parentAttribution.cardId !== scope.cardId) {
+        return sendJson(response, 409, { error: '현재 AI 대화 ID를 확인할 수 없습니다. 이 대화에서 get_context를 다시 호출해 주세요.' })
+      }
+
+      const body = await readJsonBody(request)
+      const id = String(body.idempotencyKey ?? '').trim()
+      const targetCardId = String(body.targetCardId ?? '').trim()
+      const strategy = String(body.strategy ?? '').trim()
+      const conversationId = String(body.conversationId ?? '').trim()
+      const instruction = String(body.instruction ?? '').trim()
+      const decisionReason = String(body.decisionReason ?? '').trim()
+      const sourceRevision = Number(body.sourceRevision)
+      if (!isValidAiDelegationId(id)
+        || !targetCardId || targetCardId.length > 120
+        || !['resume', 'new'].includes(strategy)
+        || !instruction || instruction.length > 100_000
+        || !decisionReason || decisionReason.length > 1_000
+        || !Number.isInteger(sourceRevision) || sourceRevision < 1) {
+        return sendJson(response, 400, { error: 'AI 작업 위임 값이 올바르지 않습니다.' })
+      }
+
+      const requestSignature = createHash('sha256').update(JSON.stringify({
+        mapId, parentCardId: scope.cardId, targetCardId, strategy, conversationId,
+        instruction, decisionReason, sourceRevision,
+      })).digest('hex')
+      const existingDelegation = aiDelegations.get(id)
+      if (existingDelegation) {
+        if (existingDelegation.requestSignature !== requestSignature) {
+          return sendJson(response, 409, { error: '같은 idempotencyKey가 다른 AI 위임 요청에 사용되었습니다.' })
+        }
+        return sendJson(response, 200, { delegation: delegationPublicView(existingDelegation), repeated: true })
+      }
+
+      const map = await readMap(mapId)
+      const parentCard = map?.nodes.find((node) => node.id === scope.cardId)
+      const targetCard = map?.nodes.find((node) => node.id === targetCardId)
+      if (!map || map.trashedAt || !parentCard || !targetCard) {
+        return sendJson(response, 404, { error: '상위 카드 또는 위임 대상 카드를 찾을 수 없습니다.' })
+      }
+      if (!isHierarchyDescendant(map, parentCard.id, targetCard.id)) {
+        return sendJson(response, 400, { error: '현재 카드의 하위 카드에만 AI 작업을 위임할 수 있습니다.' })
+      }
+      if (map.version !== sourceRevision) {
+        let recoveredDispatch = null
+        try {
+          const candidate = await fetchAionUi(`/api/internal/external-conversation-dispatches/${encodeURIComponent(id)}`)
+          const recoveredConversationId = String(candidate?.conversationId ?? '').trim()
+          const linkedToTarget = /^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$/.test(recoveredConversationId)
+            && isAiConversationLinked(targetCard.data, recoveredConversationId)
+          if (linkedToTarget && (strategy === 'new' || recoveredConversationId === conversationId)) {
+            recoveredDispatch = candidate
+          }
+        } catch {
+          // AionCore에도 실행 기록이 없으면 일반적인 문서 버전 충돌로 처리합니다.
+        }
+        if (recoveredDispatch) {
+          const now = new Date().toISOString()
+          const targetConversationId = String(recoveredDispatch.conversationId).trim()
+          const delegation = {
+            id,
+            requestSignature,
+            mapId,
+            parentCardId: parentCard.id,
+            parentCardLabel: parentCard.data?.label ?? parentCard.id,
+            targetCardId: targetCard.id,
+            targetCardLabel: targetCard.data?.label ?? targetCard.id,
+            parentConversationId: parentAttribution.conversationId,
+            targetConversationId,
+            strategy,
+            decisionReason,
+            sourceRevision,
+            instructionPreview: instruction.replace(/\s+/g, ' ').slice(0, 240),
+            instructionHash: createHash('sha256').update(instruction).digest('hex'),
+            ...initialAiDelegationRuntime(recoveredDispatch, now),
+            linkError: null,
+            startedBy: parentAttribution.startedBy ?? user.id,
+            createdAt: now,
+            updatedAt: now,
+            recoveredAt: now,
+          }
+          aiDelegations.set(id, delegation)
+          await persistAiDelegations()
+          broadcastEvent({ type: 'ai-delegation-changed', delegation: delegationPublicView(delegation) })
+          return sendJson(response, 202, {
+            delegation: delegationPublicView(delegation),
+            mapVersion: map.version,
+            repeated: true,
+            recovered: true,
+          })
+        }
+        return sendJson(response, 409, { error: `문서가 변경되었습니다. 최신 버전 ${map.version}을 다시 확인해 주세요.`, currentVersion: map.version })
+      }
+      let selection = null
+      let targetConversationId = conversationId
+      if (strategy === 'resume') {
+        if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$/.test(targetConversationId)
+          || !isAiConversationLinked(targetCard.data, targetConversationId)) {
+          return sendJson(response, 400, { error: '이어갈 대화는 대상 카드에 연결된 conversationId여야 합니다.' })
+        }
+        const linked = aiConversationLinksFromData(targetCard.data)
+          .find((candidate) => candidate.conversationId === targetConversationId)
+        try {
+          const conversation = await fetchAiConversationRuntime(targetConversationId)
+          const runtime = normalizeAiConversationRuntime(targetConversationId, conversation)
+          if (runtime.state !== 'idle') {
+            return sendJson(response, 409, { error: `대화가 ${runtime.state} 상태이므로 지금 이어갈 수 없습니다.`, runtime })
+          }
+          const recovered = aiConversationLinkFromAionUiConversation(conversation)
+          selection = delegationSelectionFromSource({
+            ...recovered,
+            ...linked,
+            agent: linked?.agent ?? recovered?.agent,
+            model: linked?.model ?? recovered?.model,
+            mode: linked?.mode ?? recovered?.mode,
+            thoughtLevel: linked?.thoughtLevel ?? recovered?.thoughtLevel,
+            skills: linked?.skills?.length ? linked.skills : recovered?.skills,
+            mcpServers: linked?.mcpServers?.length ? linked.mcpServers : recovered?.mcpServers,
+            workspace: linked?.workspace ?? recovered?.workspace,
+          })
+        } catch {
+          return sendJson(response, 503, { error: '이어갈 AionUi 대화 상태를 확인하지 못했습니다.' })
+        }
+      } else {
+        try {
+          selection = await delegationCreateSelection(targetCard, body.newConversation, parentAttribution)
+        } catch (error) {
+          return sendJson(response, 400, { error: error.message })
+        }
+      }
+      if (!selection) return sendJson(response, 409, { error: '위임 대화의 AI 종류와 모델 정보를 확인하지 못했습니다.' })
+
+      const { token: attributionToken, attribution } = issueDelegatedAttribution({
+        mapId,
+        cardId: targetCard.id,
+        conversationId: strategy === 'resume' ? targetConversationId : null,
+        selection,
+        startedBy: parentAttribution.startedBy ?? user.id,
+      })
+      await persistAiAttributions()
+      const delegatedInstruction = buildDelegatedInstruction({
+        mapId,
+        cardId: targetCard.id,
+        editorId: parentAttribution.startedBy ?? user.id,
+        attributionToken,
+        instruction,
+      })
+
+      let dispatch
+      try {
+        dispatch = await fetchAionUi('/api/internal/external-conversation-dispatches', {
+          method: 'POST',
+          body: {
+            operationId: id,
+            actorConversationId: parentAttribution.conversationId,
+            strategy,
+            ...(strategy === 'resume' ? { targetConversationId } : {
+              create: {
+                agentId: selection.agent.id,
+                title: targetCard.data?.label ?? targetCard.id,
+                modelId: selection.model.id,
+                mode: selection.mode?.id ?? null,
+                thoughtLevel: selection.thoughtLevel?.id ?? null,
+                enabledSkillIds: selection.enabledSkillIds,
+                disabledBuiltinSkillIds: selection.disabledBuiltinSkillIds,
+                mcpIds: selection.mcpIds,
+                workspace: selection.workspace,
+              },
+            }),
+            instruction: delegatedInstruction,
+          },
+        })
+      } catch (error) {
+        aiAttributions.delete(sessionTokenKey(attributionToken))
+        await persistAiAttributions()
+        return sendJson(response, error?.status === 409 ? 409 : 503, {
+          error: error?.status === 409
+            ? '대상 AI 대화가 이미 작업 중이거나 같은 위임 요청이 준비 중입니다.'
+            : 'AionUi에 AI 작업을 위임하지 못했습니다.',
+        })
+      }
+
+      targetConversationId = String(dispatch.conversationId ?? '').trim()
+      if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$/.test(targetConversationId)) {
+        return sendJson(response, 503, { error: 'AionUi가 위임 대화 ID를 반환하지 않았습니다.' })
+      }
+      attribution.conversationId = targetConversationId
+      aiConversationAttributions.set(conversationAttributionKey(mapId, targetCard.id), {
+        mapId,
+        cardId: targetCard.id,
+        conversationId: targetConversationId,
+        authorName: attribution.authorName,
+        agentId: attribution.agentId,
+        agentName: attribution.agentName,
+        modelId: attribution.modelId,
+        modelName: attribution.modelName,
+        providerId: attribution.providerId,
+        startedBy: attribution.startedBy,
+        linkedAt: new Date().toISOString(),
+        refreshedAt: new Date().toISOString(),
+      })
+      await Promise.all([persistAiAttributions(), persistAiConversationAttributions()])
+
+      let updatedMap = map
+      let linkError = null
+      if (strategy === 'new') {
+        const latestMap = await readMap(mapId)
+        const latestTargetCard = latestMap?.nodes.find((node) => node.id === targetCard.id)
+        if (!latestMap || latestMap.trashedAt || !latestTargetCard) {
+          linkError = '새 대화는 생성됐지만 대상 카드가 변경되어 연결하지 못했습니다.'
+        } else {
+          const conversationLink = normalizeAiConversationLink({
+            conversationId: targetConversationId,
+            agent: selection.agent,
+            model: selection.model,
+            providerId: selection.providerId,
+            mode: selection.mode,
+            thoughtLevel: selection.thoughtLevel,
+            skills: selection.enabledSkillIds.map((skillId) => ({ id: skillId, label: skillId })),
+            mcpServers: selection.mcpIds.map((mcpId) => ({ id: mcpId, label: mcpId })),
+            workspace: selection.workspace,
+            requestPreview: instruction,
+            startedBy: { id: attribution.startedBy, label: users.find((candidate) => candidate.id === attribution.startedBy)?.name ?? attribution.startedBy },
+            startedAt: new Date().toISOString(),
+            linkedAt: new Date().toISOString(),
+          })
+          try {
+            updatedMap = await saveMap(mapId, {
+              nodes: latestMap.nodes.map((node) => node.id === targetCard.id ? {
+                ...node,
+                data: {
+                  ...node.data,
+                  aiConversationId: targetConversationId,
+                  aiConversations: appendAiConversationLink(node.data, conversationLink),
+                },
+              } : node),
+              edges: latestMap.edges,
+            }, user, latestMap.title, latestMap.color, 'content')
+            broadcastEvent({
+              type: 'ai-conversation-linked', mapId, nodeId: targetCard.id,
+              conversationId: targetConversationId, conversation: conversationLink,
+              sourceClientId: null, updatedAt: updatedMap.updatedAt, updatedBy: publicUser(user),
+            })
+          } catch (error) {
+            linkError = '새 대화는 생성됐지만 대상 카드의 대화 목록에 연결하지 못했습니다.'
+            console.warn('[AI delegation conversation link]', error)
+          }
+        }
+      }
+
+      const now = new Date().toISOString()
+      const delegation = {
+        id,
+        requestSignature,
+        mapId,
+        parentCardId: parentCard.id,
+        parentCardLabel: parentCard.data?.label ?? parentCard.id,
+        targetCardId: targetCard.id,
+        targetCardLabel: targetCard.data?.label ?? targetCard.id,
+        parentConversationId: parentAttribution.conversationId,
+        targetConversationId,
+        strategy,
+        decisionReason,
+        sourceRevision,
+        instructionPreview: instruction.replace(/\s+/g, ' ').slice(0, 240),
+        instructionHash: createHash('sha256').update(instruction).digest('hex'),
+        ...initialAiDelegationRuntime(dispatch, now),
+        linkError,
+        startedBy: attribution.startedBy,
+        createdAt: now,
+        updatedAt: now,
+      }
+      aiDelegations.set(id, delegation)
+      await persistAiDelegations()
+      broadcastEvent({ type: 'ai-delegation-changed', delegation: delegationPublicView(delegation) })
+      return sendJson(response, 202, {
+        delegation: delegationPublicView(delegation),
+        mapVersion: updatedMap.version,
+        repeated: false,
+      })
+    }
 
     const cardAiConversationsRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/cards\/([^/]+)\/ai-conversations$/)
     if (cardAiConversationsRoute && request.method === 'GET') {
@@ -4131,6 +4772,10 @@ setInterval(() => {
 setInterval(() => {
   void refreshVisibleAiConversationRuntimes().catch((error) => console.warn('[AI conversation runtime poll]', error))
 }, aiConversationRuntimePollIntervalMs).unref()
+
+setInterval(() => {
+  void pollAiDelegations().catch((error) => console.warn('[AI delegation poll]', error))
+}, aiDelegationPollIntervalMs).unref()
 
 setInterval(() => {
   void ensureDailyBackups().catch((error) => console.warn('[Daily backup scheduler]', error))

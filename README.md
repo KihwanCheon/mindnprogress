@@ -176,6 +176,7 @@ npm run dev
 | `MNP_AIONUI_URL` | 자동 탐색 | AionUi 백엔드 주소 강제 지정 |
 | `MNP_AIONUI_WEB_URL` | `MNP_PUBLIC_URL` 호스트의 7777 포트 | 원격 브라우저에서 AI 대화를 열 AionUi WebUI 주소 |
 | `MNP_AIONUI_DISCOVERY_FILE` | OS 임시 폴더의 `aionui-backend.json` | AionUi 가변 포트 탐색 파일 |
+| `MNP_AI_DELEGATION_POLL_INTERVAL_MS` | `3000` | 하위 AI 턴과 상위 대화 재개 상태 확인 간격. 최소 100ms |
 | `MNP_AI_ATTRIBUTION_DURATION_MS` | 8시간 | AI 종류·모델 작성자 귀속 정보의 유지 시간(ms) |
 | `MNP_DOORAY_API_KEY` | Claude 설정에서 조회 | Dooray API 키 환경변수 우선 지정 |
 | `MNP_DOORAY_BASE_URL` | Dooray MCP 설정 또는 `https://api.dooray.com` | Dooray API 기준 주소 |
@@ -208,6 +209,8 @@ MindNProgress는 AionUi가 OS 임시 디렉터리에 게시하는 `aionui-backen
 
 `AI 대화 시작`의 작업공간은 로그인 계정과 문서별 마지막 입력값을 유지합니다. 실제 대화를 시작한 작업공간은 로그인 계정의 서버 이력에 최대 10개까지 저장되어 PC와 4175 웹에서 같은 계정으로 접속하면 함께 표시되며, 각 항목의 `×` 버튼으로 양쪽 이력에서 제거할 수 있습니다. 기존 브라우저 이력은 처음 열 때 현재 로그인 계정의 서버 이력과 한 번 병합됩니다.
 
+상위 카드의 AI는 하위 카드에 연결된 대화 후보의 AI·모델·사고 강도·MCP·스킬·작업공간·최근 활동과 실행 상태를 비교하고, 필요한 후보의 전문만 확인해 기존 대화를 이어가거나 새 대화를 선택할 수 있습니다. 위임할 때는 일반적인 작업 제안이 아니라 실행할 지시와 완료 조건을 전달합니다. 서버는 하위 대화의 해당 `turnId`가 완료되거나 실패할 때까지 문서 JSON 밖의 `_ai-delegations.json`에서 상태를 추적하고, 상위 대화가 유휴 상태가 되면 하위 AI의 마지막 응답과 카드 재확인 지침을 보내 상위 AI를 자동 재개합니다. 여러 하위 결과가 동시에 끝나면 같은 상위 대화에 한 번에 하나씩 전달해 턴 충돌을 막습니다. 새 대화를 만들 때만 대상 카드의 AI 대화 목록 연결로 문서 버전이 증가하며, 위임 상태 폴링 자체는 문서 버전과 변경 이력을 변경하지 않습니다.
+
 AionUi에 다음 로컬 MCP 서버를 등록하고 활성화합니다.
 
 ```text
@@ -225,7 +228,7 @@ AI가 MindNProgress 밖에서 시작되었다면 먼저 `mindnprogress_read_me_f
 
 ## MindNProgress MCP 명령어
 
-현재 MCP 서버는 37개 도구를 제공합니다. 카드가 선택된 작업은 먼저 `mindnprogress_get_context`로 최신 버전과 제품 규칙을 확인하고, 변경 후에는 `mindnprogress_get_document`로 실제 저장 결과를 다시 확인하는 흐름을 권장합니다. 조회 도구는 문서 버전을 변경하지 않으며 카드·관계 편집과 AI 대화 ID 연결 같은 저장 작업만 버전을 증가시킵니다. 선택 카드 이외의 형제·하위·선행 카드를 함께 수정할 때는 `mindnprogress_get_ai_work_states`로 다른 AI가 작업 중인지 먼저 확인합니다.
+현재 MCP 서버는 40개 도구를 제공합니다. 카드가 선택된 작업은 먼저 `mindnprogress_get_context`로 최신 버전과 제품 규칙을 확인하고, 변경 후에는 `mindnprogress_get_document`로 실제 저장 결과를 다시 확인하는 흐름을 권장합니다. 조회 도구는 문서 버전을 변경하지 않으며 카드·관계 편집과 AI 대화 ID 연결 같은 저장 작업만 버전을 증가시킵니다. 선택 카드 이외의 형제·하위·선행 카드를 함께 수정할 때는 `mindnprogress_get_ai_work_states`로 다른 AI가 작업 중인지 먼저 확인합니다.
 
 ### 시작과 조회
 
@@ -237,6 +240,9 @@ AI가 MindNProgress 밖에서 시작되었다면 먼저 `mindnprogress_read_me_f
 | `mindnprogress_get_document` | 문서의 모든 카드와 연결 관계 및 외부 접근 URL을 조회합니다. |
 | `mindnprogress_get_card` | 특정 카드의 설명, 공유 지식, 업무 필드와 댓글을 페이지 단위로 조회합니다. |
 | `mindnprogress_get_ai_work_states` | 지정한 카드 또는 문서 전체에서 연결된 AI 대화의 현재 작업·승인 대기·유휴·확인 불가 상태를 조회합니다. 문서 버전은 변경하지 않습니다. |
+| `mindnprogress_list_ai_conversations` | 카드에 연결된 모든 AI 대화 후보의 실행 환경, 시작 정보, 최근 활동과 실시간 상태를 조회해 기존 대화 이어가기와 새 대화 시작 판단에 사용합니다. |
+| `mindnprogress_delegate_ai_work` | 현재 카드의 하위 카드에 실행 가능한 지시를 전달해 기존 대화를 이어가거나 새 대화를 만들고, 해당 턴 완료 후 결과와 함께 상위 대화를 자동 재개합니다. |
+| `mindnprogress_list_ai_delegations` | Unity 프로젝트 잠금 대기(`waiting-resource`)를 포함해 하위 실행부터 상위 대화 재개까지 AI 작업 위임의 현재 상태, 대상 대화와 turnId를 조회합니다. |
 | `mindnprogress_get_ai_conversation_transcript` | 카드에 연결된 최근 AionUi 대화 또는 `conversationId`로 지정한 이전 대화 전문을 `전체 복사`와 같은 텍스트 형식으로 조회합니다. |
 | `mindnprogress_list_users` | 담당자로 지정할 수 있는 편집자 계정 목록을 조회합니다. |
 

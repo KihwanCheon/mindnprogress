@@ -36,9 +36,12 @@ async function startMockAionUi({
   conversationCreatedAt = Date.parse('2026-07-20T00:00:00.000Z'),
   conversationModelId = `${modelId}[1m]`,
 } = {}) {
+  let conversationRuntimeState = 'running'
+  const dispatchRequests = []
+  const dispatches = new Map()
   const server = createHttpServer((request, response) => {
-    const send = (data) => {
-      response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
+    const send = (data, status = 200) => {
+      response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' })
       response.end(JSON.stringify({ success: true, data }))
     }
     if (request.url === '/api/agents/management') {
@@ -67,12 +70,26 @@ async function startMockAionUi({
         modified_at: conversationCreatedAt + 60_000,
         extra: { agent_id: agentId, current_model_id: conversationModelId, backend: 'claude' },
         runtime: {
-          state: 'running',
-          is_processing: true,
-          task_status: 'running',
-          can_send_message: false,
+          state: conversationRuntimeState,
+          is_processing: conversationRuntimeState === 'running',
+          task_status: conversationRuntimeState === 'running' ? 'running' : 'finished',
+          can_send_message: conversationRuntimeState === 'idle',
           pending_confirmations: 0,
-          turn_id: 'turn-mcp-runtime-test',
+          turn_id: conversationRuntimeState === 'running' ? 'turn-mcp-runtime-test' : null,
+        },
+      })
+    }
+    if (request.url === '/api/conversations/conversation-delegated') {
+      return send({
+        id: 'conversation-delegated',
+        name: '위임 하위 카드',
+        type: 'acp',
+        created_at: conversationCreatedAt + 120_000,
+        modified_at: conversationCreatedAt + 180_000,
+        extra: { agent_id: agentId, current_model_id: modelId, backend: 'claude' },
+        runtime: {
+          state: 'idle', is_processing: false, task_status: 'finished', can_send_message: true,
+          pending_confirmations: 0, turn_id: null,
         },
       })
     }
@@ -90,6 +107,43 @@ async function startMockAionUi({
         has_more_after: false,
       })
     }
+    if (request.url === '/api/conversations/conversation-delegated/messages?limit=100&content_mode=full') {
+      return send({
+        items: [
+          { id: 'delegated-user', type: 'text', position: 'right', content: '하위 작업 지시' },
+          { id: 'delegated-assistant', type: 'text', position: 'left', content: '하위 카드 작업을 완료하고 결과를 기록했습니다.' },
+        ],
+      })
+    }
+    if (request.method === 'POST' && request.url === '/api/internal/external-conversation-dispatches') {
+      const chunks = []
+      request.on('data', (chunk) => chunks.push(chunk))
+      request.on('end', () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+        const existing = dispatches.get(body.operationId)
+        if (existing) {
+          send({ ...existing, repeated: true }, 200)
+          return
+        }
+        dispatchRequests.push(body)
+        const targetConversationId = body.strategy === 'new' ? 'conversation-delegated' : body.targetConversationId
+        const stored = {
+          operationId: body.operationId,
+          conversationId: targetConversationId,
+          state: body.operationId.endsWith('-wake') ? 'completed' : 'running',
+          turnId: `turn-${body.operationId}`,
+          repeated: false,
+        }
+        dispatches.set(body.operationId, stored)
+        send({ ...stored, state: 'starting', turnId: null }, 202)
+      })
+      return
+    }
+    const dispatchStatusMatch = request.url?.match(/^\/api\/internal\/external-conversation-dispatches\/([^/?]+)$/)
+    if (request.method === 'GET' && dispatchStatusMatch) {
+      const dispatch = dispatches.get(decodeURIComponent(dispatchStatusMatch[1]))
+      if (dispatch) return send(dispatch)
+    }
     response.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' })
     response.end(JSON.stringify({ success: false, error: 'not found' }))
   })
@@ -99,7 +153,22 @@ async function startMockAionUi({
   })
   const address = server.address()
   assert.ok(typeof address === 'object' && address, '가짜 AionUi 포트를 할당하지 못했습니다.')
-  return { server, baseUrl: `http://127.0.0.1:${address.port}` }
+  return {
+    server,
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    dispatchRequests,
+    setConversationRuntimeState: (state) => { conversationRuntimeState = state },
+    completeDispatch: (operationId) => {
+      const dispatch = dispatches.get(operationId)
+      assert.ok(dispatch, `완료할 위임 operation을 찾지 못했습니다: ${operationId}`)
+      dispatches.set(operationId, { ...dispatch, state: 'completed' })
+    },
+    setDispatchState: (operationId, state, resource = null) => {
+      const dispatch = dispatches.get(operationId)
+      assert.ok(dispatch, `상태를 변경할 위임 operation을 찾지 못했습니다: ${operationId}`)
+      dispatches.set(operationId, { ...dispatch, state, resource })
+    },
+  }
 }
 
 async function publishMockAionUiDiscovery(discoveryFile, mockAionUi) {
@@ -156,6 +225,7 @@ async function main() {
     MNP_ADMIN_EMAIL: 'mcp-test-admin@mind.local',
     MNP_ADMIN_PASSWORD: 'McpTest!2026',
     MNP_AI_ATTRIBUTION_DURATION_MS: '10000',
+    MNP_AI_DELEGATION_POLL_INTERVAL_MS: '100',
   }
   const serverLogs = []
   const startApiServer = () => {
@@ -186,7 +256,7 @@ async function main() {
     await client.connect(transport)
     const listedTools = await client.listTools()
     const registeredToolNames = listedTools.tools.map((tool) => tool.name).sort()
-    assert.equal(registeredToolNames.length, 37, `예상과 다른 MCP 도구 수: ${registeredToolNames.length}`)
+    assert.equal(registeredToolNames.length, 40, `예상과 다른 MCP 도구 수: ${registeredToolNames.length}`)
 
     const invoke = async (name, args = {}) => {
       calledTools.set(name, (calledTools.get(name) ?? 0) + 1)
@@ -202,12 +272,14 @@ async function main() {
 
     const guide = await invoke('mindnprogress_read_me_first')
     assert.equal(guide.guide.product.name, 'MindNProgress')
-    assert.equal(guide.guide.version, '1.9')
+    assert.equal(guide.guide.version, '2.1')
     assert.match(guide.guide.dataModel.cardContent.sharedKnowledge, /재사용/)
     assert.match(guide.guide.authoringRules.join('\n'), /모든 isWork=true 업무 진행률을 동일 가중치 평균/)
     assert.match(guide.guide.operationRules.join('\n'), /변경할 필드만 보내고/)
     assert.match(guide.guide.operationRules.join('\n'), /조회 도구는 문서 version을 변경하지 않으며/)
     assert.match(guide.guide.operationRules.join('\n'), /mindnprogress_get_ai_work_states.*동시에 수정하지 않음/)
+    assert.match(guide.guide.operationRules.join('\n'), /기존 AI 대화를 이어갈지 새로 시작할지.*mindnprogress_list_ai_conversations/)
+    assert.match(guide.guide.operationRules.join('\n'), /unityMCP.*waiting-resource/)
     assert.match(guide.guide.operationRules.join('\n'), /댓글 summary는 \[진행\].*\[차단\].*\[결과\]/)
     assert.match(guide.guide.commentRules.detail, /작업을 이어가거나 결과를 검증/)
     assert.match(guide.guide.commentRules.legacy, /자동 분리하거나 다시 쓰지 않음/)
@@ -284,7 +356,7 @@ async function main() {
       body: JSON.stringify({ email: 'mcp-test-editor@mind.local', password: 'McpEditor!2026' }),
     })
     assert.equal(editorLoginResponse.status, 200)
-    const editorSessionCookie = editorLoginResponse.headers.get('set-cookie')?.split(';')[0]
+    let editorSessionCookie = editorLoginResponse.headers.get('set-cookie')?.split(';')[0]
     assert.ok(editorSessionCookie, '테스트 편집자 세션 쿠키가 없습니다.')
     const referencedCommentResponse = await fetch(`${apiBaseUrl}/api/maps/${encodeURIComponent(mapId)}/comments`, {
       method: 'POST',
@@ -440,7 +512,7 @@ async function main() {
       editorId: attribution.editorId,
       attributionToken: attribution.attributionToken,
     })
-    assert.equal(context.contextSchemaVersion, '2.3')
+    assert.equal(context.contextSchemaVersion, '2.4')
     assert.equal(context.detailLevel, 'focused')
     assert.equal(context.document.nodes, undefined)
     assert.equal(context.document.outline.length, 4)
@@ -455,6 +527,7 @@ async function main() {
     assert.deepEqual(context.selection.taskLinks.startupInspection.conversationInspection.sources, [])
     assert.equal(context.selection.knowledgeSources.all, undefined)
     assert.equal(context.selection.aiWorkCoordination.tool, 'mindnprogress_get_ai_work_states')
+    assert.equal(context.selection.aiWorkCoordination.childDelegation.delegateTool, 'mindnprogress_delegate_ai_work')
     assert.deepEqual(context.selection.aiWorkCoordination.siblingCardIds, [])
     assert.equal(context.selection.aiWorkCoordination.toolArguments, null)
     assert.equal(context.selection.accessUrl, `https://mindnprogress.test/mindmap/${mapId}/task-a`)
@@ -572,6 +645,24 @@ async function main() {
     assert.equal(conversationList.conversations.length, 1)
     assert.equal(conversationList.conversations[0].runtime.state, 'running')
     assert.equal(conversationList.conversations[0].available, true)
+    const conversationCandidates = await invoke('mindnprogress_list_ai_conversations', { mapId, cardId: 'task-a' })
+    assert.equal(conversationCandidates.latestConversationId, 'conversation-test')
+    assert.equal(conversationCandidates.conversations.length, 1)
+    assert.equal(conversationCandidates.conversations[0].agent.label, 'Claude Code')
+    assert.equal(conversationCandidates.conversations[0].model.label, 'Claude Test Model')
+    assert.equal(conversationCandidates.conversations[0].runtime.state, 'running')
+    assert.match(conversationCandidates.selectionRule.exclude, /running.*waiting-confirmation/)
+    const emptyDelegations = await invoke('mindnprogress_list_ai_delegations', { mapId, parentCardId: 'task-a' })
+    assert.deepEqual(emptyDelegations.delegations, [])
+    await invokeExpectError('mindnprogress_delegate_ai_work', {
+      mapId,
+      targetCardId: 'branch-a',
+      strategy: 'new',
+      instruction: '하위 카드 작업을 실제로 수행하세요.',
+      decisionReason: '회귀 테스트에서 상위-하위 범위 검증',
+      sourceRevision: documentResult.map.version,
+      idempotencyKey: 'mcp-regression-invalid-parent',
+    }, /하위 카드에만 AI 작업을 위임/)
     const versionBeforeAiWorkStateRead = documentResult.map.version
     const aiWorkStates = await invoke('mindnprogress_get_ai_work_states', {
       mapId,
@@ -607,6 +698,118 @@ async function main() {
     await invokeExpectError('mindnprogress_get_ai_conversation_transcript', {
       mapId, cardId: 'branch-a',
     }, /카드에 연결된 AI 대화가 없습니다/)
+
+    const delegatedChildCreated = await invoke('mindnprogress_add_card', {
+      mapId,
+      parentId: 'task-a',
+      data: { label: '위임 하위 카드', kind: 'task', isWork: false, status: 'planned', progress: 0 },
+    })
+    const delegatedChild = delegatedChildCreated.map.nodes.find((node) => node.data?.label === '위임 하위 카드')
+    assert.ok(delegatedChild)
+    const delegationArguments = {
+      mapId,
+      targetCardId: delegatedChild.id,
+      strategy: 'new',
+      instruction: '하위 카드의 요구사항을 확인하고 구현과 검증을 완료한 뒤 결과를 기록하세요.',
+      decisionReason: '기존 대화가 없어 상위 대화와 같은 실행 환경으로 새 대화를 시작합니다.',
+      sourceRevision: delegatedChildCreated.map.version,
+      idempotencyKey: `mcp-regression:${delegatedChild.id}:${delegatedChildCreated.map.version}`,
+    }
+    const delegated = await invoke('mindnprogress_delegate_ai_work', delegationArguments)
+    assert.equal(delegated.delegation.targetConversationId, 'conversation-delegated')
+    assert.equal(delegated.delegation.parentConversationId, 'conversation-test')
+    assert.equal(delegated.delegation.strategy, 'new')
+    assert.equal(delegated.mapVersion, delegatedChildCreated.map.version + 1)
+    const delegatedRepeat = await invoke('mindnprogress_delegate_ai_work', delegationArguments)
+    assert.equal(delegatedRepeat.repeated, true)
+    assert.equal(mockAionUi.dispatchRequests.length, 1, '멱등 재호출이 하위 대화를 중복 실행했습니다.')
+    const delegatedDocument = await invoke('mindnprogress_get_document', { mapId })
+    documentResult = delegatedDocument
+    assert.equal(
+      delegatedDocument.map.nodes.find((node) => node.id === delegatedChild.id)?.data.aiConversationId,
+      'conversation-delegated',
+    )
+    assert.match(mockAionUi.dispatchRequests[0].instruction, /MindNProgress 하위 카드 위임 작업 요청/)
+    assert.match(mockAionUi.dispatchRequests[0].instruction, /실제로 수행/)
+
+    mockAionUi.setDispatchState(delegationArguments.idempotencyKey, 'waiting_resource', {
+      kind: 'unity_project',
+      key: 'unity:test-project',
+      projectRoot: 'C:/Git/Test/UnityProject',
+    })
+    let waitingDelegation = null
+    const resourceWaitStartedAt = Date.now()
+    while (Date.now() - resourceWaitStartedAt < 6_000) {
+      const delegationList = await invoke('mindnprogress_list_ai_delegations', {
+        mapId,
+        parentCardId: 'task-a',
+        targetCardId: delegatedChild.id,
+      })
+      waitingDelegation = delegationList.delegations[0] ?? null
+      if (waitingDelegation?.state === 'waiting-resource') break
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+    assert.equal(waitingDelegation?.state, 'waiting-resource')
+    assert.equal(waitingDelegation?.resource?.key, 'unity:test-project')
+    assert.equal(mockAionUi.dispatchRequests.length, 1, 'Unity 자원 대기를 완료로 오인해 상위 대화를 재개했습니다.')
+
+    apiServer.kill()
+    await new Promise((resolve) => apiServer.once('exit', resolve))
+    apiServer = startApiServer()
+    await waitForServer(apiBaseUrl, apiServer, serverLogs)
+    const restartedEditorLoginResponse = await fetch(`${apiBaseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'mcp-test-editor@mind.local', password: 'McpEditor!2026' }),
+    })
+    assert.equal(restartedEditorLoginResponse.status, 200)
+    editorSessionCookie = restartedEditorLoginResponse.headers.get('set-cookie')?.split(';')[0]
+    assert.ok(editorSessionCookie, '재시작 후 테스트 편집자 세션 쿠키가 없습니다.')
+    const restoredDelegationList = await invoke('mindnprogress_list_ai_delegations', {
+      mapId,
+      parentCardId: 'task-a',
+      targetCardId: delegatedChild.id,
+    })
+    assert.equal(restoredDelegationList.delegations[0]?.id, delegationArguments.idempotencyKey)
+    assert.equal(restoredDelegationList.delegations[0]?.state, 'waiting-resource')
+
+    apiServer.kill()
+    await new Promise((resolve) => apiServer.once('exit', resolve))
+    await writeFile(path.join(testDataDirectory, '_ai-delegations.json'), '[]\n', 'utf8')
+    mockAionUi.completeDispatch(delegationArguments.idempotencyKey)
+    apiServer = startApiServer()
+    await waitForServer(apiBaseUrl, apiServer, serverLogs)
+    const recoveryEditorLoginResponse = await fetch(`${apiBaseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'mcp-test-editor@mind.local', password: 'McpEditor!2026' }),
+    })
+    assert.equal(recoveryEditorLoginResponse.status, 200)
+    editorSessionCookie = recoveryEditorLoginResponse.headers.get('set-cookie')?.split(';')[0]
+    assert.ok(editorSessionCookie, '위임 복구 후 테스트 편집자 세션 쿠키가 없습니다.')
+    const recoveredDelegation = await invoke('mindnprogress_delegate_ai_work', delegationArguments)
+    assert.equal(recoveredDelegation.recovered, true)
+    assert.equal(recoveredDelegation.repeated, true)
+    assert.equal(recoveredDelegation.delegation.state, 'waiting-parent')
+
+    mockAionUi.setConversationRuntimeState('idle')
+    let completedDelegation = null
+    const delegationWaitStartedAt = Date.now()
+    while (Date.now() - delegationWaitStartedAt < 12_000) {
+      const delegationList = await invoke('mindnprogress_list_ai_delegations', {
+        mapId,
+        parentCardId: 'task-a',
+        targetCardId: delegatedChild.id,
+      })
+      completedDelegation = delegationList.delegations[0] ?? null
+      if (completedDelegation?.state === 'completed') break
+      await new Promise((resolve) => setTimeout(resolve, 500))
+    }
+    assert.equal(completedDelegation?.state, 'completed')
+    assert.equal(completedDelegation?.childStatus, 'completed')
+    assert.equal(mockAionUi.dispatchRequests.length, 2)
+    assert.equal(mockAionUi.dispatchRequests[1].targetConversationId, 'conversation-test')
+    assert.match(mockAionUi.dispatchRequests[1].instruction, /하위 카드 작업을 완료하고 결과를 기록했습니다/)
 
     const unlinkedAttributionResponse = await fetch(`${apiBaseUrl}/api/integrations/aionui/attributions`, {
       method: 'POST',

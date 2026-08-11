@@ -1,0 +1,40 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import {
+  initialAiDelegationRuntime,
+  isValidAiDelegationId,
+} from '../server/lib/aiDelegations.mjs'
+
+test('콜론을 포함한 위임 ID를 요청과 재시작 복원에서 사용할 수 있다', () => {
+  assert.equal(isValidAiDelegationId('map-a:card-b:1258:p0-download-errors'), true)
+  assert.equal(isValidAiDelegationId('map-a/card-b/1258'), false)
+  assert.equal(isValidAiDelegationId('map-a card-b 1258'), false)
+})
+
+test('이미 끝난 AionCore operation은 상위 대화 재개 대기 상태로 복구한다', () => {
+  assert.deepEqual(initialAiDelegationRuntime({
+    state: 'completed',
+    turnId: 'turn-child',
+  }, '2026-08-11T09:00:00.000Z'), {
+    state: 'waiting-parent',
+    childStatus: 'completed',
+    childTurnId: 'turn-child',
+    childError: null,
+    childCompletedAt: '2026-08-11T09:00:00.000Z',
+  })
+})
+
+test('Unity 프로젝트 잠금 대기를 하위 작업 완료로 오인하지 않는다', () => {
+  const runtime = initialAiDelegationRuntime({
+    state: 'waiting_resource',
+    turnId: 'turn-waiting',
+    resource: {
+      kind: 'unity_project',
+      key: 'unity:abc123',
+      projectRoot: 'C:/Git/Holdem/hdtf-client',
+    },
+  })
+  assert.equal(runtime.state, 'waiting-resource')
+  assert.equal(runtime.childTurnId, 'turn-waiting')
+  assert.equal(runtime.resource.key, 'unity:abc123')
+})
