@@ -28,16 +28,39 @@ function runtimeLabel(runtime: AiConversationRuntime, available: boolean) {
   return { className: 'idle', label: '대화 대기' }
 }
 
-export function AiConversationPickerDialog({ mapId, cardId, cardTitle, onSelect, onStartNew, onClose }: {
+export function AiConversationPickerDialog({ mapId, cardId, cardTitle, onSelect, onStartNew, onDeleteUnavailable, onClose }: {
   mapId: string
   cardId: string
   cardTitle: string
   onSelect: (conversationId: string) => void
   onStartNew: () => void
+  onDeleteUnavailable: (conversationId: string) => Promise<{ latestConversationId: string | null }>
   onClose: () => void
 }) {
   const [result, setResult] = useState<ConversationListResponse | null>(null)
   const [error, setError] = useState('')
+  const [deleteError, setDeleteError] = useState('')
+  const [deletingConversationId, setDeletingConversationId] = useState<string | null>(null)
+
+  const deleteUnavailableConversation = async (conversation: ConversationListItem) => {
+    if (conversation.available || deletingConversationId) return
+    const confirmed = window.confirm('AionUi에서 찾을 수 없는 대화입니다. 이 카드에 남은 대화 연결 기록을 삭제할까요?')
+    if (!confirmed) return
+    setDeleteError('')
+    setDeletingConversationId(conversation.conversationId)
+    try {
+      const deleted = await onDeleteUnavailable(conversation.conversationId)
+      setResult((current) => current ? {
+        ...current,
+        latestConversationId: deleted.latestConversationId,
+        conversations: current.conversations.filter((item) => item.conversationId !== conversation.conversationId),
+      } : current)
+    } catch (deleteFailure) {
+      setDeleteError(deleteFailure instanceof Error ? deleteFailure.message : '대화 연결 기록을 삭제하지 못했습니다.')
+    } finally {
+      setDeletingConversationId(null)
+    }
+  }
 
   useEffect(() => {
     const controller = new AbortController()
@@ -73,38 +96,55 @@ export function AiConversationPickerDialog({ mapId, cardId, cardTitle, onSelect,
         <div className="ai-conversation-picker-content">
           {!result && !error && <div className="ai-conversation-picker-message">연결된 대화를 확인하는 중…</div>}
           {error && <div className="ai-conversation-picker-message error"><strong>대화 목록을 불러오지 못했습니다.</strong><span>{error}</span></div>}
+          {deleteError && <div className="ai-conversation-picker-delete-error" role="alert">{deleteError}</div>}
           {result?.conversations.map((conversation) => {
             const status = runtimeLabel(conversation.runtime, conversation.available)
             const isLatest = result.latestConversationId === conversation.conversationId
             return (
-              <button
-                type="button"
+              <article
                 className={`ai-conversation-choice ${conversation.available ? '' : 'unavailable'}`}
                 key={conversation.conversationId}
-                onClick={() => onSelect(conversation.conversationId)}
               >
-                <span className="ai-conversation-choice-heading">
-                  <span className={`ai-conversation-choice-status ${status.className}`}><i />{status.label}</span>
-                  {isLatest && <em>최근 연결</em>}
-                </span>
-                <strong>{conversation.name || 'AionUi 대화'}</strong>
-                <span className="ai-conversation-choice-model">
-                  {conversation.agent?.label ?? 'AI 종류 정보 없음'} <span>({conversation.model?.label ?? '모델 정보 없음'})</span>
-                </span>
-                {(conversation.mode || conversation.thoughtLevel) && (
-                  <span className="ai-conversation-choice-options">
-                    {conversation.mode && <span>권한 {conversation.mode.label}</span>}
-                    {conversation.thoughtLevel && <span>사고 수준 {conversation.thoughtLevel.label}</span>}
+                <button
+                  type="button"
+                  className="ai-conversation-choice-open"
+                  disabled={deletingConversationId === conversation.conversationId}
+                  onClick={() => onSelect(conversation.conversationId)}
+                >
+                  <span className="ai-conversation-choice-heading">
+                    <span className={`ai-conversation-choice-status ${status.className}`}><i />{status.label}</span>
+                    {isLatest && <em>최근 연결</em>}
                   </span>
+                  <strong>{conversation.name || 'AionUi 대화'}</strong>
+                  <span className="ai-conversation-choice-model">
+                    {conversation.agent?.label ?? 'AI 종류 정보 없음'} <span>({conversation.model?.label ?? '모델 정보 없음'})</span>
+                  </span>
+                  {(conversation.mode || conversation.thoughtLevel) && (
+                    <span className="ai-conversation-choice-options">
+                      {conversation.mode && <span>권한 {conversation.mode.label}</span>}
+                      {conversation.thoughtLevel && <span>사고 수준 {conversation.thoughtLevel.label}</span>}
+                    </span>
+                  )}
+                  {conversation.requestPreview && <span className="ai-conversation-choice-request">{conversation.requestPreview}</span>}
+                  {conversation.workspace && <small className="workspace" title={conversation.workspace}>{conversation.workspace}</small>}
+                  <span className="ai-conversation-choice-capabilities">
+                    <span title={conversation.skills.map((item) => item.label).join(', ')}><b>스킬</b>{conversation.skills.length > 0 ? conversation.skills.map((item) => item.label).join(', ') : '없음'}</span>
+                    <span title={conversation.mcpServers.map((item) => item.label).join(', ')}><b>MCP</b>{conversation.mcpServers.length > 0 ? conversation.mcpServers.map((item) => item.label).join(', ') : '없음'}</span>
+                  </span>
+                  <span className="ai-conversation-choice-meta"><span>{conversation.startedBy?.label ?? '시작한 편집자 정보 없음'}</span><time>{displayDate(conversation.startedAt ?? conversation.linkedAt)}</time></span>
+                </button>
+                {!conversation.available && (
+                  <button
+                    type="button"
+                    className="ai-conversation-choice-delete"
+                    disabled={deletingConversationId !== null}
+                    onClick={() => { void deleteUnavailableConversation(conversation) }}
+                    aria-label={`${conversation.name || 'AionUi 대화'} 연결 기록 삭제`}
+                  >
+                    {deletingConversationId === conversation.conversationId ? '삭제 중…' : '삭제'}
+                  </button>
                 )}
-                {conversation.requestPreview && <span className="ai-conversation-choice-request">{conversation.requestPreview}</span>}
-                {conversation.workspace && <small className="workspace" title={conversation.workspace}>{conversation.workspace}</small>}
-                <span className="ai-conversation-choice-capabilities">
-                  <span title={conversation.skills.map((item) => item.label).join(', ')}><b>스킬</b>{conversation.skills.length > 0 ? conversation.skills.map((item) => item.label).join(', ') : '없음'}</span>
-                  <span title={conversation.mcpServers.map((item) => item.label).join(', ')}><b>MCP</b>{conversation.mcpServers.length > 0 ? conversation.mcpServers.map((item) => item.label).join(', ') : '없음'}</span>
-                </span>
-                <span className="ai-conversation-choice-meta"><span>{conversation.startedBy?.label ?? '시작한 편집자 정보 없음'}</span><time>{displayDate(conversation.startedAt ?? conversation.linkedAt)}</time></span>
-              </button>
+              </article>
             )
           })}
           {result && result.conversations.length === 0 && <div className="ai-conversation-picker-message">연결된 AI 대화가 없습니다.</div>}

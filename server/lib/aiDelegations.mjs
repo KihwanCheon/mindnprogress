@@ -4,6 +4,10 @@ export function isValidAiDelegationId(value) {
   return AI_DELEGATION_ID_PATTERN.test(String(value ?? ''))
 }
 
+export function formatAiConversationTitle(documentTitle, cardTitle) {
+  return `${documentTitle}: ${cardTitle}`.replace(/\s+/g, ' ').trim().slice(0, 120)
+}
+
 export function initialAiDelegationRuntime(dispatch, completedAt = new Date().toISOString()) {
   const state = String(dispatch?.state ?? '').trim()
   const childTurnId = String(dispatch?.turnId ?? '').trim() || null

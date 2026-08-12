@@ -9,6 +9,7 @@ import { detectReleasedWaitingItems } from './lib/waitingItems.mjs'
 import { resolveAttributionWithoutToken, resolveScopedAttribution } from './lib/attributionScope.mjs'
 import { readAionUiSubscriptionUsage } from './lib/aionUiSubscriptionUsage.mjs'
 import {
+  formatAiConversationTitle,
   initialAiDelegationRuntime,
   isValidAiDelegationId,
 } from './lib/aiDelegations.mjs'
@@ -48,6 +49,7 @@ import {
   appendAiConversationLink,
   isAiConversationLinked,
   normalizeAiConversationLink,
+  removeAiConversationLink,
 } from '../src/utils/aiConversations.mjs'
 import {
   AionUiExternalLaunchPayloadError,
@@ -1476,7 +1478,9 @@ function parentWakeInstruction(delegation, result) {
 - 선택 방식: ${delegation.strategy === 'resume' ? '기존 대화 이어가기' : '새 대화 시작'}
 - 선택 이유: ${delegation.decisionReason}
 
-${result ? `## 하위 AI의 마지막 응답\n\n${result}\n\n` : ''}MindNProgress에서 하위 카드의 최신 설명·공유 지식·댓글·상태를 다시 확인하고, 결과가 상위 업무와 다른 하위 업무에 미치는 영향을 판단해 다음 작업을 이어가세요. 하위 AI의 응답은 참고 자료이므로 실제 카드와 산출물을 기준으로 검증하세요.`
+${result ? `## 하위 AI의 마지막 응답\n\n${result}\n\n` : ''}MindNProgress에서 하위 카드의 최신 설명·공유 지식·댓글·상태를 다시 확인하고, 결과가 상위 업무와 다른 하위 업무에 미치는 영향을 판단해 다음 작업을 이어가세요. 하위 AI의 응답은 참고 자료이므로 실제 카드와 산출물을 기준으로 검증하세요.
+
+다음 작업을 위임하기로 판단했다면 이번 턴의 최종 응답 전에 mindnprogress_delegate_ai_work를 실제로 호출하고 성공 결과를 확인하세요. 성공을 확인하기 전에는 “위임했습니다”라고 쓰지 말고, 실제 호출 없이 “위임하겠습니다” 또는 “이어서 진행하겠습니다”와 같은 미래형 약속으로 턴을 끝내지 마세요. 위임할 수 없다면 실행을 약속하지 말고 차단 원인과 필요한 조치를 현재 응답에 명시하세요.`
 }
 
 async function pollAiDelegations() {
@@ -3319,7 +3323,12 @@ const server = createServer(async (request, response) => {
         return sendJson(response, 404, { error: '상위 카드 또는 위임 대상 카드를 찾을 수 없습니다.' })
       }
       if (!isHierarchyDescendant(map, parentCard.id, targetCard.id)) {
-        return sendJson(response, 400, { error: '현재 카드의 하위 카드에만 AI 작업을 위임할 수 있습니다.' })
+        return sendJson(response, 400, {
+          error: `위임 기준 카드 "${parentCard.data?.label ?? parentCard.id}"(${parentCard.id})의 계층상 하위 카드에만 AI 작업을 위임할 수 있습니다. 대상은 "${targetCard.data?.label ?? targetCard.id}"(${targetCard.id})입니다.`,
+          code: 'AI_DELEGATION_TARGET_OUTSIDE_SOURCE',
+          sourceCardId: parentCard.id,
+          targetCardId: targetCard.id,
+        })
       }
       if (map.version !== sourceRevision) {
         let recoveredDispatch = null
@@ -3437,7 +3446,7 @@ const server = createServer(async (request, response) => {
             ...(strategy === 'resume' ? { targetConversationId } : {
               create: {
                 agentId: selection.agent.id,
-                title: targetCard.data?.label ?? targetCard.id,
+                title: formatAiConversationTitle(map.title, targetCard.data?.label ?? targetCard.id),
                 modelId: selection.model.id,
                 mode: selection.mode?.id ?? null,
                 thoughtLevel: selection.thoughtLevel?.id ?? null,
@@ -3557,6 +3566,57 @@ const server = createServer(async (request, response) => {
         delegation: delegationPublicView(delegation),
         mapVersion: updatedMap.version,
         repeated: false,
+      })
+    }
+
+    const cardAiConversationItemRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/cards\/([^/]+)\/ai-conversations\/([^/]+)$/)
+    if (cardAiConversationItemRoute && request.method === 'DELETE') {
+      const user = requireUser(request, response)
+      if (!user) return
+      if (!canEdit(user)) return sendJson(response, 403, { error: '편집자만 AI 대화 연결을 삭제할 수 있습니다.' })
+      const mapId = decodeURIComponent(cardAiConversationItemRoute[1])
+      const cardId = decodeURIComponent(cardAiConversationItemRoute[2])
+      const conversationId = decodeURIComponent(cardAiConversationItemRoute[3])
+      if (!isValidMapId(mapId)
+        || !cardId || cardId.length > 120
+        || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$/.test(conversationId)) {
+        return sendJson(response, 400, { error: '문서, 카드 또는 대화 ID가 올바르지 않습니다.' })
+      }
+      const map = await readMap(mapId)
+      const card = map?.nodes.find((node) => node.id === cardId)
+      if (!map || map.trashedAt || !card) return sendJson(response, 404, { error: '카드를 찾을 수 없습니다.' })
+      if (!isAiConversationLinked(card.data, conversationId)) {
+        return sendJson(response, 404, { error: '카드에 연결된 AI 대화를 찾을 수 없습니다.' })
+      }
+
+      const remainingLinks = removeAiConversationLink(card.data, conversationId)
+      const latestConversationId = remainingLinks.at(-1)?.conversationId ?? null
+      const nextData = { ...card.data }
+      if (remainingLinks.length > 0) nextData.aiConversations = remainingLinks
+      else delete nextData.aiConversations
+      if (latestConversationId) nextData.aiConversationId = latestConversationId
+      else delete nextData.aiConversationId
+      const updatedMap = await saveMap(mapId, {
+        nodes: map.nodes.map((node) => node.id === cardId ? { ...node, data: nextData } : node),
+        edges: map.edges,
+      }, user, map.title, map.color, 'content')
+
+      const attributionKey = conversationAttributionKey(mapId, cardId)
+      if (aiConversationAttributions.get(attributionKey)?.conversationId === conversationId) {
+        aiConversationAttributions.delete(attributionKey)
+      }
+      for (const [tokenHash, attribution] of aiAttributions.entries()) {
+        if (attribution.mapId === mapId && attribution.cardId === cardId && attribution.conversationId === conversationId) {
+          aiAttributions.delete(tokenHash)
+        }
+      }
+      await Promise.all([persistAiAttributions(), persistAiConversationAttributions()])
+      broadcastMapChange(request, mapId, 'content', user)
+      return sendJson(response, 200, {
+        map: updatedMap,
+        card: updatedMap.nodes.find((node) => node.id === cardId),
+        removedConversationId: conversationId,
+        latestConversationId,
       })
     }
 
@@ -4574,6 +4634,25 @@ const server = createServer(async (request, response) => {
         revisions: historyPage.revisions,
         historyHasMore: historyPage.hasMore,
         historyNextOffset: historyPage.nextOffset,
+      })
+    }
+
+    const dailyBackupPreviewRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/backups\/daily\/(\d{4}-\d{2}-\d{2})\/preview$/)
+    if (dailyBackupPreviewRoute && request.method === 'GET') {
+      const mapId = decodeURIComponent(dailyBackupPreviewRoute[1])
+      const date = dailyBackupPreviewRoute[2]
+      if (!isValidMapId(mapId) || !isValidDailyBackupDate(date)) return sendJson(response, 400, { error: '올바르지 않은 일일 백업 요청입니다.' })
+      const user = requireUser(request, response)
+      if (!user) return
+      const map = await readMap(mapId)
+      if (!map || map.trashedAt) return sendJson(response, 404, { error: '마인드맵을 찾을 수 없습니다.' })
+      const backup = await readDailyBackup(mapId, date)
+      if (!backup) return sendJson(response, 404, { error: '일일 백업을 찾을 수 없습니다.' })
+      return sendJson(response, 200, {
+        backup: {
+          ...dailyBackupSummary(backup),
+          map: backup.map,
+        },
       })
     }
 

@@ -3177,6 +3177,28 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     if (conversationId) void openAiConversation(conversationId, cardId, mapId)
   }
 
+  const deleteUnavailableAiConversation = async (mapId: string, cardId: string, conversationId: string) => {
+    const result = await apiRequest<{
+      map: MapDocument
+      card: MindMapNode
+      removedConversationId: string
+      latestConversationId: string | null
+    }>(`/api/maps/${encodeURIComponent(mapId)}/cards/${encodeURIComponent(cardId)}/ai-conversations/${encodeURIComponent(conversationId)}`, {
+      method: 'DELETE',
+    })
+    if (mapId === activeMapId) {
+      serverBaseline.current = structuredClone(result.map)
+      setNodes((current) => current.map((node) => node.id === cardId
+        ? { ...node, data: result.card.data }
+        : node))
+      setDocuments((current) => current.map((document) => document.id === mapId
+        ? { ...document, version: result.map.version, updatedAt: result.map.updatedAt, updatedBy: result.map.updatedBy }
+        : document))
+      setSavedAt('서버와 동기화됨')
+    }
+    return { latestConversationId: result.latestConversationId }
+  }
+
   const startOrOpenContextNodeAiConversation = () => {
     if (!contextMenuNode) return
     setNodeContextMenu(null)
@@ -6978,6 +7000,11 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
             setAiConversationPicker(null)
             setAiDialogOpen(true)
           }}
+          onDeleteUnavailable={(conversationId) => deleteUnavailableAiConversation(
+            aiConversationPicker.mapId,
+            aiConversationPicker.cardId,
+            conversationId,
+          )}
           onClose={() => setAiConversationPicker(null)}
         />
       )}

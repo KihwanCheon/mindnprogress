@@ -61,6 +61,24 @@ async function startMockAionUi({
     if (request.url === '/api/providers') return send([])
     if (request.url === '/api/skills') return send([])
     if (request.url === '/api/mcp/servers') return send([])
+    if (request.url === '/api/internal/conversation-runtimes/active') {
+      return send({
+        schema_version: 1,
+        generated_at: Date.now(),
+        items: conversationRuntimeState === 'running'
+          ? [{
+              conversation_id: conversationId,
+              runtime: {
+                state: 'running',
+                is_processing: true,
+                task_status: 'running',
+                pending_confirmations: 0,
+                turn_id: 'turn-mcp-runtime-test',
+              },
+            }]
+          : [],
+      })
+    }
     if (request.url === `/api/conversations/${conversationId}`) {
       return send({
         id: conversationId,
@@ -86,6 +104,20 @@ async function startMockAionUi({
         type: 'acp',
         created_at: conversationCreatedAt + 120_000,
         modified_at: conversationCreatedAt + 180_000,
+        extra: { agent_id: agentId, current_model_id: modelId, backend: 'claude' },
+        runtime: {
+          state: 'idle', is_processing: false, task_status: 'finished', can_send_message: true,
+          pending_confirmations: 0, turn_id: null,
+        },
+      })
+    }
+    if (request.url === '/api/conversations/conversation-inspected-card') {
+      return send({
+        id: 'conversation-inspected-card',
+        name: '추가 조회 카드 대화',
+        type: 'acp',
+        created_at: conversationCreatedAt + 90_000,
+        modified_at: conversationCreatedAt + 100_000,
         extra: { agent_id: agentId, current_model_id: modelId, backend: 'claude' },
         runtime: {
           state: 'idle', is_processing: false, task_status: 'finished', can_send_message: true,
@@ -272,13 +304,17 @@ async function main() {
 
     const guide = await invoke('mindnprogress_read_me_first')
     assert.equal(guide.guide.product.name, 'MindNProgress')
-    assert.equal(guide.guide.version, '2.1')
+    assert.equal(guide.guide.version, '2.4')
     assert.match(guide.guide.dataModel.cardContent.sharedKnowledge, /재사용/)
     assert.match(guide.guide.authoringRules.join('\n'), /모든 isWork=true 업무 진행률을 동일 가중치 평균/)
+    assert.match(guide.guide.authoringRules.join('\n'), /확정된 결과를 직접 작업 근거.*주요 지식선.*단순 관련성이나 일회성 참조에는 연결하지 않음/)
     assert.match(guide.guide.operationRules.join('\n'), /변경할 필드만 보내고/)
     assert.match(guide.guide.operationRules.join('\n'), /조회 도구는 문서 version을 변경하지 않으며/)
     assert.match(guide.guide.operationRules.join('\n'), /mindnprogress_get_ai_work_states.*동시에 수정하지 않음/)
     assert.match(guide.guide.operationRules.join('\n'), /기존 AI 대화를 이어갈지 새로 시작할지.*mindnprogress_list_ai_conversations/)
+    assert.match(guide.guide.operationRules.join('\n'), /복수의 독립적인 완료 조건.*필요한 최소한의 결과 중심 체크리스트.*억지로 나누지 않고.*계획 카드에는 생략 가능/)
+    assert.match(guide.guide.operationRules.join('\n'), /위임 기준.*최초로 get_context.*모든 깊이/)
+    assert.match(guide.guide.operationRules.join('\n'), /자동 재개된 턴.*mindnprogress_delegate_ai_work.*미래형 약속/)
     assert.match(guide.guide.operationRules.join('\n'), /unityMCP.*waiting-resource/)
     assert.match(guide.guide.operationRules.join('\n'), /댓글 summary는 \[진행\].*\[차단\].*\[결과\]/)
     assert.match(guide.guide.commentRules.detail, /작업을 이어가거나 결과를 검증/)
@@ -512,7 +548,7 @@ async function main() {
       editorId: attribution.editorId,
       attributionToken: attribution.attributionToken,
     })
-    assert.equal(context.contextSchemaVersion, '2.4')
+    assert.equal(context.contextSchemaVersion, '2.5')
     assert.equal(context.detailLevel, 'focused')
     assert.equal(context.document.nodes, undefined)
     assert.equal(context.document.outline.length, 4)
@@ -706,20 +742,56 @@ async function main() {
     })
     const delegatedChild = delegatedChildCreated.map.nodes.find((node) => node.data?.label === '위임 하위 카드')
     assert.ok(delegatedChild)
+    const inspectedCardAttributionResponse = await fetch(`${apiBaseUrl}/api/integrations/aionui/attributions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: editorSessionCookie },
+      body: JSON.stringify({
+        agentId: 'agent-claude-test',
+        modelId: 'claude-test-model',
+        mapId,
+        cardId: delegatedChild.id,
+      }),
+    })
+    assert.equal(inspectedCardAttributionResponse.status, 201)
+    const inspectedCardAttribution = await inspectedCardAttributionResponse.json()
+    const inspectedCardCompletionResponse = await fetch(inspectedCardAttribution.completionUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversationId: 'conversation-inspected-card' }),
+    })
+    assert.equal(inspectedCardCompletionResponse.status, 200)
+    const delegationSourceDocument = await invoke('mindnprogress_get_document', { mapId })
     const delegationArguments = {
       mapId,
       targetCardId: delegatedChild.id,
       strategy: 'new',
       instruction: '하위 카드의 요구사항을 확인하고 구현과 검증을 완료한 뒤 결과를 기록하세요.',
       decisionReason: '기존 대화가 없어 상위 대화와 같은 실행 환경으로 새 대화를 시작합니다.',
-      sourceRevision: delegatedChildCreated.map.version,
-      idempotencyKey: `mcp-regression:${delegatedChild.id}:${delegatedChildCreated.map.version}`,
+      sourceRevision: delegationSourceDocument.map.version,
+      idempotencyKey: `mcp-regression:${delegatedChild.id}:${delegationSourceDocument.map.version}`,
     }
+    const [inspectedChildContext, inspectedUnrelatedContext] = await Promise.all([
+      invoke('mindnprogress_get_context', {
+        mapId,
+        cardId: delegatedChild.id,
+        editorId: attribution.editorId,
+        attributionToken: attribution.attributionToken,
+      }),
+      invoke('mindnprogress_get_context', {
+        mapId,
+        cardId: 'branch-b',
+        editorId: attribution.editorId,
+        attributionToken: attribution.attributionToken,
+      }),
+    ])
+    assert.equal(inspectedChildContext.selection.card.id, delegatedChild.id)
+    assert.equal(inspectedUnrelatedContext.selection.card.id, 'branch-b')
     const delegated = await invoke('mindnprogress_delegate_ai_work', delegationArguments)
     assert.equal(delegated.delegation.targetConversationId, 'conversation-delegated')
     assert.equal(delegated.delegation.parentConversationId, 'conversation-test')
+    assert.equal(delegated.delegation.parentCardId, 'task-a', '다른 카드 get_context 조회가 위임 기준 카드를 변경했습니다.')
     assert.equal(delegated.delegation.strategy, 'new')
-    assert.equal(delegated.mapVersion, delegatedChildCreated.map.version + 1)
+    assert.equal(delegated.mapVersion, delegationArguments.sourceRevision + 1)
     const delegatedRepeat = await invoke('mindnprogress_delegate_ai_work', delegationArguments)
     assert.equal(delegatedRepeat.repeated, true)
     assert.equal(mockAionUi.dispatchRequests.length, 1, '멱등 재호출이 하위 대화를 중복 실행했습니다.')
@@ -1471,6 +1543,37 @@ async function main() {
     } finally {
       await postExpiryClient.close()
     }
+
+    const deleteLinkEditorLoginResponse = await fetch(`${apiBaseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'mcp-test-editor@mind.local', password: 'McpEditor!2026' }),
+    })
+    assert.equal(deleteLinkEditorLoginResponse.status, 200)
+    editorSessionCookie = deleteLinkEditorLoginResponse.headers.get('set-cookie')?.split(';')[0]
+    assert.ok(editorSessionCookie, '대화 연결 삭제용 테스트 편집자 세션 쿠키가 없습니다.')
+    const deleteConversationLinkResponse = await fetch(`${apiBaseUrl}/api/maps/${encodeURIComponent(mapId)}/cards/task-a/ai-conversations/conversation-test`, {
+      method: 'DELETE',
+      headers: { Cookie: editorSessionCookie, 'X-MNP-Client': 'mcp-test-client' },
+    })
+    assert.equal(deleteConversationLinkResponse.status, 200)
+    const deletedConversationLink = await deleteConversationLinkResponse.json()
+    assert.equal(deletedConversationLink.removedConversationId, 'conversation-test')
+    assert.equal(deletedConversationLink.latestConversationId, null)
+    assert.equal(deletedConversationLink.card.data.aiConversationId, undefined)
+    assert.equal(deletedConversationLink.card.data.aiConversations, undefined)
+    const emptyConversationListResponse = await fetch(`${apiBaseUrl}/api/maps/${encodeURIComponent(mapId)}/cards/task-a/ai-conversations`, {
+      headers: { Cookie: editorSessionCookie },
+    })
+    assert.equal(emptyConversationListResponse.status, 200)
+    const emptyConversationList = await emptyConversationListResponse.json()
+    assert.equal(emptyConversationList.latestConversationId, null)
+    assert.deepEqual(emptyConversationList.conversations, [])
+    const repeatedDeleteConversationLinkResponse = await fetch(`${apiBaseUrl}/api/maps/${encodeURIComponent(mapId)}/cards/task-a/ai-conversations/conversation-test`, {
+      method: 'DELETE',
+      headers: { Cookie: editorSessionCookie },
+    })
+    assert.equal(repeatedDeleteConversationLinkResponse.status, 404)
 
     const uncalledTools = registeredToolNames.filter((name) => !calledTools.has(name))
     assert.deepEqual(uncalledTools, [], `호출되지 않은 MCP 도구: ${uncalledTools.join(', ')}`)

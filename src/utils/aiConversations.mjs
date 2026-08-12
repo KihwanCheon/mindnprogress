@@ -103,6 +103,12 @@ export function appendAiConversationLink(data, value) {
   ]
 }
 
+export function removeAiConversationLink(data, conversationId) {
+  const targetId = cleanText(conversationId, 120)
+  return aiConversationLinksFromData(data)
+    .filter((current) => current.conversationId !== targetId)
+}
+
 export function aiConversationLinkFromAionUiConversation(conversation) {
   if (!conversation || typeof conversation !== 'object' || Array.isArray(conversation)) return null
   const extra = conversation.extra && typeof conversation.extra === 'object' && !Array.isArray(conversation.extra)

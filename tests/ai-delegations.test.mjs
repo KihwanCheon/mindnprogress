@@ -1,9 +1,16 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  formatAiConversationTitle,
   initialAiDelegationRuntime,
   isValidAiDelegationId,
 } from '../server/lib/aiDelegations.mjs'
+
+test('AI 위임으로 만든 새 대화 제목에 문서와 카드 제목을 함께 사용한다', () => {
+  assert.equal(formatAiConversationTitle('JP-로그인', '더미 UI 준비'), 'JP-로그인: 더미 UI 준비')
+  assert.equal(formatAiConversationTitle('문서\n제목', '카드   제목'), '문서 제목: 카드 제목')
+  assert.equal(formatAiConversationTitle('문서', '카드'.repeat(60)).length, 120)
+})
 
 test('콜론을 포함한 위임 ID를 요청과 재시작 복원에서 사용할 수 있다', () => {
   assert.equal(isValidAiDelegationId('map-a:card-b:1258:p0-download-errors'), true)
