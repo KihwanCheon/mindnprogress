@@ -264,6 +264,8 @@ AI가 MindNProgress 밖에서 시작되었다면 먼저 `mindnprogress_read_me_f
 
 처음부터 여러 카드가 필요한 경우 `mindnprogress_create_document`와 `mindnprogress_save_document`를 연속 호출하지 말고 `mindnprogress_create_mindmap`을 사용합니다. 지식선만 바꿀 때는 전체 카드와 장문 본문을 다시 전달하는 `mindnprogress_save_document` 대신 지식선 전용 도구를 사용합니다. 전용 도구는 최신 문서를 내부에서 조회해 관계 변경만 재적용하고 일시적인 버전 충돌을 최대 3회까지 다시 시도합니다. 전체 저장과 문서 정보 변경은 최신 `baseVersion`을 사용하며, 버전 충돌이 발생하면 문서를 다시 조회해야 합니다.
 
+MCP 도구에서 카드를 지정할 때는 `cardId`를 사용합니다. 상위 카드는 `parentCardId`, 이동할 새 상위 카드는 `newParentCardId`, 답글의 상위 댓글은 `parentCommentId`로 지정합니다. 기존 `nodeId`, `parentId`, `newParentId`는 이미 시작된 AI 대화와의 호환을 위해 한시적으로 허용되지만 새 호출에서는 사용하지 않습니다. 선호 필드와 호환 필드를 동시에 서로 다른 값으로 전달하면 안전을 위해 요청이 거부됩니다. 원시 문서의 `nodes`, 댓글 저장 데이터의 `nodeId` 등 내부 저장 구조는 기존 문서 및 백업 호환을 위해 유지됩니다.
+
 단일 카드의 일부 필드만 변경할 때는 `mindnprogress_update_card`의 `data`에 변경할 필드만 전달합니다. 현재 카드 전체 데이터를 재전송하면 조회 이후 다른 편집자가 변경한 값을 오래된 값으로 덮어쓸 수 있습니다. 일반 카드에서 생략한 필드와 `position`은 보존되고, 빈 문자열이나 빈 배열을 명시하면 해당 필드가 초기화됩니다. 단, `status=done` 또는 `progress>=100`을 적용하면 `waitingItems`는 전달 여부와 관계없이 자동으로 해제되며 Ref 카드는 원본이 관리하는 제목·설명·공유 지식·업무 필드 등이 최신 원본 값으로 동기화될 수 있습니다.
 
 ### 문서 목록과 그룹

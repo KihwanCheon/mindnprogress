@@ -52,9 +52,9 @@ function defaultChildMindMapPosition(parentPosition, siblingPositions, parentWid
   }
 }
 
-const serverInstructions = `MindNProgress는 마인드맵과 업무 진행 관리를 결합한 웹 서비스입니다. MindNProgress 밖에서 시작해 문서 ID나 카드 ID가 없다면 mindnprogress_read_me_first를 먼저 호출하세요. 선택 문서와 카드가 있다면 mindnprogress_get_context로 제품 규칙과 최신 문서 구조를 먼저 확인하세요. AionUi가 발급한 attributionToken이 없는 외부 MCP 세션은 자신이 현재 AI 종류와 모델을 정확히 알고 있을 때 get_context의 aiType과 aiModel에 함께 전달하고, 알지 못하면 추측하지 마세요. get_context의 selection.taskLinks.startupInspection을 따르세요. mode가 knowledge-guided이면 primary 선행 지식 중 kind=image인 항목은 imageAccess.localPath의 원본을 사용 가능한 로컬 이미지 열람 도구로 직접 확인하고 설명과 댓글을 함께 사용하며, 일반 카드는 sharedKnowledge를 먼저 재사용하고 설명과 댓글로 보완합니다. fallbackSources와 fallbackTargets는 정보가 부족할 때만 선택적으로 조사합니다. mode가 default이고 required가 true이면 targets의 업무 본문, 댓글, 첨부파일 목록과 관련 링크를 조사하세요. 진행 과정과 결과는 댓글에 기록하고, 다른 카드나 후속 세션이 재사용할 안정적인 사실·결정·제약은 카드의 sharedKnowledge에 요약하세요. AI 댓글은 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 충실히 담은 detail로 작성하며, 요약 때문에 상세를 축약하지 마세요. 외부 전달물이나 결정 대기는 waitingItems로 기록하고 제목에 대기 문구를 붙이지 마세요. 대기를 등록할 때는 [차단], 해제할 때는 [진행] 댓글로 이유와 재개 상태를 기록하세요. 카드 일부 필드만 변경할 때는 mindnprogress_update_card의 data에 변경할 필드만 보내고 현재 카드 전체 데이터를 재전송하지 마세요. 일반 카드에서 생략한 필드와 위치는 보존되지만 완료 상태 또는 진행률 100 적용 시 waitingItems는 자동으로 해제되며, Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 선택 카드 밖의 형제·하위·선행 카드를 함께 수정하기 전에는 mindnprogress_get_ai_work_states로 해당 카드에 다른 AI 작업이 진행 중인지 확인하세요. running 또는 waiting-confirmation인 카드는 사용자 지시 없이 동시에 수정하지 마세요. 지식선만 변경할 때는 전체 문서를 다시 보내지 말고 지식선 전용 도구를 사용하세요. 조회 도구는 문서 버전을 변경하지 않지만 카드·관계 편집과 AI 대화 ID 연결은 버전을 증가시킬 수 있습니다. 특정 자료가 있다고 가정하지 마세요. 여러 카드로 구성된 새 문서는 mindnprogress_create_mindmap으로 한 번에 생성하고, 변경 후에는 최신 문서를 다시 조회해 결과를 검증하세요. 비밀번호 변경과 계정 관리 작업은 지원하지 않습니다.`
+const serverInstructions = `MindNProgress는 마인드맵과 업무 진행 관리를 결합한 웹 서비스입니다. MindNProgress 밖에서 시작해 문서 ID나 카드 ID가 없다면 mindnprogress_read_me_first를 먼저 호출하세요. 선택 문서와 카드가 있다면 mindnprogress_get_context로 제품 규칙과 최신 문서 구조를 먼저 확인하세요. MCP 도구에서 카드를 지정할 때는 cardId 계열 인자를 사용하세요. nodeId 계열 인자는 기존 대화 호환용이므로 새 호출에서는 사용하지 마세요. AionUi가 발급한 attributionToken이 없는 외부 MCP 세션은 자신이 현재 AI 종류와 모델을 정확히 알고 있을 때 get_context의 aiType과 aiModel에 함께 전달하고, 알지 못하면 추측하지 마세요. get_context의 selection.taskLinks.startupInspection을 따르세요. mode가 knowledge-guided이면 primary 선행 지식 중 kind=image인 항목은 imageAccess.localPath의 원본을 사용 가능한 로컬 이미지 열람 도구로 직접 확인하고 설명과 댓글을 함께 사용하며, 일반 카드는 sharedKnowledge를 먼저 재사용하고 설명과 댓글로 보완합니다. fallbackSources와 fallbackTargets는 정보가 부족할 때만 선택적으로 조사합니다. mode가 default이고 required가 true이면 targets의 업무 본문, 댓글, 첨부파일 목록과 관련 링크를 조사하세요. 진행 과정과 결과는 댓글에 기록하고, 다른 카드나 후속 세션이 재사용할 안정적인 사실·결정·제약은 카드의 sharedKnowledge에 요약하세요. AI 댓글은 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 충실히 담은 detail로 작성하며, 요약 때문에 상세를 축약하지 마세요. 외부 전달물이나 결정 대기는 waitingItems로 기록하고 제목에 대기 문구를 붙이지 마세요. 대기를 등록할 때는 [차단], 해제할 때는 [진행] 댓글로 이유와 재개 상태를 기록하세요. 카드 일부 필드만 변경할 때는 mindnprogress_update_card의 data에 변경할 필드만 보내고 현재 카드 전체 데이터를 재전송하지 마세요. 일반 카드에서 생략한 필드와 위치는 보존되지만 완료 상태 또는 진행률 100 적용 시 waitingItems는 자동으로 해제되며, Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 선택 카드 밖의 형제·하위·선행 카드를 함께 수정하기 전에는 mindnprogress_get_ai_work_states로 해당 카드에 다른 AI 작업이 진행 중인지 확인하세요. running 또는 waiting-confirmation인 카드는 사용자 지시 없이 동시에 수정하지 마세요. 지식선만 변경할 때는 전체 문서를 다시 보내지 말고 지식선 전용 도구를 사용하세요. 조회 도구는 문서 버전을 변경하지 않지만 카드·관계 편집과 AI 대화 ID 연결은 버전을 증가시킬 수 있습니다. 특정 자료가 있다고 가정하지 마세요. 여러 카드로 구성된 새 문서는 mindnprogress_create_mindmap으로 한 번에 생성하고, 변경 후에는 최신 문서를 다시 조회해 결과를 검증하세요. 비밀번호 변경과 계정 관리 작업은 지원하지 않습니다.`
 const productGuide = {
-  version: '2.4',
+  version: '2.5',
   product: {
     name: 'MindNProgress',
     purpose: '아이디어를 계층형 마인드맵으로 구조화하고 실행 업무의 진행 상황을 같은 문서에서 관리하는 웹 서비스',
@@ -121,6 +121,7 @@ const productGuide = {
   ],
   operationRules: [
     '분석과 편집 전에 mindnprogress_get_context로 최신 버전과 제품 규칙을 확인',
+    'MCP 도구에서 카드를 지정할 때는 cardId, parentCardId, newParentCardId를 사용하고 댓글의 상위 답글은 parentCommentId를 사용함. nodeId, parentId, newParentId는 기존 대화 호환용이므로 새 호출에서는 사용하지 않음',
     'get_context의 startupInspection.mode가 knowledge-guided이면 주요 선행 지식을 먼저 활용하되 kind=image인 source는 imageAccess.localPath의 원본을 로컬 이미지 열람 도구로 직접 확인하고, fallback은 정보가 부족할 때만 조사',
     'startupInspection.mode가 default이고 조사가 요구되면 실제 작업 전에 선택 카드와 최상위 카드의 업무 링크를 조사하되 특정 첨부나 자료가 있다고 가정하지 않음',
     '여러 카드로 새 문서를 만들 때 mindnprogress_create_mindmap을 한 번만 호출',
@@ -279,6 +280,21 @@ function registerTool(server, name, description, schema, handler, options = {}) 
       }
     }
   })
+}
+
+function resolveAliasedId(preferredValue, legacyValue, {
+  preferredName,
+  legacyName,
+  required = true,
+}) {
+  if (preferredValue !== undefined && legacyValue !== undefined && preferredValue !== legacyValue) {
+    throw new Error(`${preferredName}와 호환용 ${legacyName}의 값이 서로 다릅니다.`)
+  }
+  const resolved = preferredValue ?? legacyValue
+  if (required && resolved === undefined) {
+    throw new Error(`${preferredName}를 입력해 주세요.`)
+  }
+  return resolved
 }
 
 async function getDocument(mapId) {
@@ -452,7 +468,7 @@ function paginateComments(comments, { offset = 0, limit = 50, order = 'desc' } =
   }
 }
 
-function focusedCommentWindow(comments, mapId, nodeId) {
+function focusedCommentWindow(comments, mapId, cardId) {
   const items = comments.slice(-contextCommentLimit)
   const hasMore = comments.length > items.length
   const hasDetail = items.some((comment) => comment.hasDetail === true)
@@ -466,7 +482,7 @@ function focusedCommentWindow(comments, mapId, nodeId) {
       tool: 'mindnprogress_list_comments',
       detailToolArguments: hasDetail ? {
         mapId,
-        nodeId,
+        cardId,
         offset: 0,
         limit: Math.max(1, items.length),
         order: 'desc',
@@ -474,7 +490,7 @@ function focusedCommentWindow(comments, mapId, nodeId) {
       } : null,
       nextToolArguments: hasMore ? {
         mapId,
-        nodeId,
+        cardId,
         offset: items.length,
         limit: 50,
         order: 'desc',
@@ -920,7 +936,7 @@ async function main() {
         hasMore: source.comments.length > 0,
         tool: 'mindnprogress_list_comments',
         nextToolArguments: source.comments.length > 0
-          ? { mapId, nodeId: source.card.id, offset: 0, limit: 50, order: 'desc', includeDetail: true }
+          ? { mapId, cardId: source.card.id, offset: 0, limit: 50, order: 'desc', includeDetail: true }
           : null,
       },
       taskLink: source.taskLink,
@@ -1196,15 +1212,21 @@ async function main() {
 
   registerTool(server, 'mindnprogress_add_card', '문서에 새 카드 또는 하위 카드를 추가합니다. 외부 전달물이나 결정 대기는 제목이 아니라 waitingItems로 기록합니다.', {
     mapId: z.string().min(1),
-    parentId: z.string().optional(),
+    parentCardId: z.string().min(1).optional().describe('새 카드를 추가할 상위 카드 ID. 최상위 카드를 추가할 때는 생략'),
+    parentId: z.string().min(1).optional().describe('기존 대화 호환용 상위 카드 ID. 새 호출에서는 parentCardId 사용'),
     data: nodeDataSchema,
     position: z.object({ x: z.number(), y: z.number() }).optional(),
-  }, async ({ mapId, parentId, data, position }) => {
+  }, async ({ mapId, parentCardId, parentId, data, position }) => {
+    const resolvedParentCardId = resolveAliasedId(parentCardId, parentId, {
+      preferredName: 'parentCardId',
+      legacyName: 'parentId',
+      required: false,
+    })
     const map = await getDocument(mapId)
-    const parent = parentId ? map.nodes.find((node) => node.id === parentId) : null
-    if (parentId && !parent) throw new Error('상위 카드를 찾을 수 없습니다.')
-    const siblingIds = new Set(parentId
-      ? map.edges.filter((edge) => isHierarchyEdge(edge) && edge.source === parentId).map((edge) => edge.target)
+    const parent = resolvedParentCardId ? map.nodes.find((node) => node.id === resolvedParentCardId) : null
+    if (resolvedParentCardId && !parent) throw new Error('상위 카드를 찾을 수 없습니다.')
+    const siblingIds = new Set(resolvedParentCardId
+      ? map.edges.filter((edge) => isHierarchyEdge(edge) && edge.source === resolvedParentCardId).map((edge) => edge.target)
       : [])
     const siblingPositions = map.nodes.filter((node) => siblingIds.has(node.id)).map((node) => node.position)
     const nodeId = `node-${Date.now().toString(36)}-${randomBytes(3).toString('hex')}`
@@ -1224,26 +1246,31 @@ async function main() {
       },
     }
     map.nodes.push(node)
-    if (parentId) map.edges.push({
-      id: `edge-${parentId}-${nodeId}`,
-      source: parentId,
+    if (resolvedParentCardId) map.edges.push({
+      id: `edge-${resolvedParentCardId}-${nodeId}`,
+      source: resolvedParentCardId,
       target: nodeId,
       sourceHandle: parent?.data?.kind === 'image' ? 'image-source-right' : undefined,
       type: 'default',
       data: { relation: 'hierarchy' },
       markerEnd: { type: 'arrowclosed', width: 16, height: 16 },
     })
-    return saveDocument(map, false, parentId ?? '')
+    return saveDocument(map, false, resolvedParentCardId ?? '')
   })
 
   registerTool(server, 'mindnprogress_update_card', '카드의 일부 필드만 부분 병합 방식으로 변경합니다. data에 포함한 필드만 변경되고 일반 카드에서 생략한 필드와 position은 보존되므로 현재 카드 전체 데이터를 재전송하지 마세요. 빈 문자열과 빈 배열은 해당 필드를 명시적으로 초기화합니다. 단, status=done 또는 progress>=100이면 waitingItems가 자동으로 비워지며 Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. description은 업무 요청과 배경, sharedKnowledge는 다른 카드가 재사용할 안정적인 결론에 사용하고 외부 대기는 waitingItems로 기록하세요.', {
     mapId: z.string().min(1),
-    nodeId: z.string().min(1),
+    cardId: z.string().min(1).optional().describe('수정할 카드 ID. 새 호출에서는 이 필드를 사용'),
+    nodeId: z.string().min(1).optional().describe('기존 대화 호환용 카드 ID. 새 호출에서는 cardId 사용'),
     data: nodeDataSchema.partial().describe('변경할 카드 필드만 포함하는 부분 병합 데이터. 일반 카드에서 생략한 필드는 보존되므로 현재 카드 전체 데이터를 재전송하지 않습니다. 빈 문자열과 빈 배열은 명시적 초기화이며, 완료 상태 또는 진행률 100 적용 시 waitingItems는 자동으로 비워지고 Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다.'),
     position: z.object({ x: z.number(), y: z.number() }).optional(),
-  }, async ({ mapId, nodeId, data, position }) => {
+  }, async ({ mapId, cardId, nodeId, data, position }) => {
+    const resolvedCardId = resolveAliasedId(cardId, nodeId, {
+      preferredName: 'cardId',
+      legacyName: 'nodeId',
+    })
     const map = await getDocument(mapId)
-    const node = map.nodes.find((item) => item.id === nodeId)
+    const node = map.nodes.find((item) => item.id === resolvedCardId)
     if (!node) throw new Error('카드를 찾을 수 없습니다.')
     const nextData = {
       ...node.data,
@@ -1254,47 +1281,62 @@ async function main() {
       ? { ...nextData, waitingItems: [] }
       : nextData
     if (position) node.position = position
-    return saveDocument(map, false, nodeId)
+    return saveDocument(map, false, resolvedCardId)
   })
 
   registerTool(server, 'mindnprogress_move_card', '카드와 모든 하위 카드를 유지한 채 다른 카드의 하위로 이동합니다.', {
     mapId: z.string().min(1),
-    nodeId: z.string().min(1),
-    newParentId: z.string().min(1),
-  }, async ({ mapId, nodeId, newParentId }) => {
+    cardId: z.string().min(1).optional().describe('이동할 카드 ID. 새 호출에서는 이 필드를 사용'),
+    nodeId: z.string().min(1).optional().describe('기존 대화 호환용 카드 ID. 새 호출에서는 cardId 사용'),
+    newParentCardId: z.string().min(1).optional().describe('새 상위 카드 ID. 새 호출에서는 이 필드를 사용'),
+    newParentId: z.string().min(1).optional().describe('기존 대화 호환용 새 상위 카드 ID. 새 호출에서는 newParentCardId 사용'),
+  }, async ({ mapId, cardId, nodeId, newParentCardId, newParentId }) => {
+    const resolvedCardId = resolveAliasedId(cardId, nodeId, {
+      preferredName: 'cardId',
+      legacyName: 'nodeId',
+    })
+    const resolvedParentCardId = resolveAliasedId(newParentCardId, newParentId, {
+      preferredName: 'newParentCardId',
+      legacyName: 'newParentId',
+    })
     const map = await getDocument(mapId)
-    if (!map.nodes.some((node) => node.id === nodeId) || !map.nodes.some((node) => node.id === newParentId)) {
+    if (!map.nodes.some((node) => node.id === resolvedCardId) || !map.nodes.some((node) => node.id === resolvedParentCardId)) {
       throw new Error('이동할 카드 또는 새 상위 카드를 찾을 수 없습니다.')
     }
-    if (nodeId === newParentId || descendantsOf(nodeId, map.edges).has(newParentId)) {
+    if (resolvedCardId === resolvedParentCardId || descendantsOf(resolvedCardId, map.edges).has(resolvedParentCardId)) {
       throw new Error('자기 자신이나 하위 카드 아래로 이동할 수 없습니다.')
     }
-    map.edges = map.edges.filter((edge) => isKnowledgeEdge(edge) || edge.target !== nodeId)
+    map.edges = map.edges.filter((edge) => isKnowledgeEdge(edge) || edge.target !== resolvedCardId)
     map.edges.push({
-      id: `edge-${newParentId}-${nodeId}`,
-      source: newParentId,
-      target: nodeId,
+      id: `edge-${resolvedParentCardId}-${resolvedCardId}`,
+      source: resolvedParentCardId,
+      target: resolvedCardId,
       type: 'default',
       data: { relation: 'hierarchy' },
       markerEnd: { type: 'arrowclosed', width: 16, height: 16 },
     })
-    return saveDocument(map, false, nodeId)
+    return saveDocument(map, false, resolvedCardId)
   })
 
   registerTool(server, 'mindnprogress_delete_card', '카드를 삭제합니다. 기본적으로 모든 하위 카드도 함께 삭제합니다.', {
     mapId: z.string().min(1),
-    nodeId: z.string().min(1),
+    cardId: z.string().min(1).optional().describe('삭제할 카드 ID. 새 호출에서는 이 필드를 사용'),
+    nodeId: z.string().min(1).optional().describe('기존 대화 호환용 카드 ID. 새 호출에서는 cardId 사용'),
     includeDescendants: z.boolean().default(true),
-  }, async ({ mapId, nodeId, includeDescendants }) => {
+  }, async ({ mapId, cardId, nodeId, includeDescendants }) => {
+    const resolvedCardId = resolveAliasedId(cardId, nodeId, {
+      preferredName: 'cardId',
+      legacyName: 'nodeId',
+    })
     const map = await getDocument(mapId)
-    const target = map.nodes.find((node) => node.id === nodeId)
+    const target = map.nodes.find((node) => node.id === resolvedCardId)
     if (!target) throw new Error('카드를 찾을 수 없습니다.')
     if (target.data?.kind === 'root') throw new Error('루트 카드는 삭제할 수 없습니다.')
-    const deletedIds = includeDescendants ? descendantsOf(nodeId, map.edges) : new Set()
-    deletedIds.add(nodeId)
+    const deletedIds = includeDescendants ? descendantsOf(resolvedCardId, map.edges) : new Set()
+    deletedIds.add(resolvedCardId)
     map.nodes = map.nodes.filter((node) => !deletedIds.has(node.id))
     map.edges = map.edges.filter((edge) => !deletedIds.has(edge.source) && !deletedIds.has(edge.target))
-    return saveDocument(map, false, nodeId)
+    return saveDocument(map, false, resolvedCardId)
   })
 
   registerTool(server, 'mindnprogress_add_knowledge_line', 'source 카드의 결과를 target 카드가 선행 지식으로 사용하도록 지식선을 추가합니다. 전체 문서를 전달하지 않고 최신 버전에 관계만 안전하게 반영하며 순환과 중복 연결을 거부합니다.', {
@@ -1431,36 +1473,53 @@ async function main() {
     apiRequest('/api/assignees'))
   registerTool(server, 'mindnprogress_list_comments', '문서 또는 특정 카드의 댓글과 답글을 페이지 단위로 조회합니다. 기본 응답은 요약과 상세 존재 여부만 포함하며, 작업 근거나 검증 내용이 더 필요할 때 includeDetail=true를 사용하세요. 다음 댓글이 있으면 nextOffset을 offset으로 전달하세요.', {
     mapId: z.string().min(1),
-    nodeId: z.string().optional(),
+    cardId: z.string().min(1).optional().describe('댓글을 조회할 카드 ID. 생략하면 문서 전체 댓글 조회'),
+    nodeId: z.string().min(1).optional().describe('기존 대화 호환용 카드 ID. 새 호출에서는 cardId 사용'),
     offset: z.number().int().nonnegative().default(0),
     limit: z.number().int().min(1).max(100).default(50),
     order: z.enum(['asc', 'desc']).default('desc'),
     includeDetail: z.boolean().default(false),
-  }, async ({ mapId, nodeId, offset, limit, order, includeDetail }) => {
+  }, async ({ mapId, cardId, nodeId, offset, limit, order, includeDetail }) => {
+    const resolvedCardId = resolveAliasedId(cardId, nodeId, {
+      preferredName: 'cardId',
+      legacyName: 'nodeId',
+      required: false,
+    })
     const query = new URLSearchParams({
       offset: String(offset),
       limit: String(limit),
       order,
       includeDetail: String(includeDetail),
     })
-    if (nodeId) query.set('nodeId', nodeId)
+    if (resolvedCardId) query.set('nodeId', resolvedCardId)
     return apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments?${query}`)
   })
   registerTool(server, 'mindnprogress_add_comment', '카드에 댓글 또는 답글을 요약과 상세로 작성합니다. summary는 [진행], [차단], [결과]로 시작하는 1~2문장으로 작성하고, detail에는 작업을 이어가거나 검증하는 데 필요한 수행 내용·판단·변경 범위·검증 결과·산출물·다음 단계 중 해당 내용을 충실히 기록하세요. 요약 때문에 상세를 축약하지 마세요.', {
     mapId: z.string().min(1),
-    nodeId: z.string().min(1),
+    cardId: z.string().min(1).optional().describe('댓글을 작성할 카드 ID. 새 호출에서는 이 필드를 사용'),
+    nodeId: z.string().min(1).optional().describe('기존 대화 호환용 카드 ID. 새 호출에서는 cardId 사용'),
     summary: z.string().min(1).max(240).optional().describe('새 형식 댓글의 짧은 요약'),
     detail: z.string().max(6000).optional().describe('작업을 이어가거나 검증하는 데 필요한 상세 내용'),
     text: z.string().min(1).max(1000).optional().describe('이전 도구 호출과의 호환용 필드. 새 댓글은 summary와 detail을 사용'),
-    parentId: z.string().optional(),
-  }, async ({ mapId, nodeId, summary, detail, text, parentId }) => {
+    parentCommentId: z.string().min(1).optional().describe('답글을 작성할 상위 댓글 ID'),
+    parentId: z.string().min(1).optional().describe('기존 대화 호환용 상위 댓글 ID. 새 호출에서는 parentCommentId 사용'),
+  }, async ({ mapId, cardId, nodeId, summary, detail, text, parentCommentId, parentId }) => {
+    const resolvedCardId = resolveAliasedId(cardId, nodeId, {
+      preferredName: 'cardId',
+      legacyName: 'nodeId',
+    })
+    const resolvedParentCommentId = resolveAliasedId(parentCommentId, parentId, {
+      preferredName: 'parentCommentId',
+      legacyName: 'parentId',
+      required: false,
+    })
     if (!summary?.trim() && !text?.trim()) throw new Error('댓글 summary를 입력해 주세요.')
     const body = summary !== undefined
-      ? { nodeId, summary, detail, parentId }
-      : { nodeId, text, parentId }
+      ? { nodeId: resolvedCardId, summary, detail, parentId: resolvedParentCommentId }
+      : { nodeId: resolvedCardId, text, parentId: resolvedParentCommentId }
     return runCommentWithAttribution(async () => {
       const result = await apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments`, {
-        method: 'POST', aiCardId: nodeId, requestAttributionContinuation: true, body: JSON.stringify(body),
+        method: 'POST', aiCardId: resolvedCardId, requestAttributionContinuation: true, body: JSON.stringify(body),
       })
       adoptAttributionContinuation(result)
       return result
