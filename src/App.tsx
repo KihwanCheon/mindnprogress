@@ -34,6 +34,7 @@ import { AdminEditorPanel } from './components/AdminEditorPanel'
 import { AiConversationDialog } from './components/AiConversationDialog'
 import { AiConversationPickerDialog } from './components/AiConversationPickerDialog'
 import { AiConversationActivityIndicator } from './components/AiConversationRuntimeBadge'
+import { DailyBackupPreviewDialog, type DailyBackupPreview } from './components/DailyBackupPreviewDialog'
 import { ImagePreviewDialog } from './components/ImagePreviewDialog'
 import { DashboardView, KanbanView, TimelineView } from './components/WorkViews'
 import type { AiConversationLink, AiConversationRuntime, ChecklistItem, KnowledgePolicy, MindDoorayLinkData, MindDoorayTaskData, MindDoorayWikiData, MindImageData, MindMapEdgeData, MindNodeData, TeamMember, WaitingItem } from './types/mindMap'
@@ -1736,6 +1737,8 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const [historyTab, setHistoryTab] = useState<'changes' | 'daily'>('changes')
   const [mapRevisions, setMapRevisions] = useState<MapRevisionSummary[]>([])
   const [dailyBackups, setDailyBackups] = useState<DailyBackupSummary[]>([])
+  const [dailyBackupPreview, setDailyBackupPreview] = useState<DailyBackupPreview | null>(null)
+  const [dailyBackupPreviewLoadingDate, setDailyBackupPreviewLoadingDate] = useState<string | null>(null)
   const [historyLoading, setHistoryLoading] = useState(false)
   const [historyLoadingMore, setHistoryLoadingMore] = useState(false)
   const [historyHasMore, setHistoryHasMore] = useState(false)
@@ -3501,6 +3504,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       if (event.key !== 'Insert' || mode !== 'editor' || !selectedId) return
       const target = event.target as HTMLElement | null
       if (target?.matches('input, textarea, select, [contenteditable="true"]')) return
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return
 
       event.preventDefault()
       addNode(selectedId)
@@ -3541,6 +3545,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       if (mode !== 'editor' || (!event.ctrlKey && !event.metaKey)) return
       const target = event.target as HTMLElement | null
       if (target?.matches('input, textarea, select, [contenteditable="true"]')) return
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return
       const key = event.key.toLowerCase()
 
       if (key === 'z') {
@@ -4001,6 +4006,10 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     }
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
+        if (dailyBackupPreview) {
+          setDailyBackupPreview(null)
+          return
+        }
         cancelKnowledgeConnection()
         setNodeContextMenu(null)
         setDocumentContextMenu(null)
@@ -4015,7 +4024,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       window.removeEventListener('pointerdown', closeContextMenu)
       window.removeEventListener('keydown', closeOnEscape)
     }
-  }, [cancelKnowledgeConnection])
+  }, [cancelKnowledgeConnection, dailyBackupPreview])
 
   useEffect(() => {
     cancelKnowledgeConnection()
@@ -4244,6 +4253,22 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       setHistoryError(error instanceof Error ? error.message : '일일 백업을 복원하지 못했습니다.')
     } finally {
       setHistoryLoading(false)
+    }
+  }
+
+  const previewDailyBackup = async (backup: DailyBackupSummary) => {
+    if (!activeMapId || dailyBackupPreviewLoadingDate) return
+    setDailyBackupPreviewLoadingDate(backup.date)
+    setHistoryError('')
+    try {
+      const result = await apiRequest<{ backup: DailyBackupPreview }>(
+        `/api/maps/${encodeURIComponent(activeMapId)}/backups/daily/${encodeURIComponent(backup.date)}/preview`,
+      )
+      setDailyBackupPreview(result.backup)
+    } catch (error) {
+      setHistoryError(error instanceof Error ? error.message : '일일 백업 미리보기를 열지 못했습니다.')
+    } finally {
+      setDailyBackupPreviewLoadingDate(null)
     }
   }
 
@@ -6958,7 +6983,12 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                     <small>문서 상태 {backup.mapUpdatedAt ? new Date(backup.mapUpdatedAt).toLocaleString('ko-KR') : '시간 기록 없음'}</small>
                     <small>{backup.mapUpdatedBy?.name ?? backup.backedUpBy.name} · {backup.nodeCount}개 항목</small>
                   </div>
-                  {mode === 'editor' && <button disabled={historyLoading} onClick={() => { void restoreDailyBackup(backup) }}>복원</button>}
+                  <div className="history-item-actions">
+                    <button disabled={historyLoading || dailyBackupPreviewLoadingDate !== null} onClick={() => { void previewDailyBackup(backup) }}>
+                      {dailyBackupPreviewLoadingDate === backup.date ? '여는 중…' : '가상으로 열기'}
+                    </button>
+                    {mode === 'editor' && <button disabled={historyLoading || dailyBackupPreviewLoadingDate !== null} onClick={() => { void restoreDailyBackup(backup) }}>복원</button>}
+                  </div>
                 </article>
               ))}
               {!historyLoading && !historyError && historyTab === 'daily' && dailyBackups.length === 0 && (
@@ -6968,6 +6998,15 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
             <footer>{mode === 'editor' ? '일일 백업은 날짜별 최신 상태를 자동 보관하며, 복원 전 현재 상태도 이력에 저장됩니다.' : '뷰어는 변경 이력과 일일 백업을 확인할 수 있지만 복원할 수 없습니다.'}</footer>
           </section>
         </div>
+      )}
+      {dailyBackupPreview && (
+        <DailyBackupPreviewDialog
+          preview={dailyBackupPreview}
+          teamMembers={teamMembers}
+          commentStats={commentStats}
+          referenceCommentStats={referenceCommentStats}
+          onClose={() => setDailyBackupPreview(null)}
+        />
       )}
       {aiDialogOpen && selectedNode && selectedNode.data.kind !== 'image' && activeDocument && (
         <AiConversationDialog
