@@ -45,3 +45,16 @@ test('Unity 프로젝트 잠금 대기를 하위 작업 완료로 오인하지 �
   assert.equal(runtime.childTurnId, 'turn-waiting')
   assert.equal(runtime.resource.key, 'unity:abc123')
 })
+
+test('사용자가 중지한 하위 턴은 상위 대화 재개가 아닌 하위 재개 대기로 유지한다', () => {
+  assert.deepEqual(initialAiDelegationRuntime({
+    state: 'waiting_resume',
+    turnId: 'turn-interrupted',
+  }, '2026-08-13T09:00:00.000Z'), {
+    state: 'waiting-child-resume',
+    childStatus: 'interrupted',
+    childTurnId: 'turn-interrupted',
+    childError: null,
+    childInterruptedAt: '2026-08-13T09:00:00.000Z',
+  })
+})

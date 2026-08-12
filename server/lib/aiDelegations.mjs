@@ -23,6 +23,15 @@ export function initialAiDelegationRuntime(dispatch, completedAt = new Date().to
       childCompletedAt: completedAt,
     }
   }
+  if (state === 'waiting_resume') {
+    return {
+      state: 'waiting-child-resume',
+      childStatus: 'interrupted',
+      childTurnId,
+      childError: null,
+      childInterruptedAt: completedAt,
+    }
+  }
   if (state === 'waiting_resource') {
     return {
       state: 'waiting-resource',

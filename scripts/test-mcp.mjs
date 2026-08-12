@@ -258,6 +258,7 @@ async function main() {
     MNP_ADMIN_PASSWORD: 'McpTest!2026',
     MNP_AI_ATTRIBUTION_DURATION_MS: '10000',
     MNP_AI_DELEGATION_POLL_INTERVAL_MS: '100',
+    AIONUI_CONVERSATION_ID: 'conversation-test',
   }
   const serverLogs = []
   const startApiServer = () => {
@@ -312,7 +313,7 @@ async function main() {
 
     const guide = await invoke('mindnprogress_read_me_first')
     assert.equal(guide.guide.product.name, 'MindNProgress')
-    assert.equal(guide.guide.version, '2.5')
+    assert.equal(guide.guide.version, '2.6')
     assert.match(guide.guide.dataModel.cardContent.sharedKnowledge, /재사용/)
     assert.match(guide.guide.authoringRules.join('\n'), /모든 isWork=true 업무 진행률을 동일 가중치 평균/)
     assert.match(guide.guide.authoringRules.join('\n'), /확정된 결과를 직접 작업 근거.*주요 지식선.*단순 관련성이나 일회성 참조에는 연결하지 않음/)
@@ -322,7 +323,7 @@ async function main() {
     assert.match(guide.guide.operationRules.join('\n'), /mindnprogress_get_ai_work_states.*동시에 수정하지 않음/)
     assert.match(guide.guide.operationRules.join('\n'), /기존 AI 대화를 이어갈지 새로 시작할지.*mindnprogress_list_ai_conversations/)
     assert.match(guide.guide.operationRules.join('\n'), /복수의 독립적인 완료 조건.*필요한 최소한의 결과 중심 체크리스트.*억지로 나누지 않고.*계획 카드에는 생략 가능/)
-    assert.match(guide.guide.operationRules.join('\n'), /위임 기준.*최초로 get_context.*모든 깊이/)
+    assert.match(guide.guide.operationRules.join('\n'), /위임 기준.*AionUi 대화 ID.*MCP 재연결.*모든 깊이/)
     assert.match(guide.guide.operationRules.join('\n'), /자동 재개된 턴.*mindnprogress_delegate_ai_work.*미래형 약속/)
     assert.match(guide.guide.operationRules.join('\n'), /unityMCP.*waiting-resource/)
     assert.match(guide.guide.operationRules.join('\n'), /댓글 summary는 \[진행\].*\[차단\].*\[결과\]/)
@@ -557,7 +558,7 @@ async function main() {
       editorId: attribution.editorId,
       attributionToken: attribution.attributionToken,
     })
-    assert.equal(context.contextSchemaVersion, '2.5')
+    assert.equal(context.contextSchemaVersion, '2.6')
     assert.equal(context.detailLevel, 'focused')
     assert.equal(context.document.nodes, undefined)
     assert.equal(context.document.outline.length, 4)
@@ -572,6 +573,8 @@ async function main() {
     assert.deepEqual(context.selection.taskLinks.startupInspection.conversationInspection.sources, [])
     assert.equal(context.selection.knowledgeSources.all, undefined)
     assert.equal(context.selection.aiWorkCoordination.tool, 'mindnprogress_get_ai_work_states')
+    assert.equal(context.selection.aiWorkCoordination.delegationOrigin.cardId, 'task-a')
+    assert.equal(context.selection.aiWorkCoordination.delegationOrigin.conversationId, 'conversation-test')
     assert.equal(context.selection.aiWorkCoordination.childDelegation.delegateTool, 'mindnprogress_delegate_ai_work')
     assert.deepEqual(context.selection.aiWorkCoordination.siblingCardIds, [])
     assert.equal(context.selection.aiWorkCoordination.toolArguments, null)
@@ -645,6 +648,7 @@ async function main() {
     })
     assert.equal(completionResponse.status, 200)
     await access(path.join(testDataDirectory, '_ai-conversation-attributions.json'))
+    await access(path.join(testDataDirectory, '_ai-conversation-origins.json'))
     const repairedCommentsResponse = await fetch(`${apiBaseUrl}/api/maps/${encodeURIComponent(mapId)}/comments?nodeId=task-a`, {
       headers: { Cookie: sessionCookie },
     })
@@ -795,7 +799,35 @@ async function main() {
     ])
     assert.equal(inspectedChildContext.selection.card.id, delegatedChild.id)
     assert.equal(inspectedUnrelatedContext.selection.card.id, 'branch-b')
-    const delegated = await invoke('mindnprogress_delegate_ai_work', delegationArguments)
+    const originReconnectTransport = new StdioClientTransport({
+      command: process.execPath,
+      args: ['mcp/server.mjs'],
+      cwd: projectDirectory,
+      env: environment,
+      stderr: 'pipe',
+    })
+    const originReconnectClient = new Client({ name: 'mindnprogress-delegation-origin-reconnect', version: '1.0.0' })
+    await originReconnectClient.connect(originReconnectTransport)
+    let delegated
+    try {
+      const reconnectedChildContext = parseToolResult('mindnprogress_get_context', await originReconnectClient.callTool({
+        name: 'mindnprogress_get_context',
+        arguments: {
+          mapId,
+          cardId: delegatedChild.id,
+          editorId: attribution.editorId,
+          attributionToken: inspectedCardAttribution.attributionToken,
+        },
+      }))
+      assert.equal(reconnectedChildContext.selection.card.id, delegatedChild.id)
+      assert.equal(reconnectedChildContext.selection.aiWorkCoordination.delegationOrigin.cardId, 'task-a')
+      delegated = parseToolResult('mindnprogress_delegate_ai_work', await originReconnectClient.callTool({
+        name: 'mindnprogress_delegate_ai_work',
+        arguments: delegationArguments,
+      }))
+    } finally {
+      await originReconnectClient.close()
+    }
     assert.equal(delegated.delegation.targetConversationId, 'conversation-delegated')
     assert.equal(delegated.delegation.parentConversationId, 'conversation-test')
     assert.equal(delegated.delegation.parentCardId, 'task-a', '다른 카드 get_context 조회가 위임 기준 카드를 변경했습니다.')
@@ -812,6 +844,23 @@ async function main() {
     )
     assert.match(mockAionUi.dispatchRequests[0].instruction, /MindNProgress 하위 카드 위임 작업 요청/)
     assert.match(mockAionUi.dispatchRequests[0].instruction, /실제로 수행/)
+
+    mockAionUi.setDispatchState(delegationArguments.idempotencyKey, 'waiting_resume')
+    let interruptedDelegation = null
+    const resumeWaitStartedAt = Date.now()
+    while (Date.now() - resumeWaitStartedAt < 6_000) {
+      const delegationList = await invoke('mindnprogress_list_ai_delegations', {
+        mapId,
+        parentCardId: 'task-a',
+        targetCardId: delegatedChild.id,
+      })
+      interruptedDelegation = delegationList.delegations[0] ?? null
+      if (interruptedDelegation?.state === 'waiting-child-resume') break
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+    assert.equal(interruptedDelegation?.state, 'waiting-child-resume')
+    assert.equal(interruptedDelegation?.childStatus, 'interrupted')
+    assert.equal(mockAionUi.dispatchRequests.length, 1, '중지된 하위 턴을 완료로 오인해 상위 대화를 재개했습니다.')
 
     mockAionUi.setDispatchState(delegationArguments.idempotencyKey, 'waiting_resource', {
       kind: 'unity_project',

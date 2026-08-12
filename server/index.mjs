@@ -77,6 +77,7 @@ const usersFile = path.join(dataDirectory, '_users.json')
 const sessionsFile = path.join(dataDirectory, '_sessions.json')
 const aiAttributionsFile = path.join(dataDirectory, '_ai-attributions.json')
 const aiConversationAttributionsFile = path.join(dataDirectory, '_ai-conversation-attributions.json')
+const aiConversationOriginsFile = path.join(dataDirectory, '_ai-conversation-origins.json')
 const aiDelegationsFile = path.join(dataDirectory, '_ai-delegations.json')
 const aiWorkspaceHistoriesFile = path.join(dataDirectory, '_ai-workspace-histories.json')
 const integrationTokenFile = path.join(dataDirectory, '_integration-token')
@@ -251,11 +252,13 @@ let integrationToken = ''
 const aiAttributionDurationMs = Math.max(50, Number(process.env.MNP_AI_ATTRIBUTION_DURATION_MS) || 8 * 60 * 60 * 1000)
 const aiAttributions = new Map()
 const aiConversationAttributions = new Map()
+const aiConversationOrigins = new Map()
 const aiConversationLaunches = new Map()
 const aiWorkspaceHistories = new Map()
 const aiAttributionContinuationToken = Symbol('aiAttributionContinuationToken')
 let aiAttributionWriteQueue = Promise.resolve()
 let aiConversationAttributionWriteQueue = Promise.resolve()
+let aiConversationOriginWriteQueue = Promise.resolve()
 let aiWorkspaceHistoryWriteQueue = Promise.resolve()
 
 function publicUser(user) {
@@ -376,11 +379,39 @@ function integrationRequestScope(request) {
     mapId: String(request.headers['x-mnp-ai-map-id'] ?? '').trim().slice(0, 120),
     cardId: String(request.headers['x-mnp-ai-card-id'] ?? '').trim().slice(0, 120),
     editorId: String(request.headers['x-mnp-ai-editor-id'] ?? '').trim().slice(0, 120),
+    conversationId: String(request.headers['x-mnp-ai-conversation-id'] ?? '').trim().slice(0, 120),
   }
 }
 
 function conversationAttributionKey(mapId, cardId) {
   return `${mapId}:${cardId}`
+}
+
+function validAiConversationId(value) {
+  return /^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$/.test(String(value ?? ''))
+}
+
+function normalizeAiConversationOrigin(value) {
+  const conversationId = String(value?.conversationId ?? '').trim()
+  const mapId = String(value?.mapId ?? '').trim()
+  const cardId = String(value?.cardId ?? '').trim()
+  if (!validAiConversationId(conversationId) || !isValidMapId(mapId) || !cardId || cardId.length > 120) return null
+  return {
+    conversationId,
+    mapId,
+    cardId,
+    startedBy: String(value?.startedBy ?? '').trim().slice(0, 120) || null,
+    linkedAt: normalizedIsoDate(value?.linkedAt),
+  }
+}
+
+function rememberAiConversationOrigin(value) {
+  const origin = normalizeAiConversationOrigin(value)
+  if (!origin) return null
+  const existing = aiConversationOrigins.get(origin.conversationId)
+  if (existing) return existing
+  aiConversationOrigins.set(origin.conversationId, origin)
+  return origin
 }
 
 function scopedAttribution(request) {
@@ -1143,6 +1174,15 @@ function persistAiConversationAttributions() {
   return aiConversationAttributionWriteQueue
 }
 
+function persistAiConversationOrigins() {
+  const storedOrigins = [...aiConversationOrigins.values()]
+    .sort((first, second) => String(first.linkedAt).localeCompare(String(second.linkedAt))
+      || String(first.conversationId).localeCompare(String(second.conversationId)))
+  aiConversationOriginWriteQueue = aiConversationOriginWriteQueue.catch(() => {})
+    .then(() => writeStoredArray(aiConversationOriginsFile, storedOrigins))
+  return aiConversationOriginWriteQueue
+}
+
 function persistAiDelegations() {
   const storedDelegations = [...aiDelegations.values()]
     .sort((first, second) => String(first.createdAt).localeCompare(String(second.createdAt)))
@@ -1183,6 +1223,36 @@ async function loadAiConversationAttributions() {
     aiConversationAttributions.set(conversationAttributionKey(attribution.mapId, attribution.cardId), attribution)
   }
   await persistAiConversationAttributions()
+}
+
+async function loadAiConversationOrigins() {
+  const storedOrigins = await readStoredArray(aiConversationOriginsFile)
+  for (const storedOrigin of storedOrigins) rememberAiConversationOrigin(storedOrigin)
+  await persistAiConversationOrigins()
+}
+
+async function recoverAiConversationOrigins() {
+  const candidates = []
+  for (const summary of await listMaps()) {
+    const map = await readMap(summary.id)
+    if (!map || map.trashedAt) continue
+    for (const node of map.nodes) {
+      for (const link of aiConversationLinksFromData(node.data)) {
+        candidates.push({
+          conversationId: link.conversationId,
+          mapId: map.id,
+          cardId: node.id,
+          startedBy: link.startedBy?.id ?? null,
+          linkedAt: link.startedAt ?? link.linkedAt,
+        })
+      }
+    }
+  }
+  candidates.sort((first, second) => String(first.linkedAt ?? '').localeCompare(String(second.linkedAt ?? ''))
+    || String(first.mapId).localeCompare(String(second.mapId))
+    || String(first.cardId).localeCompare(String(second.cardId)))
+  for (const candidate of candidates) rememberAiConversationOrigin(candidate)
+  await persistAiConversationOrigins()
 }
 
 async function loadAiDelegations() {
@@ -1305,18 +1375,64 @@ async function fetchAionUi(pathname, { timeoutMs = 8_000, method = 'GET', body }
   throw lastError ?? new Error('AIONUI_REQUEST_FAILED')
 }
 
-function requestAiAttribution(request) {
+function delegationSourceForRequest(scope, mapId) {
+  if (!scope.conversationId) {
+    return scope.mapId === mapId && scope.cardId
+      ? { mapId, cardId: scope.cardId, conversationId: null, startedBy: null, source: 'legacy-mcp-process' }
+      : null
+  }
+  const origin = aiConversationOrigins.get(scope.conversationId)
+  if (!origin || origin.mapId !== mapId) return null
+  return { ...origin, source: 'conversation-origin' }
+}
+
+async function resolveOrRememberDelegationSource(scope, mapId, map) {
+  const existing = delegationSourceForRequest(scope, mapId)
+  if (existing || !scope.conversationId || scope.mapId !== mapId || !scope.cardId
+    || !map.nodes.some((node) => node.id === scope.cardId)) return existing
+  const origin = rememberAiConversationOrigin({
+    conversationId: scope.conversationId,
+    mapId,
+    cardId: scope.cardId,
+    startedBy: scope.editorId,
+    linkedAt: new Date().toISOString(),
+  })
+  if (!origin) return null
+  await persistAiConversationOrigins()
+  return { ...origin, source: 'conversation-origin' }
+}
+
+function delegationParentAttribution(request, source, parentCard, fallbackUser) {
   const scope = integrationRequestScope(request)
   const token = String(request.headers['x-mnp-ai-attribution'] ?? '').trim()
-  if (token) {
-    const attribution = aiAttributions.get(sessionTokenKey(token))
-    if (attribution
-      && attribution.expiresAt > Date.now()
-      && attribution.mapId === scope.mapId
-      && attribution.cardId === scope.cardId
-      && (!scope.editorId || attribution.startedBy === scope.editorId)) return attribution
+  const tokenAttribution = token ? aiAttributions.get(sessionTokenKey(token)) : null
+  const currentAttribution = aiConversationAttributions.get(conversationAttributionKey(source.mapId, source.cardId))
+  const transientAttribution = [...aiAttributions.values()].find((candidate) =>
+    candidate.conversationId === source.conversationId
+    && candidate.mapId === source.mapId
+    && candidate.cardId === source.cardId)
+  const matchingAttribution = [tokenAttribution, transientAttribution, currentAttribution]
+    .find((candidate) => candidate
+      && candidate.mapId === source.mapId
+      && candidate.cardId === source.cardId
+      && (!source.conversationId || candidate.conversationId === source.conversationId)
+      && (!scope.editorId || candidate.startedBy === scope.editorId))
+  const conversationLink = source.conversationId
+    ? aiConversationLinksFromData(parentCard.data).find((link) => link.conversationId === source.conversationId)
+    : null
+  const conversationId = source.conversationId ?? matchingAttribution?.conversationId
+  if (!conversationId) return null
+  return {
+    ...(matchingAttribution ?? {}),
+    mapId: source.mapId,
+    cardId: source.cardId,
+    conversationId,
+    startedBy: matchingAttribution?.startedBy
+      ?? source.startedBy
+      ?? conversationLink?.startedBy?.id
+      ?? fallbackUser.id,
+    selection: matchingAttribution?.selection ?? conversationLink ?? null,
   }
-  return scopedAttribution(request).attribution
 }
 
 function isHierarchyDescendant(map, parentCardId, targetCardId) {
@@ -1502,16 +1618,22 @@ async function pollAiDelegations() {
   aiDelegationPollRunning = true
   try {
     const active = [...aiDelegations.values()].filter((delegation) =>
-      ['starting', 'waiting-resource', 'running', 'waiting-parent', 'waking-parent'].includes(delegation.state))
+      ['starting', 'waiting-resource', 'running', 'waiting-child-resume', 'waiting-parent', 'waking-parent'].includes(delegation.state))
     for (const delegation of active) {
-      if (['starting', 'waiting-resource', 'running'].includes(delegation.state)) {
+      if (['starting', 'waiting-resource', 'running', 'waiting-child-resume'].includes(delegation.state)) {
         try {
           const status = await fetchAionUi(`/api/internal/external-conversation-dispatches/${encodeURIComponent(delegation.id)}`)
-          if (['starting', 'waiting_resource', 'running'].includes(status.state)) {
+          if (['starting', 'waiting_resource', 'running', 'waiting_resume'].includes(status.state)) {
             await updateAiDelegation(delegation.id, {
-              state: status.state === 'waiting_resource' ? 'waiting-resource' : status.state,
+              state: status.state === 'waiting_resource'
+                ? 'waiting-resource'
+                : status.state === 'waiting_resume' ? 'waiting-child-resume' : status.state,
+              childStatus: status.state === 'waiting_resume' ? 'interrupted' : delegation.childStatus,
               childTurnId: status.turnId ?? delegation.childTurnId ?? null,
               resource: status.resource ?? delegation.resource ?? null,
+              ...(status.state === 'waiting_resume' && !delegation.childInterruptedAt
+                ? { childInterruptedAt: new Date().toISOString() }
+                : {}),
             })
             continue
           }
@@ -2849,8 +2971,10 @@ const adminBootstrapped = await loadUsers()
 await loadSessions()
 await loadAiAttributions()
 await loadAiConversationAttributions()
+await loadAiConversationOrigins()
 await loadAiDelegations()
 await loadAiWorkspaceHistories()
+await recoverAiConversationOrigins()
 const metadataMigration = await migrateStoredMapCreationMetadata()
 if (metadataMigration.migratedDocuments > 0) {
   console.log(`[Mind & Progress] 문서 ${metadataMigration.migratedDocuments}개에 생성자와 생성 시각을 복원했습니다.`)
@@ -3222,6 +3346,14 @@ const server = createServer(async (request, response) => {
             : node),
           edges: map.edges,
         }, actor, map.title, map.color, 'content')
+        rememberAiConversationOrigin({
+          conversationId,
+          mapId: launch.mapId,
+          cardId: launch.cardId,
+          startedBy: launch.startedBy,
+          linkedAt: conversationLink.startedAt ?? conversationLink.linkedAt,
+        })
+        await persistAiConversationOrigins()
         if (attribution) {
           attribution.conversationId = conversationId
           await persistAiAttributions()
@@ -3293,14 +3425,17 @@ const server = createServer(async (request, response) => {
       if (!user) return
       if (!canEdit(user)) return sendJson(response, 403, { error: '편집자만 AI 작업을 위임할 수 있습니다.' })
       const mapId = decodeURIComponent(aiDelegationsRoute[1])
-      const scope = integrationRequestScope(request)
-      const parentAttribution = requestAiAttribution(request)
-      if (!isValidMapId(mapId) || scope.mapId !== mapId || !scope.cardId) {
+      const requestScope = integrationRequestScope(request)
+      const source = delegationSourceForRequest(requestScope, mapId)
+      if (!isValidMapId(mapId) || !source) {
+        if (requestScope.conversationId) {
+          return sendJson(response, 409, {
+            error: '현재 AionUi 대화가 시작된 MindNProgress 카드를 확인할 수 없습니다. 카드의 AI 대화 연결 상태를 확인해 주세요.',
+            code: 'AI_DELEGATION_ORIGIN_NOT_FOUND',
+            conversationId: requestScope.conversationId,
+          })
+        }
         return sendJson(response, 400, { error: '현재 상위 카드의 문서와 카드 범위가 필요합니다.' })
-      }
-      if (!parentAttribution?.conversationId || parentAttribution.mapId !== mapId
-        || parentAttribution.cardId !== scope.cardId) {
-        return sendJson(response, 409, { error: '현재 AI 대화 ID를 확인할 수 없습니다. 이 대화에서 get_context를 다시 호출해 주세요.' })
       }
 
       const body = await readJsonBody(request)
@@ -3321,7 +3456,7 @@ const server = createServer(async (request, response) => {
       }
 
       const requestSignature = createHash('sha256').update(JSON.stringify({
-        mapId, parentCardId: scope.cardId, targetCardId, strategy, conversationId,
+        mapId, parentCardId: source.cardId, targetCardId, strategy, conversationId,
         instruction, decisionReason, sourceRevision,
       })).digest('hex')
       const existingDelegation = aiDelegations.get(id)
@@ -3333,10 +3468,20 @@ const server = createServer(async (request, response) => {
       }
 
       const map = await readMap(mapId)
-      const parentCard = map?.nodes.find((node) => node.id === scope.cardId)
+      const parentCard = map?.nodes.find((node) => node.id === source.cardId)
       const targetCard = map?.nodes.find((node) => node.id === targetCardId)
       if (!map || map.trashedAt || !parentCard || !targetCard) {
         return sendJson(response, 404, { error: '상위 카드 또는 위임 대상 카드를 찾을 수 없습니다.' })
+      }
+      const parentAttribution = delegationParentAttribution(request, source, parentCard, user)
+      if (!parentAttribution?.conversationId
+        || (source.conversationId && !isAiConversationLinked(parentCard.data, source.conversationId))) {
+        return sendJson(response, 409, {
+          error: '현재 AI 대화와 대화가 시작된 카드의 연결을 확인할 수 없습니다.',
+          code: 'AI_DELEGATION_ORIGIN_LINK_MISSING',
+          conversationId: source.conversationId,
+          sourceCardId: source.cardId,
+        })
       }
       if (!isHierarchyDescendant(map, parentCard.id, targetCard.id)) {
         return sendJson(response, 400, {
@@ -3490,6 +3635,13 @@ const server = createServer(async (request, response) => {
         return sendJson(response, 503, { error: 'AionUi가 위임 대화 ID를 반환하지 않았습니다.' })
       }
       attribution.conversationId = targetConversationId
+      rememberAiConversationOrigin({
+        conversationId: targetConversationId,
+        mapId,
+        cardId: targetCard.id,
+        startedBy: attribution.startedBy,
+        linkedAt: new Date().toISOString(),
+      })
       aiConversationAttributions.set(conversationAttributionKey(mapId, targetCard.id), {
         mapId,
         cardId: targetCard.id,
@@ -3504,7 +3656,7 @@ const server = createServer(async (request, response) => {
         linkedAt: new Date().toISOString(),
         refreshedAt: new Date().toISOString(),
       })
-      await Promise.all([persistAiAttributions(), persistAiConversationAttributions()])
+      await Promise.all([persistAiAttributions(), persistAiConversationAttributions(), persistAiConversationOrigins()])
 
       let updatedMap = map
       let linkError = null
@@ -3626,7 +3778,9 @@ const server = createServer(async (request, response) => {
           aiAttributions.delete(tokenHash)
         }
       }
-      await Promise.all([persistAiAttributions(), persistAiConversationAttributions()])
+      const origin = aiConversationOrigins.get(conversationId)
+      if (origin?.mapId === mapId && origin.cardId === cardId) aiConversationOrigins.delete(conversationId)
+      await Promise.all([persistAiAttributions(), persistAiConversationAttributions(), persistAiConversationOrigins()])
       broadcastMapChange(request, mapId, 'content', user)
       return sendJson(response, 200, {
         map: updatedMap,
@@ -4752,10 +4906,12 @@ const server = createServer(async (request, response) => {
         const map = await readMap(mapId)
         if (!map || map.trashedAt) return sendJson(response, 404, { error: '마인드맵을 찾을 수 없습니다.' })
         const resolved = await resolveReferencesForMap(map)
+        const delegationOrigin = await resolveOrRememberDelegationSource(integrationRequestScope(request), mapId, map)
         return sendJson(response, 200, {
           map: resolved.map,
           referenceCommentStats: resolved.referenceCommentStats,
           unresolvedReferenceNodeIds: resolved.unresolvedReferenceNodeIds,
+          ...(delegationOrigin ? { delegationOrigin } : {}),
         })
       }
 

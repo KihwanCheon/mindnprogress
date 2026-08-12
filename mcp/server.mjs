@@ -12,7 +12,8 @@ const projectDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url
 const dataDirectory = path.resolve(String(process.env.MNP_DATA_DIR ?? '').trim() || path.join(projectDirectory, 'server', 'data'))
 const tokenFile = path.resolve(String(process.env.MNP_TOKEN_FILE ?? '').trim() || path.join(dataDirectory, '_integration-token'))
 const apiBaseUrl = String(process.env.MNP_API_URL ?? 'http://127.0.0.1:4176').replace(/\/+$/, '')
-const contextSchemaVersion = '2.5'
+const aionUiConversationId = String(process.env.AIONUI_CONVERSATION_ID ?? '').trim()
+const contextSchemaVersion = '2.6'
 const contextCommentLimit = 20
 const mindMapGridSize = 24
 const mindMapChildHorizontalGap = mindMapGridSize * 4
@@ -54,7 +55,7 @@ function defaultChildMindMapPosition(parentPosition, siblingPositions, parentWid
 
 const serverInstructions = `MindNProgress는 마인드맵과 업무 진행 관리를 결합한 웹 서비스입니다. MindNProgress 밖에서 시작해 문서 ID나 카드 ID가 없다면 mindnprogress_read_me_first를 먼저 호출하세요. 선택 문서와 카드가 있다면 mindnprogress_get_context로 제품 규칙과 최신 문서 구조를 먼저 확인하세요. MCP 도구에서 카드를 지정할 때는 cardId 계열 인자를 사용하세요. nodeId 계열 인자는 기존 대화 호환용이므로 새 호출에서는 사용하지 마세요. AionUi가 발급한 attributionToken이 없는 외부 MCP 세션은 자신이 현재 AI 종류와 모델을 정확히 알고 있을 때 get_context의 aiType과 aiModel에 함께 전달하고, 알지 못하면 추측하지 마세요. get_context의 selection.taskLinks.startupInspection을 따르세요. mode가 knowledge-guided이면 primary 선행 지식 중 kind=image인 항목은 imageAccess.localPath의 원본을 사용 가능한 로컬 이미지 열람 도구로 직접 확인하고 설명과 댓글을 함께 사용하며, 일반 카드는 sharedKnowledge를 먼저 재사용하고 설명과 댓글로 보완합니다. fallbackSources와 fallbackTargets는 정보가 부족할 때만 선택적으로 조사합니다. mode가 default이고 required가 true이면 targets의 업무 본문, 댓글, 첨부파일 목록과 관련 링크를 조사하세요. 진행 과정과 결과는 댓글에 기록하고, 다른 카드나 후속 세션이 재사용할 안정적인 사실·결정·제약은 카드의 sharedKnowledge에 요약하세요. AI 댓글은 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 충실히 담은 detail로 작성하며, 요약 때문에 상세를 축약하지 마세요. 외부 전달물이나 결정 대기는 waitingItems로 기록하고 제목에 대기 문구를 붙이지 마세요. 대기를 등록할 때는 [차단], 해제할 때는 [진행] 댓글로 이유와 재개 상태를 기록하세요. 카드 일부 필드만 변경할 때는 mindnprogress_update_card의 data에 변경할 필드만 보내고 현재 카드 전체 데이터를 재전송하지 마세요. 일반 카드에서 생략한 필드와 위치는 보존되지만 완료 상태 또는 진행률 100 적용 시 waitingItems는 자동으로 해제되며, Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 선택 카드 밖의 형제·하위·선행 카드를 함께 수정하기 전에는 mindnprogress_get_ai_work_states로 해당 카드에 다른 AI 작업이 진행 중인지 확인하세요. running 또는 waiting-confirmation인 카드는 사용자 지시 없이 동시에 수정하지 마세요. 지식선만 변경할 때는 전체 문서를 다시 보내지 말고 지식선 전용 도구를 사용하세요. 조회 도구는 문서 버전을 변경하지 않지만 카드·관계 편집과 AI 대화 ID 연결은 버전을 증가시킬 수 있습니다. 특정 자료가 있다고 가정하지 마세요. 여러 카드로 구성된 새 문서는 mindnprogress_create_mindmap으로 한 번에 생성하고, 변경 후에는 최신 문서를 다시 조회해 결과를 검증하세요. 비밀번호 변경과 계정 관리 작업은 지원하지 않습니다.`
 const productGuide = {
-  version: '2.5',
+  version: '2.6',
   product: {
     name: 'MindNProgress',
     purpose: '아이디어를 계층형 마인드맵으로 구조화하고 실행 업무의 진행 상황을 같은 문서에서 관리하는 웹 서비스',
@@ -132,7 +133,7 @@ const productGuide = {
     '선택 카드 밖의 형제·하위·선행 카드를 함께 수정하기 전에는 mindnprogress_get_ai_work_states로 해당 카드의 AI 작업 상태를 확인하고, running 또는 waiting-confirmation인 카드는 사용자 지시 없이 동시에 수정하지 않음',
     '하위 카드의 기존 AI 대화를 이어갈지 새로 시작할지 판단할 때는 mindnprogress_list_ai_conversations로 후보를 먼저 비교하고, 같은 업무 흐름이며 idle이고 실행 환경이 호환되는 대화를 우선 이어감. 목적·모델·작업공간이 다르거나 문맥이 독립되어야 할 때만 새 대화를 선택',
     '복수의 독립적인 완료 조건이 있는 업무를 위임할 때 상위 AI가 위임 전에 필요한 최소한의 결과 중심 체크리스트를 작성함. 누락된 경우 하위 AI가 실제 작업 전에 작성하고 진행에 맞춰 갱신하며, 개수를 맞추기 위해 억지로 나누지 않고 단순 업무나 아직 위임하지 않은 계획 카드에는 생략 가능',
-    'mindnprogress_delegate_ai_work의 위임 기준은 이 대화에서 최초로 get_context를 호출한 시작 카드로 고정되며, 다른 카드를 get_context로 추가 조회해도 바뀌지 않음. 직계 자식뿐 아니라 모든 깊이의 계층상 하위 카드에 위임 가능',
+    'mindnprogress_delegate_ai_work의 위임 기준은 AionUi 대화 ID에 영속 기록된 시작 카드로 고정되며, MCP 재연결·프로세스 재생성이나 다른 카드의 get_context 추가 조회에도 바뀌지 않음. 직계 자식뿐 아니라 모든 깊이의 계층상 하위 카드에 위임 가능',
     '하위 작업 결과로 자동 재개된 턴에서 다음 작업을 위임하기로 판단하면 최종 응답 전에 mindnprogress_delegate_ai_work를 실제로 호출하고 성공 결과를 확인함. 실제 호출 없이 “위임하겠습니다” 또는 “이어서 진행하겠습니다”와 같은 미래형 약속으로 턴을 끝내지 않으며, 위임할 수 없으면 차단 원인과 필요한 조치를 현재 응답에 명시함',
     'unityMCP가 활성화되고 실제 Unity 프로젝트인 같은 workspace의 AI 턴은 AionCore가 프로젝트 단위로 직렬화함. 위임 상태가 waiting-resource이면 다른 세션의 Unity 작업 종료를 기다리는 정상 상태이므로 중복 위임하거나 별도 대화를 시작하지 않음',
     '조회 도구는 문서 version을 변경하지 않으며 카드·관계 편집과 AI 대화 ID 연결 같은 저장 작업만 version을 증가시킴',
@@ -187,6 +188,7 @@ async function apiRequest(pathname, init = {}) {
         : {}),
       ...(scopedMapId ? { 'X-MNP-AI-Map-Id': scopedMapId } : {}),
       ...(scopedCardId ? { 'X-MNP-AI-Card-Id': scopedCardId } : {}),
+      ...(aionUiConversationId ? { 'X-MNP-AI-Conversation-Id': aionUiConversationId } : {}),
       ...(requestAttributionContinuation ? { 'X-MNP-AI-Request-Attribution-Continuation': 'true' } : {}),
       ...(requestInit.body ? { 'Content-Type': 'application/json' } : {}),
       ...requestInit.headers,
@@ -997,6 +999,12 @@ async function main() {
         },
         aiWorkCoordination: {
           tool: 'mindnprogress_get_ai_work_states',
+          delegationOrigin: documentResult.delegationOrigin ?? {
+            mapId: delegationOrigin?.mapId ?? mapId,
+            cardId: delegationOrigin?.cardId ?? cardId,
+            conversationId: aionUiConversationId || null,
+            source: 'mcp-process',
+          },
           siblingCardIds: siblingIds,
           toolArguments: siblingIds.length > 0 ? { mapId, cardIds: siblingIds } : null,
           instruction: '형제 카드를 포함해 선택 카드 이외의 관련 카드를 수정하려면 해당 카드 ID로 AI 작업 상태를 먼저 조회하세요. running 또는 waiting-confirmation이면 다른 AI가 작업 중이므로 사용자 지시 없이 동시에 수정하지 마세요. idle은 AI 대화가 쉬는 상태일 뿐 카드 업무 완료를 뜻하지 않으며, unknown은 충돌 없음으로 간주하지 마세요.',
@@ -1004,7 +1012,7 @@ async function main() {
             candidateTool: 'mindnprogress_list_ai_conversations',
             delegateTool: 'mindnprogress_delegate_ai_work',
             statusTool: 'mindnprogress_list_ai_delegations',
-            instruction: '이 대화가 시작된 카드의 계층상 하위 카드에 작업을 맡길 때는 후보 목록과 필요한 대화 전문을 근거로 resume 또는 new를 선택하고 실행 가능한 지시를 전달하세요. 위임 기준은 다른 카드의 get_context 조회와 무관하게 시작 카드로 유지되며 직계 자식뿐 아니라 모든 깊이의 하위 카드에 위임할 수 있습니다. 같은 Unity 프로젝트의 unityMCP 대화는 AionCore가 한 번에 한 턴만 실행하며 waiting-resource는 정상 대기 상태입니다. 위임 도구는 하위 AI 턴이 끝난 뒤 결과와 함께 현재 대화를 자동으로 다시 시작하므로 주기적으로 확인하거나 일반적인 다음 작업 제안 문구를 보내지 마세요. 자동 재개된 턴에서 다음 작업을 위임하기로 판단했다면 최종 응답 전에 mindnprogress_delegate_ai_work를 실제로 호출하고 성공 결과를 확인하세요. 실제 호출 없이 “위임하겠습니다” 또는 “이어서 진행하겠습니다”와 같은 미래형 약속으로 턴을 끝내지 말고, 위임할 수 없다면 차단 원인과 필요한 조치를 현재 응답에 명시하세요.',
+            instruction: '이 대화가 시작된 카드의 계층상 하위 카드에 작업을 맡길 때는 후보 목록과 필요한 대화 전문을 근거로 resume 또는 new를 선택하고 실행 가능한 지시를 전달하세요. 위임 기준은 AionUi 대화 ID에 영속 기록되므로 MCP 재연결·프로세스 재생성이나 다른 카드의 get_context 조회와 무관하게 유지되며, 직계 자식뿐 아니라 모든 깊이의 하위 카드에 위임할 수 있습니다. 같은 Unity 프로젝트의 unityMCP 대화는 AionCore가 한 번에 한 턴만 실행하며 waiting-resource는 정상 대기 상태입니다. 하위 AI 턴이 사용자에 의해 중지되면 위임은 재개 대기 상태를 유지하고, 같은 하위 대화에서 이어진 턴이 실제 완료된 뒤에만 현재 대화를 자동으로 다시 시작합니다. 주기적으로 확인하거나 일반적인 다음 작업 제안 문구를 보내지 마세요. 자동 재개된 턴에서 다음 작업을 위임하기로 판단했다면 최종 응답 전에 mindnprogress_delegate_ai_work를 실제로 호출하고 성공 결과를 확인하세요. 실제 호출 없이 “위임하겠습니다” 또는 “이어서 진행하겠습니다”와 같은 미래형 약속으로 턴을 끝내지 말고, 위임할 수 없다면 차단 원인과 필요한 조치를 현재 응답에 명시하세요.',
           },
         },
         taskLinks,
