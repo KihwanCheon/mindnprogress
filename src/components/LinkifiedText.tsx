@@ -1,5 +1,5 @@
 import { Fragment, type ReactNode } from 'react'
-import { extractTextLinks } from '../utils/textLinks'
+import { extractTextLinks } from '../utils/textLinks.mjs'
 import { DoorayTaskLinkLabel } from './DoorayTaskLinkLabel'
 
 export function LinkifiedText({ text }: { text: string }) {

@@ -48,7 +48,7 @@ import { aiConversationLinksFromData, appendAiConversationLink } from './utils/a
 import { mergeMapContent } from './utils/mergeMapContent.mjs'
 import { snapAspectResizeToGrid, snapFreeResizeToGrid } from './utils/resizeGrid.mjs'
 import type { ResizeSnapRequest } from './utils/resizeGrid.mjs'
-import { extractTextLinks } from './utils/textLinks'
+import { extractTextLinks } from './utils/textLinks.mjs'
 import { touchPointCentroid, touchPointDistance, viewportForTouchGesture } from './utils/touchViewport.mjs'
 import { normalizeWorkspaceLocation, restorableWorkspaceLocation, workspaceLocationStorageKey } from './utils/workspaceLocation.mjs'
 import { appliedUiTheme, applyUiTheme, storedUiTheme, UI_THEME_STORAGE_KEY, type UiTheme } from './theme'
