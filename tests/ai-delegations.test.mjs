@@ -31,7 +31,7 @@ test('이미 끝난 AionCore operation은 상위 대화 재개 대기 상태로 
   })
 })
 
-test('Unity 프로젝트 잠금 대기를 하위 작업 완료로 오인하지 않는다', () => {
+test('구버전 자원 대기 상태를 하위 작업 완료로 오인하지 않는다', () => {
   const runtime = initialAiDelegationRuntime({
     state: 'waiting_resource',
     turnId: 'turn-waiting',
