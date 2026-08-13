@@ -254,7 +254,7 @@ AI가 MindNProgress 밖에서 시작되었다면 먼저 `mindnprogress_read_me_f
 | `mindnprogress_create_document` | Root 카드 하나만 포함한 빈 문서를 생성합니다. |
 | `mindnprogress_save_document` | 기준 버전을 확인하면서 문서의 전체 카드와 연결 관계를 저장합니다. |
 | `mindnprogress_add_card` | 새 카드 또는 지정한 상위 카드의 하위 카드를 추가합니다. |
-| `mindnprogress_update_card` | 전달한 필드만 부분 병합하여 카드 제목, 설명, 공유 지식, 상태, 진행률과 업무 관리 필드를 수정합니다. 일반 카드에서 생략한 필드와 위치는 보존되며, 결과는 전체 문서 대신 저장된 카드와 문서·Root 요약만 반환합니다. |
+| `mindnprogress_update_card` | 전달한 필드만 부분 병합하여 카드 제목, 설명, 공유 지식, 상태, 진행률과 업무 관리 필드를 수정합니다. 일반 카드에서 생략한 필드와 위치는 보존됩니다. 기본 `responseMode=full`은 저활용 필드를 제외한 최신 전체 문서를, `affected`는 직접·간접 변경 카드와 문서·Root 요약을 반환합니다. |
 | `mindnprogress_move_card` | 카드와 전체 하위 구조를 다른 카드 아래로 이동합니다. |
 | `mindnprogress_delete_card` | 카드와 선택적으로 전체 하위 카드를 삭제합니다. Root 카드는 삭제할 수 없습니다. |
 | `mindnprogress_add_knowledge_line` | 두 카드 사이에 지식선을 추가합니다. 중복과 순환 관계를 거부합니다. |
@@ -266,7 +266,7 @@ AI가 MindNProgress 밖에서 시작되었다면 먼저 `mindnprogress_read_me_f
 
 MCP 도구에서 카드를 지정할 때는 `cardId`를 사용합니다. 상위 카드는 `parentCardId`, 이동할 새 상위 카드는 `newParentCardId`, 답글의 상위 댓글은 `parentCommentId`로 지정합니다. 기존 `nodeId`, `parentId`, `newParentId`는 이미 시작된 AI 대화와의 호환을 위해 한시적으로 허용되지만 새 호출에서는 사용하지 않습니다. 선호 필드와 호환 필드를 동시에 서로 다른 값으로 전달하면 안전을 위해 요청이 거부됩니다. 원시 문서의 `nodes`, 댓글 저장 데이터의 `nodeId` 등 내부 저장 구조는 기존 문서 및 백업 호환을 위해 유지됩니다.
 
-단일 카드의 일부 필드만 변경할 때는 `mindnprogress_update_card`의 `data`에 변경할 필드만 전달합니다. 현재 카드 전체 데이터를 재전송하면 조회 이후 다른 편집자가 변경한 값을 오래된 값으로 덮어쓸 수 있습니다. 일반 카드에서 생략한 필드와 `position`은 보존되고, 빈 문자열이나 빈 배열을 명시하면 해당 필드가 초기화됩니다. 단, `status=done` 또는 `progress>=100`을 적용하면 `waitingItems`는 전달 여부와 관계없이 자동으로 해제되며 Ref 카드는 원본이 관리하는 제목·설명·공유 지식·업무 필드 등이 최신 원본 값으로 동기화될 수 있습니다. 저장 응답의 `document`에는 최신 버전과 Root 진행률·상태가, `card`에는 저장된 대상 카드가 포함되며 다른 카드의 장문 본문은 반환하지 않습니다.
+단일 카드의 일부 필드만 변경할 때는 `mindnprogress_update_card`의 `data`에 변경할 필드만 전달합니다. 현재 카드 전체 데이터를 재전송하면 조회 이후 다른 편집자가 변경한 값을 오래된 값으로 덮어쓸 수 있습니다. 일반 카드에서 생략한 필드와 `position`은 보존되고, 빈 문자열이나 빈 배열을 명시하면 해당 필드가 초기화됩니다. 단, `status=done` 또는 `progress>=100`을 적용하면 `waitingItems`는 전달 여부와 관계없이 자동으로 해제되며 Ref 카드는 원본이 관리하는 제목·설명·공유 지식·업무 필드 등이 최신 원본 값으로 동기화될 수 있습니다. `responseMode`를 생략하면 `full`이며 저장 직후 모든 카드의 본문·위치와 계층선·지식선을 반환합니다. 응답 크기를 줄이기 위해 카드의 AI 대화 상세 목록은 최근 대화 ID와 개수로 축약하고, 카드 타입 고정값과 연결선 렌더링 전용 값은 제외합니다. 단일 카드 수정 결과만 필요하면 `responseMode=affected`를 사용하며, 이때 `affectedCards`에는 직접 수정 카드와 Root 진행률 재계산 등 서버가 함께 조정한 카드가 포함됩니다.
 
 ### 문서 목록과 그룹
 

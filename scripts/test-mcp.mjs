@@ -311,6 +311,8 @@ async function main() {
       assert.ok(toolSchema(name)?.properties?.cardId, `${name}: cardId 공개 인자가 없습니다.`)
       assert.match(toolSchema(name)?.properties?.nodeId?.description ?? '', /기존 대화 호환용/)
     }
+    assert.deepEqual(toolSchema('mindnprogress_update_card')?.properties?.responseMode?.enum, ['full', 'affected'])
+    assert.equal(toolSchema('mindnprogress_update_card')?.properties?.responseMode?.default, 'full')
     assert.ok(toolSchema('mindnprogress_add_card')?.properties?.parentCardId)
     assert.ok(toolSchema('mindnprogress_move_card')?.properties?.newParentCardId)
     assert.ok(toolSchema('mindnprogress_add_comment')?.properties?.parentCommentId)
@@ -331,7 +333,7 @@ async function main() {
 
     const guide = await invoke('mindnprogress_read_me_first')
     assert.equal(guide.guide.product.name, 'MindNProgress')
-    assert.equal(guide.guide.version, '2.8')
+    assert.equal(guide.guide.version, '2.9')
     assert.match(guide.guide.dataModel.cardContent.sharedKnowledge, /재사용/)
     assert.match(guide.guide.authoringRules.join('\n'), /모든 isWork=true 업무 진행률을 동일 가중치 평균/)
     assert.match(guide.guide.authoringRules.join('\n'), /확정된 결과를 직접 작업 근거.*주요 지식선.*단순 관련성이나 일회성 참조에는 연결하지 않음/)
@@ -344,7 +346,7 @@ async function main() {
     assert.match(guide.guide.operationRules.join('\n'), /위임 기준.*AionUi 대화 ID.*MCP 재연결.*모든 깊이/)
     assert.match(guide.guide.operationRules.join('\n'), /자동 재개된 턴.*mindnprogress_delegate_ai_work.*미래형 약속/)
     assert.match(guide.guide.operationRules.join('\n'), /같은 Unity 프로젝트.*순차 위임.*AionCore.*자동으로.*잠그거나 대기시키지 않/)
-    assert.match(guide.guide.operationRules.join('\n'), /mindnprogress_update_card.*전체 문서가 아니라.*document.*card.*Root 상태.*changedFields/)
+    assert.match(guide.guide.operationRules.join('\n'), /mindnprogress_update_card.*responseMode.*full.*기본값.*AI 대화 상세 목록.*affected/)
     assert.match(guide.guide.operationRules.join('\n'), /댓글 summary는 \[진행\].*\[차단\].*\[결과\]/)
     assert.match(guide.guide.commentRules.detail, /작업을 이어가거나 결과를 검증/)
     assert.match(guide.guide.commentRules.legacy, /자동 분리하거나 다시 쓰지 않음/)
@@ -432,6 +434,7 @@ async function main() {
     const updatedReferenceSource = await invoke('mindnprogress_update_card', {
       mapId,
       nodeId: 'branch-b',
+      responseMode: 'affected',
       data: {
         description: '원본에서 변경된 최신 업무 설명',
         progress: 65,
@@ -443,6 +446,7 @@ async function main() {
     const referencedRootResult = await invoke('mindnprogress_update_card', {
       mapId: secondaryMapId,
       nodeId: secondaryRootId,
+      responseMode: 'affected',
       data: { reference: { mapId, nodeId: 'branch-b' } },
     })
     assert.deepEqual(
@@ -578,7 +582,7 @@ async function main() {
       editorId: attribution.editorId,
       attributionToken: attribution.attributionToken,
     })
-    assert.equal(context.contextSchemaVersion, '2.8')
+    assert.equal(context.contextSchemaVersion, '2.9')
     assert.equal(context.detailLevel, 'focused')
     assert.equal(context.document.nodes, undefined)
     assert.equal(context.document.outline.length, 4)
@@ -1338,6 +1342,7 @@ async function main() {
     const waitingCardResult = await invoke('mindnprogress_update_card', {
       mapId,
       cardId: addedCard.id,
+      responseMode: 'affected',
       data: {
         description: '부분 병합 보존 설명',
         kind: 'task',
@@ -1362,6 +1367,9 @@ async function main() {
     assert.equal(waitingCardResult.document.rootStatus, 'in-progress')
     assert.equal(waitingCardResult.root.progress, 35)
     assert.equal(waitingCardResult.root.status, 'in-progress')
+    assert.equal(waitingCardResult.responseMode, 'affected')
+    assert.ok(waitingCardResult.affectedCards.some((item) => item.card.id === addedCard.id && item.reason === 'requested'))
+    assert.ok(waitingCardResult.affectedCards.some((item) => item.card.id === 'root' && item.reason === 'root-rollup'))
 
     const partialMergePreservedFields = [
       'label',
@@ -1386,21 +1394,28 @@ async function main() {
       cardId: addedCard.id,
       data: { sharedKnowledge: '공유 지식만 부분 수정' },
     })
-    const partiallyUpdatedCard = partialUpdateResult.card
+    const partiallyUpdatedCard = partialUpdateResult.map.nodes.find((node) => node.id === addedCard.id)
+    assert.ok(partiallyUpdatedCard)
     assert.equal(partiallyUpdatedCard.data.sharedKnowledge, '공유 지식만 부분 수정')
     assert.deepEqual(
       Object.fromEntries(partialMergePreservedFields.map((field) => [field, partiallyUpdatedCard.data[field]])),
       preservedCardData,
     )
     assert.deepEqual(partiallyUpdatedCard.position, waitingCard.position)
-    assert.equal(partialUpdateResult.map, undefined)
+    assert.equal(partialUpdateResult.responseMode, 'full')
+    assert.equal(partialUpdateResult.summary.version, partialUpdateResult.map.version)
+    assert.equal(partialUpdateResult.changedCardId, addedCard.id)
     assert.deepEqual(partialUpdateResult.changedFields, ['sharedKnowledge'])
-    assert.doesNotMatch(JSON.stringify(partialUpdateResult), /현재 선택과 무관한 장문 지식/)
-    assert.ok(JSON.stringify(partialUpdateResult).length < 20_000, 'update_card가 수정 카드 밖의 장문 문서 내용을 반환했습니다.')
+    assert.match(JSON.stringify(partialUpdateResult), /현재 선택과 무관한 장문 지식/)
+    assert.ok(partialUpdateResult.map.nodes.every((node) => node.type === undefined))
+    assert.ok(partialUpdateResult.map.nodes.every((node) => node.data.aiConversations === undefined))
+    assert.ok(partialUpdateResult.map.edges.every((edge) => edge.type === undefined && edge.markerEnd === undefined && edge.reconnectable === undefined))
+    assert.ok(partialUpdateResult.map.edges.some((edge) => edge.data.relation === 'knowledge' && edge.data.knowledgePolicy === 'inspect-if-insufficient'))
 
     const updatedCardResult = await invoke('mindnprogress_update_card', {
       mapId,
       cardId: addedCard.id,
+      responseMode: 'affected',
       data: {
         label: '수정된 업무 카드', description: '업데이트 검증', sharedKnowledge: '후속 카드가 재사용할 완료 결과', kind: 'task', isWork: true,
         status: 'done', progress: 100, dueDate: '2026-07-31', checklist: [{ id: 'check-regression', text: '완료 조건', done: true }],

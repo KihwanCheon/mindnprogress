@@ -13,7 +13,7 @@ const dataDirectory = path.resolve(String(process.env.MNP_DATA_DIR ?? '').trim()
 const tokenFile = path.resolve(String(process.env.MNP_TOKEN_FILE ?? '').trim() || path.join(dataDirectory, '_integration-token'))
 const apiBaseUrl = String(process.env.MNP_API_URL ?? 'http://127.0.0.1:4176').replace(/\/+$/, '')
 const aionUiConversationId = String(process.env.AIONUI_CONVERSATION_ID ?? '').trim()
-const contextSchemaVersion = '2.8'
+const contextSchemaVersion = '2.9'
 const commentSummaryMaxLength = 240
 const commentSummaryTooLongMessage = 'summary는 240자 이하의 1~2문장만 입력하세요. 상세 내용은 summary 문자열에 이어 붙이지 말고 detail 인자로 분리하세요. 예: {"summary":"[결과] 구현과 검증을 완료했습니다.","detail":"## 수행 내용\\n..."}. 호환용 text로 우회하거나 상세를 여러 댓글로 나누지 마세요.'
 const contextCommentLimit = 20
@@ -57,7 +57,7 @@ function defaultChildMindMapPosition(parentPosition, siblingPositions, parentWid
 
 const serverInstructions = `MindNProgress는 마인드맵과 업무 진행 관리를 결합한 웹 서비스입니다. MindNProgress 밖에서 시작해 문서 ID나 카드 ID가 없다면 mindnprogress_read_me_first를 먼저 호출하세요. 선택 문서와 카드가 있다면 mindnprogress_get_context로 제품 규칙과 최신 문서 구조를 먼저 확인하세요. MCP 도구에서 카드를 지정할 때는 cardId 계열 인자를 사용하세요. nodeId 계열 인자는 기존 대화 호환용이므로 새 호출에서는 사용하지 마세요. AionUi가 발급한 attributionToken이 없는 외부 MCP 세션은 자신이 현재 AI 종류와 모델을 정확히 알고 있을 때 get_context의 aiType과 aiModel에 함께 전달하고, 알지 못하면 추측하지 마세요. get_context의 selection.taskLinks.startupInspection을 따르세요. mode가 knowledge-guided이면 primary 선행 지식 중 kind=image인 항목은 imageAccess.localPath의 원본을 사용 가능한 로컬 이미지 열람 도구로 직접 확인하고 설명과 댓글을 함께 사용하며, 일반 카드는 sharedKnowledge를 먼저 재사용하고 설명과 댓글로 보완합니다. fallbackSources와 fallbackTargets는 정보가 부족할 때만 선택적으로 조사합니다. mode가 default이고 required가 true이면 targets의 업무 본문, 댓글, 첨부파일 목록과 관련 링크를 조사하세요. 진행 과정과 결과는 댓글에 기록하고, 다른 카드나 후속 세션이 재사용할 안정적인 사실·결정·제약은 카드의 sharedKnowledge에 요약하세요. AI 댓글은 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 충실히 담은 detail로 작성하며, 요약 때문에 상세를 축약하지 마세요. 외부 전달물이나 결정 대기는 waitingItems로 기록하고 제목에 대기 문구를 붙이지 마세요. 대기를 등록할 때는 [차단], 해제할 때는 [진행] 댓글로 이유와 재개 상태를 기록하세요. 카드 일부 필드만 변경할 때는 mindnprogress_update_card의 data에 변경할 필드만 보내고 현재 카드 전체 데이터를 재전송하지 마세요. 일반 카드에서 생략한 필드와 위치는 보존되지만 완료 상태 또는 진행률 100 적용 시 waitingItems는 자동으로 해제되며, Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 선택 카드 밖의 형제·하위·선행 카드를 함께 수정하기 전에는 mindnprogress_get_ai_work_states로 해당 카드에 다른 AI 작업이 진행 중인지 확인하세요. running 또는 waiting-confirmation인 카드는 사용자 지시 없이 동시에 수정하지 마세요. 지식선만 변경할 때는 전체 문서를 다시 보내지 말고 지식선 전용 도구를 사용하세요. 조회 도구는 문서 버전을 변경하지 않지만 카드·관계 편집과 AI 대화 ID 연결은 버전을 증가시킬 수 있습니다. 특정 자료가 있다고 가정하지 마세요. 여러 카드로 구성된 새 문서는 mindnprogress_create_mindmap으로 한 번에 생성하고, 변경 후에는 최신 문서를 다시 조회해 결과를 검증하세요. 비밀번호 변경과 계정 관리 작업은 지원하지 않습니다.`
 const productGuide = {
-  version: '2.8',
+  version: '2.9',
   product: {
     name: 'MindNProgress',
     purpose: '아이디어를 계층형 마인드맵으로 구조화하고 실행 업무의 진행 상황을 같은 문서에서 관리하는 웹 서비스',
@@ -132,7 +132,7 @@ const productGuide = {
     'create_document 후 save_document를 연속 호출해 전체 구조를 만들지 않음',
     '지식선 추가·정책 변경·삭제는 전체 save_document 대신 지식선 전용 도구를 사용',
     '카드 일부 필드만 변경할 때 mindnprogress_update_card의 data에는 변경할 필드만 보내고 현재 카드 전체 데이터를 재전송하지 않음. 일반 카드에서 생략한 필드와 위치는 보존되지만 완료 상태 또는 진행률 100 적용 시 waitingItems가 자동으로 해제되며 Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있음',
-    'mindnprogress_update_card의 저장 응답은 전체 문서가 아니라 document 요약, 저장된 card, Root 상태와 요청한 changedFields만 반환함. 수정 후 장문 본문이나 다른 카드까지 확인해야 하면 mindnprogress_get_card 또는 mindnprogress_get_document로 필요한 범위만 다시 조회함',
+    'mindnprogress_update_card의 responseMode는 full이 기본값이며 저장된 전체 카드 본문과 관계를 연속 작업용으로 반환하되 AI 대화 상세 목록과 렌더링 전용 필드는 제외함. 단일 카드와 서버가 함께 조정한 카드만 필요하면 affected를 명시함',
     '선택 카드 밖의 형제·하위·선행 카드를 함께 수정하기 전에는 mindnprogress_get_ai_work_states로 해당 카드의 AI 작업 상태를 확인하고, running 또는 waiting-confirmation인 카드는 사용자 지시 없이 동시에 수정하지 않음',
     '하위 카드의 기존 AI 대화를 이어갈지 새로 시작할지 판단할 때는 mindnprogress_list_ai_conversations로 후보를 먼저 비교하고, 같은 업무 흐름이며 idle이고 실행 환경이 호환되는 대화를 우선 이어감. 목적·모델·작업공간이 다르거나 문맥이 독립되어야 할 때만 새 대화를 선택',
     '복수의 독립적인 완료 조건이 있는 업무를 위임할 때 상위 AI가 위임 전에 필요한 최소한의 결과 중심 체크리스트를 작성함. 누락된 경우 하위 AI가 실제 작업 전에 작성하고 진행에 맞춰 갱신하며, 개수를 맞추기 위해 억지로 나누지 않고 단순 업무나 아직 위임하지 않은 계획 카드에는 생략 가능',
@@ -421,6 +421,51 @@ function contentCard(node, mapId = '') {
     data,
     ...(imageAccess ? { imageAccess } : {}),
   }
+}
+
+function updateCardFullNode(node) {
+  const data = { ...(node.data ?? {}) }
+  const aiConversationCount = Array.isArray(data.aiConversations) ? data.aiConversations.length : data.aiConversationId ? 1 : 0
+  delete data.aiConversations
+  if (aiConversationCount > 0) data.aiConversationCount = aiConversationCount
+  return {
+    id: node.id,
+    position: node.position,
+    data,
+  }
+}
+
+function updateCardFullEdge(edge) {
+  const relation = isKnowledgeEdge(edge) ? 'knowledge' : 'hierarchy'
+  return {
+    id: edge.id,
+    source: edge.source,
+    target: edge.target,
+    data: {
+      relation,
+      ...(relation === 'knowledge' ? { knowledgePolicy: knowledgePolicyOf(edge) } : {}),
+    },
+  }
+}
+
+function updateCardFullMap(map) {
+  return {
+    id: map.id,
+    title: map.title,
+    color: map.color,
+    version: map.version,
+    updatedAt: map.updatedAt,
+    updatedBy: map.updatedBy,
+    nodes: map.nodes.map(updateCardFullNode),
+    edges: map.edges.map(updateCardFullEdge),
+  }
+}
+
+function changedCardIds(previousMap, savedMap) {
+  const previousNodes = new Map(previousMap.nodes.map((node) => [node.id, JSON.stringify(node)]))
+  return savedMap.nodes
+    .filter((node) => previousNodes.get(node.id) !== JSON.stringify(node))
+    .map((node) => node.id)
 }
 
 function focusedDocument(map, publicBaseUrl) {
@@ -1269,13 +1314,14 @@ async function main() {
     return saveDocument(map, false, resolvedParentCardId ?? '')
   })
 
-  registerTool(server, 'mindnprogress_update_card', '카드의 일부 필드만 부분 병합 방식으로 변경합니다. data에 포함한 필드만 변경되고 일반 카드에서 생략한 필드와 position은 보존되므로 현재 카드 전체 데이터를 재전송하지 마세요. 빈 문자열과 빈 배열은 해당 필드를 명시적으로 초기화합니다. 단, status=done 또는 progress>=100이면 waitingItems가 자동으로 비워지며 Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. description은 업무 요청과 배경, sharedKnowledge는 다른 카드가 재사용할 안정적인 결론에 사용하고 외부 대기는 waitingItems로 기록하세요. 저장 응답은 전체 문서 대신 문서 요약, 저장된 카드와 Root 상태만 반환합니다.', {
+  registerTool(server, 'mindnprogress_update_card', '카드의 일부 필드만 부분 병합 방식으로 변경합니다. data에 포함한 필드만 변경되고 일반 카드에서 생략한 필드와 position은 보존되므로 현재 카드 전체 데이터를 재전송하지 마세요. 빈 문자열과 빈 배열은 해당 필드를 명시적으로 초기화합니다. 단, status=done 또는 progress>=100이면 waitingItems가 자동으로 비워지며 Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. description은 업무 요청과 배경, sharedKnowledge는 다른 카드가 재사용할 안정적인 결론에 사용하고 외부 대기는 waitingItems로 기록하세요. responseMode는 full이 기본값이며 연속 작업용 전체 카드 본문과 관계를 반환합니다. 단일 카드와 서버가 함께 조정한 카드만 필요하면 affected를 사용하세요.', {
     mapId: z.string().min(1),
     cardId: z.string().min(1).optional().describe('수정할 카드 ID. 새 호출에서는 이 필드를 사용'),
     nodeId: z.string().min(1).optional().describe('기존 대화 호환용 카드 ID. 새 호출에서는 cardId 사용'),
     data: nodeDataSchema.partial().describe('변경할 카드 필드만 포함하는 부분 병합 데이터. 일반 카드에서 생략한 필드는 보존되므로 현재 카드 전체 데이터를 재전송하지 않습니다. 빈 문자열과 빈 배열은 명시적 초기화이며, 완료 상태 또는 진행률 100 적용 시 waitingItems는 자동으로 비워지고 Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다.'),
     position: z.object({ x: z.number(), y: z.number() }).optional(),
-  }, async ({ mapId, cardId, nodeId, data, position }) => {
+    responseMode: z.enum(['full', 'affected']).default('full').describe('full은 저활용 필드를 제외한 최신 전체 문서를 반환하며 기본값입니다. affected는 직접 수정 카드와 서버가 함께 조정한 카드 및 문서·Root 요약만 반환합니다.'),
+  }, async ({ mapId, cardId, nodeId, data, position, responseMode }) => {
     const resolvedCardId = resolveAliasedId(cardId, nodeId, {
       preferredName: 'cardId',
       legacyName: 'nodeId',
@@ -1283,6 +1329,7 @@ async function main() {
     const map = await getDocument(mapId)
     const node = map.nodes.find((item) => item.id === resolvedCardId)
     if (!node) throw new Error('카드를 찾을 수 없습니다.')
+    const previousMap = responseMode === 'affected' ? structuredClone(map) : null
     const nextData = {
       ...node.data,
       ...data,
@@ -1301,7 +1348,28 @@ async function main() {
       ?? savedMap.nodes.find((item) => item.data?.kind === 'root')
       ?? savedMap.nodes.find((item) => !hierarchyTargets.has(item.id))
       ?? savedMap.nodes[0]
+    const changedFields = [...Object.keys(data), ...(position ? ['position'] : [])]
+    if (responseMode === 'full') {
+      return {
+        responseMode,
+        map: updateCardFullMap(savedMap),
+        summary: saved.summary,
+        changedCardId: resolvedCardId,
+        changedFields,
+      }
+    }
+    const affectedIds = new Set([resolvedCardId, ...changedCardIds(previousMap, savedMap)])
+    const affectedCards = savedMap.nodes
+      .filter((item) => affectedIds.has(item.id))
+      .map((item) => ({
+        reason: item.id === resolvedCardId ? 'requested' : item.id === rootCard?.id ? 'root-rollup' : 'server-adjusted',
+        card: {
+          ...contentCard(item, mapId),
+          position: item.position,
+        },
+      }))
     return {
+      responseMode,
       document: saved.summary,
       card: {
         ...contentCard(savedCard, mapId),
@@ -1313,7 +1381,8 @@ async function main() {
         status: rootCard.data?.progress >= 100 ? 'done' : rootCard.data?.status,
         progress: rootCard.data?.progress ?? 0,
       } : null,
-      changedFields: [...Object.keys(data), ...(position ? ['position'] : [])],
+      affectedCards,
+      changedFields,
     }
   }, { compactResult: true })
 
