@@ -38,6 +38,7 @@ async function startMockAionUi({
 } = {}) {
   let conversationRuntimeState = 'running'
   const dispatchRequests = []
+  const conversationTitleUpdates = []
   const dispatches = new Map()
   const server = createHttpServer((request, response) => {
     const send = (data, status = 200) => {
@@ -98,6 +99,20 @@ async function startMockAionUi({
       })
     }
     if (request.url === '/api/conversations/conversation-delegated') {
+      if (request.method === 'PATCH') {
+        const chunks = []
+        request.on('data', (chunk) => chunks.push(chunk))
+        request.on('end', () => {
+          const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+          conversationTitleUpdates.push(body)
+          send({
+            id: 'conversation-delegated',
+            name: body.name,
+            name_source: body.name_source,
+          })
+        })
+        return
+      }
       return send({
         id: 'conversation-delegated',
         name: '위임 하위 카드',
@@ -189,6 +204,7 @@ async function startMockAionUi({
     server,
     baseUrl: `http://127.0.0.1:${address.port}`,
     dispatchRequests,
+    conversationTitleUpdates,
     setConversationRuntimeState: (state) => { conversationRuntimeState = state },
     completeDispatch: (operationId) => {
       const dispatch = dispatches.get(operationId)
@@ -836,6 +852,10 @@ async function main() {
     const delegatedRepeat = await invoke('mindnprogress_delegate_ai_work', delegationArguments)
     assert.equal(delegatedRepeat.repeated, true)
     assert.equal(mockAionUi.dispatchRequests.length, 1, '멱등 재호출이 하위 대화를 중복 실행했습니다.')
+    assert.deepEqual(mockAionUi.conversationTitleUpdates, [{
+      name: 'MCP 전체 회귀 문서: 위임 하위 카드',
+      name_source: 'user',
+    }], '위임으로 만든 새 대화 제목을 Claude 자동 제목으로부터 보호하지 못했습니다.')
     const delegatedDocument = await invoke('mindnprogress_get_document', { mapId })
     documentResult = delegatedDocument
     assert.equal(

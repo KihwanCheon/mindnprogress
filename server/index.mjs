@@ -1375,6 +1375,18 @@ async function fetchAionUi(pathname, { timeoutMs = 8_000, method = 'GET', body }
   throw lastError ?? new Error('AIONUI_REQUEST_FAILED')
 }
 
+async function protectAionUiConversationTitle(conversationId, title) {
+  const protectedConversation = await fetchAionUi(`/api/conversations/${encodeURIComponent(conversationId)}`, {
+    method: 'PATCH',
+    body: { name: title, name_source: 'user' },
+  })
+  if (String(protectedConversation?.id ?? '') !== conversationId
+    || String(protectedConversation?.name ?? '') !== title
+    || protectedConversation?.name_source !== 'user') {
+    throw new Error('AIONUI_CONVERSATION_TITLE_NOT_PROTECTED')
+  }
+}
+
 function delegationSourceForRequest(scope, mapId) {
   if (!scope.conversationId) {
     return scope.mapId === mapId && scope.cardId
@@ -3596,6 +3608,9 @@ const server = createServer(async (request, response) => {
         instruction,
       })
 
+      const delegatedConversationTitle = strategy === 'new'
+        ? formatAiConversationTitle(map.title, targetCard.data?.label ?? targetCard.id)
+        : null
       let dispatch
       try {
         dispatch = await fetchAionUi('/api/internal/external-conversation-dispatches', {
@@ -3607,7 +3622,7 @@ const server = createServer(async (request, response) => {
             ...(strategy === 'resume' ? { targetConversationId } : {
               create: {
                 agentId: selection.agent.id,
-                title: formatAiConversationTitle(map.title, targetCard.data?.label ?? targetCard.id),
+                title: delegatedConversationTitle,
                 modelId: selection.model.id,
                 mode: selection.mode?.id ?? null,
                 thoughtLevel: selection.thoughtLevel?.id ?? null,
@@ -3633,6 +3648,18 @@ const server = createServer(async (request, response) => {
       targetConversationId = String(dispatch.conversationId ?? '').trim()
       if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$/.test(targetConversationId)) {
         return sendJson(response, 503, { error: 'AionUi가 위임 대화 ID를 반환하지 않았습니다.' })
+      }
+      if (delegatedConversationTitle) {
+        try {
+          await protectAionUiConversationTitle(targetConversationId, delegatedConversationTitle)
+        } catch (error) {
+          console.warn('[AI delegation conversation title protection]', JSON.stringify({
+            mapId,
+            cardId: targetCard.id,
+            conversationId: targetConversationId,
+            error: error?.message ?? String(error),
+          }))
+        }
       }
       attribution.conversationId = targetConversationId
       rememberAiConversationOrigin({

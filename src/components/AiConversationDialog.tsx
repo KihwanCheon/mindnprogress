@@ -449,10 +449,6 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
               )}
             </div>
             <details open>
-              <summary>스킬 <b>{selectedSkillIds.size}</b></summary>
-              <div className="ai-capability-list">{options.skills.map((skill) => <label key={skill.id} title={skill.description}><input type="checkbox" checked={selectedSkillIds.has(skill.id)} onChange={() => toggleSelection(setSelectedSkillIds, skill.id)} /><span><strong>{skill.name}</strong><small>{skill.description || '설명 없음'}</small></span></label>)}</div>
-            </details>
-            <details open>
               <summary>MCP 도구 <b>{options.mcpServers.filter((server) => server.required || selectedMcpIds.has(server.id)).length}</b></summary>
               <div className="ai-capability-list ai-mcp-capability-list" aria-label="사용할 MCP 도구 선택">
                 {options.mcpServers.map((server) => (
@@ -465,6 +461,10 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
                   </label>
                 ))}
               </div>
+            </details>
+            <details open>
+              <summary>스킬 <b>{selectedSkillIds.size}</b></summary>
+              <div className="ai-capability-list">{options.skills.map((skill) => <label key={skill.id} title={skill.description}><input type="checkbox" checked={selectedSkillIds.has(skill.id)} onChange={() => toggleSelection(setSelectedSkillIds, skill.id)} /><span><strong>{skill.name}</strong><small>{skill.description || '설명 없음'}</small></span></label>)}</div>
             </details>
             {launchError && <div className="ai-launch-error" role="alert">{launchError}</div>}
           </div>
