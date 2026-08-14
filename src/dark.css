@@ -1029,7 +1029,21 @@
   background: var(--theme-danger-soft);
 }
 
-[data-theme="dark"] .node-waiting,
+[data-theme="dark"] .node-waiting {
+  color: #9cc7ff;
+  border-color: #355a84;
+  background: #172a40;
+}
+
+[data-theme="dark"] .node-waiting:hover {
+  border-color: #527fac;
+  background: #1e3652;
+}
+
+[data-theme="dark"] .node-waiting:focus-visible {
+  box-shadow: 0 0 0 3px rgba(121, 175, 234, .24), 0 4px 10px rgba(0, 0, 0, .28);
+}
+
 [data-theme="dark"] .waiting-chip,
 [data-theme="dark"] .waiting-badge {
   color: #efc66f;
@@ -1038,7 +1052,11 @@
 }
 
 [data-theme="dark"] .node-waiting::after {
-  border-color: #66502b;
+  border-color: #355a84;
+}
+
+[data-theme="dark"] .node-waiting:hover::after {
+  border-color: #527fac;
 }
 
 [data-theme="dark"] .node-collapse-toggle {
