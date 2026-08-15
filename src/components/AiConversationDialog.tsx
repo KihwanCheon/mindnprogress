@@ -27,6 +27,7 @@ type AionMcpServer = { id: string; name: string; description: string; toolCount:
 type AionOptions = {
   connected: boolean
   protocol: string
+  defaultWorkspace: string
   agents: AionAgent[]
   skills: AionSkill[]
   mcpServers: AionMcpServer[]
@@ -38,7 +39,6 @@ type SavedRuntimeSelections = {
   thoughtLevel?: string
 }
 
-const defaultWorkspace = 'C:\\Git\\MindNProgress'
 const defaultEditorRequest = `이 카드의 최신 내용을 검토하세요.
 
 검토 결과 이미 확정된 요구사항, 결정 또는 조사 결과가 카드의 업무 설명, 공유 지식, 상태, 체크리스트 또는 대기 항목에 누락되어 있거나 현재 내용과 어긋나면 필요한 필드만 먼저 수정하고 저장 결과를 확인하세요. 추측이나 아직 결정되지 않은 내용은 카드에 확정 정보처럼 기록하지 마세요.
@@ -57,12 +57,11 @@ function workspaceHistoryStorageKey(userId: string) {
   return `mindnprogress-ai-workspace-history-v2:${userId}`
 }
 
-function readDocumentWorkspace(userId: string, documentId: string) {
+function readDocumentWorkspace(userId: string, documentId: string): string | null {
   try {
     return localStorage.getItem(workspaceStorageKey(userId, documentId))
-      ?? defaultWorkspace
   } catch {
-    return defaultWorkspace
+    return null
   }
 }
 
@@ -173,7 +172,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
   const [modelId, setModelId] = useState('')
   const [mode, setMode] = useState('')
   const [thoughtLevel, setThoughtLevel] = useState('')
-  const [workspace, setWorkspace] = useState(() => readDocumentWorkspace(userId, documentId))
+  const [workspace, setWorkspace] = useState(() => readDocumentWorkspace(userId, documentId) ?? '')
   const [workspaceHistory, setWorkspaceHistory] = useState(() => readWorkspaceHistory(userId))
   const workspaceHistoryRef = useRef(workspaceHistory)
   const workspaceHistoryMutationRef = useRef(0)
@@ -221,6 +220,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
       })
       .then((body) => {
         setOptions(body)
+        if (readDocumentWorkspace(userId, documentId) === null) setWorkspace(body.defaultWorkspace)
         const savedSelections = readRuntimeSelections()
         const savedMcpIds = readMcpSelections()
         const initialAgent = body.agents.find((agent) => agent.id === savedSelections.agentId && agent.models.length > 0)
@@ -241,7 +241,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
       })
       .finally(() => setLoading(false))
     return () => controller.abort()
-  }, [])
+  }, [documentId, userId])
 
   useEffect(() => {
     if (!options || !agentId) return

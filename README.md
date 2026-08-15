@@ -93,21 +93,45 @@ AionUi ── Claude / Codex / Copilot 등
 
 ## 외부 전체 백업과 복원
 
-Windows에서는 저장소 루트의 `MindNProgress_Backup.bat`을 실행하면 Git으로 복구할 수 없는 운영 데이터를 `D:\MindNProgress_Backup\YYYY-MM-DD` 아래의 시간별 ZIP 파일로 백업합니다.
+Git으로 복구할 수 없는 운영 데이터는 운영체제별 실행 파일 또는 공용 npm 명령으로 시간별 ZIP 파일에 백업할 수 있습니다.
+
+백업에는 `server/data` 전체와 존재하는 로컬 `.env*`·`*.local` 설정이 포함됩니다. 문서, 계정, 세션, 댓글, 알림, 변경 이력, 일일 백업, 문서별 원본 이미지, MCP 토큰과 AI 작성자 귀속을 함께 보존하며 `node_modules`, `dist`, 로그와 PID 같은 재생성 가능한 파일은 제외합니다. 각 ZIP에는 파일별 크기와 SHA-256을 기록한 `manifest.json`과 수동 복원 안내 `RESTORE.txt`가 포함되며, 생성 직후 ZIP을 다시 풀어 manifest와 대조합니다.
+
+### macOS
+
+MindNProgress를 `Ctrl+C`로 종료한 뒤 Finder에서 `MindNProgress_Backup.command`를 더블클릭합니다. 기본 백업 위치는 `~/Documents/MindNProgress_Backup/YYYY-MM-DD`입니다. 터미널에서는 다음 명령도 사용할 수 있습니다.
+
+```bash
+./MindNProgress_Backup.command
+# 또는 원하는 저장 위치 지정
+npm run backup -- --destination "/Volumes/Backup/MindNProgress_Backup"
+```
+
+복원할 때도 먼저 MindNProgress를 종료하고 ZIP 경로를 전달합니다. 복원 전 데이터는 저장소의 `.mindnprogress/pre-restore-data-*`에 보관됩니다.
+
+```bash
+./MindNProgress_Restore.command "/Users/me/Documents/MindNProgress_Backup/2026-07-30/MindNProgress_2026-07-30_120000.zip"
+# 또는
+npm run restore -- --archive "/path/to/MindNProgress_2026-07-30_120000.zip"
+```
+
+macOS가 처음 실행한 `.command` 파일을 차단하면 Finder에서 파일을 Control-클릭하고 `열기`를 선택합니다.
+
+### Windows
+
+저장소 루트의 `MindNProgress_Backup.bat`을 실행하면 기본적으로 `D:\MindNProgress_Backup\YYYY-MM-DD` 아래에 백업합니다.
 
 ```bat
 MindNProgress_Backup.bat
 ```
 
-백업에는 `server/data` 전체와 존재하는 로컬 `.env*`·`*.local` 설정이 포함됩니다. 문서, 계정, 세션, 댓글, 알림, 변경 이력, 일일 백업, 문서별 원본 이미지, MCP 토큰과 AI 작성자 귀속을 함께 보존하며 `node_modules`, `dist`, 로그와 PID 같은 재생성 가능한 파일은 제외합니다. 서버가 실행 중이면 일관된 시점의 데이터를 복사하기 위해 잠시 중지하고, 스냅샷 복사가 끝나는 즉시 기존 실행 상태로 자동 복구한 뒤 압축과 검증을 계속합니다.
-
-각 ZIP에는 파일별 크기와 SHA-256을 기록한 `manifest.json`과 수동 복원 안내 `RESTORE.txt`가 포함됩니다. 배치는 ZIP을 다시 풀어 manifest와 대조한 뒤에만 완료 처리합니다. 복원은 동일한 소스 버전을 준비한 후 다음처럼 실행합니다.
+Windows 배치는 서버가 실행 중이면 일관된 시점의 데이터를 복사하기 위해 잠시 중지하고, 스냅샷 복사가 끝나는 즉시 기존 실행 상태로 자동 복구한 뒤 압축과 검증을 계속합니다. 복원은 동일한 소스 버전을 준비한 후 다음처럼 실행합니다.
 
 ```bat
 MindNProgress_Restore.bat "D:\MindNProgress_Backup\2026-07-30\MindNProgress_2026-07-30_120000.zip"
 ```
 
-복원 배치는 ZIP을 검증하고 현재 `server/data`를 `.mindnprogress\pre-restore-data-*`에 보관한 뒤 백업 데이터로 교체합니다. 데이터 마이그레이션은 수행하지 않으므로 다른 버전으로의 복원은 보장하지 않습니다. 백업에는 계정과 세션, MCP 인증 토큰이 포함되므로 외부에 공유하지 마세요.
+두 운영체제의 복원 도구는 ZIP을 검증하고 현재 `server/data`를 `.mindnprogress/pre-restore-data-*`에 보관한 뒤 백업 데이터로 교체합니다. 데이터 마이그레이션은 수행하지 않으므로 다른 버전으로의 복원은 보장하지 않습니다. 백업에는 계정과 세션, MCP 인증 토큰이 포함되므로 외부에 공유하지 마세요.
 
 기본 백업 경로를 바꿔야 하는 테스트·운영 환경에서는 `MNP_BACKUP_DIR` 환경변수를 사용할 수 있습니다. 운영 데이터가 실수로 Git에 포함되지 않도록 저장소 루트와 그 하위 경로는 백업 대상으로 지정할 수 없으며, 반드시 저장소 외부 경로를 사용해야 합니다.
 
@@ -118,6 +142,19 @@ MindNProgress_Restore.bat "D:\MindNProgress_Backup\2026-07-30\MindNProgress_2026
 - AI 대화 기능을 사용할 경우 실행 중인 AionUi
 
 ## 설치 및 실행
+
+### macOS에서 더블클릭 실행
+
+Node.js를 설치한 뒤 Finder에서 저장소 루트의 `MindNProgress.command`를 더블클릭합니다. 처음 실행할 때 패키지를 설치하고 앱을 빌드한 다음 기본 브라우저에서 `http://127.0.0.1:4176/`을 엽니다. 서버를 종료하려면 열린 터미널 창에서 `Ctrl+C`를 누릅니다.
+
+터미널에서 처음 실행한다면 실행 권한을 한 번 설정할 수 있습니다.
+
+```bash
+chmod +x MindNProgress.command MindNProgress_Backup.command MindNProgress_Restore.command
+./MindNProgress.command
+```
+
+### 터미널에서 개발 및 실행
 
 ```bash
 git clone https://github.com/mabobsa/MindNProgress.git
@@ -137,6 +174,18 @@ npm start
 
 이 경우 기본 접속 주소는 `http://127.0.0.1:4176/`입니다. 다른 PC에서도 접근하게 하려면 API 호스트와 공개 URL을 명시합니다.
 
+macOS/Linux:
+
+```bash
+MNP_API_HOST='0.0.0.0' \
+MNP_API_PORT='4175' \
+MNP_WEB_PORT='4175' \
+MNP_PUBLIC_URL='http://192.168.0.10:4175' \
+npm start
+```
+
+Windows PowerShell:
+
 ```powershell
 $env:MNP_API_HOST='0.0.0.0'
 $env:MNP_API_PORT='4175'
@@ -152,6 +201,16 @@ npm start
 최초 실행 시 저장된 계정이 없으면 관리자 계정이 자동 생성됩니다. 기본 이메일은 `admin@mind.local`이며 일회성 임시 비밀번호가 서버 콘솔에 한 번 표시됩니다.
 
 초기 계정을 직접 지정하려면 최초 실행 전에 환경변수를 설정합니다.
+
+macOS/Linux:
+
+```bash
+MNP_ADMIN_EMAIL='admin@example.com' \
+MNP_ADMIN_PASSWORD='8자 이상의 비밀번호' \
+npm run dev
+```
+
+Windows PowerShell:
 
 ```powershell
 $env:MNP_ADMIN_EMAIL='admin@example.com'
@@ -217,10 +276,10 @@ AionUi에 다음 로컬 MCP 서버를 등록하고 활성화합니다.
 이름: MindNProgress
 전송 방식: stdio
 명령: node
-인수: <MindNProgress 저장소 경로>\mcp\server.mjs
+인수: <MindNProgress 저장소 경로>/mcp/server.mjs
 ```
 
-예를 들어 저장소가 `C:\Git\MindNProgress`라면 인수는 `C:\Git\MindNProgress\mcp\server.mjs`입니다. 다른 위치에 복제했다면 실제 절대 경로로 바꿔야 합니다.
+예를 들어 macOS에서 저장소가 `/Users/me/Git/MindNProgress`라면 인수는 `/Users/me/Git/MindNProgress/mcp/server.mjs`입니다. Windows의 `C:\Git\MindNProgress`라면 `C:\Git\MindNProgress\mcp\server.mjs`를 사용합니다. 다른 위치에 복제했다면 실제 절대 경로로 바꿔야 합니다.
 
 MCP는 데이터 폴더의 `_integration-token`을 사용해 로컬 API와 통신합니다. 이 토큰은 자동 생성되며 Git에 포함되지 않습니다. 비밀번호 변경 MCP 도구는 제공하지 않습니다.
 

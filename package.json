@@ -13,6 +13,8 @@
     "test:mcp": "node scripts/test-mcp.mjs",
     "test:unit": "node scripts/run-unit-tests.mjs",
     "mcp": "node mcp/server.mjs",
+    "backup": "node scripts/backup-data.mjs",
+    "restore": "node scripts/restore-data.mjs",
     "comments:migration": "node scripts/comment-migration.mjs",
     "preview": "vite preview",
     "start": "node server/index.mjs"

@@ -4056,6 +4056,7 @@ const server = createServer(async (request, response) => {
           connected: true,
           aionUiUrl: activeAionUiBaseUrl,
           protocol: 'aionui://conversation/new',
+          defaultWorkspace: projectDirectory,
           agents: normalizedAgents,
           skills: normalizedSkills,
           mcpServers: normalizedMcpServers,
