@@ -44,7 +44,8 @@ import { createsKnowledgeCycle, isHierarchyEdge, isKnowledgeEdge, knowledgePolic
 import { isSameDoorayKnowledgeUrl, normalizedDoorayKnowledgeUrl, taskUrlProvider } from './utils/externalLinks'
 import { splitImageFileName, uniqueImageFileName } from './utils/imageFileNames.mjs'
 import { shouldReconnectEventStream } from './utils/eventStreamHealth.mjs'
-import { aiConversationLinksFromData, appendAiConversationLink } from './utils/aiConversations.mjs'
+import { aiConversationLinksFromData } from './utils/aiConversations.mjs'
+import { mapContentsEqual, reconcileRemoteMapContent } from './utils/mapDocumentSync.mjs'
 import { mergeMapContent } from './utils/mergeMapContent.mjs'
 import { snapAspectResizeToGrid, snapFreeResizeToGrid } from './utils/resizeGrid.mjs'
 import type { ResizeSnapRequest } from './utils/resizeGrid.mjs'
@@ -1827,6 +1828,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [savedAt, setSavedAt] = useState('서버에서 불러오는 중…')
   const [saveError, setSaveError] = useState('')
+  const [serverBaselineRevision, setServerBaselineRevision] = useState(0)
   const dragSnapshot = useRef<DragSnapshot | null>(null)
   const rightPanGesture = useRef<RightPanGesture | null>(null)
   const touchPanGesture = useRef<TouchPanGesture | null>(null)
@@ -1849,6 +1851,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const focusedNodeIdRef = useRef<string | null>(null)
   const activeMapIdRef = useRef(activeMapId)
   const nodesRef = useRef(nodes)
+  const edgesRef = useRef(edges)
   const canvasPointerRef = useRef({ inside: false, x: 0, y: 0 })
   const resolvingDoorayUrls = useRef(new Set<string>())
   const refreshingDoorayKnowledgeCards = useRef(new Set<string>())
@@ -1858,6 +1861,76 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   selectedIdRef.current = selectedId
   activeMapIdRef.current = activeMapId
   nodesRef.current = nodes
+  edgesRef.current = edges
+  const reconcileRemoteMap = useCallback((remoteMap: MapDocument) => {
+    if (activeMapIdRef.current !== remoteMap.id) return
+    const baseline = serverBaseline.current
+    if (baseline?.id === remoteMap.id && remoteMap.version <= baseline.version) return
+
+    const localContent = createPersistedMapContent(nodesRef.current, edgesRef.current)
+    const reconciliation = reconcileRemoteMapContent(baseline, localContent, remoteMap)
+    const currentSelectedId = selectedIdRef.current
+    const nextSelectedId = currentSelectedId && reconciliation.nodes.some((node) => node.id === currentSelectedId)
+      ? currentSelectedId
+      : reconciliation.nodes[0]?.id ?? null
+    const nextNodes = synchronizeNodeSelection(reconciliation.nodes, nextSelectedId)
+
+    serverBaseline.current = structuredClone(remoteMap)
+    resetHistory(nextNodes, reconciliation.edges)
+    setNodes(nextNodes)
+    setEdges(reconciliation.edges)
+    setSelectedId(nextSelectedId)
+    setDocuments((current) => current.map((document) => document.id === remoteMap.id
+      ? {
+          ...document,
+          title: remoteMap.title,
+          color: remoteMap.color,
+          nodeCount: remoteMap.nodes.length,
+          version: remoteMap.version,
+          updatedAt: remoteMap.updatedAt,
+          updatedBy: remoteMap.updatedBy,
+        }
+      : document))
+    localStorage.setItem(storageKeyForMap(remoteMap.id), JSON.stringify({
+      nodes: nextNodes,
+      edges: reconciliation.edges,
+    }))
+    setExternalChange(null)
+
+    if (reconciliation.needsSave) {
+      setMergeNotice(reconciliation.conflicts > 0
+        ? `외부 변경과 로컬 수정을 병합했습니다. 겹친 ${reconciliation.conflicts}개 항목은 내 변경을 유지했습니다.`
+        : '외부 변경과 로컬 수정을 병합했습니다.')
+      setSavedAt('병합 내용 저장 대기 중…')
+      window.setTimeout(() => setMergeNotice(''), 5000)
+    } else {
+      setSavedAt('서버와 동기화됨')
+    }
+  }, [resetHistory, setEdges, setNodes])
+  const acceptSavedMap = useCallback((savedMap: MapDocument, sentContent: Pick<MapDocument, 'nodes' | 'edges'>) => {
+    if (activeMapIdRef.current !== savedMap.id) return
+    const baseline = serverBaseline.current
+    if (baseline?.id === savedMap.id && savedMap.version < baseline.version) return
+
+    const currentContent = createPersistedMapContent(nodesRef.current, edgesRef.current)
+    const reconciliation = reconcileRemoteMapContent(sentContent, currentContent, savedMap)
+    serverBaseline.current = structuredClone(savedMap)
+    if (!mapContentsEqual(currentContent, reconciliation)) {
+      const currentSelectedId = selectedIdRef.current
+      const nextSelectedId = currentSelectedId && reconciliation.nodes.some((node) => node.id === currentSelectedId)
+        ? currentSelectedId
+        : reconciliation.nodes[0]?.id ?? null
+      const nextNodes = synchronizeNodeSelection(reconciliation.nodes, nextSelectedId)
+      setNodes(nextNodes)
+      setEdges(reconciliation.edges)
+      setSelectedId(nextSelectedId)
+      localStorage.setItem(storageKeyForMap(savedMap.id), JSON.stringify({
+        nodes: nextNodes,
+        edges: reconciliation.edges,
+      }))
+    }
+    setServerBaselineRevision((current) => current + 1)
+  }, [setEdges, setNodes])
   const { fitView, screenToFlowPosition, setCenter, setViewport } = useReactFlow<MindMapNode, MindMapEdge>()
   const reactFlowStore = useStoreApi<MindMapNode, MindMapEdge>()
   const showFullMindMap = useCallback((duration = 500) => {
@@ -2670,22 +2743,9 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         }
         if (event.type === 'ai-conversation-linked') {
           if (event.mapId !== activeMapId) return
-          setNodes((current) => current.map((node) => node.id === event.nodeId
-            ? {
-                ...node,
-                data: {
-                  ...node.data,
-                  aiConversationId: event.conversationId,
-                  aiConversations: appendAiConversationLink(node.data, event.conversation),
-                },
-              }
-            : node))
           void apiRequest<{ map: MapDocument }>(`/api/maps/${encodeURIComponent(activeMapId)}`)
             .then(({ map }) => {
-              serverBaseline.current = structuredClone(map)
-              setDocuments((current) => current.map((document) => document.id === map.id
-                ? { ...document, version: map.version, updatedAt: map.updatedAt, updatedBy: map.updatedBy }
-                : document))
+              reconcileRemoteMap(map)
             })
             .catch(() => undefined)
           return
@@ -2777,7 +2837,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       window.removeEventListener('focus', handleFocus)
       eventSource?.close()
     }
-  }, [activeMapId, mode, refreshResolvedReferences, setNodes, user.id, user.publicAccess])
+  }, [activeMapId, mode, reconcileRemoteMap, refreshResolvedReferences, user.id, user.publicAccess])
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -3007,20 +3067,23 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
 
   useEffect(() => {
     if (!activeMapId || loadedMapId !== activeMapId) return
-    const timer = window.setTimeout(() => {
-      const localContent = createPersistedMapContent(nodes, edges)
-      localStorage.setItem(storageKeyForMap(activeMapId), JSON.stringify(localContent))
-      if (mode === 'viewer') {
-        setSavedAt('읽기 전용')
-        return
-      }
-      const baseline = serverBaseline.current
-      const baselineContent = baseline ? createPersistedMapContent(baseline.nodes, baseline.edges) : null
-      if (baselineContent && JSON.stringify(localContent) === JSON.stringify(baselineContent)) {
-        setSavedAt('서버와 동기화됨')
-        return
-      }
+    const localContent = createPersistedMapContent(nodes, edges)
+    localStorage.setItem(storageKeyForMap(activeMapId), JSON.stringify(localContent))
+    if (mode === 'viewer') {
+      setSavedAt('읽기 전용')
+      return
+    }
+    const saveBase = serverBaseline.current
+    if (!saveBase || saveBase.id !== activeMapId) {
+      setSavedAt('로컬 백업만 저장됨 · 서버 재연결 필요')
+      return
+    }
+    if (mapContentsEqual(localContent, saveBase)) {
+      setSavedAt('서버와 동기화됨')
+      return
+    }
 
+    const timer = window.setTimeout(() => {
       setSavedAt('서버에 저장 중…')
       setSaveError('')
       const savingMapId = activeMapId
@@ -3036,13 +3099,13 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         method: 'PUT',
         body: JSON.stringify({
           map: localContent,
-          baseVersion: serverBaseline.current?.version,
+          baseVersion: saveBase.version,
           suppressWorkNotificationNodeIds: suppressedNotificationNodeIds,
         }),
       })
         .then(({ map, summary }) => {
           clearPastedNodeNotificationSuppressions()
-          serverBaseline.current = structuredClone(map)
+          acceptSavedMap(map, localContent)
           setDocuments((current) => current.map((document) => document.id === summary.id ? summary : document))
           setSavedAt('서버와 동기화됨')
         })
@@ -3050,24 +3113,27 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
           const conflictBody = error instanceof ApiRequestError
             ? error.body as { code?: string; map?: MapDocument }
             : null
-          const base = serverBaseline.current
           const remote = conflictBody?.code === 'VERSION_CONFLICT' ? conflictBody.map : null
-          if (error instanceof ApiRequestError && error.status === 409 && base && remote && base.id === savingMapId) {
+          if (error instanceof ApiRequestError && error.status === 409 && remote && saveBase.id === savingMapId) {
             try {
-              const merged = mergeMapContent(base, localContent, remote)
+              const merged = mergeMapContent(saveBase, localContent, remote)
+              if (mapContentsEqual(merged, remote)) {
+                clearPastedNodeNotificationSuppressions()
+                acceptSavedMap(remote, localContent)
+                setSavedAt('서버와 동기화됨')
+                return
+              }
+              const mergedContent = { nodes: merged.nodes, edges: merged.edges }
               const result = await apiRequest<{ map: MapDocument; summary: MapSummary }>(`/api/maps/${encodeURIComponent(savingMapId)}`, {
                 method: 'PUT',
                 body: JSON.stringify({
-                  map: { nodes: merged.nodes, edges: merged.edges },
+                  map: mergedContent,
                   baseVersion: remote.version,
-                  force: true,
                   suppressWorkNotificationNodeIds: suppressedNotificationNodeIds,
                 }),
               })
               clearPastedNodeNotificationSuppressions()
-              serverBaseline.current = structuredClone(result.map)
-              setNodes(merged.nodes)
-              setEdges(merged.edges)
+              acceptSavedMap(result.map, mergedContent)
               setDocuments((current) => current.map((document) => document.id === result.summary.id ? result.summary : document))
               setExternalChange(null)
               setMergeNotice(merged.conflicts > 0
@@ -3077,6 +3143,17 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
               window.setTimeout(() => setMergeNotice(''), 5000)
               return
             } catch (mergeError) {
+              const latestConflict = mergeError instanceof ApiRequestError
+                ? mergeError.body as { code?: string; map?: MapDocument }
+                : null
+              if (mergeError instanceof ApiRequestError
+                && mergeError.status === 409
+                && latestConflict?.code === 'VERSION_CONFLICT'
+                && latestConflict.map) {
+                reconcileRemoteMap(latestConflict.map)
+                setSavedAt('새 변경과 다시 병합함')
+                return
+              }
               setSaveError(mergeError instanceof Error ? mergeError.message : '동시 변경을 병합하지 못했습니다.')
               setSavedAt('병합 실패')
               return
@@ -3087,7 +3164,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         })
     }, 600)
     return () => window.clearTimeout(timer)
-  }, [activeMapId, edges, loadedMapId, mode, nodes, setEdges, setNodes])
+  }, [acceptSavedMap, activeMapId, edges, loadedMapId, mode, nodes, reconcileRemoteMap, serverBaselineRevision])
 
   const onConnect = useCallback(
     (connection: Connection) => {
@@ -3190,13 +3267,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       method: 'DELETE',
     })
     if (mapId === activeMapId) {
-      serverBaseline.current = structuredClone(result.map)
-      setNodes((current) => current.map((node) => node.id === cardId
-        ? { ...node, data: result.card.data }
-        : node))
-      setDocuments((current) => current.map((document) => document.id === mapId
-        ? { ...document, version: result.map.version, updatedAt: result.map.updatedAt, updatedBy: result.map.updatedBy }
-        : document))
+      reconcileRemoteMap(result.map)
       setSavedAt('서버와 동기화됨')
     }
     return { latestConversationId: result.latestConversationId }
@@ -4114,8 +4185,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         method: 'PATCH',
         body: JSON.stringify({ title, baseVersion: serverBaseline.current?.version }),
       })
-      serverBaseline.current = structuredClone(updated.map)
-      setDocuments((current) => current.map((document) => document.id === updated.summary.id ? updated.summary : document))
+      reconcileRemoteMap(updated.map)
       setRenamingMap(false)
       setSavedAt('이름 변경됨')
     } catch (error) {
@@ -4136,7 +4206,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         method: 'PATCH',
         body: JSON.stringify({ color, baseVersion: mapId === activeMapId ? serverBaseline.current?.version : document.version }),
       })
-      if (mapId === activeMapId) serverBaseline.current = structuredClone(updated.map)
+      if (mapId === activeMapId) reconcileRemoteMap(updated.map)
       setDocuments((current) => current.map((item) => item.id === updated.summary.id ? updated.summary : item))
       setSavedAt('문서 색상 변경됨')
     } catch (error) {
@@ -4404,9 +4474,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       })
       setDocuments((current) => current.map((document) => document.id === result.summary.id ? result.summary : document))
       if (mapId === activeMapId) {
-        serverBaseline.current = structuredClone(result.map)
-        setNodes(completedNodes)
-        setEdges(sourceMap.edges)
+        reconcileRemoteMap(result.map)
       }
       setSavedAt('전체 완료됨')
     } catch (error) {
