@@ -339,7 +339,7 @@ async function main() {
 
     const guide = await invoke('mindnprogress_read_me_first')
     assert.equal(guide.guide.product.name, 'MindNProgress')
-    assert.equal(guide.guide.version, '3.4')
+    assert.equal(guide.guide.version, '3.5')
     assert.match(guide.guide.operationRules.join('\n'), /중지된 위임을 resume하면 같은 AI 대화와 기존 worker lease/)
     assert.match(guide.guide.dataModel.cardContent.sharedKnowledge, /재사용/)
     assert.match(guide.guide.authoringRules.join('\n'), /모든 isWork=true 업무 진행률을 동일 가중치 평균/)
@@ -350,6 +350,7 @@ async function main() {
     assert.match(guide.guide.operationRules.join('\n'), /mindnprogress_get_ai_work_states.*동시에 수정하지 않음/)
     assert.match(guide.guide.operationRules.join('\n'), /작업공간 pool.*병렬 위임.*직렬 통합/)
     assert.match(guide.guide.operationRules.join('\n'), /mindnprogress_checkpoint_ai_workspace.*동적 폰트·Atlas|동적 폰트·Atlas.*mindnprogress_checkpoint_ai_workspace/)
+    assert.match(guide.guide.operationRules.join('\n'), /파일 변경이 없는 조사·검증 작업.*confirmNoChanges=true 체크포인트/)
     assert.match(guide.guide.operationRules.join('\n'), /기존 AI 대화를 이어갈지 새로 시작할지.*mindnprogress_list_ai_conversations/)
     assert.match(guide.guide.operationRules.join('\n'), /복수의 독립적인 완료 조건.*필요한 최소한의 결과 중심 체크리스트.*억지로 나누지 않고.*계획 카드에는 생략 가능/)
     assert.match(guide.guide.operationRules.join('\n'), /위임 기준.*AionUi 대화 ID.*MCP 재연결.*모든 깊이/)
@@ -623,6 +624,46 @@ async function main() {
       paths: [],
       confirmNoChanges: true,
     }, /활성 AI 작업공간 lease를 찾지 못했습니다/)
+
+    const legacyMcpEnvironment = { ...environment }
+    delete legacyMcpEnvironment.AIONUI_CONVERSATION_ID
+    const legacyCheckpointTransport = new StdioClientTransport({
+      command: process.execPath,
+      args: ['mcp/server.mjs'],
+      cwd: projectDirectory,
+      env: legacyMcpEnvironment,
+      stderr: 'pipe',
+    })
+    const legacyCheckpointClient = new Client({ name: 'mindnprogress-checkpoint-legacy-scope', version: '1.0.0' })
+    await legacyCheckpointClient.connect(legacyCheckpointTransport)
+    try {
+      parseToolResult('mindnprogress_get_context', await legacyCheckpointClient.callTool({
+        name: 'mindnprogress_get_context',
+        arguments: {
+          mapId,
+          cardId: 'task-a',
+          editorId: attribution.editorId,
+          attributionToken: attribution.attributionToken,
+        },
+      }))
+      const legacyCheckpointResult = await legacyCheckpointClient.callTool({
+        name: 'mindnprogress_checkpoint_ai_workspace',
+        arguments: {
+          mapId,
+          leaseId: 'lease-not-found',
+          jobId: 'job-not-found',
+          paths: [],
+          confirmNoChanges: true,
+        },
+      })
+      assert.equal(legacyCheckpointResult.isError, true)
+      assert.match(
+        legacyCheckpointResult.content?.find((item) => item.type === 'text')?.text ?? '',
+        /활성 AI 작업공간 lease를 찾지 못했습니다/,
+      )
+    } finally {
+      await legacyCheckpointClient.close()
+    }
 
     const fullContext = await invoke('mindnprogress_get_context', {
       mapId,
@@ -1032,6 +1073,7 @@ async function main() {
     }
     assert.equal(completedDelegation?.state, 'completed')
     assert.equal(completedDelegation?.childStatus, 'completed')
+    assert.equal(completedDelegation?.parentDispatchState, 'completed')
     assert.equal(mockAionUi.dispatchRequests.length, 3)
     assert.equal(mockAionUi.dispatchRequests[2].targetConversationId, 'conversation-test')
     assert.match(mockAionUi.dispatchRequests[2].instruction, /하위 카드 작업을 완료하고 결과를 기록했습니다/)

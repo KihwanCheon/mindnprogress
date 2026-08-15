@@ -113,12 +113,24 @@ test('registry 작업공간만 풀로 인식하고 유휴 worker에 원자적 le
       jobId: lease.jobId,
       mapId: 'map-a',
       cardId: 'card-b',
-      conversationId: 'conversation-c',
+      conversationId: '',
       paths: [],
       confirmNoChanges: true,
     })
     assert.equal(noChangesCheckpoint.noChanges, true)
     assert.equal(noChangesCheckpoint.checkpoint.noCodeChanges, true)
+
+    await assert.rejects(
+      () => manager.checkpoint(lease.leaseId, {
+        jobId: lease.jobId,
+        mapId: 'map-a',
+        cardId: 'card-b',
+        conversationId: 'conversation-other',
+        paths: [],
+        confirmNoChanges: true,
+      }),
+      (error) => error instanceof WorkspacePoolUnavailableError,
+    )
 
     await assert.rejects(
       () => manager.reuseLease(lease.leaseId, {
@@ -133,6 +145,76 @@ test('registry 작업공간만 풀로 인식하고 유휴 worker에 원자적 le
       () => manager.acquire({ workspaceHint: integrationRoot }),
       (error) => error instanceof WorkspacePoolUnavailableError,
     )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('변경 없는 완료도 명시적 no-change 체크포인트 뒤에만 lease를 회수한다', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'mnp-workspace-no-change-'))
+  try {
+    const integrationRoot = path.join(root, 'main')
+    const workerRoot = path.join(root, 'fork1')
+    const sharedRoot = path.join(root, 'shared')
+    await Promise.all([mkdir(integrationRoot), mkdir(workerRoot), mkdir(sharedRoot)])
+    const registryFile = path.join(sharedRoot, 'workspaces.json')
+    const stateFile = path.join(root, 'state.json')
+    await writeFile(registryFile, JSON.stringify({
+      schemaVersion: 1,
+      poolId: 'holdem',
+      sharedRoot,
+      workspaces: [
+        { id: 'main', root: integrationRoot, role: 'integration', enabled: true },
+        { id: 'fork1', root: workerRoot, role: 'worker', enabled: true },
+      ],
+    }), 'utf8')
+
+    let workerBranch = 'japan-master'
+    const manager = new WorkspacePoolManager({
+      registryFile,
+      stateFile,
+      gitRunner: async (cwd, args) => {
+        const worker = cwd === workerRoot
+        if (args[0] === 'status') return ''
+        if (args[0] === 'remote') return ''
+        if (args[0] === 'rev-parse') return 'base123'
+        if (args[0] === 'branch' && args[1] === '--show-current') return worker ? workerBranch : 'japan-master'
+        if (args[0] === 'switch') {
+          workerBranch = args[1] === '-C' ? args[2] : args[1]
+          return ''
+        }
+        return ''
+      },
+    })
+    await manager.initialize()
+    const lease = await manager.acquire({
+      workspaceHint: integrationRoot,
+      mapId: 'map-a',
+      cardId: 'card-a',
+      conversationId: 'conversation-a',
+      cardLabel: '조사 전용 작업',
+    })
+
+    const checkpointRequired = await manager.finalize(lease.leaseId, { childStatus: 'completed' })
+    assert.equal(checkpointRequired.status, 'checkpoint-required')
+    assert.deepEqual(checkpointRequired.changedFiles, [])
+
+    const checkpoint = await manager.checkpoint(lease.leaseId, {
+      jobId: lease.jobId,
+      mapId: 'map-a',
+      cardId: 'card-a',
+      conversationId: '',
+      paths: [],
+      confirmNoChanges: true,
+    })
+    assert.equal(checkpoint.checkpoint.noCodeChanges, true)
+
+    const completed = await manager.finalize(lease.leaseId, { childStatus: 'completed' })
+    assert.equal(completed.status, 'completed')
+    assert.equal(completed.integratedCommit, null)
+    const state = JSON.parse(await readFile(stateFile, 'utf8'))
+    assert.equal(state.workspaces.fork1.status, 'idle')
+    assert.equal(state.workspaces.fork1.idleBranch, 'mnp/idle/fork1')
   } finally {
     await rm(root, { recursive: true, force: true })
   }

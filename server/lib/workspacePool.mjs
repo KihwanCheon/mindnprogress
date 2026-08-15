@@ -372,10 +372,11 @@ export class WorkspacePoolManager {
       if (!lease || !['leased', 'checkpoint-required'].includes(lease.status)) {
         throw new WorkspacePoolUnavailableError('체크포인트를 생성할 활성 AI 작업공간 lease를 찾지 못했습니다.')
       }
+      const requestedConversationId = String(conversationId ?? '').trim()
       if (String(jobId ?? '') !== lease.jobId
         || String(mapId ?? '') !== lease.mapId
         || String(cardId ?? '') !== lease.cardId
-        || String(conversationId ?? '') !== lease.conversationId) {
+        || (requestedConversationId && requestedConversationId !== lease.conversationId)) {
         throw new WorkspacePoolUnavailableError('체크포인트 요청이 현재 AI 작업공간 소유권과 일치하지 않습니다.')
       }
       const workspace = this.registry.workspaces.find((candidate) => candidate.id === lease.workspaceId)
@@ -668,13 +669,13 @@ export class WorkspacePoolManager {
           throw new Error(`예상 브랜치 ${lease.branch}가 아닌 ${currentBranch}입니다.`)
         }
         const dirty = await this.git(workspace.root, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])
+        const currentHead = await this.git(workspace.root, ['rev-parse', 'HEAD'])
+        const hasCheckpoint = currentHead !== lease.baseCommit
+          || (Array.isArray(lease.checkpoints) && lease.checkpoints.length > 0)
+        if (completed && !lease.integrationBranch && !hasCheckpoint) {
+          return await this.requireCheckpoint(lease, workspace)
+        }
         if (dirty && !lease.integrationBranch) {
-          const currentHead = await this.git(workspace.root, ['rev-parse', 'HEAD'])
-          const hasCheckpoint = currentHead !== lease.baseCommit
-            || (Array.isArray(lease.checkpoints) && lease.checkpoints.length > 0)
-          if (completed && !hasCheckpoint) {
-            return await this.requireCheckpoint(lease, workspace)
-          }
           if (completed) {
             const drift = await this.archiveAndRestoreDrift(workspace, {
               reason: '명시적 체크포인트 이후 발생한 검증·Play·재임포트 변경',

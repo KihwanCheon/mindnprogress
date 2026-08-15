@@ -1276,6 +1276,7 @@ async function recoverAiConversationOrigins() {
 async function loadAiDelegations() {
   const storedDelegations = await readStoredArray(aiDelegationsFile)
   let rejectedCount = 0
+  let repairedCount = 0
   for (const delegation of storedDelegations) {
     if (!isValidAiDelegationId(delegation?.id)) {
       rejectedCount += 1
@@ -1289,10 +1290,18 @@ async function loadAiDelegations() {
       rejectedCount += 1
       continue
     }
-    aiDelegations.set(delegation.id, delegation)
+    const normalized = delegation.state === 'completed' && delegation.parentDispatchState !== 'completed'
+      ? { ...delegation, parentDispatchState: 'completed' }
+      : delegation
+    if (normalized !== delegation) repairedCount += 1
+    aiDelegations.set(normalized.id, normalized)
   }
   if (rejectedCount > 0) {
     console.warn(`[AI delegation storage] ${rejectedCount}개 항목을 무시했으며 원본 파일은 덮어쓰지 않았습니다.`)
+  }
+  if (repairedCount > 0) {
+    await persistAiDelegations()
+    console.log(`[AI delegation storage] 완료된 ${repairedCount}개 위임의 상위 재개 상태를 보정했습니다.`)
   }
 }
 
@@ -2151,6 +2160,7 @@ async function pollAiDelegations() {
         await updateAiDelegation(delegation.id, {
           state: status.state === 'completed' ? 'completed' : 'parent-wake-failed',
           parentTurnId: status.turnId ?? delegation.parentTurnId ?? null,
+          parentDispatchState: status.state,
           parentError: status.errorMessage ?? null,
           completedAt: new Date().toISOString(),
         })
@@ -3876,9 +3886,9 @@ const server = createServer(async (request, response) => {
       if (!canEdit(user)) return sendJson(response, 403, { error: '편집자만 AI 작업공간 체크포인트를 생성할 수 있습니다.' })
       const leaseId = decodeURIComponent(aiWorkspaceCheckpointRoute[1])
       const scope = integrationRequestScope(request)
-      if (!scope.mapId || !scope.cardId || !scope.conversationId) {
+      if (!scope.mapId || !scope.cardId) {
         return sendJson(response, 400, {
-          error: '현재 AI 대화의 문서, 카드, 대화 ID 범위가 필요합니다.',
+          error: '현재 AI 대화의 문서와 카드 범위가 필요합니다.',
           code: 'AI_WORKSPACE_CHECKPOINT_SCOPE_REQUIRED',
         })
       }
