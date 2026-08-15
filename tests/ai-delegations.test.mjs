@@ -60,6 +60,21 @@ test('사용자가 중지한 하위 턴은 상위 대화 재개가 아닌 하위
   })
 })
 
+test('AionCore 재시작 상태는 완료 처리하지 않고 명시적 복구 대기로 유지한다', () => {
+  assert.deepEqual(initialAiDelegationRuntime({
+    state: 'recovery_required',
+    conversationId: 'conversation-child',
+    turnId: 'turn-before-restart',
+    errorMessage: 'interrupted_by_restart',
+  }, '2026-08-15T12:00:00.000Z'), {
+    state: 'recovery-required',
+    childStatus: 'interrupted-by-restart',
+    childTurnId: 'turn-before-restart',
+    childError: 'interrupted_by_restart',
+    recoveryRequiredAt: '2026-08-15T12:00:00.000Z',
+  })
+})
+
 test('같은 카드와 대화에서 아직 끝나지 않은 위임만 최신순으로 찾는다', () => {
   const matches = activeAiDelegationsForConversation([
     {
@@ -69,6 +84,10 @@ test('같은 카드와 대화에서 아직 끝나지 않은 위임만 최신순�
     {
       id: 'new-running', mapId: 'map-a', targetCardId: 'card-a', targetConversationId: 'conversation-a',
       state: 'running', createdAt: '2026-08-15T10:00:00.000Z',
+    },
+    {
+      id: 'newest-recovery', mapId: 'map-a', targetCardId: 'card-a', targetConversationId: 'conversation-a',
+      state: 'recovery-required', createdAt: '2026-08-15T10:30:00.000Z',
     },
     {
       id: 'completed', mapId: 'map-a', targetCardId: 'card-a', targetConversationId: 'conversation-a',
@@ -84,11 +103,11 @@ test('같은 카드와 대화에서 아직 끝나지 않은 위임만 최신순�
     targetConversationId: 'conversation-a',
   })
 
-  assert.deepEqual(matches.map((delegation) => delegation.id), ['new-running', 'old-waiting'])
+  assert.deepEqual(matches.map((delegation) => delegation.id), ['newest-recovery', 'new-running', 'old-waiting'])
   assert.equal(activeAiDelegationsForConversation(matches, {
     mapId: 'map-a',
     targetCardId: 'card-a',
     targetConversationId: 'conversation-a',
     excludeId: 'new-running',
-  }).at(0)?.id, 'old-waiting')
+  }).at(0)?.id, 'newest-recovery')
 })

@@ -1610,9 +1610,27 @@ ${workspaceInstruction ? `${workspaceInstruction}\n` : ''}
 ${instruction.trim()}`
 }
 
+function delegationRecoveryInstruction(delegation, instruction) {
+  return `# 재시작 후 위임 복구
+
+AionCore 또는 MindNProgress 재시작으로 이전 실행의 메모리 상태가 끊겼습니다. 원래 지시를 처음부터 반복하지 말고, 현재 카드와 할당된 작업공간의 실제 상태를 먼저 확인한 뒤 미완료 부분만 이어서 수행하세요.
+
+- 위임 ID: ${delegation.id}
+- 대상 카드: ${delegation.targetCardLabel} (${delegation.targetCardId})
+- 대상 대화: ${delegation.targetConversationId}
+- 작업공간: ${delegation.workspaceLease?.projectRoot ?? '기존 대화 작업공간'}
+
+먼저 \`.ai-session.json\`, 현재 브랜치, Git 변경과 최근 대화·카드 결과를 서로 대조하세요. 이미 완료된 변경이나 외부 처리는 중복 실행하지 말고 검증과 결과 보고만 하세요. 다른 작업공간으로 이동하거나 새 lease를 만들지 마세요.
+
+# 복구 후 수행 지시
+
+${instruction.trim()}`
+}
+
 function delegationPublicView(delegation) {
   const publicDelegation = { ...delegation }
   delete publicDelegation.instructionHash
+  delete publicDelegation.recoveryInstructionHash
   delete publicDelegation.requestSignature
   return publicDelegation
 }
@@ -1882,7 +1900,19 @@ async function pollAiDelegations() {
     for (const delegation of active) {
       if (['starting', 'waiting-resource', 'running', 'waiting-child-resume'].includes(delegation.state)) {
         try {
-          const status = await fetchAionUi(`/api/internal/external-conversation-dispatches/${encodeURIComponent(delegation.id)}`)
+          const operationId = delegation.childOperationId ?? delegation.id
+          const status = await fetchAionUi(`/api/internal/external-conversation-dispatches/${encodeURIComponent(operationId)}`)
+          if (status.state === 'recovery_required') {
+            await updateAiDelegation(delegation.id, {
+              state: 'recovery-required',
+              childStatus: 'interrupted-by-restart',
+              childTurnId: status.turnId ?? delegation.childTurnId ?? null,
+              childError: status.errorMessage ?? 'AionCore 재시작으로 명시적인 작업 재개가 필요합니다.',
+              recoveryRequiredAt: delegation.recoveryRequiredAt ?? new Date().toISOString(),
+              resource: null,
+            })
+            continue
+          }
           if (['starting', 'waiting_resource', 'running', 'waiting_resume'].includes(status.state)) {
             await updateAiDelegation(delegation.id, {
               state: status.state === 'waiting_resource'
@@ -1914,17 +1944,13 @@ async function pollAiDelegations() {
           })
         } catch (error) {
           if (error?.status !== 404) continue
-          const childError = 'AionUi가 위임 실행 상태를 더 이상 보유하지 않습니다.'
-          const workspace = await finalizeDelegationWorkspace(delegation, 'interrupted', childError)
-          const updated = await updateAiDelegation(delegation.id, {
-            childStatus: 'interrupted',
-            childError: workspace.error ?? childError,
-            childCompletedAt: new Date().toISOString(),
-            workspaceResult: workspace.result,
-            workspaceError: workspace.error,
+          await updateAiDelegation(delegation.id, {
+            state: 'recovery-required',
+            childStatus: 'interrupted-by-restart',
+            childError: 'AionUi가 위임 실행 상태를 더 이상 보유하지 않습니다. 작업공간을 보존한 채 명시적인 재개가 필요합니다.',
+            recoveryRequiredAt: delegation.recoveryRequiredAt ?? new Date().toISOString(),
+            resource: null,
           })
-          if (await advanceWorkspaceIntegration(updated, workspace)) continue
-          await updateAiDelegation(delegation.id, { state: 'waiting-parent' })
         }
         continue
       }
@@ -1948,6 +1974,17 @@ async function pollAiDelegations() {
       if (['integration-starting', 'integration-waiting-resource', 'integration-running', 'integration-waiting-resume'].includes(delegation.state)) {
         try {
           const status = await fetchAionUi(`/api/internal/external-conversation-dispatches/${encodeURIComponent(delegation.integrationOperationId)}`)
+          if (status.state === 'recovery_required') {
+            await updateAiDelegation(delegation.id, {
+              state: 'integration-recovery-required',
+              integrationStatus: 'interrupted-by-restart',
+              integrationTurnId: status.turnId ?? delegation.integrationTurnId ?? null,
+              integrationError: status.errorMessage ?? 'AionCore 재시작으로 통합 충돌 해결의 명시적인 재개가 필요합니다.',
+              recoveryRequiredAt: delegation.recoveryRequiredAt ?? new Date().toISOString(),
+              integrationResource: null,
+            })
+            continue
+          }
           if (['starting', 'waiting_resource', 'running', 'waiting_resume'].includes(status.state)) {
             await updateAiDelegation(delegation.id, {
               state: integrationDelegationState(status.state),
@@ -1971,16 +2008,12 @@ async function pollAiDelegations() {
           await updateAiDelegation(delegation.id, { state: 'waiting-parent' })
         } catch (error) {
           if (error?.status !== 404) continue
-          const integrationError = 'AionUi가 통합 충돌 해결 실행 상태를 더 이상 보유하지 않습니다.'
-          const workspace = await completeDelegationWorkspaceConflict(delegation, 'interrupted', integrationError)
           await updateAiDelegation(delegation.id, {
-            state: 'waiting-parent',
-            integrationStatus: 'interrupted',
-            integrationError,
-            integrationCompletedAt: new Date().toISOString(),
-            workspaceResult: workspace.result,
-            workspaceError: workspace.error,
-            childError: workspace.error ?? integrationError,
+            state: 'integration-recovery-required',
+            integrationStatus: 'interrupted-by-restart',
+            integrationError: 'AionUi가 통합 충돌 해결 실행 상태를 더 이상 보유하지 않습니다. 작업공간을 보존한 채 명시적인 재개가 필요합니다.',
+            recoveryRequiredAt: delegation.recoveryRequiredAt ?? new Date().toISOString(),
+            integrationResource: null,
           })
         }
         continue
@@ -1997,7 +2030,8 @@ async function pollAiDelegations() {
           const runtime = normalizeAiConversationRuntime(delegation.parentConversationId, parent)
           if (runtime.state !== 'idle') continue
           const result = await latestAssistantResult(delegation.targetConversationId)
-          const wakeOperationId = boundedAionOperationId(delegation.id, 'wake')
+          const parentWakeAttempt = Number(delegation.parentWakeAttempt ?? 0) + 1
+          const wakeOperationId = boundedAionOperationId(delegation.id, `wake-${parentWakeAttempt}`)
           const response = await fetchAionUi('/api/internal/external-conversation-dispatches', {
             method: 'POST',
             body: {
@@ -2011,6 +2045,7 @@ async function pollAiDelegations() {
           await updateAiDelegation(delegation.id, {
             state: 'waking-parent',
             wakeOperationId,
+            parentWakeAttempt,
             parentTurnId: response.turnId ?? null,
           })
         } catch {
@@ -2021,6 +2056,14 @@ async function pollAiDelegations() {
 
       try {
         const status = await fetchAionUi(`/api/internal/external-conversation-dispatches/${encodeURIComponent(delegation.wakeOperationId)}`)
+        if (status.state === 'recovery_required') {
+          await updateAiDelegation(delegation.id, {
+            state: 'waiting-parent',
+            parentDispatchState: 'interrupted-by-restart',
+            parentError: 'AionCore 재시작으로 상위 대화 재개 알림을 다시 전달합니다.',
+          })
+          continue
+        }
         if (['starting', 'waiting_resource', 'running'].includes(status.state)) {
           await updateAiDelegation(delegation.id, {
             parentTurnId: status.turnId ?? delegation.parentTurnId ?? null,
@@ -2035,7 +2078,14 @@ async function pollAiDelegations() {
           parentError: status.errorMessage ?? null,
           completedAt: new Date().toISOString(),
         })
-      } catch {
+      } catch (error) {
+        if (error?.status === 404) {
+          await updateAiDelegation(delegation.id, {
+            state: 'waiting-parent',
+            parentDispatchState: 'interrupted-by-restart',
+            parentError: 'AionUi가 상위 대화 재개 상태를 더 이상 보유하지 않아 다시 전달합니다.',
+          })
+        }
         continue
       }
     }
@@ -3741,6 +3791,197 @@ const server = createServer(async (request, response) => {
     const aionUiConversationTranscriptRoute = url.pathname.match(/^\/api\/integrations\/aionui\/conversations\/([^/]+)\/transcript$/)
 
     const aiDelegationsRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/ai-delegations$/)
+    const aiDelegationRecoveryRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/ai-delegations\/([^/]+)\/recover$/)
+
+    if (aiDelegationRecoveryRoute && request.method === 'POST') {
+      const user = requireUser(request, response)
+      if (!user) return
+      if (!canEdit(user)) return sendJson(response, 403, { error: '편집자만 AI 위임을 복구할 수 있습니다.' })
+      const mapId = decodeURIComponent(aiDelegationRecoveryRoute[1])
+      const delegationId = decodeURIComponent(aiDelegationRecoveryRoute[2])
+      const requestScope = integrationRequestScope(request)
+      const source = delegationSourceForRequest(requestScope, mapId)
+      if (!isValidMapId(mapId) || !isValidAiDelegationId(delegationId) || !source) {
+        return sendJson(response, 400, { error: '복구할 AI 위임의 문서, 대화 또는 위임 ID가 올바르지 않습니다.' })
+      }
+
+      const delegation = aiDelegations.get(delegationId)
+      if (!delegation || delegation.mapId !== mapId) {
+        return sendJson(response, 404, { error: '복구할 AI 위임을 찾을 수 없습니다.' })
+      }
+      if (delegation.parentCardId !== source.cardId
+        || (source.conversationId && delegation.parentConversationId !== source.conversationId)) {
+        return sendJson(response, 403, {
+          error: '이 위임을 시작한 상위 카드와 AI 대화에서만 복구할 수 있습니다.',
+          code: 'AI_DELEGATION_RECOVERY_ORIGIN_MISMATCH',
+        })
+      }
+      if (!['recovery-required', 'integration-recovery-required'].includes(delegation.state)) {
+        return sendJson(response, 409, {
+          error: `현재 위임 상태(${delegation.state})는 명시적인 재시작 복구 대상이 아닙니다.`,
+          code: 'AI_DELEGATION_RECOVERY_NOT_REQUIRED',
+          delegation: delegationPublicView(delegation),
+        })
+      }
+
+      const body = await readJsonBody(request)
+      const instruction = String(body.instruction ?? '').trim()
+      const sourceRevision = Number(body.sourceRevision)
+      if (!instruction || instruction.length > 100_000
+        || !Number.isInteger(sourceRevision) || sourceRevision < 1) {
+        return sendJson(response, 400, { error: '복구 지시와 최신 문서 version이 필요합니다.' })
+      }
+
+      const map = await readMap(mapId)
+      const parentCard = map?.nodes.find((node) => node.id === delegation.parentCardId)
+      const targetCard = map?.nodes.find((node) => node.id === delegation.targetCardId)
+      if (!map || map.trashedAt || !parentCard || !targetCard) {
+        return sendJson(response, 404, { error: '상위 카드 또는 위임 대상 카드를 찾을 수 없습니다.' })
+      }
+      if (map.version !== sourceRevision) {
+        return sendJson(response, 409, {
+          error: `문서가 변경되었습니다. 최신 버전 ${map.version}을 다시 확인해 주세요.`,
+          currentVersion: map.version,
+        })
+      }
+      if (!isAiConversationLinked(targetCard.data, delegation.targetConversationId)) {
+        return sendJson(response, 409, { error: '위임 대상 카드와 기존 AI 대화의 연결을 확인할 수 없습니다.' })
+      }
+
+      const linked = aiConversationLinksFromData(targetCard.data)
+        .find((candidate) => candidate.conversationId === delegation.targetConversationId)
+      let selection
+      try {
+        const conversation = await fetchAiConversationRuntime(delegation.targetConversationId)
+        const runtime = normalizeAiConversationRuntime(delegation.targetConversationId, conversation)
+        if (runtime.state !== 'idle') {
+          return sendJson(response, 409, {
+            error: `대상 대화가 ${runtime.state} 상태이므로 지금 복구할 수 없습니다.`,
+            runtime,
+          })
+        }
+        const recovered = aiConversationLinkFromAionUiConversation(conversation)
+        selection = delegationSelectionFromSource({
+          ...recovered,
+          ...linked,
+          agent: linked?.agent ?? recovered?.agent,
+          model: linked?.model ?? recovered?.model,
+          mode: linked?.mode ?? recovered?.mode,
+          thoughtLevel: linked?.thoughtLevel ?? recovered?.thoughtLevel,
+          skills: linked?.skills?.length ? linked.skills : recovered?.skills,
+          mcpServers: linked?.mcpServers?.length ? linked.mcpServers : recovered?.mcpServers,
+          workspace: delegation.workspaceLease?.projectRoot ?? linked?.workspace ?? recovered?.workspace,
+        })
+      } catch (error) {
+        return sendJson(response, 503, { error: `이어갈 AionUi 대화 상태를 확인하지 못했습니다: ${error?.message ?? String(error)}` })
+      }
+      if (!selection) return sendJson(response, 409, { error: '복구할 AI 대화의 실행 환경을 확인하지 못했습니다.' })
+
+      let workspaceLease = delegation.workspaceLease ?? null
+      if (workspaceLease?.leaseId) {
+        try {
+          workspaceLease = await workspacePoolManager.reuseLease(workspaceLease.leaseId, {
+            mapId,
+            cardId: targetCard.id,
+            conversationId: delegation.targetConversationId,
+          })
+          selection.workspace = workspaceLease.projectRoot
+        } catch (error) {
+          return sendJson(response, 409, {
+            error: `기존 작업공간 lease를 복구하지 못했습니다: ${error?.message ?? String(error)}`,
+            code: error?.code ?? 'AI_DELEGATION_WORKSPACE_RECOVERY_FAILED',
+          })
+        }
+      }
+
+      const { token: attributionToken, attribution } = issueDelegatedAttribution({
+        mapId,
+        cardId: targetCard.id,
+        conversationId: delegation.targetConversationId,
+        selection,
+        startedBy: delegation.startedBy ?? user.id,
+      })
+      await persistAiAttributions()
+
+      const recoveryAttempt = Number(delegation.recoveryAttempt ?? 0) + 1
+      const integrationRecovery = delegation.state === 'integration-recovery-required'
+      const operationId = boundedAionOperationId(
+        delegation.id,
+        `${integrationRecovery ? 'integrate-' : ''}recover-${recoveryAttempt}`,
+      )
+      const requestedInstruction = integrationRecovery
+        ? `${workspaceConflictInstruction(delegation, delegation.workspaceResult)}\n\n${delegationRecoveryInstruction(delegation, instruction)}`
+        : delegationRecoveryInstruction(delegation, instruction)
+      const delegatedInstruction = buildDelegatedInstruction({
+        mapId,
+        cardId: targetCard.id,
+        editorId: delegation.startedBy ?? user.id,
+        attributionToken,
+        instruction: requestedInstruction,
+        workspaceLease,
+      })
+
+      let dispatch
+      try {
+        dispatch = await fetchAionUi('/api/internal/external-conversation-dispatches', {
+          method: 'POST',
+          timeoutMs: 30_000,
+          body: {
+            operationId,
+            actorConversationId: delegation.parentConversationId,
+            strategy: 'resume',
+            targetConversationId: delegation.targetConversationId,
+            ...(workspaceLease ? { workspaceLease } : {}),
+            instruction: delegatedInstruction,
+          },
+        })
+      } catch (error) {
+        for (let attempt = 0; attempt < 10 && !dispatch; attempt += 1) {
+          if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 500))
+          try {
+            dispatch = await fetchAionUi(`/api/internal/external-conversation-dispatches/${encodeURIComponent(operationId)}`)
+          } catch {
+            // The recovery dispatch may have started even when its POST response was lost.
+          }
+        }
+        if (!dispatch) {
+          aiAttributions.delete(sessionTokenKey(attributionToken))
+          await persistAiAttributions()
+          return sendJson(response, error?.status === 409 ? 409 : 503, {
+            error: `AionUi에 복구 작업을 전달하지 못했습니다: ${error?.message ?? String(error)}`,
+          })
+        }
+      }
+
+      attribution.conversationId = delegation.targetConversationId
+      const now = new Date().toISOString()
+      const nextState = integrationRecovery
+        ? integrationDelegationState(dispatch.state)
+        : (dispatch.state === 'waiting_resource'
+            ? 'waiting-resource'
+            : dispatch.state === 'waiting_resume' ? 'waiting-child-resume' : 'starting')
+      const updated = await updateAiDelegation(delegation.id, {
+        state: nextState,
+        childOperationId: integrationRecovery ? delegation.childOperationId : operationId,
+        integrationOperationId: integrationRecovery ? operationId : delegation.integrationOperationId,
+        recoveryAttempt,
+        recoveryOperationId: operationId,
+        recoveryInstructionPreview: instruction.replace(/\s+/g, ' ').slice(0, 240),
+        recoveryInstructionHash: createHash('sha256').update(instruction).digest('hex'),
+        recoveryRequestedAt: now,
+        recoveryRequiredAt: null,
+        childError: integrationRecovery ? delegation.childError : null,
+        integrationError: integrationRecovery ? null : delegation.integrationError,
+        childTurnId: integrationRecovery ? delegation.childTurnId : (dispatch.turnId ?? null),
+        integrationTurnId: integrationRecovery ? (dispatch.turnId ?? null) : delegation.integrationTurnId,
+        workspaceLease,
+      })
+      return sendJson(response, 202, {
+        delegation: delegationPublicView(updated),
+        recovery: { operationId, attempt: recoveryAttempt, reusedConversation: true, reusedWorkspace: Boolean(workspaceLease) },
+      })
+    }
+
     if (aiDelegationsRoute && request.method === 'GET') {
       const user = requireUser(request, response)
       if (!user) return
@@ -3855,6 +4096,7 @@ const server = createServer(async (request, response) => {
             targetCardLabel: targetCard.data?.label ?? targetCard.id,
             parentConversationId: parentAttribution.conversationId,
             targetConversationId,
+            childOperationId: id,
             strategy,
             decisionReason,
             sourceRevision,
@@ -4185,6 +4427,7 @@ const server = createServer(async (request, response) => {
         targetCardLabel: targetCard.data?.label ?? targetCard.id,
         parentConversationId: parentAttribution.conversationId,
         targetConversationId,
+        childOperationId: id,
         strategy,
         decisionReason,
         sourceRevision,

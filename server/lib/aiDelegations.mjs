@@ -6,11 +6,13 @@ export const ACTIVE_AI_DELEGATION_STATES = new Set([
   'running',
   'resuming',
   'waiting-child-resume',
+  'recovery-required',
   'waiting-integration',
   'integration-starting',
   'integration-waiting-resource',
   'integration-running',
   'integration-waiting-resume',
+  'integration-recovery-required',
   'waiting-parent',
   'waking-parent',
 ])
@@ -60,6 +62,15 @@ export function initialAiDelegationRuntime(dispatch, completedAt = new Date().to
       childTurnId,
       childError: null,
       childInterruptedAt: completedAt,
+    }
+  }
+  if (state === 'recovery_required') {
+    return {
+      state: 'recovery-required',
+      childStatus: 'interrupted-by-restart',
+      childTurnId,
+      childError: String(dispatch?.errorMessage ?? '').trim() || 'interrupted_by_restart',
+      recoveryRequiredAt: completedAt,
     }
   }
   if (state === 'waiting_resource') {
