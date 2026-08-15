@@ -1,10 +1,15 @@
 import { execFile } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { copyFile, lstat, mkdir, readFile, readlink, rename, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import { promisify } from 'node:util'
 
 const execFileAsync = promisify(execFile)
+const idleDriftReason = '작업공간에 소유자를 확정할 수 없는 변경이 있습니다.'
+const protectedWorkspaceEntries = new Set([
+  '.ai-workspace.json', '.agents', '.claude', '.codex', '_AIShared', 'AGENTS.md', 'CLAUDE.local.md',
+])
 
 export class WorkspacePoolUnavailableError extends Error {
   constructor(message, details = []) {
@@ -27,6 +32,34 @@ export class WorkspacePoolIntegrationError extends Error {
 function normalizedPath(value) {
   const resolved = path.resolve(String(value ?? '').trim()).replace(/[\\/]+$/, '')
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved
+}
+
+function nullSeparated(value) {
+  return String(value ?? '').split('\0').map((item) => item.trim()).filter(Boolean)
+}
+
+function safeRelativePath(value) {
+  const normalized = String(value ?? '').trim().replaceAll('\\', '/')
+  if (!normalized || normalized.startsWith('/') || /^[A-Za-z]:/.test(normalized)) return null
+  const segments = normalized.split('/')
+  if (segments.some((segment) => !segment || segment === '.' || segment === '..')) return null
+  return segments.join('/')
+}
+
+function isProtectedWorkspacePath(relative) {
+  return protectedWorkspaceEntries.has(String(relative ?? '').replaceAll('\\', '/').split('/')[0])
+}
+
+function pathInside(root, relative) {
+  const resolvedRoot = path.resolve(root)
+  const resolved = path.resolve(resolvedRoot, relative)
+  const prefix = `${normalizedPath(resolvedRoot)}${path.sep}`
+  if (!normalizedPath(resolved).startsWith(prefix)) throw new Error(`작업공간 밖의 경로는 처리할 수 없습니다: ${relative}`)
+  return resolved
+}
+
+function driftFolderName(now = new Date()) {
+  return now.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z')
 }
 
 function atomicJson(file, value) {
@@ -61,7 +94,7 @@ async function defaultGitRunner(cwd, args) {
   const result = await execFileAsync('git', args, {
     cwd,
     windowsHide: true,
-    maxBuffer: 10 * 1024 * 1024,
+    maxBuffer: 256 * 1024 * 1024,
   })
   return String(result.stdout ?? '').trim()
 }
@@ -102,6 +135,7 @@ function publicLease(lease) {
     baseBranch: lease.baseBranch,
     baseCommit: lease.baseCommit,
     startedAt: lease.startedAt,
+    checkpointCount: Array.isArray(lease.checkpoints) ? lease.checkpoints.length : 0,
   }
 }
 
@@ -126,7 +160,9 @@ export function buildWorkspaceInstruction(lease) {
 - Unity assetsPath: \`${lease.assetsPath}\`
 - Unity instance hash: \`${lease.unityInstanceHash}\`
 
-이 작업에서는 위 \`projectRoot\`만 수정하세요. 다른 Holdem 작업공간으로 이동하거나 브랜치를 바꾸거나 lease를 직접 해제하지 마세요. \`.ai-session.json\`의 값이 위 정보와 일치하는지 먼저 확인하고, 공통 지식은 \`_AIShared\`에서 읽기 전용으로 사용하세요. 커밋과 작업공간 통합은 MindNProgress가 작업 종료 후 처리하므로 직접 커밋하지 마세요.`
+이 작업에서는 위 \`projectRoot\`만 수정하세요. 다른 Holdem 작업공간으로 이동하거나 브랜치를 바꾸거나 lease를 직접 해제하지 마세요. \`.ai-session.json\`의 값이 위 정보와 일치하는지 먼저 확인하고, 공통 지식은 \`_AIShared\`에서 읽기 전용으로 사용하세요.
+
+Unity Play Mode, 재임포트, 동적 폰트·Atlas 생성 등의 검증은 어떤 tracked 파일이든 자동으로 바꿀 수 있습니다. 구현 수정을 마친 뒤 각 검증을 시작하기 전에 \`mindnprogress_checkpoint_ai_workspace\`를 호출하여 의도한 변경 경로만 고정하세요. 검증 후 보완했다면 다시 체크포인트를 만들고 검증하세요. Git으로 직접 커밋하지 마세요. 완료 시 MindNProgress는 명시적 체크포인트만 main에 통합하고 그 이후의 자동 변경은 복구 자료로 보존한 뒤 worker에서 제거합니다.`
 }
 
 export class WorkspacePoolManager {
@@ -182,6 +218,237 @@ export class WorkspacePoolManager {
       : null
   }
 
+  recoverableIdleWorkspaceState(workspaceId) {
+    const current = this.state?.workspaces?.[workspaceId] ?? { status: 'idle' }
+    if (current.status === 'idle') return true
+    if (current.status !== 'quarantined' || current.reason !== idleDriftReason) return false
+    const lease = current.leaseId ? this.state?.leases?.[current.leaseId] : null
+    return !lease || ['completed', 'cancelled', 'quarantined'].includes(lease.status)
+  }
+
+  async archiveAndRestoreDriftOnce(workspace, {
+    reason,
+    phase,
+    jobId = null,
+    leaseId = null,
+    idleCommit = null,
+    attempt = 1,
+    previousArchives = [],
+  } = {}) {
+    const status = await this.git(workspace.root, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])
+    if (!status) return null
+
+    const detectedAt = new Date()
+    const branch = await this.git(workspace.root, ['branch', '--show-current'])
+    const headCommit = await this.git(workspace.root, ['rev-parse', 'HEAD'])
+    const trackedDiff = await this.git(workspace.root, ['diff', '--binary', '--no-ext-diff'])
+    const stagedDiff = await this.git(workspace.root, ['diff', '--cached', '--binary', '--no-ext-diff'])
+    const untracked = nullSeparated(await this.git(workspace.root, ['ls-files', '--others', '--exclude-standard', '-z']))
+      .map(safeRelativePath)
+      .filter(Boolean)
+    const protectedUntracked = untracked.filter(isProtectedWorkspacePath)
+    if (protectedUntracked.length > 0) {
+      throw new Error(`AI 작업공간 인프라 항목은 자동 정리하지 않습니다: ${protectedUntracked.join(', ')}`)
+    }
+    const archiveRoot = path.join(
+      this.registry.sharedRoot,
+      'workspace-drift',
+      workspace.id,
+      `${driftFolderName(detectedAt)}-${randomBytes(3).toString('hex')}`,
+    )
+    await mkdir(archiveRoot, { recursive: true })
+    await Promise.all([
+      writeFile(path.join(archiveRoot, 'tracked.diff'), trackedDiff, 'utf8'),
+      writeFile(path.join(archiveRoot, 'staged.diff'), stagedDiff, 'utf8'),
+    ])
+
+    const archivedUntracked = []
+    for (const relative of untracked) {
+      const source = pathInside(workspace.root, relative)
+      const target = pathInside(path.join(archiveRoot, 'untracked'), relative)
+      const info = await lstat(source)
+      await mkdir(path.dirname(target), { recursive: true })
+      if (info.isFile()) {
+        await copyFile(source, target)
+        archivedUntracked.push({ path: relative, type: 'file', size: info.size })
+      } else if (info.isSymbolicLink()) {
+        const link = await readlink(source)
+        await writeFile(`${target}.symlink.txt`, link, 'utf8')
+        archivedUntracked.push({ path: relative, type: 'symbolic-link', target: link })
+      } else {
+        throw new Error(`복구 보존을 지원하지 않는 untracked 항목입니다: ${relative}`)
+      }
+    }
+
+    const metadata = {
+      schemaVersion: 1,
+      poolId: this.registry.poolId,
+      workspaceId: workspace.id,
+      workspaceRoot: workspace.root,
+      reason: String(reason ?? '자동 생성된 작업공간 drift'),
+      phase: String(phase ?? 'idle'),
+      jobId,
+      leaseId,
+      branch,
+      headCommit,
+      idleCommit,
+      attempt,
+      previousArchives,
+      status,
+      untracked: archivedUntracked,
+      detectedAt: detectedAt.toISOString(),
+    }
+    await atomicJson(path.join(archiveRoot, 'metadata.json'), metadata)
+
+    await this.git(workspace.root, ['restore', '--source=HEAD', '--staged', '--worktree', '--', '.'])
+    for (const relative of untracked) {
+      await rm(pathInside(workspace.root, relative), { force: true })
+    }
+    const remaining = await this.git(workspace.root, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])
+    if (remaining) {
+      metadata.remainingAfterRestore = remaining
+      await atomicJson(path.join(archiveRoot, 'metadata.json'), metadata)
+    }
+    return { archiveRoot, metadata, remaining }
+  }
+
+  async archiveAndRestoreDrift(workspace, options = {}) {
+    const archives = []
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const drift = await this.archiveAndRestoreDriftOnce(workspace, {
+        ...options,
+        attempt,
+        previousArchives: [...archives],
+      })
+      if (!drift) {
+        return archives.length > 0
+          ? { archiveRoot: archives.at(-1), archiveRoots: archives }
+          : null
+      }
+      archives.push(drift.archiveRoot)
+      if (!drift.remaining) return { ...drift, archiveRoots: archives }
+      if (attempt < 3) await delay(250)
+    }
+    throw new Error(`drift 복원 중 Unity가 변경을 계속 생성했습니다. 복구 자료: ${archives.join(', ')}`)
+  }
+
+  async prepareIdleWorkspace(workspace, current, context = {}) {
+    const sessionFile = path.join(workspace.root, '.ai-session.json')
+    if (await exists(sessionFile)) throw new Error('.ai-session.json이 이미 존재합니다.')
+    const dirty = await this.git(workspace.root, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])
+    let drift = null
+    if (dirty) {
+      drift = await this.archiveAndRestoreDrift(workspace, {
+        reason: current.reason ?? '유휴 worker에서 발견된 소유자 미확인 변경',
+        phase: 'idle-preparation',
+        jobId: context.jobId,
+        leaseId: context.leaseId,
+        idleCommit: current.idleCommit ?? null,
+      })
+    }
+    this.state.workspaces[workspace.id] = {
+      status: 'idle',
+      idleCommit: current.idleCommit ?? null,
+      lastJobId: current.lastJobId ?? null,
+      lastLeaseId: current.lastLeaseId ?? null,
+      lastDriftArchive: drift?.archiveRoot ?? current.lastDriftArchive ?? null,
+      updatedAt: new Date().toISOString(),
+    }
+    await this.persist()
+    return drift
+  }
+
+  async checkpoint(leaseId, {
+    jobId,
+    mapId,
+    cardId,
+    conversationId,
+    paths,
+    confirmNoChanges = false,
+    cardLabel,
+  } = {}) {
+    return this.runExclusive(async () => {
+      const lease = this.state?.leases?.[String(leaseId ?? '').trim()]
+      if (!lease || !['leased', 'checkpoint-required'].includes(lease.status)) {
+        throw new WorkspacePoolUnavailableError('체크포인트를 생성할 활성 AI 작업공간 lease를 찾지 못했습니다.')
+      }
+      if (String(jobId ?? '') !== lease.jobId
+        || String(mapId ?? '') !== lease.mapId
+        || String(cardId ?? '') !== lease.cardId
+        || String(conversationId ?? '') !== lease.conversationId) {
+        throw new WorkspacePoolUnavailableError('체크포인트 요청이 현재 AI 작업공간 소유권과 일치하지 않습니다.')
+      }
+      const workspace = this.registry.workspaces.find((candidate) => candidate.id === lease.workspaceId)
+      if (!workspace) throw new WorkspacePoolUnavailableError('체크포인트 작업공간을 찾지 못했습니다.')
+      const currentBranch = await this.git(workspace.root, ['branch', '--show-current'])
+      if (currentBranch !== lease.branch) {
+        throw new WorkspacePoolUnavailableError(`체크포인트 브랜치가 ${lease.branch}가 아닙니다.`)
+      }
+      const intendedPaths = [...new Set((Array.isArray(paths) ? paths : []).map(safeRelativePath).filter(Boolean))]
+      if (intendedPaths.length === 0) {
+        if (!confirmNoChanges) {
+          throw new WorkspacePoolUnavailableError('체크포인트에 포함할 의도된 변경 경로가 필요합니다. 의도한 파일 변경이 없다면 confirmNoChanges를 사용하세요.')
+        }
+        const checkpoint = {
+          commit: await this.git(workspace.root, ['rev-parse', 'HEAD']),
+          paths: [],
+          noCodeChanges: true,
+          createdAt: new Date().toISOString(),
+        }
+        lease.checkpoints ??= []
+        lease.checkpoints.push(checkpoint)
+        lease.status = 'leased'
+        lease.updatedAt = checkpoint.createdAt
+        this.state.workspaces[workspace.id] = {
+          status: 'leased',
+          jobId: lease.jobId,
+          leaseId: lease.leaseId,
+          updatedAt: checkpoint.createdAt,
+        }
+        await this.persist()
+        return { lease: publicLease(lease), checkpoint, noChanges: true }
+      }
+      const scopedStatus = await this.git(workspace.root, [
+        'status', '--porcelain=v1', '-z', '--untracked-files=all', '--', ...intendedPaths,
+      ])
+      if (!scopedStatus) {
+        return {
+          lease: publicLease(lease),
+          checkpoint: null,
+          noChanges: true,
+          paths: intendedPaths,
+        }
+      }
+      await this.git(workspace.root, ['add', '--', ...intendedPaths])
+      const stagedPaths = nullSeparated(await this.git(workspace.root, ['diff', '--cached', '--name-only', '-z']))
+      const unexpected = stagedPaths.filter((item) => !intendedPaths.includes(item.replaceAll('\\', '/')))
+      if (unexpected.length > 0) {
+        await this.git(workspace.root, ['restore', '--staged', '--', ...stagedPaths])
+        throw new WorkspacePoolUnavailableError(`의도하지 않은 staged 변경이 포함되어 체크포인트를 중단했습니다: ${unexpected.join(', ')}`)
+      }
+      const message = checkpointMessage(cardLabel ?? lease.cardLabel, false)
+      await this.git(workspace.root, ['commit', '-m', message.title, '-m', message.body])
+      const commit = await this.git(workspace.root, ['rev-parse', 'HEAD'])
+      const checkpoint = {
+        commit,
+        paths: intendedPaths,
+        createdAt: new Date().toISOString(),
+      }
+      lease.checkpoints ??= []
+      lease.checkpoints.push(checkpoint)
+      lease.status = 'leased'
+      lease.updatedAt = checkpoint.createdAt
+      this.state.workspaces[workspace.id] = {
+        status: 'leased',
+        jobId: lease.jobId,
+        leaseId: lease.leaseId,
+        updatedAt: checkpoint.createdAt,
+      }
+      await this.persist()
+      return { lease: publicLease(lease), checkpoint, noChanges: false }
+    })
+  }
+
   async acquire({ workspaceHint, mapId, cardId, conversationId, cardLabel } = {}) {
     return this.runExclusive(async () => {
       if (!this.poolForWorkspace(workspaceHint)) return null
@@ -202,7 +469,7 @@ export class WorkspacePoolManager {
       const failures = []
       for (const workspace of this.registry.workers) {
         const current = this.state.workspaces[workspace.id] ?? { status: 'idle' }
-        if (current.status !== 'idle') continue
+        if (!this.recoverableIdleWorkspaceState(workspace.id)) continue
         this.state.workspaces[workspace.id] = {
           ...current,
           status: 'preparing',
@@ -212,10 +479,8 @@ export class WorkspacePoolManager {
         }
         await this.persist()
         try {
+          const recoveredDrift = await this.prepareIdleWorkspace(workspace, current, { jobId, leaseId })
           const sessionFile = path.join(workspace.root, '.ai-session.json')
-          if (await exists(sessionFile)) throw new Error('.ai-session.json이 이미 존재합니다.')
-          const dirty = await this.git(workspace.root, ['status', '--porcelain', '--untracked-files=all'])
-          if (dirty) throw new Error('작업공간에 소유자를 확정할 수 없는 변경이 있습니다.')
           const originUrl = await this.git(workspace.root, ['remote', 'get-url', 'origin'])
           if (this.registry.originUrl && originUrl !== this.registry.originUrl) {
             throw new Error('작업공간 origin URL이 registry와 일치하지 않습니다.')
@@ -261,6 +526,7 @@ export class WorkspacePoolManager {
             status: 'leased',
             jobId,
             leaseId,
+            lastDriftArchive: recoveredDrift?.archiveRoot ?? current.lastDriftArchive ?? null,
             updatedAt: startedAt,
           }
           await this.persist()
@@ -271,6 +537,7 @@ export class WorkspacePoolManager {
           this.state.workspaces[workspace.id] = {
             status: 'quarantined',
             reason,
+            reasonCode: reason === idleDriftReason ? 'IDLE_WORKTREE_DRIFT' : 'WORKSPACE_PREPARATION_FAILED',
             jobId,
             leaseId,
             updatedAt: new Date().toISOString(),
@@ -287,7 +554,7 @@ export class WorkspacePoolManager {
       const normalizedLeaseId = String(leaseId ?? '').trim()
       const normalizedConversationId = String(conversationId ?? '').trim()
       const lease = this.state?.leases?.[normalizedLeaseId]
-      if (!lease || lease.status !== 'leased') {
+      if (!lease || !['leased', 'checkpoint-required'].includes(lease.status)) {
         throw new WorkspacePoolUnavailableError('이어갈 AI 작업공간 lease를 찾지 못했습니다.')
       }
       if (lease.mapId !== String(mapId ?? '') || lease.cardId !== String(cardId ?? '')) {
@@ -302,7 +569,9 @@ export class WorkspacePoolManager {
 
       const workspace = this.registry?.workspaces.find((candidate) => candidate.id === lease.workspaceId)
       const workspaceState = this.state?.workspaces?.[lease.workspaceId]
-      if (!workspace || workspaceState?.status !== 'leased' || workspaceState?.leaseId !== normalizedLeaseId) {
+      if (!workspace
+        || !['leased', 'checkpoint-required'].includes(workspaceState?.status)
+        || workspaceState?.leaseId !== normalizedLeaseId) {
         throw new WorkspacePoolUnavailableError('이어갈 AI 작업공간의 점유 상태가 lease와 일치하지 않습니다.')
       }
       const sessionFile = path.join(workspace.root, '.ai-session.json')
@@ -398,11 +667,27 @@ export class WorkspacePoolManager {
         if (!lease.integrationBranch && currentBranch !== lease.branch) {
           throw new Error(`예상 브랜치 ${lease.branch}가 아닌 ${currentBranch}입니다.`)
         }
-        const dirty = await this.git(workspace.root, ['status', '--porcelain', '--untracked-files=all'])
+        const dirty = await this.git(workspace.root, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])
         if (dirty && !lease.integrationBranch) {
-          const message = checkpointMessage(cardLabel ?? lease.cardLabel, completed)
-          await this.git(workspace.root, ['add', '-A'])
-          await this.git(workspace.root, ['commit', '-m', message.title, '-m', message.body])
+          const currentHead = await this.git(workspace.root, ['rev-parse', 'HEAD'])
+          const hasCheckpoint = currentHead !== lease.baseCommit
+            || (Array.isArray(lease.checkpoints) && lease.checkpoints.length > 0)
+          if (completed && !hasCheckpoint) {
+            return await this.requireCheckpoint(lease, workspace)
+          }
+          if (completed) {
+            const drift = await this.archiveAndRestoreDrift(workspace, {
+              reason: '명시적 체크포인트 이후 발생한 검증·Play·재임포트 변경',
+              phase: 'post-checkpoint-verification',
+              jobId: lease.jobId,
+              leaseId: lease.leaseId,
+            })
+            lease.lastDriftArchive = drift?.archiveRoot ?? lease.lastDriftArchive ?? null
+          } else {
+            const message = checkpointMessage(cardLabel ?? lease.cardLabel, false)
+            await this.git(workspace.root, ['add', '-A'])
+            await this.git(workspace.root, ['commit', '-m', message.title, '-m', message.body])
+          }
         }
         headCommit = lease.headCommit ?? await this.git(workspace.root, ['rev-parse', 'HEAD'])
         if (headCommit !== lease.baseCommit) {
@@ -525,6 +810,41 @@ export class WorkspacePoolManager {
         })
       }
     })
+  }
+
+  async requireCheckpoint(lease, workspace) {
+    lease.checkpointRound = Number(lease.checkpointRound ?? 0) + 1
+    if (lease.checkpointRound > 3) {
+      throw new Error('명시적 체크포인트 요청 재시도 한도(3회)를 초과했습니다.')
+    }
+    const [tracked, staged, untracked] = await Promise.all([
+      this.git(workspace.root, ['diff', '--name-only', '-z']),
+      this.git(workspace.root, ['diff', '--cached', '--name-only', '-z']),
+      this.git(workspace.root, ['ls-files', '--others', '--exclude-standard', '-z']),
+    ])
+    const changedFiles = [...new Set([
+      ...nullSeparated(tracked),
+      ...nullSeparated(staged),
+      ...nullSeparated(untracked),
+    ])].sort()
+    const updatedAt = new Date().toISOString()
+    const result = await this.writeResult(lease, {
+      status: 'checkpoint-required',
+      checkpointRound: lease.checkpointRound,
+      changedFiles,
+      error: '의도된 구현 변경을 검증 부산물과 구분할 명시적 체크포인트가 필요합니다.',
+      updatedAt,
+    })
+    lease.status = 'checkpoint-required'
+    lease.result = result
+    this.state.workspaces[workspace.id] = {
+      status: 'checkpoint-required',
+      jobId: lease.jobId,
+      leaseId: lease.leaseId,
+      updatedAt,
+    }
+    await this.persist()
+    return result
   }
 
   async completeConflictResolution(leaseId, { childStatus, childError } = {}) {
@@ -659,16 +979,38 @@ export class WorkspacePoolManager {
   }
 
   async completeLease(lease, workspace, resultFields) {
-    await this.git(workspace.root, ['switch', lease.baseBranch])
+    const integration = this.registry.integration
+    const idleCommit = resultFields.integratedCommit
+      ?? await this.git(integration.root, ['rev-parse', 'HEAD'])
+    const idleBranch = `mnp/idle/${workspace.id}`
+    await this.git(workspace.root, ['switch', '-C', idleBranch, idleCommit])
     await rm(path.join(workspace.root, '.ai-session.json'), { force: true })
-    const result = await this.writeResult(lease, resultFields)
+    let drift = null
+    const postSwitchDirty = await this.git(workspace.root, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])
+    if (postSwitchDirty) {
+      drift = await this.archiveAndRestoreDrift(workspace, {
+        reason: '완료된 worker를 최신 main 기준으로 회수한 후 발생한 Unity 자동 변경',
+        phase: 'idle-release',
+        jobId: lease.jobId,
+        leaseId: lease.leaseId,
+        idleCommit,
+      })
+    }
+    const lastDriftArchive = drift?.archiveRoot ?? lease.lastDriftArchive ?? null
+    const result = await this.writeResult(lease, {
+      ...resultFields,
+      driftArchive: lastDriftArchive,
+    })
     lease.status = 'completed'
     lease.result = result
     if (this.state.integrationLeaseId === lease.leaseId) this.state.integrationLeaseId = null
     this.state.workspaces[workspace.id] = {
       status: 'idle',
+      idleCommit,
+      idleBranch,
       lastJobId: lease.jobId,
       lastLeaseId: lease.leaseId,
+      lastDriftArchive,
       updatedAt: result.completedAt,
     }
     await this.persist()
@@ -712,7 +1054,9 @@ export class WorkspacePoolManager {
       try {
         const dirty = await this.git(workspace.root, ['status', '--porcelain', '--untracked-files=all'])
         if (dirty) throw new Error('취소된 작업공간에 변경이 남아 있어 자동 회수하지 않았습니다.')
-        await this.git(workspace.root, ['switch', lease.baseBranch])
+        const idleCommit = await this.git(this.registry.integration.root, ['rev-parse', 'HEAD'])
+        const idleBranch = `mnp/idle/${workspace.id}`
+        await this.git(workspace.root, ['switch', '-C', idleBranch, idleCommit])
         await rm(path.join(workspace.root, '.ai-session.json'), { force: true })
         const result = await this.writeResult(lease, {
           status: 'cancelled',
@@ -723,6 +1067,8 @@ export class WorkspacePoolManager {
         lease.result = result
         this.state.workspaces[workspace.id] = {
           status: 'idle',
+          idleCommit,
+          idleBranch,
           lastJobId: lease.jobId,
           lastLeaseId: leaseId,
           updatedAt: result.completedAt,

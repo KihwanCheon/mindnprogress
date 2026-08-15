@@ -1823,6 +1823,76 @@ ${files}
 현재 진행 중인 cherry-pick의 충돌만 해결하세요. 요구사항과 기존 구현 의도를 함께 대조하고, 해결한 파일을 stage한 뒤 모든 cherry-pick이 끝날 때까지 \`git cherry-pick --continue\`를 수행하세요. 이 통합 과정에 필요한 보완 변경은 허용하지만 다른 Holdem 작업공간이나 main을 직접 수정하지 말고, 브랜치를 바꾸거나 lease를 해제하지 마세요. 관련 검증을 실행한 뒤 해결 내용과 검증 결과를 최종 응답으로 보고하세요. 해결할 수 없다면 임의 선택하지 말고 충돌한 의도와 필요한 판단을 구체적으로 보고하세요.`
 }
 
+function workspaceCheckpointInstruction(delegation, workspaceResult) {
+  const files = Array.isArray(workspaceResult?.changedFiles) && workspaceResult.changedFiles.length > 0
+    ? workspaceResult.changedFiles.map((file) => `- ${file}`).join('\n')
+    : '- Git status로 현재 변경을 다시 확인하세요.'
+  return `# MindNProgress 명시적 체크포인트 요청
+
+하위 작업이 완료되었지만 Unity Play·재임포트·동적 자산 생성 등의 부산물과 구현 변경을 구분할 명시적 체크포인트가 없어 main 통합을 중단했습니다.
+
+- 하위 카드: ${delegation.targetCardLabel} (${delegation.targetCardId})
+- workspaceId: ${delegation.workspaceLease.workspaceId}
+- jobId: ${delegation.workspaceLease.jobId}
+- leaseId: ${delegation.workspaceLease.leaseId}
+- projectRoot: ${delegation.workspaceLease.projectRoot}
+- 요청 회차: ${workspaceResult.checkpointRound}
+
+## 현재 변경 후보
+
+${files}
+
+최신 카드 요구사항과 Git diff를 대조해 의도한 구현 변경과 검증 부산물을 구분하세요. 의도한 파일만 \`mindnprogress_checkpoint_ai_workspace\`의 \`paths\`에 넣어 체크포인트를 생성하고, 자동 변경은 포함하지 마세요. 의도한 파일 변경이 없다면 빈 \`paths\`와 \`confirmNoChanges=true\`로 확인하세요. 구현과 자동 변경이 같은 파일에 섞여 있으면 기준 내용으로 되돌린 뒤 의도한 수정만 다시 적용하세요. 체크포인트 후 필수 검증을 다시 수행하고 최종 결과를 보고하세요.`
+}
+
+async function startWorkspaceCheckpointResolution(delegation, workspaceResult) {
+  const operationId = boundedAionOperationId(delegation.id, `checkpoint-${workspaceResult.checkpointRound}`)
+  let dispatch = null
+  try {
+    dispatch = await fetchAionUi('/api/internal/external-conversation-dispatches', {
+      method: 'POST',
+      timeoutMs: 30_000,
+      body: {
+        operationId,
+        actorConversationId: delegation.parentConversationId,
+        strategy: 'resume',
+        targetConversationId: delegation.targetConversationId,
+        workspaceLease: delegation.workspaceLease,
+        instruction: workspaceCheckpointInstruction(delegation, workspaceResult),
+      },
+    })
+  } catch (error) {
+    for (let attempt = 0; attempt < 10 && !dispatch; attempt += 1) {
+      if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 500))
+      try {
+        dispatch = await fetchAionUi(`/api/internal/external-conversation-dispatches/${encodeURIComponent(operationId)}`)
+      } catch {
+        // The checkpoint dispatch may have started even when its POST response was lost.
+      }
+    }
+    if (!dispatch) {
+      const reason = `체크포인트 보완 요청을 AionUi에 전달하지 못했습니다: ${error?.message ?? String(error)}`
+      const workspace = await workspacePoolManager.quarantine(delegation.workspaceLease.leaseId, reason)
+      return updateAiDelegation(delegation.id, {
+        state: 'waiting-parent',
+        childError: reason,
+        workspaceResult: workspace,
+        workspaceError: reason,
+        integrationOperationId: operationId,
+      })
+    }
+  }
+
+  return updateAiDelegation(delegation.id, {
+    state: integrationDelegationState(dispatch.state),
+    workspaceResult,
+    workspaceError: null,
+    integrationOperationId: operationId,
+    integrationTurnId: dispatch.turnId ?? null,
+    integrationStartedAt: new Date().toISOString(),
+  })
+}
+
 async function startWorkspaceConflictResolution(delegation, workspaceResult) {
   const operationId = boundedAionOperationId(delegation.id, `integrate-${workspaceResult.conflictRound}`)
   let dispatch = null
@@ -1882,6 +1952,10 @@ async function advanceWorkspaceIntegration(delegation, workspace) {
   }
   if (workspace.result?.status === 'awaiting-conflict-resolution') {
     await startWorkspaceConflictResolution(delegation, workspace.result)
+    return true
+  }
+  if (workspace.result?.status === 'checkpoint-required') {
+    await startWorkspaceCheckpointResolution(delegation, workspace.result)
     return true
   }
   return false
@@ -1994,7 +2068,9 @@ async function pollAiDelegations() {
             continue
           }
           const integrationError = status.errorMessage ?? null
-          const workspace = await completeDelegationWorkspaceConflict(delegation, status.state, integrationError)
+          const workspace = delegation.workspaceResult?.status === 'checkpoint-required'
+            ? await finalizeDelegationWorkspace(delegation, status.state, integrationError)
+            : await completeDelegationWorkspaceConflict(delegation, status.state, integrationError)
           const updated = await updateAiDelegation(delegation.id, {
             integrationStatus: status.state,
             integrationTurnId: status.turnId ?? delegation.integrationTurnId ?? null,
@@ -3792,6 +3868,56 @@ const server = createServer(async (request, response) => {
 
     const aiDelegationsRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/ai-delegations$/)
     const aiDelegationRecoveryRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/ai-delegations\/([^/]+)\/recover$/)
+    const aiWorkspaceCheckpointRoute = url.pathname.match(/^\/api\/ai-workspaces\/([^/]+)\/checkpoint$/)
+
+    if (aiWorkspaceCheckpointRoute && request.method === 'POST') {
+      const user = requireUser(request, response)
+      if (!user) return
+      if (!canEdit(user)) return sendJson(response, 403, { error: '편집자만 AI 작업공간 체크포인트를 생성할 수 있습니다.' })
+      const leaseId = decodeURIComponent(aiWorkspaceCheckpointRoute[1])
+      const scope = integrationRequestScope(request)
+      if (!scope.mapId || !scope.cardId || !scope.conversationId) {
+        return sendJson(response, 400, {
+          error: '현재 AI 대화의 문서, 카드, 대화 ID 범위가 필요합니다.',
+          code: 'AI_WORKSPACE_CHECKPOINT_SCOPE_REQUIRED',
+        })
+      }
+      const body = await readJsonBody(request)
+      const paths = Array.isArray(body.paths) ? body.paths : []
+      const confirmNoChanges = body.confirmNoChanges === true
+      if (!body.jobId || (!confirmNoChanges && paths.length === 0) || paths.length > 2_000) {
+        return sendJson(response, 400, {
+          error: '현재 jobId와 체크포인트에 포함할 변경 경로가 필요합니다.',
+          code: 'AI_WORKSPACE_CHECKPOINT_INPUT_INVALID',
+        })
+      }
+      const map = await readMap(scope.mapId)
+      const card = map?.nodes.find((node) => node.id === scope.cardId)
+      if (!map || map.trashedAt || !card) {
+        return sendJson(response, 404, { error: '체크포인트 대상 문서 또는 카드를 찾지 못했습니다.' })
+      }
+      try {
+        const result = await workspacePoolManager.checkpoint(leaseId, {
+          jobId: String(body.jobId),
+          mapId: scope.mapId,
+          cardId: scope.cardId,
+          conversationId: scope.conversationId,
+          paths,
+          confirmNoChanges,
+          cardLabel: card.data?.label ?? card.id,
+        })
+        return sendJson(response, result.noChanges ? 200 : 201, result)
+      } catch (error) {
+        if (error instanceof WorkspacePoolUnavailableError) {
+          return sendJson(response, 409, {
+            error: error.message,
+            code: error.code,
+            details: error.details,
+          })
+        }
+        throw error
+      }
+    }
 
     if (aiDelegationRecoveryRoute && request.method === 'POST') {
       const user = requireUser(request, response)
@@ -3910,7 +4036,9 @@ const server = createServer(async (request, response) => {
         `${integrationRecovery ? 'integrate-' : ''}recover-${recoveryAttempt}`,
       )
       const requestedInstruction = integrationRecovery
-        ? `${workspaceConflictInstruction(delegation, delegation.workspaceResult)}\n\n${delegationRecoveryInstruction(delegation, instruction)}`
+        ? `${delegation.workspaceResult?.status === 'checkpoint-required'
+            ? workspaceCheckpointInstruction(delegation, delegation.workspaceResult)
+            : workspaceConflictInstruction(delegation, delegation.workspaceResult)}\n\n${delegationRecoveryInstruction(delegation, instruction)}`
         : delegationRecoveryInstruction(delegation, instruction)
       const delegatedInstruction = buildDelegatedInstruction({
         mapId,
