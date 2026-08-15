@@ -6,6 +6,12 @@ import {
   rememberAiWorkspace,
   removeAiWorkspace,
 } from '../utils/aiWorkspaceHistory.mjs'
+import {
+  availableAiRuntimeOptionId,
+  getAiRuntimeSelection,
+  normalizeAiRuntimeSelections,
+  rememberAiRuntimeSelection,
+} from '../utils/aiRuntimeSelections.mjs'
 import './AiConversationDialog.css'
 
 type RuntimeOption = { id: string; label: string; description: string; providerId?: string }
@@ -31,13 +37,6 @@ type AionOptions = {
   skills: AionSkill[]
   mcpServers: AionMcpServer[]
 }
-type SavedRuntimeSelections = {
-  agentId?: string
-  modelId?: string
-  mode?: string
-  thoughtLevel?: string
-}
-
 const defaultWorkspace = 'C:\\Git\\MindNProgress'
 const defaultEditorRequest = `이 카드의 최신 내용을 검토하세요.
 
@@ -74,11 +73,19 @@ function storeDocumentWorkspace(userId: string, documentId: string, value: strin
   }
 }
 
-function readRuntimeSelections(): SavedRuntimeSelections {
+function readRuntimeSelections() {
   try {
-    return JSON.parse(localStorage.getItem(runtimeSelectionsStorageKey) ?? '{}') as SavedRuntimeSelections
+    return normalizeAiRuntimeSelections(JSON.parse(localStorage.getItem(runtimeSelectionsStorageKey) ?? '{}'))
   } catch {
-    return {}
+    return normalizeAiRuntimeSelections({})
+  }
+}
+
+function storeRuntimeSelections(value: ReturnType<typeof normalizeAiRuntimeSelections>) {
+  try {
+    localStorage.setItem(runtimeSelectionsStorageKey, JSON.stringify(value))
+  } catch {
+    // 브라우저 저장소를 사용할 수 없어도 현재 대화 옵션은 계속 사용합니다.
   }
 }
 
@@ -140,12 +147,6 @@ async function requestWorkspaceHistory(method: 'GET' | 'POST' | 'DELETE', body?:
   return normalizeAiWorkspaceHistory(result.workspaces)
 }
 
-function availableOptionId(options: RuntimeOption[], preferredId?: string, defaultId?: string) {
-  if (preferredId && options.some((option) => option.id === preferredId)) return preferredId
-  if (defaultId && options.some((option) => option.id === defaultId)) return defaultId
-  return options[0]?.id ?? ''
-}
-
 function encodeBase64Json(value: unknown) {
   const bytes = new TextEncoder().encode(JSON.stringify(value))
   let binary = ''
@@ -178,8 +179,15 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
   const workspaceHistoryRef = useRef(workspaceHistory)
   const workspaceHistoryMutationRef = useRef(0)
   const workspaceHistoryRequestRef = useRef<Promise<void>>(Promise.resolve())
+  const runtimeSelectionsRef = useRef(readRuntimeSelections())
   const [selectedSkillIds, setSelectedSkillIds] = useState<Set<string>>(new Set())
   const [selectedMcpIds, setSelectedMcpIds] = useState<Set<string>>(new Set())
+
+  const persistRuntimeSelection = useCallback((nextAgentId: string, selection: { modelId: string; mode: string; thoughtLevel: string }) => {
+    const next = rememberAiRuntimeSelection(runtimeSelectionsRef.current, nextAgentId, selection)
+    runtimeSelectionsRef.current = next
+    storeRuntimeSelections(next)
+  }, [])
 
   const applyWorkspaceHistory = useCallback((history: string[]) => {
     workspaceHistoryRef.current = history
@@ -221,16 +229,17 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
       })
       .then((body) => {
         setOptions(body)
-        const savedSelections = readRuntimeSelections()
+        const savedSelections = runtimeSelectionsRef.current
         const savedMcpIds = readMcpSelections()
-        const initialAgent = body.agents.find((agent) => agent.id === savedSelections.agentId && agent.models.length > 0)
+        const initialAgent = body.agents.find((agent) => agent.id === savedSelections.lastAgentId && agent.models.length > 0)
           ?? body.agents.find((agent) => agent.models.length > 0)
           ?? body.agents[0]
         if (initialAgent) {
+          const savedAgentSelection = getAiRuntimeSelection(savedSelections, initialAgent.id)
           setAgentId(initialAgent.id)
-          setModelId(availableOptionId(initialAgent.models, savedSelections.modelId, initialAgent.defaultModelId))
-          setMode(availableOptionId(initialAgent.modes, savedSelections.mode, initialAgent.defaultMode))
-          setThoughtLevel(availableOptionId(initialAgent.thoughtLevels, savedSelections.thoughtLevel, initialAgent.defaultThoughtLevel))
+          setModelId(availableAiRuntimeOptionId(initialAgent.models, savedAgentSelection.modelId, initialAgent.defaultModelId))
+          setMode(availableAiRuntimeOptionId(initialAgent.modes, savedAgentSelection.mode, initialAgent.defaultMode))
+          setThoughtLevel(availableAiRuntimeOptionId(initialAgent.thoughtLevels, savedAgentSelection.thoughtLevel, initialAgent.defaultThoughtLevel))
         }
         setSelectedSkillIds(new Set())
         setSelectedMcpIds(new Set(body.mcpServers.filter((server) => server.required || savedMcpIds.has(server.id)).map((server) => server.id)))
@@ -245,8 +254,8 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
 
   useEffect(() => {
     if (!options || !agentId) return
-    localStorage.setItem(runtimeSelectionsStorageKey, JSON.stringify({ agentId, modelId, mode, thoughtLevel }))
-  }, [agentId, mode, modelId, options, thoughtLevel])
+    persistRuntimeSelection(agentId, { modelId, mode, thoughtLevel })
+  }, [agentId, mode, modelId, options, persistRuntimeSelection, thoughtLevel])
 
   useEffect(() => {
     if (!options) return
@@ -260,11 +269,13 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
   const selectedModel = selectedAgent?.models.find((model) => model.id === modelId)
 
   const changeAgent = (nextAgentId: string) => {
+    persistRuntimeSelection(agentId, { modelId, mode, thoughtLevel })
     setAgentId(nextAgentId)
     const nextAgent = options?.agents.find((agent) => agent.id === nextAgentId)
-    setModelId(nextAgent ? availableOptionId(nextAgent.models, undefined, nextAgent.defaultModelId) : '')
-    setMode(nextAgent ? availableOptionId(nextAgent.modes, undefined, nextAgent.defaultMode) : '')
-    setThoughtLevel(nextAgent ? availableOptionId(nextAgent.thoughtLevels, undefined, nextAgent.defaultThoughtLevel) : '')
+    const savedAgentSelection = getAiRuntimeSelection(runtimeSelectionsRef.current, nextAgentId)
+    setModelId(nextAgent ? availableAiRuntimeOptionId(nextAgent.models, savedAgentSelection.modelId, nextAgent.defaultModelId) : '')
+    setMode(nextAgent ? availableAiRuntimeOptionId(nextAgent.modes, savedAgentSelection.mode, nextAgent.defaultMode) : '')
+    setThoughtLevel(nextAgent ? availableAiRuntimeOptionId(nextAgent.thoughtLevels, savedAgentSelection.thoughtLevel, nextAgent.defaultThoughtLevel) : '')
   }
 
   const toggleSelection = (setter: Dispatch<SetStateAction<Set<string>>>, id: string) => {
