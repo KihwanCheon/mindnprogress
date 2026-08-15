@@ -15,6 +15,7 @@ import {
   unavailableAiConversationRuntime,
 } from './lib/aionUiConversationRuntimes.mjs'
 import {
+  activeAiDelegationsForConversation,
   formatAiConversationTitle,
   initialAiDelegationRuntime,
   isValidAiDelegationId,
@@ -1628,6 +1629,74 @@ async function updateAiDelegation(id, updates) {
   return next
 }
 
+async function restoreAiDelegationResumeReservation(delegation, error) {
+  if (!delegation || aiDelegations.get(delegation.id)?.state !== 'resuming') return
+  await updateAiDelegation(delegation.id, {
+    state: 'waiting-child-resume',
+    resumingByDelegationId: null,
+    resumeError: error?.message ?? String(error ?? 'AI 위임 재개를 완료하지 못했습니다.'),
+  })
+}
+
+async function reconcileAiDelegationWorkspaceLeases() {
+  for (const delegation of aiDelegations.values()) {
+    if (delegation.state !== 'resuming') continue
+    await updateAiDelegation(delegation.id, {
+      state: 'waiting-child-resume',
+      resumingByDelegationId: null,
+      resumeError: 'MindNProgress 재시작으로 완료되지 않은 재개 예약을 해제했습니다.',
+    })
+  }
+
+  const delegations = [...aiDelegations.values()]
+  for (const delegation of delegations) {
+    const leaseId = delegation.workspaceLease?.leaseId
+    if (!leaseId || !delegation.targetConversationId) continue
+    try {
+      await workspacePoolManager.bindConversation(leaseId, delegation.targetConversationId)
+    } catch (error) {
+      console.warn('[AI delegation workspace conversation recovery]', JSON.stringify({
+        delegationId: delegation.id,
+        leaseId,
+        error: error?.message ?? String(error),
+      }))
+    }
+  }
+
+  const visited = new Set()
+  for (const delegation of delegations) {
+    const key = `${delegation.mapId}\u0000${delegation.targetCardId}\u0000${delegation.targetConversationId}`
+    if (visited.has(key)) continue
+    visited.add(key)
+    const active = activeAiDelegationsForConversation(aiDelegations.values(), {
+      mapId: delegation.mapId,
+      targetCardId: delegation.targetCardId,
+      targetConversationId: delegation.targetConversationId,
+    })
+    if (active.length < 2) continue
+    const canonical = active[0]
+    if (canonical.state === 'waiting-child-resume') continue
+    for (const supersededCandidate of active.slice(1)) {
+      if (supersededCandidate.state !== 'waiting-child-resume') continue
+      const oldLeaseId = supersededCandidate.workspaceLease?.leaseId
+      const canonicalLeaseId = canonical.workspaceLease?.leaseId
+      let workspaceResult = supersededCandidate.workspaceResult ?? null
+      if (oldLeaseId && oldLeaseId !== canonicalLeaseId) {
+        workspaceResult = await workspacePoolManager.cancel(
+          oldLeaseId,
+          `새 위임 ${canonical.id}이 같은 카드와 대화의 작업을 이어받았습니다.`,
+        )
+      }
+      await updateAiDelegation(supersededCandidate.id, {
+        state: 'superseded',
+        supersededByDelegationId: canonical.id,
+        supersededAt: new Date().toISOString(),
+        workspaceResult,
+      })
+    }
+  }
+}
+
 async function latestAssistantResult(conversationId) {
   try {
     const messagePage = await fetchAionUi(`/api/conversations/${encodeURIComponent(conversationId)}/messages?limit=100&content_mode=full`, { timeoutMs: 30_000 })
@@ -1742,6 +1811,7 @@ async function startWorkspaceConflictResolution(delegation, workspaceResult) {
   try {
     dispatch = await fetchAionUi('/api/internal/external-conversation-dispatches', {
       method: 'POST',
+      timeoutMs: 30_000,
       body: {
         operationId,
         actorConversationId: delegation.parentConversationId,
@@ -1752,8 +1822,8 @@ async function startWorkspaceConflictResolution(delegation, workspaceResult) {
       },
     })
   } catch (error) {
-    for (let attempt = 0; attempt < 5 && !dispatch; attempt += 1) {
-      if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 200))
+    for (let attempt = 0; attempt < 10 && !dispatch; attempt += 1) {
+      if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 500))
       try {
         dispatch = await fetchAionUi(`/api/internal/external-conversation-dispatches/${encodeURIComponent(operationId)}`)
       } catch {
@@ -3237,6 +3307,7 @@ await loadAiWorkspaceHistories()
 try {
   if (await workspacePoolManager.initialize()) {
     console.log(`[Mind & Progress] AI 작업공간 pool registry를 불러왔습니다: ${workspacePoolRegistryFile}`)
+    await reconcileAiDelegationWorkspaceLeases()
   }
 } catch (error) {
   console.warn('[AI workspace pool startup]', error)
@@ -3847,24 +3918,71 @@ const server = createServer(async (request, response) => {
       }
       if (!selection) return sendJson(response, 409, { error: '위임 대화의 AI 종류와 모델 정보를 확인하지 못했습니다.' })
 
+      let resumedDelegation = null
+      if (strategy === 'resume') {
+        const activeDelegations = activeAiDelegationsForConversation(aiDelegations.values(), {
+          mapId,
+          targetCardId: targetCard.id,
+          targetConversationId,
+          excludeId: id,
+        })
+        const nonResumable = activeDelegations.find((delegation) => delegation.state !== 'waiting-child-resume')
+        if (nonResumable) {
+          return sendJson(response, 409, {
+            error: '같은 카드와 AI 대화에 아직 끝나지 않은 위임이 있습니다.',
+            code: 'AI_DELEGATION_ALREADY_ACTIVE',
+            delegation: delegationPublicView(nonResumable),
+          })
+        }
+        if (activeDelegations.length > 1) {
+          return sendJson(response, 409, {
+            error: '같은 카드와 AI 대화에 재개 대기 중인 위임이 여러 개 있어 자동으로 선택할 수 없습니다.',
+            code: 'AI_DELEGATION_RESUME_AMBIGUOUS',
+            delegations: activeDelegations.map(delegationPublicView),
+          })
+        }
+        resumedDelegation = activeDelegations[0] ?? null
+        if (resumedDelegation) {
+          const resuming = {
+            ...resumedDelegation,
+            state: 'resuming',
+            resumingByDelegationId: id,
+            resumeRequestedAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          }
+          aiDelegations.set(resumedDelegation.id, resuming)
+          resumedDelegation = resuming
+          await persistAiDelegations()
+          broadcastEvent({ type: 'ai-delegation-changed', delegation: delegationPublicView(resuming) })
+        }
+      }
+
       let workspaceLease = null
       if (workspacePoolManager.poolForWorkspace(selection.workspace)
         && !await aionCoreSupportsWorkspaceLease()) {
+        await restoreAiDelegationResumeReservation(resumedDelegation, '현재 AionCore가 작업공간 lease를 지원하지 않습니다.')
         return sendJson(response, 503, {
           error: '현재 실행 중인 AionCore가 AI 작업공간 lease를 지원하지 않습니다. AionCore를 최신 빌드로 재기동해 주세요.',
           code: 'AIONCORE_WORKSPACE_LEASE_UNAVAILABLE',
         })
       }
       try {
-        workspaceLease = await workspacePoolManager.acquire({
-          workspaceHint: selection.workspace,
-          mapId,
-          cardId: targetCard.id,
-          conversationId: strategy === 'resume' ? targetConversationId : '',
-          cardLabel: targetCard.data?.label ?? targetCard.id,
-        })
+        workspaceLease = resumedDelegation?.workspaceLease?.leaseId
+          ? await workspacePoolManager.reuseLease(resumedDelegation.workspaceLease.leaseId, {
+              mapId,
+              cardId: targetCard.id,
+              conversationId: targetConversationId,
+            })
+          : await workspacePoolManager.acquire({
+              workspaceHint: selection.workspace,
+              mapId,
+              cardId: targetCard.id,
+              conversationId: strategy === 'resume' ? targetConversationId : '',
+              cardLabel: targetCard.data?.label ?? targetCard.id,
+            })
         if (workspaceLease) selection.workspace = workspaceLease.projectRoot
       } catch (error) {
+        await restoreAiDelegationResumeReservation(resumedDelegation, error)
         if (error instanceof WorkspacePoolUnavailableError) {
           return sendJson(response, 409, {
             error: error.message,
@@ -3899,6 +4017,7 @@ const server = createServer(async (request, response) => {
       try {
         dispatch = await fetchAionUi('/api/internal/external-conversation-dispatches', {
           method: 'POST',
+          timeoutMs: 30_000,
           body: {
             operationId: id,
             actorConversationId: parentAttribution.conversationId,
@@ -3921,8 +4040,8 @@ const server = createServer(async (request, response) => {
           },
         })
       } catch (error) {
-        for (let attempt = 0; attempt < 5 && !dispatch; attempt += 1) {
-          if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 200))
+        for (let attempt = 0; attempt < 10 && !dispatch; attempt += 1) {
+          if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 500))
           try {
             dispatch = await fetchAionUi(`/api/internal/external-conversation-dispatches/${encodeURIComponent(id)}`)
           } catch {
@@ -3933,9 +4052,10 @@ const server = createServer(async (request, response) => {
           aiAttributions.delete(sessionTokenKey(attributionToken))
           const definitelyRejected = Number.isInteger(error?.status)
             && error.status >= 400 && error.status < 500 && error.status !== 409 && error.status !== 429
+          await restoreAiDelegationResumeReservation(resumedDelegation, error)
           await Promise.all([
             persistAiAttributions(),
-            workspaceLease
+            workspaceLease && !resumedDelegation
               ? (definitelyRejected
                   ? workspacePoolManager.cancel(workspaceLease.leaseId, 'AionCore가 위임 요청을 실행 전에 거부했습니다.')
                   : workspacePoolManager.quarantine(workspaceLease.leaseId, 'AionUi 위임 요청의 실행 여부를 확인하지 못했습니다.'))
@@ -3951,10 +4071,25 @@ const server = createServer(async (request, response) => {
 
       targetConversationId = String(dispatch.conversationId ?? '').trim()
       if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$/.test(targetConversationId)) {
-        if (workspaceLease) {
+        await restoreAiDelegationResumeReservation(resumedDelegation, 'AionUi가 유효한 위임 대화 ID를 반환하지 않았습니다.')
+        if (workspaceLease && !resumedDelegation) {
           await workspacePoolManager.quarantine(workspaceLease.leaseId, 'AionUi가 유효한 위임 대화 ID를 반환하지 않았습니다.')
         }
         return sendJson(response, 503, { error: 'AionUi가 위임 대화 ID를 반환하지 않았습니다.' })
+      }
+      if (workspaceLease) {
+        try {
+          workspaceLease = await workspacePoolManager.bindConversation(workspaceLease.leaseId, targetConversationId)
+            ?? workspaceLease
+        } catch (error) {
+          console.warn('[AI delegation workspace conversation binding]', JSON.stringify({
+            mapId,
+            cardId: targetCard.id,
+            conversationId: targetConversationId,
+            leaseId: workspaceLease.leaseId,
+            error: error?.message ?? String(error),
+          }))
+        }
       }
       if (delegatedConversationTitle) {
         try {
@@ -4059,8 +4194,21 @@ const server = createServer(async (request, response) => {
         linkError,
         startedBy: attribution.startedBy,
         workspaceLease,
+        ...(resumedDelegation ? { resumesDelegationId: resumedDelegation.id } : {}),
         createdAt: now,
         updatedAt: now,
+      }
+      if (resumedDelegation) {
+        const superseded = {
+          ...resumedDelegation,
+          state: 'superseded',
+          supersededByDelegationId: id,
+          supersededAt: now,
+          resumingByDelegationId: null,
+          updatedAt: now,
+        }
+        aiDelegations.set(superseded.id, superseded)
+        broadcastEvent({ type: 'ai-delegation-changed', delegation: delegationPublicView(superseded) })
       }
       aiDelegations.set(id, delegation)
       await persistAiDelegations()

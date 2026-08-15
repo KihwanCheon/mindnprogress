@@ -333,7 +333,8 @@ async function main() {
 
     const guide = await invoke('mindnprogress_read_me_first')
     assert.equal(guide.guide.product.name, 'MindNProgress')
-    assert.equal(guide.guide.version, '3.1')
+    assert.equal(guide.guide.version, '3.2')
+    assert.match(guide.guide.operationRules.join('\n'), /중지된 위임을 resume하면 같은 AI 대화와 기존 worker lease/)
     assert.match(guide.guide.dataModel.cardContent.sharedKnowledge, /재사용/)
     assert.match(guide.guide.authoringRules.join('\n'), /모든 isWork=true 업무 진행률을 동일 가중치 평균/)
     assert.match(guide.guide.authoringRules.join('\n'), /확정된 결과를 직접 작업 근거.*주요 지식선.*단순 관련성이나 일회성 참조에는 연결하지 않음/)

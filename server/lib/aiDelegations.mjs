@@ -1,7 +1,37 @@
 export const AI_DELEGATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_:-]{0,127}$/
 
+export const ACTIVE_AI_DELEGATION_STATES = new Set([
+  'starting',
+  'waiting-resource',
+  'running',
+  'resuming',
+  'waiting-child-resume',
+  'waiting-integration',
+  'integration-starting',
+  'integration-waiting-resource',
+  'integration-running',
+  'integration-waiting-resume',
+  'waiting-parent',
+  'waking-parent',
+])
+
 export function isValidAiDelegationId(value) {
   return AI_DELEGATION_ID_PATTERN.test(String(value ?? ''))
+}
+
+export function activeAiDelegationsForConversation(delegations, {
+  mapId,
+  targetCardId,
+  targetConversationId,
+  excludeId = null,
+} = {}) {
+  return [...delegations]
+    .filter((delegation) => delegation?.id !== excludeId
+      && delegation?.mapId === mapId
+      && delegation?.targetCardId === targetCardId
+      && delegation?.targetConversationId === targetConversationId
+      && ACTIVE_AI_DELEGATION_STATES.has(delegation?.state))
+    .sort((first, second) => String(second.createdAt ?? '').localeCompare(String(first.createdAt ?? '')))
 }
 
 export function formatAiConversationTitle(documentTitle, cardTitle) {

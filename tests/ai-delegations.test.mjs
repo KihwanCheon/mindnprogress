@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  activeAiDelegationsForConversation,
   formatAiConversationTitle,
   initialAiDelegationRuntime,
   isValidAiDelegationId,
@@ -57,4 +58,37 @@ test('사용자가 중지한 하위 턴은 상위 대화 재개가 아닌 하위
     childError: null,
     childInterruptedAt: '2026-08-13T09:00:00.000Z',
   })
+})
+
+test('같은 카드와 대화에서 아직 끝나지 않은 위임만 최신순으로 찾는다', () => {
+  const matches = activeAiDelegationsForConversation([
+    {
+      id: 'old-waiting', mapId: 'map-a', targetCardId: 'card-a', targetConversationId: 'conversation-a',
+      state: 'waiting-child-resume', createdAt: '2026-08-15T09:00:00.000Z',
+    },
+    {
+      id: 'new-running', mapId: 'map-a', targetCardId: 'card-a', targetConversationId: 'conversation-a',
+      state: 'running', createdAt: '2026-08-15T10:00:00.000Z',
+    },
+    {
+      id: 'completed', mapId: 'map-a', targetCardId: 'card-a', targetConversationId: 'conversation-a',
+      state: 'completed', createdAt: '2026-08-15T11:00:00.000Z',
+    },
+    {
+      id: 'other-card', mapId: 'map-a', targetCardId: 'card-b', targetConversationId: 'conversation-a',
+      state: 'running', createdAt: '2026-08-15T12:00:00.000Z',
+    },
+  ], {
+    mapId: 'map-a',
+    targetCardId: 'card-a',
+    targetConversationId: 'conversation-a',
+  })
+
+  assert.deepEqual(matches.map((delegation) => delegation.id), ['new-running', 'old-waiting'])
+  assert.equal(activeAiDelegationsForConversation(matches, {
+    mapId: 'map-a',
+    targetCardId: 'card-a',
+    targetConversationId: 'conversation-a',
+    excludeId: 'new-running',
+  }).at(0)?.id, 'old-waiting')
 })

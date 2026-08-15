@@ -59,6 +59,7 @@ test('registry 작업공간만 풀로 인식하고 유휴 worker에 원자적 le
     }), 'utf8')
 
     const commands = []
+    let workerBranch = 'japan-master'
     const manager = new WorkspacePoolManager({
       registryFile,
       stateFile,
@@ -66,8 +67,12 @@ test('registry 작업공간만 풀로 인식하고 유휴 worker에 원자적 le
         commands.push({ cwd, args })
         if (args[0] === 'status') return ''
         if (args[0] === 'rev-parse') return 'base123'
-        if (args[0] === 'branch' && args[1] === '--show-current') return 'japan-master'
+        if (args[0] === 'branch' && args[1] === '--show-current') return cwd === workerRoot ? workerBranch : 'japan-master'
         if (args[0] === 'remote') return 'https://example.invalid/holdem.git'
+        if (args[0] === 'switch') {
+          workerBranch = args[1]
+          return ''
+        }
         return ''
       },
     })
@@ -79,7 +84,7 @@ test('registry 작업공간만 풀로 인식하고 유휴 worker에 원자적 le
       workspaceHint: integrationRoot,
       mapId: 'map-a',
       cardId: 'card-b',
-      conversationId: 'conversation-c',
+      conversationId: '',
       cardLabel: '하위 카드',
     })
     assert.equal(lease.workspaceId, 'fork2')
@@ -90,6 +95,28 @@ test('registry 작업공간만 풀로 인식하고 유휴 worker에 원자적 le
     const session = JSON.parse(await readFile(path.join(workerRoot, '.ai-session.json'), 'utf8'))
     assert.equal(session.leaseId, lease.leaseId)
     assert.equal(session.projectRoot, workerRoot)
+    assert.equal(session.conversationId, '')
+
+    await manager.bindConversation(lease.leaseId, 'conversation-c')
+    const boundSession = JSON.parse(await readFile(path.join(workerRoot, '.ai-session.json'), 'utf8'))
+    assert.equal(boundSession.conversationId, 'conversation-c')
+
+    const reused = await manager.reuseLease(lease.leaseId, {
+      mapId: 'map-a',
+      cardId: 'card-b',
+      conversationId: 'conversation-c',
+    })
+    assert.equal(reused.leaseId, lease.leaseId)
+    assert.equal(reused.workspaceId, 'fork2')
+
+    await assert.rejects(
+      () => manager.reuseLease(lease.leaseId, {
+        mapId: 'map-a',
+        cardId: 'card-b',
+        conversationId: 'conversation-other',
+      }),
+      (error) => error instanceof WorkspacePoolUnavailableError,
+    )
 
     await assert.rejects(
       () => manager.acquire({ workspaceHint: integrationRoot }),

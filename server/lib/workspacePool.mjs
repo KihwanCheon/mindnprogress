@@ -249,6 +249,7 @@ export class WorkspacePoolManager {
             workspaceId: lease.workspaceId,
             jobId,
             leaseId,
+            conversationId: lease.conversationId,
             projectRoot: lease.projectRoot,
             branch,
             baseCommit,
@@ -278,6 +279,91 @@ export class WorkspacePoolManager {
         }
       }
       throw new WorkspacePoolUnavailableError('사용 가능한 AI 작업공간이 없습니다.', failures)
+    })
+  }
+
+  async reuseLease(leaseId, { mapId, cardId, conversationId } = {}) {
+    return this.runExclusive(async () => {
+      const normalizedLeaseId = String(leaseId ?? '').trim()
+      const normalizedConversationId = String(conversationId ?? '').trim()
+      const lease = this.state?.leases?.[normalizedLeaseId]
+      if (!lease || lease.status !== 'leased') {
+        throw new WorkspacePoolUnavailableError('이어갈 AI 작업공간 lease를 찾지 못했습니다.')
+      }
+      if (lease.mapId !== String(mapId ?? '') || lease.cardId !== String(cardId ?? '')) {
+        throw new WorkspacePoolUnavailableError('이어갈 AI 작업공간 lease의 문서 또는 카드가 일치하지 않습니다.')
+      }
+      if (!normalizedConversationId) {
+        throw new WorkspacePoolUnavailableError('이어갈 AI 작업공간 lease에 연결할 대화 ID가 없습니다.')
+      }
+      if (lease.conversationId && lease.conversationId !== normalizedConversationId) {
+        throw new WorkspacePoolUnavailableError('이어갈 AI 작업공간 lease가 다른 대화에 연결되어 있습니다.')
+      }
+
+      const workspace = this.registry?.workspaces.find((candidate) => candidate.id === lease.workspaceId)
+      const workspaceState = this.state?.workspaces?.[lease.workspaceId]
+      if (!workspace || workspaceState?.status !== 'leased' || workspaceState?.leaseId !== normalizedLeaseId) {
+        throw new WorkspacePoolUnavailableError('이어갈 AI 작업공간의 점유 상태가 lease와 일치하지 않습니다.')
+      }
+      const sessionFile = path.join(workspace.root, '.ai-session.json')
+      const session = await readJson(sessionFile, null)
+      if (!session
+        || session.workspaceId !== lease.workspaceId
+        || session.jobId !== lease.jobId
+        || session.leaseId !== normalizedLeaseId) {
+        throw new WorkspacePoolUnavailableError('이어갈 AI 작업공간의 세션 파일이 lease와 일치하지 않습니다.')
+      }
+      const currentBranch = await this.git(workspace.root, ['branch', '--show-current'])
+      if (currentBranch !== lease.branch) {
+        throw new WorkspacePoolUnavailableError(`이어갈 AI 작업공간 브랜치가 ${lease.branch}가 아닙니다.`)
+      }
+
+      const updatedAt = new Date().toISOString()
+      lease.conversationId = normalizedConversationId
+      lease.updatedAt = updatedAt
+      this.state.workspaces[lease.workspaceId] = {
+        ...workspaceState,
+        updatedAt,
+      }
+      await atomicJson(sessionFile, {
+        ...session,
+        conversationId: normalizedConversationId,
+        updatedAt,
+      })
+      await this.persist()
+      return publicLease(lease)
+    })
+  }
+
+  async bindConversation(leaseId, conversationId) {
+    return this.runExclusive(async () => {
+      const normalizedLeaseId = String(leaseId ?? '').trim()
+      const normalizedConversationId = String(conversationId ?? '').trim()
+      const lease = this.state?.leases?.[normalizedLeaseId]
+      if (!lease || lease.status !== 'leased' || !normalizedConversationId) return null
+      if (lease.conversationId && lease.conversationId !== normalizedConversationId) {
+        throw new WorkspacePoolUnavailableError('AI 작업공간 lease가 이미 다른 대화에 연결되어 있습니다.')
+      }
+      const workspace = this.registry?.workspaces.find((candidate) => candidate.id === lease.workspaceId)
+      if (!workspace) return null
+      const sessionFile = path.join(workspace.root, '.ai-session.json')
+      const session = await readJson(sessionFile, null)
+      if (!session || session.leaseId !== normalizedLeaseId) {
+        throw new WorkspacePoolUnavailableError('AI 작업공간의 세션 파일이 lease와 일치하지 않습니다.')
+      }
+      if (lease.conversationId === normalizedConversationId && session.conversationId === normalizedConversationId) {
+        return publicLease(lease)
+      }
+      const updatedAt = new Date().toISOString()
+      lease.conversationId = normalizedConversationId
+      lease.updatedAt = updatedAt
+      await atomicJson(sessionFile, {
+        ...session,
+        conversationId: normalizedConversationId,
+        updatedAt,
+      })
+      await this.persist()
+      return publicLease(lease)
     })
   }
 
