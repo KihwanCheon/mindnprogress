@@ -153,7 +153,34 @@ MindNProgress_Restore.bat "..\MindNProgress_Backup\2026-07-30\MindNProgress_2026
 - npm
 - AI 대화 기능을 사용할 경우 실행 중인 AionUi
 
+### macOS 백업 및 복원
+
+MindNProgress를 종료한 뒤 Finder에서 `MindNProgress_Backup.command`를 실행하면 기본적으로 `~/Documents/MindNProgress_Backup/YYYY-MM-DD`에 백업합니다. 터미널에서는 다음 명령을 사용할 수 있습니다.
+
+```bash
+./MindNProgress_Backup.command
+npm run backup -- --destination "/Volumes/Backup/MindNProgress_Backup"
+```
+
+복원 전에도 서버를 종료하고 ZIP 경로를 전달합니다.
+
+```bash
+./MindNProgress_Restore.command "/path/to/MindNProgress_2026-07-30_120000.zip"
+npm run restore -- --archive "/path/to/MindNProgress_2026-07-30_120000.zip"
+```
+
+처음 실행할 때 macOS가 파일을 차단하면 Finder에서 Control-클릭 후 `열기`를 선택합니다.
+
 ## 설치 및 실행
+
+### macOS에서 더블클릭 실행
+
+`MindNProgress.command`를 실행하면 필요한 경우 패키지를 설치하고 빌드한 뒤 기본 브라우저를 엽니다. 터미널에서 처음 실행할 때는 다음과 같이 실행 권한을 설정합니다.
+
+```bash
+chmod +x MindNProgress.command MindNProgress_Backup.command MindNProgress_Restore.command
+./MindNProgress.command
+```
 
 ### Windows Git 개발 환경 일괄 설치
 
