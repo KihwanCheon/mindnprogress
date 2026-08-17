@@ -12,10 +12,11 @@ const protectedWorkspaceEntries = new Set([
 ])
 
 export class WorkspacePoolUnavailableError extends Error {
-  constructor(message, details = []) {
+  constructor(message, details = [], reasonCode = 'WORKSPACE_POOL_UNAVAILABLE') {
     super(message)
     this.name = 'WorkspacePoolUnavailableError'
     this.code = 'WORKSPACE_POOL_UNAVAILABLE'
+    this.reasonCode = reasonCode
     this.details = details
   }
 }
@@ -205,6 +206,19 @@ export class WorkspacePoolManager {
           updatedAt: new Date().toISOString(),
         }
       }
+      for (const workspace of this.registry.workers) {
+        const current = this.state.workspaces[workspace.id]
+        if (!this.recoverableCleanFailureLease(current?.leaseId ? this.state.leases[current.leaseId] : null)) continue
+        try {
+          await this.recoverCleanFailureWorkspace(workspace, current)
+        } catch (error) {
+          this.state.workspaces[workspace.id] = {
+            ...current,
+            recoveryError: error?.message ?? String(error),
+            updatedAt: new Date().toISOString(),
+          }
+        }
+      }
       await this.persist()
       return true
     })
@@ -218,12 +232,159 @@ export class WorkspacePoolManager {
       : null
   }
 
+  publicSnapshot({ conversationId = '' } = {}) {
+    if (!this.registry || !this.state) {
+      return {
+        available: false,
+        poolId: null,
+        integrationWorkspaceId: null,
+        workspaces: [],
+      }
+    }
+    const requestedConversationId = String(conversationId ?? '').trim()
+    const activeLeaseStatuses = new Set([
+      'leased',
+      'checkpoint-required',
+      'finalizing',
+      'waiting-integration',
+      'integrating',
+      'awaiting-conflict-resolution',
+      'resolving-integration-conflict',
+    ])
+    const assignedWorkspaceIds = new Set(
+      requestedConversationId
+        ? Object.values(this.state.leases ?? {})
+            .filter((lease) => lease?.conversationId === requestedConversationId && activeLeaseStatuses.has(lease.status))
+            .map((lease) => lease.workspaceId)
+        : [],
+    )
+    const workspaces = this.registry.workspaces.map((workspace) => {
+      const state = this.state.workspaces?.[workspace.id] ?? {
+        status: workspace.role === 'worker' ? 'idle' : 'integration',
+      }
+      return {
+        workspaceId: workspace.id,
+        role: workspace.role,
+        enabled: true,
+        status: String(state.status ?? (workspace.role === 'worker' ? 'idle' : 'integration')),
+        projectRoot: workspace.root,
+        assetsPath: String(workspace.assetsPath ?? '').trim() || `${workspace.root.replaceAll('\\', '/')}/Assets`,
+        unityInstanceHash: String(workspace.unityInstanceHash ?? '').trim() || null,
+        assignedToCurrentConversation: assignedWorkspaceIds.has(workspace.id),
+        ...(state.reason ? { reason: String(state.reason) } : {}),
+        ...(state.updatedAt ? { updatedAt: state.updatedAt } : {}),
+      }
+    })
+    const statusCounts = Object.fromEntries(
+      [...new Set(workspaces.map((workspace) => workspace.status))]
+        .sort()
+        .map((status) => [status, workspaces.filter((workspace) => workspace.status === status).length]),
+    )
+    return {
+      available: true,
+      poolId: this.registry.poolId,
+      integrationWorkspaceId: this.registry.integration?.id ?? null,
+      workspaces,
+      statusCounts,
+    }
+  }
+
   recoverableIdleWorkspaceState(workspaceId) {
     const current = this.state?.workspaces?.[workspaceId] ?? { status: 'idle' }
     if (current.status === 'idle') return true
-    if (current.status !== 'quarantined' || current.reason !== idleDriftReason) return false
+    if (current.status !== 'quarantined') return false
     const lease = current.leaseId ? this.state?.leases?.[current.leaseId] : null
-    return !lease || ['completed', 'cancelled', 'quarantined'].includes(lease.status)
+    if (current.reason === idleDriftReason) {
+      return !lease || ['completed', 'cancelled', 'quarantined'].includes(lease.status)
+    }
+    return this.recoverableCleanFailureLease(lease)
+  }
+
+  recoverableCleanFailureLease(lease) {
+    if (!lease || lease.status !== 'quarantined') return false
+    const result = lease.result
+    if (!result) return false
+    if (result.headCommit && result.headCommit !== lease.baseCommit) return false
+    if (lease.integrationBranch || result.integrationBranch) return false
+    if (Array.isArray(lease.commits) && lease.commits.length > 0) return false
+    if (Array.isArray(lease.checkpoints) && lease.checkpoints.length > 0) return false
+    return !Array.isArray(result.unmergedFiles) || result.unmergedFiles.length === 0
+  }
+
+  workerLastAssignedAt(workspaceId) {
+    return Object.values(this.state?.leases ?? {}).reduce((latest, lease) => {
+      if (lease?.workspaceId !== workspaceId) return latest
+      const timestamp = Date.parse(String(lease.startedAt ?? ''))
+      return Number.isFinite(timestamp) ? Math.max(latest, timestamp) : latest
+    }, 0)
+  }
+
+  orderedRecoverableWorkers() {
+    return this.registry.workers
+      .map((workspace, index) => ({
+        workspace,
+        index,
+        lastAssignedAt: this.workerLastAssignedAt(workspace.id),
+      }))
+      .filter(({ workspace }) => this.recoverableIdleWorkspaceState(workspace.id))
+      .sort((left, right) => left.lastAssignedAt - right.lastAssignedAt || left.index - right.index)
+      .map(({ workspace }) => workspace)
+  }
+
+  async fetchIntegrationBranch(workspace, baseBranch) {
+    await this.git(workspace.root, [
+      'fetch', '--no-tags', this.registry.integration.root, `refs/heads/${baseBranch}`,
+    ])
+  }
+
+  async recoverCleanFailureWorkspace(workspace, current) {
+    const lease = current.leaseId ? this.state?.leases?.[current.leaseId] : null
+    if (!this.recoverableCleanFailureLease(lease)) return false
+
+    const sessionFile = path.join(workspace.root, '.ai-session.json')
+    const session = await readJson(sessionFile, null)
+    if (session && (
+      session.workspaceId !== workspace.id
+      || session.jobId !== lease.jobId
+      || session.leaseId !== lease.leaseId
+    )) {
+      throw new Error('격리된 작업공간의 세션 소유권이 기존 lease와 일치하지 않습니다.')
+    }
+    const dirty = await this.git(workspace.root, ['status', '--porcelain', '--untracked-files=all'])
+    if (dirty) throw new Error('격리된 작업공간에 보존해야 할 변경이 남아 있어 자동 회수하지 않았습니다.')
+    const [headCommit, branch, idleCommit, idleBaseBranch] = await Promise.all([
+      this.git(workspace.root, ['rev-parse', 'HEAD']),
+      this.git(workspace.root, ['branch', '--show-current']),
+      this.git(this.registry.integration.root, ['rev-parse', 'HEAD']),
+      this.git(this.registry.integration.root, ['branch', '--show-current']),
+    ])
+    if (headCommit !== lease.baseCommit || branch !== lease.branch) {
+      throw new Error('격리된 작업공간의 Git 기준선이 기존 lease와 달라 자동 회수하지 않았습니다.')
+    }
+
+    const idleBranch = `mnp/idle/${workspace.id}`
+    await this.fetchIntegrationBranch(workspace, idleBaseBranch)
+    await this.git(workspace.root, ['switch', '-C', idleBranch, idleCommit])
+    await rm(sessionFile, { force: true })
+    const recoveredAt = new Date().toISOString()
+    const result = await this.writeResult(lease, {
+      ...lease.result,
+      status: 'failed-clean',
+      recoveredFromQuarantine: true,
+      recoveredAt,
+    })
+    lease.status = 'cancelled'
+    lease.result = result
+    this.state.workspaces[workspace.id] = {
+      status: 'idle',
+      idleCommit,
+      idleBranch,
+      lastJobId: lease.jobId,
+      lastLeaseId: lease.leaseId,
+      updatedAt: recoveredAt,
+    }
+    await this.persist()
+    return true
   }
 
   async archiveAndRestoreDriftOnce(workspace, {
@@ -456,21 +617,46 @@ export class WorkspacePoolManager {
       const integration = this.registry.integration
       const trackedChanges = await this.git(integration.root, ['status', '--porcelain', '--untracked-files=no'])
       if (trackedChanges) {
-        throw new WorkspacePoolUnavailableError('통합 작업공간에 커밋되지 않은 추적 파일 변경이 있습니다.')
+        throw new WorkspacePoolUnavailableError(
+          '통합 작업공간에 커밋되지 않은 추적 파일 변경이 있습니다.',
+          [],
+          'INTEGRATION_DIRTY',
+        )
       }
       const [baseCommit, baseBranch] = await Promise.all([
         this.git(integration.root, ['rev-parse', 'HEAD']),
         this.git(integration.root, ['branch', '--show-current']),
       ])
-      if (!baseCommit || !baseBranch) throw new WorkspacePoolUnavailableError('통합 작업공간의 Git 기준선을 확인하지 못했습니다.')
+      if (!baseCommit || !baseBranch) {
+        throw new WorkspacePoolUnavailableError(
+          '통합 작업공간의 Git 기준선을 확인하지 못했습니다.',
+          [],
+          'INTEGRATION_BASE_UNAVAILABLE',
+        )
+      }
 
       const jobId = `job-${Date.now()}-${randomBytes(4).toString('hex')}`
       const leaseId = `lease-${randomBytes(16).toString('hex')}`
       const branch = `mnp/${jobId}`
       const failures = []
-      for (const workspace of this.registry.workers) {
-        const current = this.state.workspaces[workspace.id] ?? { status: 'idle' }
-        if (!this.recoverableIdleWorkspaceState(workspace.id)) continue
+      for (const workspace of this.orderedRecoverableWorkers()) {
+        let current = this.state.workspaces[workspace.id] ?? { status: 'idle' }
+        if (current.status === 'quarantined' && current.reason !== idleDriftReason) {
+          try {
+            await this.recoverCleanFailureWorkspace(workspace, current)
+            current = this.state.workspaces[workspace.id]
+          } catch (error) {
+            const reason = error?.message ?? String(error)
+            failures.push({ workspaceId: workspace.id, reason })
+            this.state.workspaces[workspace.id] = {
+              ...current,
+              recoveryError: reason,
+              updatedAt: new Date().toISOString(),
+            }
+            await this.persist()
+            continue
+          }
+        }
         this.state.workspaces[workspace.id] = {
           ...current,
           status: 'preparing',
@@ -546,7 +732,11 @@ export class WorkspacePoolManager {
           await this.persist()
         }
       }
-      throw new WorkspacePoolUnavailableError('사용 가능한 AI 작업공간이 없습니다.', failures)
+      throw new WorkspacePoolUnavailableError(
+        '사용 가능한 AI 작업공간이 없습니다.',
+        failures,
+        failures.length > 0 ? 'WORKSPACE_PREPARATION_FAILED' : 'CAPACITY_EXHAUSTED',
+      )
     })
   }
 
@@ -672,6 +862,13 @@ export class WorkspacePoolManager {
         const currentHead = await this.git(workspace.root, ['rev-parse', 'HEAD'])
         const hasCheckpoint = currentHead !== lease.baseCommit
           || (Array.isArray(lease.checkpoints) && lease.checkpoints.length > 0)
+        if (!completed && !dirty && !lease.integrationBranch && !hasCheckpoint) {
+          return await this.releaseCleanFailure(lease, workspace, {
+            childStatus: childStatus ?? null,
+            childError: childError ?? null,
+            headCommit: currentHead,
+          })
+        }
         if (completed && !lease.integrationBranch && !hasCheckpoint) {
           return await this.requireCheckpoint(lease, workspace)
         }
@@ -1018,6 +1215,36 @@ export class WorkspacePoolManager {
     return result
   }
 
+  async releaseCleanFailure(lease, workspace, resultFields) {
+    const integration = this.registry.integration
+    const [idleCommit, idleBaseBranch] = await Promise.all([
+      this.git(integration.root, ['rev-parse', 'HEAD']),
+      this.git(integration.root, ['branch', '--show-current']),
+    ])
+    const idleBranch = `mnp/idle/${workspace.id}`
+    await this.fetchIntegrationBranch(workspace, idleBaseBranch)
+    await this.git(workspace.root, ['switch', '-C', idleBranch, idleCommit])
+    await rm(path.join(workspace.root, '.ai-session.json'), { force: true })
+    const completedAt = new Date().toISOString()
+    const result = await this.writeResult(lease, {
+      status: 'failed-clean',
+      ...resultFields,
+      completedAt,
+    })
+    lease.status = 'cancelled'
+    lease.result = result
+    this.state.workspaces[workspace.id] = {
+      status: 'idle',
+      idleCommit,
+      idleBranch,
+      lastJobId: lease.jobId,
+      lastLeaseId: lease.leaseId,
+      updatedAt: completedAt,
+    }
+    await this.persist()
+    return result
+  }
+
   async quarantineIntegrationFailure(lease, workspace, error, resultFields = {}) {
     const reason = error?.message ?? String(error)
     const completedAt = new Date().toISOString()
@@ -1055,8 +1282,12 @@ export class WorkspacePoolManager {
       try {
         const dirty = await this.git(workspace.root, ['status', '--porcelain', '--untracked-files=all'])
         if (dirty) throw new Error('취소된 작업공간에 변경이 남아 있어 자동 회수하지 않았습니다.')
-        const idleCommit = await this.git(this.registry.integration.root, ['rev-parse', 'HEAD'])
+        const [idleCommit, idleBaseBranch] = await Promise.all([
+          this.git(this.registry.integration.root, ['rev-parse', 'HEAD']),
+          this.git(this.registry.integration.root, ['branch', '--show-current']),
+        ])
         const idleBranch = `mnp/idle/${workspace.id}`
+        await this.fetchIntegrationBranch(workspace, idleBaseBranch)
         await this.git(workspace.root, ['switch', '-C', idleBranch, idleCommit])
         await rm(path.join(workspace.root, '.ai-session.json'), { force: true })
         const result = await this.writeResult(lease, {

@@ -79,6 +79,21 @@ test('registry 작업공간만 풀로 인식하고 유휴 worker에 원자적 le
     assert.equal(await manager.initialize(), true)
     assert.equal(manager.poolForWorkspace(workerRoot)?.poolId, 'holdem')
     assert.equal(manager.poolForWorkspace(path.join(root, 'other')), null)
+    const initialSnapshot = manager.publicSnapshot({ conversationId: 'conversation-c' })
+    assert.equal(initialSnapshot.available, true)
+    assert.equal(initialSnapshot.integrationWorkspaceId, 'main')
+    assert.deepEqual(initialSnapshot.statusCounts, { idle: 1, integration: 1 })
+    assert.deepEqual(initialSnapshot.workspaces.find((workspace) => workspace.workspaceId === 'fork2'), {
+      workspaceId: 'fork2',
+      role: 'worker',
+      enabled: true,
+      status: 'idle',
+      projectRoot: workerRoot,
+      assetsPath: `${workerRoot}/Assets`,
+      unityInstanceHash: 'hash-fork2',
+      assignedToCurrentConversation: false,
+      updatedAt: initialSnapshot.workspaces.find((workspace) => workspace.workspaceId === 'fork2').updatedAt,
+    })
 
     const lease = await manager.acquire({
       workspaceHint: integrationRoot,
@@ -100,6 +115,11 @@ test('registry 작업공간만 풀로 인식하고 유휴 worker에 원자적 le
     await manager.bindConversation(lease.leaseId, 'conversation-c')
     const boundSession = JSON.parse(await readFile(path.join(workerRoot, '.ai-session.json'), 'utf8'))
     assert.equal(boundSession.conversationId, 'conversation-c')
+    const assignedSnapshot = manager.publicSnapshot({ conversationId: 'conversation-c' })
+    assert.equal(assignedSnapshot.workspaces.find((workspace) => workspace.workspaceId === 'fork2')?.status, 'leased')
+    assert.equal(assignedSnapshot.workspaces.find((workspace) => workspace.workspaceId === 'fork2')?.assignedToCurrentConversation, true)
+    assert.equal(JSON.stringify(assignedSnapshot).includes(lease.leaseId), false)
+    assert.equal(JSON.stringify(assignedSnapshot).includes(lease.jobId), false)
 
     const reused = await manager.reuseLease(lease.leaseId, {
       mapId: 'map-a',
@@ -143,8 +163,212 @@ test('registry 작업공간만 풀로 인식하고 유휴 worker에 원자적 le
 
     await assert.rejects(
       () => manager.acquire({ workspaceHint: integrationRoot }),
-      (error) => error instanceof WorkspacePoolUnavailableError,
+      (error) => error instanceof WorkspacePoolUnavailableError
+        && error.reasonCode === 'CAPACITY_EXHAUSTED',
     )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('변경과 체크포인트 없이 종료된 하위 AI 작업은 worker를 자동 회수한다', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'mnp-workspace-clean-failure-'))
+  try {
+    const integrationRoot = path.join(root, 'main')
+    const workerRoot = path.join(root, 'fork1')
+    const sharedRoot = path.join(root, 'shared')
+    await Promise.all([mkdir(integrationRoot), mkdir(workerRoot), mkdir(sharedRoot)])
+    const registryFile = path.join(sharedRoot, 'workspaces.json')
+    const stateFile = path.join(root, 'state.json')
+    await writeFile(registryFile, JSON.stringify({
+      schemaVersion: 1,
+      poolId: 'holdem',
+      sharedRoot,
+      workspaces: [
+        { id: 'main', root: integrationRoot, role: 'integration', enabled: true },
+        { id: 'fork1', root: workerRoot, role: 'worker', enabled: true },
+      ],
+    }), 'utf8')
+
+    let workerBranch = 'japan-master'
+    const manager = new WorkspacePoolManager({
+      registryFile,
+      stateFile,
+      gitRunner: async (cwd, args) => {
+        const worker = cwd === workerRoot
+        if (args[0] === 'status') return ''
+        if (args[0] === 'remote') return ''
+        if (args[0] === 'rev-parse') return 'base123'
+        if (args[0] === 'branch' && args[1] === '--show-current') return worker ? workerBranch : 'japan-master'
+        if (args[0] === 'switch') {
+          workerBranch = args[1] === '-C' ? args[2] : args[1]
+          return ''
+        }
+        return ''
+      },
+    })
+    await manager.initialize()
+    const lease = await manager.acquire({
+      workspaceHint: integrationRoot,
+      mapId: 'map-a',
+      cardId: 'card-a',
+      conversationId: 'conversation-a',
+      cardLabel: '시작 실패 작업',
+    })
+
+    const result = await manager.finalize(lease.leaseId, {
+      childStatus: 'failed',
+      childError: '에이전트 시작 실패',
+    })
+    assert.equal(result.status, 'failed-clean')
+    assert.equal(result.childStatus, 'failed')
+    const state = JSON.parse(await readFile(stateFile, 'utf8'))
+    assert.equal(state.workspaces.fork1.status, 'idle')
+    assert.equal(state.leases[lease.leaseId].status, 'cancelled')
+    await assert.rejects(() => readFile(path.join(workerRoot, '.ai-session.json'), 'utf8'), { code: 'ENOENT' })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('변경 없이 격리된 과거 실패 lease는 다음 배정 전에 안전하게 자동 회수한다', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'mnp-workspace-recover-clean-quarantine-'))
+  try {
+    const integrationRoot = path.join(root, 'main')
+    const workerRoot = path.join(root, 'fork3')
+    const sharedRoot = path.join(root, 'shared')
+    await Promise.all([mkdir(integrationRoot), mkdir(workerRoot), mkdir(sharedRoot)])
+    const registryFile = path.join(sharedRoot, 'workspaces.json')
+    const stateFile = path.join(root, 'state.json')
+    const oldLeaseId = 'lease-old'
+    const oldJobId = 'job-old'
+    const oldBranch = `mnp/${oldJobId}`
+    await writeFile(registryFile, JSON.stringify({
+      schemaVersion: 1,
+      poolId: 'holdem',
+      sharedRoot,
+      workspaces: [
+        { id: 'main', root: integrationRoot, role: 'integration', enabled: true },
+        { id: 'fork3', root: workerRoot, role: 'worker', enabled: true },
+      ],
+    }), 'utf8')
+    await writeFile(stateFile, JSON.stringify({
+      schemaVersion: 1,
+      poolId: 'holdem',
+      workspaces: {
+        fork3: {
+          status: 'quarantined',
+          reason: '하위 AI 작업이 완료되지 않아 변경을 통합하지 않았습니다.',
+          jobId: oldJobId,
+          leaseId: oldLeaseId,
+        },
+      },
+      leases: {
+        [oldLeaseId]: {
+          poolId: 'holdem',
+          workspaceId: 'fork3',
+          jobId: oldJobId,
+          leaseId: oldLeaseId,
+          branch: oldBranch,
+          baseBranch: 'japan-master',
+          baseCommit: 'base123',
+          startedAt: '2026-08-17T01:00:00.000Z',
+          status: 'quarantined',
+          commits: [],
+          result: {
+            status: 'quarantined',
+            headCommit: null,
+            integrationBranch: null,
+            unmergedFiles: [],
+            error: '체크포인트 보완 요청을 전달하지 못했습니다.',
+          },
+        },
+      },
+    }), 'utf8')
+    await writeFile(path.join(workerRoot, '.ai-session.json'), JSON.stringify({
+      workspaceId: 'fork3', jobId: oldJobId, leaseId: oldLeaseId,
+    }), 'utf8')
+
+    let workerBranch = oldBranch
+    const manager = new WorkspacePoolManager({
+      registryFile,
+      stateFile,
+      gitRunner: async (cwd, args) => {
+        const worker = cwd === workerRoot
+        if (args[0] === 'status') return ''
+        if (args[0] === 'remote') return ''
+        if (args[0] === 'rev-parse') return worker ? 'base123' : 'main456'
+        if (args[0] === 'branch' && args[1] === '--show-current') return worker ? workerBranch : 'japan-master'
+        if (args[0] === 'switch') {
+          workerBranch = args[1] === '-C' ? args[2] : args[1]
+          return ''
+        }
+        return ''
+      },
+    })
+    await manager.initialize()
+    const recoveredState = JSON.parse(await readFile(stateFile, 'utf8'))
+    assert.equal(recoveredState.workspaces.fork3.status, 'idle')
+    assert.equal(recoveredState.leases[oldLeaseId].status, 'cancelled')
+    assert.equal(recoveredState.leases[oldLeaseId].result.status, 'failed-clean')
+    assert.equal(recoveredState.leases[oldLeaseId].result.recoveredFromQuarantine, true)
+    const lease = await manager.acquire({ workspaceHint: integrationRoot, cardLabel: '재배정 작업' })
+
+    assert.equal(lease.workspaceId, 'fork3')
+    assert.equal(JSON.parse(await readFile(path.join(workerRoot, '.ai-session.json'), 'utf8')).leaseId, lease.leaseId)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('유휴 worker는 registry 고정 순서가 아니라 가장 오래 배정되지 않은 순서로 선택한다', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'mnp-workspace-fair-allocation-'))
+  try {
+    const integrationRoot = path.join(root, 'main')
+    const sharedRoot = path.join(root, 'shared')
+    const workers = ['fork1', 'fork2', 'fork3', 'fork4'].map((id) => ({ id, root: path.join(root, id) }))
+    await Promise.all([mkdir(integrationRoot), mkdir(sharedRoot), ...workers.map(({ root: workerRoot }) => mkdir(workerRoot))])
+    const registryFile = path.join(sharedRoot, 'workspaces.json')
+    const stateFile = path.join(root, 'state.json')
+    await writeFile(registryFile, JSON.stringify({
+      schemaVersion: 1,
+      poolId: 'holdem',
+      sharedRoot,
+      workspaces: [
+        { id: 'main', root: integrationRoot, role: 'integration', enabled: true },
+        ...workers.map(({ id, root: workerRoot }) => ({ id, root: workerRoot, role: 'worker', enabled: true })),
+      ],
+    }), 'utf8')
+    await writeFile(stateFile, JSON.stringify({
+      schemaVersion: 1,
+      poolId: 'holdem',
+      workspaces: Object.fromEntries(workers.map(({ id }) => [id, { status: 'idle' }])),
+      leases: {
+        old1: { workspaceId: 'fork1', startedAt: '2026-08-17T04:00:00.000Z', status: 'completed' },
+        old2: { workspaceId: 'fork2', startedAt: '2026-08-17T03:00:00.000Z', status: 'completed' },
+        old3: { workspaceId: 'fork3', startedAt: '2026-08-17T02:00:00.000Z', status: 'completed' },
+      },
+    }), 'utf8')
+
+    const branches = Object.fromEntries(workers.map(({ root: workerRoot }) => [workerRoot, 'japan-master']))
+    const manager = new WorkspacePoolManager({
+      registryFile,
+      stateFile,
+      gitRunner: async (cwd, args) => {
+        if (args[0] === 'status') return ''
+        if (args[0] === 'remote') return ''
+        if (args[0] === 'rev-parse') return 'base123'
+        if (args[0] === 'branch' && args[1] === '--show-current') return cwd === integrationRoot ? 'japan-master' : branches[cwd]
+        if (args[0] === 'switch') {
+          branches[cwd] = args[1]
+          return ''
+        }
+        return ''
+      },
+    })
+    await manager.initialize()
+    const lease = await manager.acquire({ workspaceHint: integrationRoot, cardLabel: '공정 배정' })
+    assert.equal(lease.workspaceId, 'fork4')
   } finally {
     await rm(root, { recursive: true, force: true })
   }

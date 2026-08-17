@@ -305,7 +305,7 @@ async function main() {
     await client.connect(transport)
     const listedTools = await client.listTools()
     const registeredToolNames = listedTools.tools.map((tool) => tool.name).sort()
-    assert.equal(registeredToolNames.length, 42, `예상과 다른 MCP 도구 수: ${registeredToolNames.length}`)
+    assert.equal(registeredToolNames.length, 43, `예상과 다른 MCP 도구 수: ${registeredToolNames.length}`)
     const toolSchema = (name) => listedTools.tools.find((tool) => tool.name === name)?.inputSchema
     for (const name of ['mindnprogress_update_card', 'mindnprogress_move_card', 'mindnprogress_delete_card', 'mindnprogress_list_comments', 'mindnprogress_add_comment']) {
       assert.ok(toolSchema(name)?.properties?.cardId, `${name}: cardId 공개 인자가 없습니다.`)
@@ -339,7 +339,7 @@ async function main() {
 
     const guide = await invoke('mindnprogress_read_me_first')
     assert.equal(guide.guide.product.name, 'MindNProgress')
-    assert.equal(guide.guide.version, '3.5')
+    assert.equal(guide.guide.version, '3.7')
     assert.match(guide.guide.operationRules.join('\n'), /중지된 위임을 resume하면 같은 AI 대화와 기존 worker lease/)
     assert.match(guide.guide.dataModel.cardContent.sharedKnowledge, /재사용/)
     assert.match(guide.guide.authoringRules.join('\n'), /모든 isWork=true 업무 진행률을 동일 가중치 평균/)
@@ -348,6 +348,7 @@ async function main() {
     assert.match(guide.guide.operationRules.join('\n'), /cardId.*nodeId.*기존 대화 호환용/)
     assert.match(guide.guide.operationRules.join('\n'), /조회 도구는 문서 version을 변경하지 않으며/)
     assert.match(guide.guide.operationRules.join('\n'), /mindnprogress_get_ai_work_states.*동시에 수정하지 않음/)
+    assert.match(guide.guide.operationRules.join('\n'), /mindnprogress_get_ai_workspace_pool.*임의로 worker를 사용하지 않음/)
     assert.match(guide.guide.operationRules.join('\n'), /작업공간 pool.*병렬 위임.*직렬 통합/)
     assert.match(guide.guide.operationRules.join('\n'), /mindnprogress_checkpoint_ai_workspace.*동적 폰트·Atlas|동적 폰트·Atlas.*mindnprogress_checkpoint_ai_workspace/)
     assert.match(guide.guide.operationRules.join('\n'), /파일 변경이 없는 조사·검증 작업.*confirmNoChanges=true 체크포인트/)
@@ -809,6 +810,12 @@ async function main() {
     assert.equal(aiWorkStates.cards.find((card) => card.cardId === 'branch-a')?.state, 'unlinked')
     assert.equal(aiWorkStates.cards.find((card) => card.cardId === 'branch-a')?.isActive, false)
     assert.match(aiWorkStates.coordinationRule, /동시에 수정하지 마세요/)
+    const workspacePool = await invoke('mindnprogress_get_ai_workspace_pool')
+    assert.equal(typeof workspacePool.available, 'boolean')
+    assert.ok(Array.isArray(workspacePool.workspaces))
+    assert.match(workspacePool.coordinationRule, /직접 선택·점유·전환·해제하지 않습니다/)
+    assert.equal(JSON.stringify(workspacePool).includes('leaseId'), false)
+    assert.equal(JSON.stringify(workspacePool).includes('jobId'), false)
     const afterAiWorkStateRead = await invoke('mindnprogress_get_document', { mapId })
     assert.equal(afterAiWorkStateRead.map.version, versionBeforeAiWorkStateRead, 'AI 작업 상태 조회가 문서 버전을 변경했습니다.')
     await invokeExpectError('mindnprogress_get_ai_work_states', {

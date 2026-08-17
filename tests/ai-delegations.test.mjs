@@ -2,10 +2,45 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   activeAiDelegationsForConversation,
+  mergeAiDelegationSelections,
   formatAiConversationTitle,
   initialAiDelegationRuntime,
   isValidAiDelegationId,
 } from '../server/lib/aiDelegations.mjs'
+
+test('새 대화에서 명시하지 않은 실행 환경은 최근 대화와 상위 대화에서 필드별로 상속한다', () => {
+  const selection = mergeAiDelegationSelections(
+    {
+      agentId: 'claude', modeId: 'bypassPermissions', thoughtLevelId: 'high',
+    },
+    {
+      agent: { id: 'codex', label: 'Codex CLI' }, model: { id: 'gpt', label: 'GPT' },
+      enabledSkillIds: ['skill-a'], mcpIds: ['mcp-a'],
+    },
+    {
+      agent: { id: 'claude', label: 'Claude Code' }, model: { id: 'opus', label: 'Opus' },
+      enabledSkillIds: ['skill-a'], mcpIds: ['mcp-a'],
+      workspace: 'C:\\Git\\Holdem\\hdtf-client',
+    },
+  )
+
+  assert.equal(selection.agent.id, 'claude')
+  assert.equal(selection.model.id, 'opus')
+  assert.equal(selection.mode.id, 'bypassPermissions')
+  assert.equal(selection.thoughtLevel.id, 'high')
+  assert.deepEqual(selection.enabledSkillIds, ['skill-a'])
+  assert.deepEqual(selection.mcpIds, ['mcp-a'])
+  assert.equal(selection.workspace, 'C:\\Git\\Holdem\\hdtf-client')
+})
+
+test('명시적인 빈 스킬과 MCP 목록은 상위 설정으로 다시 채우지 않는다', () => {
+  const selection = mergeAiDelegationSelections(
+    { agentId: 'claude', modelId: 'opus', enabledSkillIds: [], mcpIds: [] },
+    { agentId: 'claude', modelId: 'opus', enabledSkillIds: ['skill-a'], mcpIds: ['mcp-a'] },
+  )
+  assert.deepEqual(selection.enabledSkillIds, [])
+  assert.deepEqual(selection.mcpIds, [])
+})
 
 test('AI 위임으로 만든 새 대화 제목에 문서와 카드 제목을 함께 사용한다', () => {
   assert.equal(formatAiConversationTitle('JP-로그인', '더미 UI 준비'), 'JP-로그인: 더미 UI 준비')
@@ -90,6 +125,10 @@ test('같은 카드와 대화에서 아직 끝나지 않은 위임만 최신순�
       state: 'recovery-required', createdAt: '2026-08-15T10:30:00.000Z',
     },
     {
+      id: 'workspace-queued', mapId: 'map-a', targetCardId: 'card-a', targetConversationId: 'conversation-a',
+      state: 'waiting-workspace', createdAt: '2026-08-15T10:45:00.000Z',
+    },
+    {
       id: 'completed', mapId: 'map-a', targetCardId: 'card-a', targetConversationId: 'conversation-a',
       state: 'completed', createdAt: '2026-08-15T11:00:00.000Z',
     },
@@ -103,11 +142,13 @@ test('같은 카드와 대화에서 아직 끝나지 않은 위임만 최신순�
     targetConversationId: 'conversation-a',
   })
 
-  assert.deepEqual(matches.map((delegation) => delegation.id), ['newest-recovery', 'new-running', 'old-waiting'])
+  assert.deepEqual(matches.map((delegation) => delegation.id), [
+    'workspace-queued', 'newest-recovery', 'new-running', 'old-waiting',
+  ])
   assert.equal(activeAiDelegationsForConversation(matches, {
     mapId: 'map-a',
     targetCardId: 'card-a',
     targetConversationId: 'conversation-a',
     excludeId: 'new-running',
-  }).at(0)?.id, 'newest-recovery')
+  }).at(0)?.id, 'workspace-queued')
 })
