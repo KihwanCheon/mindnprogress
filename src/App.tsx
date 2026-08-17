@@ -3245,7 +3245,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     mapId = node.data.reference?.mapId ?? activeMapId,
   ) => {
     const conversations = aiConversationLinksFromData(node.data)
-    if (conversations.length > 1) {
+    if (conversations.length > 0) {
       setAiConversationPicker({
         mapId,
         cardId,
