@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+
 export const AI_DELEGATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_:-]{0,127}$/
 
 export const ACTIVE_AI_DELEGATION_STATES = new Set([
@@ -94,6 +96,87 @@ export function isValidAiDelegationId(value) {
   return AI_DELEGATION_ID_PATTERN.test(String(value ?? ''))
 }
 
+function normalizedRequestList(values) {
+  return [...new Set((Array.isArray(values) ? values : [])
+    .map((value) => String(value ?? '').trim())
+    .filter(Boolean))].sort()
+}
+
+export function createAiDelegationRequestSignature({
+  mapId,
+  parentCardId,
+  targetCardId,
+  strategy,
+  conversationId,
+  instruction,
+  decisionReason,
+  sourceRevision,
+  newConversation,
+}) {
+  const requested = newConversation && typeof newConversation === 'object'
+    ? {
+        agentId: String(newConversation.agentId ?? '').trim() || null,
+        modelId: String(newConversation.modelId ?? '').trim() || null,
+        providerId: String(newConversation.providerId ?? '').trim() || null,
+        modeId: String(newConversation.modeId ?? '').trim() || null,
+        thoughtLevelId: String(newConversation.thoughtLevelId ?? '').trim() || null,
+        enabledSkillIds: normalizedRequestList(newConversation.enabledSkillIds),
+        disabledBuiltinSkillIds: normalizedRequestList(newConversation.disabledBuiltinSkillIds),
+        mcpIds: normalizedRequestList(newConversation.mcpIds),
+        workspace: String(newConversation.workspace ?? '').trim() || null,
+      }
+    : null
+  return createHash('sha256').update(JSON.stringify({
+    mapId,
+    parentCardId,
+    targetCardId,
+    strategy,
+    conversationId,
+    instruction,
+    decisionReason,
+    sourceRevision,
+    newConversation: strategy === 'new' ? requested : null,
+  })).digest('hex')
+}
+
+function normalizedWorkspaceRoot(value) {
+  return String(value ?? '').trim().replaceAll('\\', '/').replace(/\/+$/, '').toLowerCase()
+}
+
+export function aiDelegationWorkspaceLeaseMatches(expected, actual) {
+  if (!expected && !actual) return true
+  if (!expected || !actual) return false
+  return String(expected.workspaceId ?? '') === String(actual.workspaceId ?? '')
+    && String(expected.jobId ?? '') === String(actual.jobId ?? '')
+    && String(expected.leaseId ?? '') === String(actual.leaseId ?? '')
+    && normalizedWorkspaceRoot(expected.projectRoot) === normalizedWorkspaceRoot(actual.projectRoot)
+}
+
+export function failedAiIntegrationRecoveryRuntime(dispatch, recoveredAt = new Date().toISOString()) {
+  if (String(dispatch?.state ?? '').trim() !== 'failed') return null
+  return {
+    state: 'integration-recovery-required',
+    integrationStatus: 'failed',
+    integrationTurnId: String(dispatch?.turnId ?? '').trim() || null,
+    integrationError: String(dispatch?.errorMessage ?? '').trim()
+      || '필수 체크포인트 또는 통합 작업이 실패해 명시적인 재개가 필요합니다.',
+    recoveryRequiredAt: recoveredAt,
+    integrationResource: null,
+  }
+}
+
+export function aiDelegationSucceeded(delegation) {
+  if (delegation?.childStatus !== 'completed' || delegation?.workspaceError) return false
+  if (delegation?.integrationOperationId && delegation?.integrationStatus !== 'completed') return false
+  if (delegation?.workspaceLease?.leaseId && delegation?.workspaceResult?.status !== 'completed') return false
+  return true
+}
+
+export function aiDelegationStateAfterParentWake(delegation, parentDispatchState) {
+  if (parentDispatchState !== 'completed') return 'parent-wake-failed'
+  return aiDelegationSucceeded(delegation) ? 'completed' : 'failed'
+}
+
 export function activeAiDelegationsForConversation(delegations, {
   mapId,
   targetCardId,
@@ -133,7 +216,7 @@ export function initialAiDelegationRuntime(dispatch, completedAt = new Date().to
       state: 'waiting-child-resume',
       childStatus: 'interrupted',
       childTurnId,
-      childError: null,
+      childError: String(dispatch?.errorMessage ?? '').trim() || null,
       childInterruptedAt: completedAt,
     }
   }

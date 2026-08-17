@@ -757,6 +757,21 @@ export class WorkspacePoolManager {
       if (lease.conversationId && lease.conversationId !== normalizedConversationId) {
         throw new WorkspacePoolUnavailableError('이어갈 AI 작업공간 lease가 다른 대화에 연결되어 있습니다.')
       }
+      const conflictingLease = Object.values(this.state.leases).find((candidate) =>
+        candidate?.leaseId !== normalizedLeaseId
+        && candidate?.conversationId === normalizedConversationId
+        && !['completed', 'cancelled', 'quarantined'].includes(candidate?.status))
+      if (conflictingLease) {
+        throw new WorkspacePoolUnavailableError(
+          '같은 AI 대화가 이미 다른 활성 작업공간 lease에 연결되어 있습니다.',
+          [{
+            conversationId: normalizedConversationId,
+            leaseId: conflictingLease.leaseId,
+            workspaceId: conflictingLease.workspaceId,
+          }],
+          'CONVERSATION_ALREADY_LEASED',
+        )
+      }
 
       const workspace = this.registry?.workspaces.find((candidate) => candidate.id === lease.workspaceId)
       const workspaceState = this.state?.workspaces?.[lease.workspaceId]
@@ -803,6 +818,21 @@ export class WorkspacePoolManager {
       if (!lease || lease.status !== 'leased' || !normalizedConversationId) return null
       if (lease.conversationId && lease.conversationId !== normalizedConversationId) {
         throw new WorkspacePoolUnavailableError('AI 작업공간 lease가 이미 다른 대화에 연결되어 있습니다.')
+      }
+      const conflictingLease = Object.values(this.state.leases).find((candidate) =>
+        candidate?.leaseId !== normalizedLeaseId
+        && candidate?.conversationId === normalizedConversationId
+        && !['completed', 'cancelled', 'quarantined'].includes(candidate?.status))
+      if (conflictingLease) {
+        throw new WorkspacePoolUnavailableError(
+          '같은 AI 대화가 이미 다른 활성 작업공간 lease에 연결되어 있습니다.',
+          [{
+            conversationId: normalizedConversationId,
+            leaseId: conflictingLease.leaseId,
+            workspaceId: conflictingLease.workspaceId,
+          }],
+          'CONVERSATION_ALREADY_LEASED',
+        )
       }
       const workspace = this.registry?.workspaces.find((candidate) => candidate.id === lease.workspaceId)
       if (!workspace) return null

@@ -268,6 +268,7 @@ async function main() {
     MNP_API_URL: apiBaseUrl,
     MNP_PUBLIC_URL: 'https://mindnprogress.test',
     MNP_DATA_DIR: testDataDirectory,
+    MNP_WORKSPACE_POOL_REGISTRY: path.join(testDataDirectory, '_missing-workspaces.json'),
     MNP_AIONUI_URL: '',
     MNP_AIONUI_DISCOVERY_FILE: aionUiDiscoveryFile,
     MNP_ADMIN_EMAIL: 'mcp-test-admin@mind.local',
@@ -339,7 +340,7 @@ async function main() {
 
     const guide = await invoke('mindnprogress_read_me_first')
     assert.equal(guide.guide.product.name, 'MindNProgress')
-    assert.equal(guide.guide.version, '3.7')
+    assert.equal(guide.guide.version, '3.8')
     assert.match(guide.guide.operationRules.join('\n'), /중지된 위임을 resume하면 같은 AI 대화와 기존 worker lease/)
     assert.match(guide.guide.dataModel.cardContent.sharedKnowledge, /재사용/)
     assert.match(guide.guide.authoringRules.join('\n'), /모든 isWork=true 업무 진행률을 동일 가중치 평균/)

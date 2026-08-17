@@ -2,11 +2,113 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   activeAiDelegationsForConversation,
+  aiDelegationStateAfterParentWake,
+  aiDelegationSucceeded,
+  aiDelegationWorkspaceLeaseMatches,
+  createAiDelegationRequestSignature,
+  failedAiIntegrationRecoveryRuntime,
   mergeAiDelegationSelections,
   formatAiConversationTitle,
   initialAiDelegationRuntime,
   isValidAiDelegationId,
 } from '../server/lib/aiDelegations.mjs'
+
+test('같은 위임 ID의 새 대화 실행 설정이 달라지면 다른 요청으로 판정한다', () => {
+  const base = {
+    mapId: 'map-a',
+    parentCardId: 'card-parent',
+    targetCardId: 'card-child',
+    strategy: 'new',
+    conversationId: '',
+    instruction: '작업을 진행하세요.',
+    decisionReason: '최신 대화가 없습니다.',
+    sourceRevision: 12,
+    newConversation: {
+      agentId: 'claude',
+      modelId: 'opus',
+      providerId: 'anthropic',
+      thoughtLevelId: 'high',
+      enabledSkillIds: ['skill-b', 'skill-a'],
+      mcpIds: ['mcp-b', 'mcp-a'],
+      workspace: 'C:\\Git\\Holdem_Fork2\\hdtf-client',
+    },
+  }
+  const signature = createAiDelegationRequestSignature(base)
+  assert.equal(signature, createAiDelegationRequestSignature({
+    ...base,
+    newConversation: {
+      ...base.newConversation,
+      enabledSkillIds: ['skill-a', 'skill-b'],
+      mcpIds: ['mcp-a', 'mcp-b'],
+    },
+  }))
+  assert.notEqual(signature, createAiDelegationRequestSignature({
+    ...base,
+    newConversation: { ...base.newConversation, modelId: 'sonnet' },
+  }))
+  assert.notEqual(signature, createAiDelegationRequestSignature({
+    ...base,
+    newConversation: { ...base.newConversation, workspace: 'C:\\Git\\Holdem_Fork3\\hdtf-client' },
+  }))
+})
+
+test('AionCore가 실제 사용한 작업공간 lease를 모든 식별자로 비교한다', () => {
+  const expected = {
+    workspaceId: 'fork2',
+    jobId: 'job-12',
+    leaseId: 'lease-12',
+    projectRoot: 'C:\\Git\\Holdem_Fork2\\hdtf-client\\',
+  }
+  assert.equal(aiDelegationWorkspaceLeaseMatches(expected, {
+    ...expected,
+    projectRoot: 'c:/git/holdem_fork2/hdtf-client',
+  }), true)
+  assert.equal(aiDelegationWorkspaceLeaseMatches(expected, {
+    ...expected,
+    leaseId: 'lease-other',
+  }), false)
+  assert.equal(aiDelegationWorkspaceLeaseMatches(expected, null), false)
+  assert.equal(aiDelegationWorkspaceLeaseMatches(null, null), true)
+})
+
+test('필수 체크포인트 대화 실패는 상위 완료가 아니라 통합 복구 대기로 유지한다', () => {
+  assert.deepEqual(failedAiIntegrationRecoveryRuntime({
+    state: 'failed',
+    turnId: 'turn-checkpoint-failed',
+    errorMessage: 'Agent process disconnected',
+  }, '2026-08-17T08:18:26.000Z'), {
+    state: 'integration-recovery-required',
+    integrationStatus: 'failed',
+    integrationTurnId: 'turn-checkpoint-failed',
+    integrationError: 'Agent process disconnected',
+    recoveryRequiredAt: '2026-08-17T08:18:26.000Z',
+    integrationResource: null,
+  })
+  assert.equal(failedAiIntegrationRecoveryRuntime({ state: 'completed' }), null)
+})
+
+test('상위 대화 알림 성공과 하위 작업 성공을 별도로 판정한다', () => {
+  const completed = {
+    childStatus: 'completed',
+    workspaceLease: { leaseId: 'lease-1' },
+    workspaceResult: { status: 'completed' },
+    integrationOperationId: 'operation-checkpoint',
+    integrationStatus: 'completed',
+    workspaceError: null,
+  }
+  assert.equal(aiDelegationSucceeded(completed), true)
+  assert.equal(aiDelegationStateAfterParentWake(completed, 'completed'), 'completed')
+
+  const integrationFailed = {
+    ...completed,
+    workspaceResult: { status: 'checkpoint-required' },
+    integrationStatus: 'failed',
+    integrationError: 'Agent process disconnected',
+  }
+  assert.equal(aiDelegationSucceeded(integrationFailed), false)
+  assert.equal(aiDelegationStateAfterParentWake(integrationFailed, 'completed'), 'failed')
+  assert.equal(aiDelegationStateAfterParentWake(completed, 'failed'), 'parent-wake-failed')
+})
 
 test('새 대화에서 명시하지 않은 실행 환경은 최근 대화와 상위 대화에서 필드별로 상속한다', () => {
   const selection = mergeAiDelegationSelections(
@@ -86,11 +188,12 @@ test('사용자가 중지한 하위 턴은 상위 대화 재개가 아닌 하위
   assert.deepEqual(initialAiDelegationRuntime({
     state: 'waiting_resume',
     turnId: 'turn-interrupted',
+    errorMessage: 'Agent process disconnected',
   }, '2026-08-13T09:00:00.000Z'), {
     state: 'waiting-child-resume',
     childStatus: 'interrupted',
     childTurnId: 'turn-interrupted',
-    childError: null,
+    childError: 'Agent process disconnected',
     childInterruptedAt: '2026-08-13T09:00:00.000Z',
   })
 })

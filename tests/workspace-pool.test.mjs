@@ -171,6 +171,80 @@ test('registry 작업공간만 풀로 인식하고 유휴 worker에 원자적 le
   }
 })
 
+test('같은 AI 대화를 서로 다른 활성 작업공간 lease에 중복 연결하지 않는다', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'mnp-workspace-conversation-lease-'))
+  try {
+    const integrationRoot = path.join(root, 'main')
+    const workerRoots = [path.join(root, 'fork1'), path.join(root, 'fork2')]
+    const sharedRoot = path.join(root, 'shared')
+    await Promise.all([mkdir(integrationRoot), mkdir(sharedRoot), ...workerRoots.map((workerRoot) => mkdir(workerRoot))])
+    const registryFile = path.join(sharedRoot, 'workspaces.json')
+    const stateFile = path.join(root, 'state.json')
+    await writeFile(registryFile, JSON.stringify({
+      schemaVersion: 1,
+      poolId: 'holdem',
+      sharedRoot,
+      originUrl: 'https://example.invalid/holdem.git',
+      workspaces: [
+        { id: 'main', root: integrationRoot, role: 'integration', enabled: true },
+        ...workerRoots.map((workerRoot, index) => ({
+          id: `fork${index + 1}`,
+          root: workerRoot,
+          role: 'worker',
+          enabled: true,
+        })),
+      ],
+    }), 'utf8')
+
+    const branches = Object.fromEntries(workerRoots.map((workerRoot) => [workerRoot, 'japan-master']))
+    const manager = new WorkspacePoolManager({
+      registryFile,
+      stateFile,
+      gitRunner: async (cwd, args) => {
+        if (args[0] === 'status') return ''
+        if (args[0] === 'rev-parse') return 'base123'
+        if (args[0] === 'branch' && args[1] === '--show-current') return branches[cwd] ?? 'japan-master'
+        if (args[0] === 'remote') return 'https://example.invalid/holdem.git'
+        if (args[0] === 'switch') {
+          branches[cwd] = args[1]
+          return ''
+        }
+        return ''
+      },
+    })
+    assert.equal(await manager.initialize(), true)
+
+    const first = await manager.acquire({
+      workspaceHint: integrationRoot,
+      mapId: 'map-a',
+      cardId: 'card-a',
+      cardLabel: '첫 작업',
+    })
+    await manager.bindConversation(first.leaseId, 'conversation-shared')
+    const second = await manager.acquire({
+      workspaceHint: integrationRoot,
+      mapId: 'map-a',
+      cardId: 'card-b',
+      cardLabel: '둘째 작업',
+    })
+
+    for (const operation of [
+      () => manager.bindConversation(second.leaseId, 'conversation-shared'),
+      () => manager.reuseLease(second.leaseId, {
+        mapId: 'map-a',
+        cardId: 'card-b',
+        conversationId: 'conversation-shared',
+      }),
+    ]) {
+      await assert.rejects(operation, (error) =>
+        error instanceof WorkspacePoolUnavailableError
+        && error.reasonCode === 'CONVERSATION_ALREADY_LEASED')
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('변경과 체크포인트 없이 종료된 하위 AI 작업은 worker를 자동 회수한다', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'mnp-workspace-clean-failure-'))
   try {
