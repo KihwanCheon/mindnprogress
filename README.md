@@ -229,7 +229,7 @@ AI가 MindNProgress 밖에서 시작되었다면 먼저 `mindnprogress_read_me_f
 
 ## MindNProgress MCP 명령어
 
-현재 MCP 서버는 46개 도구를 제공합니다. 카드가 선택된 작업은 먼저 `mindnprogress_get_context`로 최신 버전과 제품 규칙을 확인하고, 변경 후에는 `mindnprogress_get_document`로 실제 저장 결과를 다시 확인하는 흐름을 권장합니다. 조회 도구는 문서 버전을 변경하지 않으며 카드·관계 편집과 AI 대화 ID 연결 같은 저장 작업만 버전을 증가시킵니다. 선택 카드 이외의 형제·하위·선행 카드를 함께 수정할 때는 `mindnprogress_get_ai_work_states`로 다른 AI가 작업 중인지 먼저 확인합니다. Holdem AI 작업공간의 최신 목록과 상태는 폴더명을 추측하지 않고 `mindnprogress_get_ai_workspace_pool`로 조회합니다.
+현재 MCP 서버는 49개 도구를 제공합니다. 카드가 선택된 작업은 먼저 `mindnprogress_get_context`로 최신 버전과 제품 규칙을 확인하고, 변경 후에는 `mindnprogress_get_document`로 실제 저장 결과를 다시 확인하는 흐름을 권장합니다. 조회 도구는 문서 버전을 변경하지 않으며 카드·관계 편집과 AI 대화 ID 연결 같은 저장 작업만 버전을 증가시킵니다. 선택 카드 이외의 형제·하위·선행 카드를 함께 수정할 때는 `mindnprogress_get_ai_work_states`로 다른 AI가 작업 중인지 먼저 확인합니다. Holdem AI 작업공간의 최신 목록과 상태는 폴더명을 추측하지 않고 `mindnprogress_get_ai_workspace_pool`로 조회합니다.
 
 ### 시작과 조회
 
@@ -240,6 +240,8 @@ AI가 MindNProgress 밖에서 시작되었다면 먼저 `mindnprogress_read_me_f
 | `mindnprogress_get_context` | 선택 카드와 문서 구조, 관계, 댓글, 담당자, 업무 링크 및 선행 지식을 작업 문맥으로 조회합니다. `detailLevel`은 `focused` 또는 `full`을 사용합니다. |
 | `mindnprogress_get_document` | 문서의 모든 카드와 연결 관계 및 외부 접근 URL을 조회합니다. |
 | `mindnprogress_get_card` | 특정 카드의 설명, 공유 지식, 업무 필드와 댓글을 페이지 단위로 조회합니다. |
+| `mindnprogress_list_shared_knowledge_candidates` | 정리가 필요한 공유 지식 후보의 우선순위·길이·SHA-256·검토 상태를 원문 없이 페이지 단위로 조회합니다. |
+| `mindnprogress_get_shared_knowledge_review_context` | 후보 한 카드의 공유 지식 원문과 관계·최근 댓글·검토 기준을 조회합니다. |
 | `mindnprogress_get_ai_work_states` | 지정한 카드 또는 문서 전체에서 연결된 AI 대화의 현재 작업·승인 대기·유휴·확인 불가 상태를 조회합니다. 문서 버전은 변경하지 않습니다. |
 | `mindnprogress_get_ai_workspace_pool` | MindNProgress가 관리하는 AI 작업공간의 역할·경로·Unity 인스턴스 해시와 현재 상태를 조회합니다. 다른 대화의 lease·job 식별자는 노출하지 않습니다. |
 | `mindnprogress_checkpoint_ai_workspace` | worker의 실제 변경 경로와 `summary`·`background`·`cause`·`changes`(선택 `scope`)를 받아 의미 있는 `[김용민]` 커밋으로 고정합니다. 구조화 커밋 메시지를 생략할 수 없습니다. |
@@ -264,6 +266,7 @@ AI가 MindNProgress 밖에서 시작되었다면 먼저 `mindnprogress_read_me_f
 | `mindnprogress_add_card` | 새 카드 또는 지정한 상위 카드의 하위 카드를 추가합니다. |
 | `mindnprogress_update_card` | 전달한 필드만 부분 병합하여 카드 제목, 설명, 공유 지식, 상태, 진행률과 업무 관리 필드를 수정합니다. 일반 카드에서 생략한 필드와 위치는 보존됩니다. 기본 `responseMode=full`은 저활용 필드를 제외한 최신 전체 문서를, `affected`는 직접·간접 변경 카드와 문서·Root 요약을 반환합니다. |
 | `mindnprogress_patch_card_text` | 조회한 SHA-256이 유지된 경우에만 설명 또는 공유 지식의 유일 문자열·경계 내부를 교체하거나 뒤에 추가합니다. 장문 필드 전체를 다시 생성하지 않습니다. |
+| `mindnprogress_apply_shared_knowledge_review` | 문서 버전과 카드별 SHA-256이 모두 일치할 때만 최대 20개 카드의 정리 결과와 검토 기록을 한 번에 저장합니다. |
 | `mindnprogress_move_card` | 카드와 전체 하위 구조를 다른 카드 아래로 이동합니다. |
 | `mindnprogress_delete_card` | 카드와 선택적으로 전체 하위 카드를 삭제합니다. Root 카드는 삭제할 수 없습니다. |
 | `mindnprogress_add_knowledge_line` | 두 카드 사이에 지식선을 추가합니다. 중복과 순환 관계를 거부합니다. |
@@ -280,6 +283,8 @@ MCP 도구에서 카드를 지정할 때는 `cardId`를 사용합니다. 상위 
 전체 활성 문서의 공유 지식 현황은 인증된 `GET /api/shared-knowledge/audit`로 조회합니다. `mapId` 쿼리를 지정하면 한 문서만 검사하며, 응답에는 원문 대신 길이·UTF-8 바이트·SHA-256·문단과 목록 수·정확히 반복된 문장 수·10,000자 한도 사용률·지식선 소비 카드 수가 포함됩니다. 3,000자는 관심, 5,000자는 정리 권장, 8,000자는 우선 정리 기준이며 Ref 카드는 원본 카드에서만 정리하도록 직접 처리 후보에서 제외됩니다.
 
 공유 지식 검토 기록은 서버가 검토 시각·검토자·본문 SHA-256·결과(`cleaned` 또는 `accepted-long`)를 소유하는 메타데이터입니다. 현재 본문 해시와 일치하는 검토 완료 카드는 현황에 표시하되 정리 후보에서 제외하고, 이후 본문이 달라지면 기존 기록을 보존한 채 `stale`로 분류해 다시 후보에 포함합니다. 일반 문서 저장 요청은 이 기록을 새로 만들거나 덮어쓸 수 없습니다.
+
+AI 정리는 `mindnprogress_list_shared_knowledge_candidates`로 원문 없는 후보를 고른 뒤, 필요한 카드만 `mindnprogress_get_shared_knowledge_review_context`로 확인합니다. 실제로 본문을 정리한 카드는 `cleaned`와 정리된 `replacement`를 보내고, 길지만 현재 내용 전체가 계속 필요하다고 판단한 경우에만 `accepted-long`을 사용합니다. 적용 요청은 문서 버전과 모든 대상 카드의 SHA-256을 먼저 검증하고 하나라도 달라졌으면 아무 카드도 저장하지 않습니다. 정리 결과가 빈 문자열이면 공유 지식과 검토 기록을 모두 제거하여 이후 후보에서 제외합니다.
 
 ### 문서 목록과 그룹
 

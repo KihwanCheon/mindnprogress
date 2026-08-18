@@ -61,9 +61,9 @@ function defaultChildMindMapPosition(parentPosition, siblingPositions, parentWid
   }
 }
 
-const serverInstructions = `MindNProgress는 마인드맵과 업무 진행 관리를 결합한 웹 서비스입니다. MindNProgress 밖에서 시작해 문서 ID나 카드 ID가 없다면 mindnprogress_read_me_first를 먼저 호출하세요. 선택 문서와 카드가 있다면 mindnprogress_get_context로 제품 규칙과 최신 문서 구조를 먼저 확인하세요. MCP 도구에서 카드를 지정할 때는 cardId 계열 인자를 사용하세요. nodeId 계열 인자는 기존 대화 호환용이므로 새 호출에서는 사용하지 마세요. AionUi가 발급한 attributionToken이 없는 외부 MCP 세션은 자신이 현재 AI 종류와 모델을 정확히 알고 있을 때 get_context의 aiType과 aiModel에 함께 전달하고, 알지 못하면 추측하지 마세요. get_context의 selection.taskLinks.startupInspection을 따르세요. mode가 knowledge-guided이면 primary 선행 지식 중 kind=image인 항목은 imageAccess.localPath의 원본을 사용 가능한 로컬 이미지 열람 도구로 직접 확인하고 설명과 댓글을 함께 사용하며, 일반 카드는 sharedKnowledge를 먼저 재사용하고 설명과 댓글로 보완합니다. fallbackSources와 fallbackTargets는 정보가 부족할 때만 선택적으로 조사합니다. mode가 default이고 required가 true이면 targets의 업무 본문, 댓글, 첨부파일 목록과 관련 링크를 조사하세요. 진행 과정과 결과는 댓글에 기록하고, 다른 카드나 후속 세션이 재사용할 안정적인 사실·결정·제약은 카드의 sharedKnowledge에 요약하세요. AI 댓글은 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 충실히 담은 detail로 작성하며, 요약 때문에 상세를 축약하지 마세요. 외부 전달물이나 결정 대기는 waitingItems로 기록하고 제목에 대기 문구를 붙이지 마세요. 대기를 등록할 때는 [차단], 해제할 때는 [진행] 댓글로 이유와 재개 상태를 기록하세요. 카드 일부 필드만 변경할 때는 mindnprogress_update_card의 data에 변경할 필드만 보내고 현재 카드 전체 데이터를 재전송하지 마세요. 기존 description 또는 sharedKnowledge 내부의 일부만 고칠 때는 조회 결과의 textIntegrity SHA-256과 mindnprogress_patch_card_text를 사용하세요. 일반 카드에서 생략한 필드와 위치는 보존되지만 완료 상태 또는 진행률 100 적용 시 waitingItems는 자동으로 해제되며, Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 선택 카드 밖의 형제·하위·선행 카드를 함께 수정하기 전에는 mindnprogress_get_ai_work_states로 해당 카드에 다른 AI 작업이 진행 중인지 확인하세요. running 또는 waiting-confirmation인 카드는 사용자 지시 없이 동시에 수정하지 마세요. Holdem AI 작업공간의 최신 목록·경로·상태가 필요하면 폴더명을 추측하지 말고 mindnprogress_get_ai_workspace_pool을 호출하세요. 작업공간 선택·점유·전환·해제는 MindNProgress만 수행하며 AI가 임의로 worker를 선택하지 않습니다. 사용자가 중지한 위임 대화를 같은 대화에서 직접 이어 실제 위임 작업을 완료했다면 카드 기록과 작업공간 체크포인트를 마친 뒤 최종 답변 직전에 mindnprogress_complete_ai_delegation을 호출하세요. 단순 질의 응답·중간 보고 또는 중단 없이 진행된 최초 위임에는 호출하지 마세요. 지식선만 변경할 때는 전체 문서를 다시 보내지 말고 지식선 전용 도구를 사용하세요. 조회 도구는 문서 버전을 변경하지 않지만 카드·관계 편집과 AI 대화 ID 연결은 버전을 증가시킬 수 있습니다. 특정 자료가 있다고 가정하지 마세요. 여러 카드로 구성된 새 문서는 mindnprogress_create_mindmap으로 한 번에 생성하고, 변경 후에는 최신 문서를 다시 조회해 결과를 검증하세요. 비밀번호 변경과 계정 관리 작업은 지원하지 않습니다.`
+const serverInstructions = `MindNProgress는 마인드맵과 업무 진행 관리를 결합한 웹 서비스입니다. MindNProgress 밖에서 시작해 문서 ID나 카드 ID가 없다면 mindnprogress_read_me_first를 먼저 호출하세요. 선택 문서와 카드가 있다면 mindnprogress_get_context로 제품 규칙과 최신 문서 구조를 먼저 확인하세요. MCP 도구에서 카드를 지정할 때는 cardId 계열 인자를 사용하세요. nodeId 계열 인자는 기존 대화 호환용이므로 새 호출에서는 사용하지 마세요. AionUi가 발급한 attributionToken이 없는 외부 MCP 세션은 자신이 현재 AI 종류와 모델을 정확히 알고 있을 때 get_context의 aiType과 aiModel에 함께 전달하고, 알지 못하면 추측하지 마세요. get_context의 selection.taskLinks.startupInspection을 따르세요. mode가 knowledge-guided이면 primary 선행 지식 중 kind=image인 항목은 imageAccess.localPath의 원본을 사용 가능한 로컬 이미지 열람 도구로 직접 확인하고 설명과 댓글을 함께 사용하며, 일반 카드는 sharedKnowledge를 먼저 재사용하고 설명과 댓글로 보완합니다. fallbackSources와 fallbackTargets는 정보가 부족할 때만 선택적으로 조사합니다. mode가 default이고 required가 true이면 targets의 업무 본문, 댓글, 첨부파일 목록과 관련 링크를 조사하세요. 진행 과정과 결과는 댓글에 기록하고, 다른 카드나 후속 세션이 재사용할 안정적인 사실·결정·제약은 카드의 sharedKnowledge에 요약하세요. AI 댓글은 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 충실히 담은 detail로 작성하며, 요약 때문에 상세를 축약하지 마세요. 외부 전달물이나 결정 대기는 waitingItems로 기록하고 제목에 대기 문구를 붙이지 마세요. 대기를 등록할 때는 [차단], 해제할 때는 [진행] 댓글로 이유와 재개 상태를 기록하세요. 카드 일부 필드만 변경할 때는 mindnprogress_update_card의 data에 변경할 필드만 보내고 현재 카드 전체 데이터를 재전송하지 마세요. 기존 description 또는 sharedKnowledge 내부의 일부만 고칠 때는 조회 결과의 textIntegrity SHA-256과 mindnprogress_patch_card_text를 사용하세요. 과도한 sharedKnowledge를 정리할 때는 후보 목록과 전용 검토 문맥을 조회한 뒤 mindnprogress_apply_shared_knowledge_review로 현재 해시가 일치하는 결과만 원자적으로 저장하세요. 일반 카드에서 생략한 필드와 위치는 보존되지만 완료 상태 또는 진행률 100 적용 시 waitingItems는 자동으로 해제되며, Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 선택 카드 밖의 형제·하위·선행 카드를 함께 수정하기 전에는 mindnprogress_get_ai_work_states로 해당 카드에 다른 AI 작업이 진행 중인지 확인하세요. running 또는 waiting-confirmation인 카드는 사용자 지시 없이 동시에 수정하지 마세요. Holdem AI 작업공간의 최신 목록·경로·상태가 필요하면 폴더명을 추측하지 말고 mindnprogress_get_ai_workspace_pool을 호출하세요. 작업공간 선택·점유·전환·해제는 MindNProgress만 수행하며 AI가 임의로 worker를 선택하지 않습니다. 사용자가 중지한 위임 대화를 같은 대화에서 직접 이어 실제 위임 작업을 완료했다면 카드 기록과 작업공간 체크포인트를 마친 뒤 최종 답변 직전에 mindnprogress_complete_ai_delegation을 호출하세요. 단순 질의 응답·중간 보고 또는 중단 없이 진행된 최초 위임에는 호출하지 마세요. 지식선만 변경할 때는 전체 문서를 다시 보내지 말고 지식선 전용 도구를 사용하세요. 조회 도구는 문서 버전을 변경하지 않지만 카드·관계 편집과 AI 대화 ID 연결은 버전을 증가시킬 수 있습니다. 특정 자료가 있다고 가정하지 마세요. 여러 카드로 구성된 새 문서는 mindnprogress_create_mindmap으로 한 번에 생성하고, 변경 후에는 최신 문서를 다시 조회해 결과를 검증하세요. 비밀번호 변경과 계정 관리 작업은 지원하지 않습니다.`
 const productGuide = {
-  version: '4.2',
+  version: '4.3',
   product: {
     name: 'MindNProgress',
     purpose: '아이디어를 계층형 마인드맵으로 구조화하고 실행 업무의 진행 상황을 같은 문서에서 관리하는 웹 서비스',
@@ -139,6 +139,7 @@ const productGuide = {
     '지식선 추가·정책 변경·삭제는 전체 save_document 대신 지식선 전용 도구를 사용',
     '카드 일부 필드만 변경할 때 mindnprogress_update_card의 data에는 변경할 필드만 보내고 현재 카드 전체 데이터를 재전송하지 않음. 일반 카드에서 생략한 필드와 위치는 보존되지만 완료 상태 또는 진행률 100 적용 시 waitingItems가 자동으로 해제되며 Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있음',
     '기존 description 또는 sharedKnowledge 내부의 일부만 수정할 때는 조회 응답의 textIntegrity SHA-256을 expectedSha256으로 지정해 mindnprogress_patch_card_text를 사용하고 필드 전체를 다시 생성하지 않음',
+    '과도한 sharedKnowledge를 정리할 때는 mindnprogress_list_shared_knowledge_candidates에서 후보를 고르고 mindnprogress_get_shared_knowledge_review_context로 한 카드 원문과 관계를 확인한 뒤 mindnprogress_apply_shared_knowledge_review로 저장함. cleaned는 정리한 replacement를 보내고, 장문 전체가 계속 필요할 때만 replacement 없이 accepted-long을 사용함',
     'mindnprogress_update_card의 responseMode는 full이 기본값이며 저장된 전체 카드 본문과 관계를 연속 작업용으로 반환하되 AI 대화 상세 목록과 렌더링 전용 필드는 제외함. 단일 카드와 서버가 함께 조정한 카드만 필요하면 affected를 명시함',
     '선택 카드 밖의 형제·하위·선행 카드를 함께 수정하기 전에는 mindnprogress_get_ai_work_states로 해당 카드의 AI 작업 상태를 확인하고, running 또는 waiting-confirmation인 카드는 사용자 지시 없이 동시에 수정하지 않음',
     'Holdem AI 작업공간의 최신 목록·경로·상태는 폴더명이나 과거 대화로 추측하지 않고 mindnprogress_get_ai_workspace_pool로 조회함. 작업공간 선택·점유·전환·해제는 MindNProgress만 수행하며 AI가 임의로 worker를 사용하지 않음',
@@ -771,6 +772,31 @@ async function main() {
   registerTool(server, 'mindnprogress_list_documents', '활성 문서 목록과 버전, 완료 현황 및 좌측 목록의 문서 그룹·혼합 순서를 조회합니다.', {}, async () =>
     apiRequest('/api/maps'))
 
+  registerTool(server, 'mindnprogress_list_shared_knowledge_candidates', '전체 문서 또는 한 문서에서 정리가 필요한 sharedKnowledge 후보를 원문 없이 조회합니다. 우선순위, 길이, SHA-256, 반복 문장 수, 검토 상태와 지식선 소비자 수를 반환하며 문서 버전을 변경하지 않습니다.', {
+    mapId: z.string().min(1).optional().describe('한 문서만 조회할 때 지정하는 문서 ID'),
+    offset: z.number().int().nonnegative().default(0),
+    limit: z.number().int().min(1).max(100).default(50),
+  }, async ({ mapId, offset, limit }) => {
+    const query = new URLSearchParams()
+    if (mapId) query.set('mapId', mapId)
+    const result = await apiRequest(`/api/shared-knowledge/audit${query.size > 0 ? `?${query}` : ''}`)
+    const candidates = result.audit.candidates.slice(offset, offset + limit)
+    const nextOffset = offset + candidates.length
+    return {
+      generatedAt: result.audit.generatedAt,
+      thresholds: result.audit.thresholds,
+      summary: result.audit.summary,
+      candidates,
+      page: {
+        total: result.audit.candidates.length,
+        offset,
+        limit,
+        hasMore: nextOffset < result.audit.candidates.length,
+        nextOffset: nextOffset < result.audit.candidates.length ? nextOffset : null,
+      },
+    }
+  }, { compactResult: true })
+
   registerTool(server, 'mindnprogress_read_me_first', 'MindNProgress를 처음 사용하거나 MindNProgress 밖에서 대화를 시작했다면 가장 먼저 읽어야 하는 제품 가이드입니다. 문서 ID 없이 호출할 수 있으며 마인드맵 작성 규칙과 안전한 도구 사용 순서를 알려줍니다.', {}, async () => ({
     guide: productGuide,
     recommendedWorkflows: {
@@ -798,6 +824,7 @@ async function main() {
       '외부 전달물이나 결정 대기는 waitingItems에 기록하고 카드 제목에는 대기 문구를 추가하지 않음',
       '카드 일부 필드만 변경할 때는 mindnprogress_update_card에 변경할 필드만 전달하고 현재 카드 전체 데이터를 재전송하지 않음',
       '기존 description 또는 sharedKnowledge 내부만 고칠 때는 조회 결과의 textIntegrity SHA-256과 mindnprogress_patch_card_text를 사용',
+      '과도한 sharedKnowledge 정리는 후보 목록과 전용 문맥을 조회한 뒤 해시 조건부 검토 도구로 저장',
     '선택 카드 이외의 관련 카드를 수정하기 전에는 mindnprogress_get_ai_work_states로 다른 AI 작업과의 충돌 여부를 확인',
     '하위 카드의 기존 AI 대화를 이어갈지 새로 시작할지 판단할 때는 mindnprogress_list_ai_conversations로 후보를 먼저 비교하고, 같은 업무 흐름이며 idle이고 실행 환경이 호환되는 대화를 우선 이어감. 목적·모델·작업공간이 다르거나 문맥이 독립되어야 할 때만 새 대화를 선택',
       '지식선만 변경할 때는 전체 문서를 다시 보내지 않고 지식선 전용 도구를 사용',
@@ -1330,6 +1357,23 @@ async function main() {
     }
   })
 
+  registerTool(server, 'mindnprogress_get_shared_knowledge_review_context', '정리 후보 한 카드의 sharedKnowledge 원문, 무결성 해시, 검토 신호, 계층·지식선 관계와 최근 댓글을 조회합니다. 후보 목록에서 선택한 카드만 호출하고 반환된 document.version과 card.textIntegrity.sha256을 저장 요청에 그대로 사용하세요.', {
+    mapId: z.string().min(1),
+    cardId: z.string().min(1).max(120),
+    commentLimit: z.number().int().min(0).max(20).default(10),
+    includeCommentDetail: z.boolean().default(false).describe('true이면 최근 댓글의 상세 본문도 포함. 요약만으로 현재 결론을 판단할 수 없을 때만 사용'),
+  }, async ({ mapId, cardId, commentLimit, includeCommentDetail }) => {
+    const query = new URLSearchParams({
+      commentLimit: String(commentLimit),
+      includeCommentDetail: String(includeCommentDetail),
+    })
+    const result = await apiRequest(
+      `/api/maps/${encodeURIComponent(mapId)}/cards/${encodeURIComponent(cardId)}/shared-knowledge-review-context?${query}`,
+      { aiMapId: mapId, aiCardId: cardId },
+    )
+    return result.context
+  })
+
   registerTool(server, 'mindnprogress_create_mindmap', '새 문서와 완성된 계층형 마인드맵을 한 번에 원자적으로 생성합니다. 여러 카드를 만들 때는 create_document 후 save_document를 호출하지 말고 반드시 이 도구를 우선 사용하세요. 카드 위치와 연결선은 자동 배치됩니다.', {
     title: z.string().min(1).max(120),
     color: documentColor.default('violet'),
@@ -1556,6 +1600,24 @@ async function main() {
       verification: { storedMatchesExpected: true },
     }
   }, { compactResult: true })
+
+  registerTool(server, 'mindnprogress_apply_shared_knowledge_review', '검토 문맥에서 만든 sharedKnowledge 정리 결과를 한 문서에 원자적으로 저장하고 검토 완료로 기록합니다. 모든 카드의 현재 SHA-256과 문서 버전이 일치할 때만 전체 요청을 한 번에 반영하며 하나라도 다르면 아무것도 저장하지 않습니다. 본문을 줄이거나 재구성한 경우 cleaned와 replacement를, 현재 장문 전체가 계속 필요하면 accepted-long만 사용하세요. Ref 카드는 지원하지 않습니다.', {
+    mapId: z.string().min(1),
+    baseVersion: z.number().int().positive().describe('검토 문맥의 document.version'),
+    patches: z.array(z.object({
+      cardId: z.string().min(1).max(120),
+      expectedSha256: z.string().regex(/^[a-f0-9]{64}$/).describe('검토 문맥의 card.textIntegrity.sha256'),
+      reviewResult: z.enum(['cleaned', 'accepted-long']),
+      replacement: z.string().max(10_000).optional().describe('cleaned일 때만 보내는 정리된 sharedKnowledge 전체. accepted-long일 때는 생략'),
+    })).min(1).max(20),
+  }, async ({ mapId, baseVersion, patches }) => apiRequest(
+    `/api/maps/${encodeURIComponent(mapId)}/shared-knowledge/reviews`,
+    {
+      method: 'POST',
+      aiMapId: mapId,
+      body: JSON.stringify({ baseVersion, patches }),
+    },
+  ), { compactResult: true })
 
   registerTool(server, 'mindnprogress_recover_ai_delegation', 'AionCore 재시작, 연결 끊김 또는 필수 체크포인트·통합 실패로 recovery-required 또는 integration-recovery-required가 된 AI 위임을 기존 대화와 기존 작업공간에서 명시적으로 재개합니다. 원래 지시를 자동 재생하지 않으며, 현재 카드·Git·작업공간 상태를 확인한 뒤 미완료 부분만 수행하도록 새 복구 지시를 전달합니다.', {
     mapId: z.string().min(1).describe('복구할 위임이 속한 문서 ID'),

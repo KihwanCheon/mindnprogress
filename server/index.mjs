@@ -76,9 +76,16 @@ import {
 import { localLoopbackRedirectLocation } from './lib/localLoopbackRedirect.mjs'
 import { buildSharedKnowledgeAudit } from './lib/sharedKnowledgeAudit.mjs'
 import {
+  SharedKnowledgeMaintenanceError,
+  buildSharedKnowledgeReviewContext,
+  prepareSharedKnowledgeReviewBatch,
+} from './lib/sharedKnowledgeMaintenance.mjs'
+import {
   isValidSharedKnowledgeReview,
   normalizeMapSharedKnowledgeReviews,
   reconcileSharedKnowledgeReviews,
+  sharedKnowledgeReviewState,
+  sharedKnowledgeSha256,
 } from './lib/sharedKnowledgeReview.mjs'
 import {
   WorkspacePoolIntegrationError,
@@ -326,6 +333,16 @@ function sendJson(response, statusCode, body, headers = {}) {
     ...headers,
   })
   response.end(JSON.stringify(body))
+}
+
+function sendSharedKnowledgeMaintenanceError(response, error) {
+  if (!(error instanceof SharedKnowledgeMaintenanceError)) return false
+  sendJson(response, error.status, {
+    error: error.message,
+    code: error.code,
+    ...error.details,
+  })
+  return true
 }
 
 function requestClientId(request) {
@@ -4192,9 +4209,16 @@ async function readMapRevision(mapId, revisionId) {
 
 async function saveMap(mapId, map, user, title, color, revisionReason = 'edit', {
   sharedKnowledgeReviewRequests = new Map(),
+  expectedVersion = null,
 } = {}) {
   await mkdir(dataDirectory, { recursive: true })
   const existing = await readMap(mapId)
+  if (Number.isInteger(expectedVersion) && existing?.version !== expectedVersion) {
+    const error = new Error('다른 사용자가 먼저 문서를 변경했습니다.')
+    error.code = 'VERSION_CONFLICT'
+    error.currentVersion = existing?.version ?? null
+    throw error
+  }
   const now = new Date().toISOString()
   const normalizedMap = reconcileSharedKnowledgeReviews(
     existing,
@@ -6311,6 +6335,127 @@ const server = createServer(async (request, response) => {
       }
       const maps = (await Promise.all(selectedSummaries.map((summary) => readMap(summary.id)))).filter(Boolean)
       return sendJson(response, 200, { audit: buildSharedKnowledgeAudit(maps) })
+    }
+
+    const sharedKnowledgeReviewContextRoute = url.pathname.match(
+      /^\/api\/maps\/([^/]+)\/cards\/([^/]+)\/shared-knowledge-review-context$/,
+    )
+    if (sharedKnowledgeReviewContextRoute && request.method === 'GET') {
+      const mapId = decodeURIComponent(sharedKnowledgeReviewContextRoute[1])
+      const cardId = decodeURIComponent(sharedKnowledgeReviewContextRoute[2])
+      if (!isValidMapId(mapId) || !cardId || cardId.length > 120) {
+        return sendJson(response, 400, { error: '문서 또는 카드 ID가 올바르지 않습니다.' })
+      }
+      const user = requireUser(request, response)
+      if (!user) return
+      const map = await readMap(mapId)
+      if (!map || map.trashedAt) return sendJson(response, 404, { error: '마인드맵을 찾을 수 없습니다.' })
+      const rawCommentLimit = url.searchParams.get('commentLimit')
+      const commentLimit = rawCommentLimit === null ? 10 : Number(rawCommentLimit)
+      if (!Number.isInteger(commentLimit) || commentLimit < 0 || commentLimit > 20) {
+        return sendJson(response, 400, { error: 'commentLimit은 0~20의 정수여야 합니다.' })
+      }
+      const includeCommentDetail = url.searchParams.get('includeCommentDetail') === 'true'
+      try {
+        const context = buildSharedKnowledgeReviewContext(map, cardId)
+        const allComments = await listComments(mapId, cardId)
+        const comments = commentLimit > 0
+          ? [...allComments].reverse().slice(0, commentLimit).map((comment) => commentForResponse(comment, includeCommentDetail))
+          : []
+        return sendJson(response, 200, {
+          context: {
+            ...context,
+            accessUrl: `${publicBaseUrl}/mindmap/${encodeURIComponent(mapId)}/${encodeURIComponent(cardId)}`,
+            comments,
+            commentsPage: {
+              total: allComments.length,
+              returned: comments.length,
+              order: 'desc',
+              includesDetail: includeCommentDetail,
+            },
+          },
+        })
+      } catch (error) {
+        if (sendSharedKnowledgeMaintenanceError(response, error)) return
+        throw error
+      }
+    }
+
+    const sharedKnowledgeReviewsRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/shared-knowledge\/reviews$/)
+    if (sharedKnowledgeReviewsRoute && request.method === 'POST') {
+      const mapId = decodeURIComponent(sharedKnowledgeReviewsRoute[1])
+      if (!isValidMapId(mapId)) return sendJson(response, 400, { error: '올바르지 않은 문서 ID입니다.' })
+      const user = requireUser(request, response)
+      if (!user) return
+      if (!canEdit(user)) return sendJson(response, 403, { error: '뷰어는 공유 지식 검토 결과를 저장할 수 없습니다.' })
+      const existing = await readMap(mapId)
+      if (!existing || existing.trashedAt) return sendJson(response, 404, { error: '마인드맵을 찾을 수 없습니다.' })
+      const body = await readJsonBody(request)
+      const baseVersion = Number(body.baseVersion)
+      if (!Number.isInteger(baseVersion) || baseVersion < 1) {
+        return sendJson(response, 400, { error: '검토 문맥에서 확인한 문서 버전을 입력해 주세요.' })
+      }
+      if (baseVersion !== existing.version) {
+        return sendJson(response, 409, {
+          error: '다른 사용자가 먼저 문서를 변경했습니다. 검토 후보와 문맥을 다시 조회해 주세요.',
+          code: 'VERSION_CONFLICT',
+          currentVersion: existing.version,
+        })
+      }
+
+      let prepared
+      try {
+        prepared = prepareSharedKnowledgeReviewBatch(existing, body.patches)
+      } catch (error) {
+        if (sendSharedKnowledgeMaintenanceError(response, error)) return
+        throw error
+      }
+
+      let map
+      try {
+        map = await saveMap(
+          mapId,
+          prepared.map,
+          user,
+          existing.title,
+          existing.color,
+          'shared-knowledge-review',
+          {
+            sharedKnowledgeReviewRequests: prepared.reviewRequests,
+            expectedVersion: baseVersion,
+          },
+        )
+      } catch (error) {
+        if (error?.code === 'VERSION_CONFLICT') {
+          return sendJson(response, 409, {
+            error: '다른 사용자가 먼저 문서를 변경했습니다. 검토 후보와 문맥을 다시 조회해 주세요.',
+            code: 'VERSION_CONFLICT',
+            currentVersion: error.currentVersion,
+          })
+        }
+        throw error
+      }
+
+      const changes = prepared.changes.map((change) => {
+        const card = map.nodes.find((node) => node.id === change.cardId)
+        const sharedKnowledge = typeof card?.data?.sharedKnowledge === 'string' ? card.data.sharedKnowledge : ''
+        const storedSha256 = sharedKnowledgeSha256(sharedKnowledge)
+        if (storedSha256 !== change.after.sha256) {
+          throw new Error(`공유 지식 검토 결과 검증에 실패했습니다: ${change.cardId}`)
+        }
+        const reviewStatus = sharedKnowledgeReviewState(sharedKnowledge, card?.data?.sharedKnowledgeReview, storedSha256)
+        return {
+          ...change,
+          reviewState: reviewStatus.state,
+          review: reviewStatus.review,
+        }
+      })
+      broadcastMapChange(request, mapId, 'shared-knowledge-reviewed', user)
+      return sendJson(response, 200, {
+        document: mapSummary(map),
+        changes,
+        atomic: true,
+      })
     }
 
     const mapImageAssetRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/images\/([^/]+)$/)

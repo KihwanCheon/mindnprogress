@@ -149,6 +149,7 @@ export function buildSharedKnowledgeAudit(maps, {
   const cards = documents.flatMap((document) => document.cards.map((card) => ({
     mapId: document.mapId,
     documentTitle: document.title,
+    documentVersion: document.version,
     ...card,
   })))
   const candidates = cards.filter((card) => card.actionable).sort((first, second) =>
