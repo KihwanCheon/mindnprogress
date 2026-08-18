@@ -162,6 +162,17 @@ async function startMockAionUi({
         ],
       })
     }
+    if (request.method === 'GET'
+      && request.url === '/api/internal/external-conversation-dispatches/capabilities') {
+      return send({
+        schemaVersion: 3,
+        workspaceLeaseVersion: 2,
+        atomicWorkspaceRebind: true,
+        releasesRuntimeOnTerminal: true,
+        persistentRecoveryState: true,
+        explicitCompletionAfterInterruption: true,
+      })
+    }
     if (request.method === 'POST' && request.url === '/api/internal/external-conversation-dispatches') {
       const chunks = []
       request.on('data', (chunk) => chunks.push(chunk))
@@ -183,6 +194,30 @@ async function startMockAionUi({
         }
         dispatches.set(body.operationId, stored)
         send({ ...stored, state: 'starting', turnId: null }, 202)
+      })
+      return
+    }
+    const dispatchCompletionMatch = request.url?.match(
+      /^\/api\/internal\/external-conversation-dispatches\/([^/?]+)\/complete$/,
+    )
+    if (request.method === 'POST' && dispatchCompletionMatch) {
+      const chunks = []
+      request.on('data', (chunk) => chunks.push(chunk))
+      request.on('end', () => {
+        const operationId = decodeURIComponent(dispatchCompletionMatch[1])
+        const dispatch = dispatches.get(operationId)
+        if (!dispatch) {
+          response.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' })
+          response.end(JSON.stringify({ success: false, error: { code: 'EXTERNAL_DISPATCH_NOT_FOUND' } }))
+          return
+        }
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+        send({
+          operationId,
+          conversationId: body.conversationId,
+          turnId: 'turn-explicit-completion',
+          accepted: true,
+        })
       })
       return
     }
@@ -306,7 +341,7 @@ async function main() {
     await client.connect(transport)
     const listedTools = await client.listTools()
     const registeredToolNames = listedTools.tools.map((tool) => tool.name).sort()
-    assert.equal(registeredToolNames.length, 45, `예상과 다른 MCP 도구 수: ${registeredToolNames.length}`)
+    assert.equal(registeredToolNames.length, 46, `예상과 다른 MCP 도구 수: ${registeredToolNames.length}`)
     const toolSchema = (name) => listedTools.tools.find((tool) => tool.name === name)?.inputSchema
     for (const name of ['mindnprogress_update_card', 'mindnprogress_move_card', 'mindnprogress_delete_card', 'mindnprogress_list_comments', 'mindnprogress_add_comment']) {
       assert.ok(toolSchema(name)?.properties?.cardId, `${name}: cardId 공개 인자가 없습니다.`)
@@ -336,6 +371,7 @@ async function main() {
     assert.equal(toolSchema('mindnprogress_checkpoint_ai_workspace')?.properties?.confirmNoChanges, undefined)
     assert.ok(toolSchema('mindnprogress_confirm_ai_workspace_no_changes')?.properties?.leaseId)
     assert.ok(toolSchema('mindnprogress_confirm_ai_workspace_no_changes')?.properties?.jobId)
+    assert.ok(toolSchema('mindnprogress_complete_ai_delegation')?.required?.includes('mapId'))
 
     const invoke = async (name, args = {}) => {
       calledTools.set(name, (calledTools.get(name) ?? 0) + 1)
@@ -351,7 +387,8 @@ async function main() {
 
     const guide = await invoke('mindnprogress_read_me_first')
     assert.equal(guide.guide.product.name, 'MindNProgress')
-    assert.equal(guide.guide.version, '4.1')
+    assert.equal(guide.guide.version, '4.2')
+    assert.match(guide.guide.operationRules.join('\n'), /mindnprogress_complete_ai_delegation/)
     assert.match(guide.guide.operationRules.join('\n'), /중지된 위임을 resume하면 같은 AI 대화와 기존 worker lease/)
     assert.match(guide.guide.dataModel.cardContent.sharedKnowledge, /재사용/)
     assert.match(guide.guide.dataModel.workFields.progress, /일반 isWork=false 묶음 카드.*읽기 전용 요약값/)
@@ -970,6 +1007,8 @@ async function main() {
     )
     assert.match(mockAionUi.dispatchRequests[0].instruction, /MindNProgress 하위 카드 위임 작업 요청/)
     assert.match(mockAionUi.dispatchRequests[0].instruction, /실제로 수행/)
+    assert.match(mockAionUi.dispatchRequests[0].instruction, /mindnprogress_complete_ai_delegation/)
+    assert.equal(mockAionUi.dispatchRequests[0].explicitCompletionAfterInterruption, true)
 
     mockAionUi.setDispatchState(delegationArguments.idempotencyKey, 'waiting_resume')
     let interruptedDelegation = null
@@ -987,6 +1026,39 @@ async function main() {
     assert.equal(interruptedDelegation?.state, 'waiting-child-resume')
     assert.equal(interruptedDelegation?.childStatus, 'interrupted')
     assert.equal(mockAionUi.dispatchRequests.length, 1, '중지된 하위 턴을 완료로 오인해 상위 대화를 재개했습니다.')
+
+    const childCompletionTransport = new StdioClientTransport({
+      command: process.execPath,
+      args: ['mcp/server.mjs'],
+      cwd: projectDirectory,
+      env: { ...environment, AIONUI_CONVERSATION_ID: 'conversation-delegated' },
+      stderr: 'pipe',
+    })
+    const childCompletionClient = new Client({ name: 'mindnprogress-explicit-completion', version: '1.0.0' })
+    await childCompletionClient.connect(childCompletionTransport)
+    try {
+      parseToolResult('mindnprogress_get_context', await childCompletionClient.callTool({
+        name: 'mindnprogress_get_context',
+        arguments: {
+          mapId,
+          cardId: delegatedChild.id,
+          editorId: attribution.editorId,
+          aiType: 'Claude Code',
+          aiModel: 'Claude Test Model',
+        },
+      }))
+      const explicitCompletion = parseToolResult('mindnprogress_complete_ai_delegation',
+        await childCompletionClient.callTool({
+          name: 'mindnprogress_complete_ai_delegation',
+          arguments: { mapId },
+        }))
+      calledTools.set('mindnprogress_complete_ai_delegation', 1)
+      assert.equal(explicitCompletion.accepted, true)
+      assert.equal(explicitCompletion.turnId, 'turn-explicit-completion')
+      assert.equal(explicitCompletion.delegation.id, delegationArguments.idempotencyKey)
+    } finally {
+      await childCompletionClient.close()
+    }
 
     mockAionUi.setDispatchState(delegationArguments.idempotencyKey, 'waiting_resource', {
       kind: 'unity_project',

@@ -61,9 +61,9 @@ function defaultChildMindMapPosition(parentPosition, siblingPositions, parentWid
   }
 }
 
-const serverInstructions = `MindNProgress는 마인드맵과 업무 진행 관리를 결합한 웹 서비스입니다. MindNProgress 밖에서 시작해 문서 ID나 카드 ID가 없다면 mindnprogress_read_me_first를 먼저 호출하세요. 선택 문서와 카드가 있다면 mindnprogress_get_context로 제품 규칙과 최신 문서 구조를 먼저 확인하세요. MCP 도구에서 카드를 지정할 때는 cardId 계열 인자를 사용하세요. nodeId 계열 인자는 기존 대화 호환용이므로 새 호출에서는 사용하지 마세요. AionUi가 발급한 attributionToken이 없는 외부 MCP 세션은 자신이 현재 AI 종류와 모델을 정확히 알고 있을 때 get_context의 aiType과 aiModel에 함께 전달하고, 알지 못하면 추측하지 마세요. get_context의 selection.taskLinks.startupInspection을 따르세요. mode가 knowledge-guided이면 primary 선행 지식 중 kind=image인 항목은 imageAccess.localPath의 원본을 사용 가능한 로컬 이미지 열람 도구로 직접 확인하고 설명과 댓글을 함께 사용하며, 일반 카드는 sharedKnowledge를 먼저 재사용하고 설명과 댓글로 보완합니다. fallbackSources와 fallbackTargets는 정보가 부족할 때만 선택적으로 조사합니다. mode가 default이고 required가 true이면 targets의 업무 본문, 댓글, 첨부파일 목록과 관련 링크를 조사하세요. 진행 과정과 결과는 댓글에 기록하고, 다른 카드나 후속 세션이 재사용할 안정적인 사실·결정·제약은 카드의 sharedKnowledge에 요약하세요. AI 댓글은 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 충실히 담은 detail로 작성하며, 요약 때문에 상세를 축약하지 마세요. 외부 전달물이나 결정 대기는 waitingItems로 기록하고 제목에 대기 문구를 붙이지 마세요. 대기를 등록할 때는 [차단], 해제할 때는 [진행] 댓글로 이유와 재개 상태를 기록하세요. 카드 일부 필드만 변경할 때는 mindnprogress_update_card의 data에 변경할 필드만 보내고 현재 카드 전체 데이터를 재전송하지 마세요. 기존 description 또는 sharedKnowledge 내부의 일부만 고칠 때는 조회 결과의 textIntegrity SHA-256과 mindnprogress_patch_card_text를 사용하세요. 일반 카드에서 생략한 필드와 위치는 보존되지만 완료 상태 또는 진행률 100 적용 시 waitingItems는 자동으로 해제되며, Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 선택 카드 밖의 형제·하위·선행 카드를 함께 수정하기 전에는 mindnprogress_get_ai_work_states로 해당 카드에 다른 AI 작업이 진행 중인지 확인하세요. running 또는 waiting-confirmation인 카드는 사용자 지시 없이 동시에 수정하지 마세요. Holdem AI 작업공간의 최신 목록·경로·상태가 필요하면 폴더명을 추측하지 말고 mindnprogress_get_ai_workspace_pool을 호출하세요. 작업공간 선택·점유·전환·해제는 MindNProgress만 수행하며 AI가 임의로 worker를 선택하지 않습니다. 지식선만 변경할 때는 전체 문서를 다시 보내지 말고 지식선 전용 도구를 사용하세요. 조회 도구는 문서 버전을 변경하지 않지만 카드·관계 편집과 AI 대화 ID 연결은 버전을 증가시킬 수 있습니다. 특정 자료가 있다고 가정하지 마세요. 여러 카드로 구성된 새 문서는 mindnprogress_create_mindmap으로 한 번에 생성하고, 변경 후에는 최신 문서를 다시 조회해 결과를 검증하세요. 비밀번호 변경과 계정 관리 작업은 지원하지 않습니다.`
+const serverInstructions = `MindNProgress는 마인드맵과 업무 진행 관리를 결합한 웹 서비스입니다. MindNProgress 밖에서 시작해 문서 ID나 카드 ID가 없다면 mindnprogress_read_me_first를 먼저 호출하세요. 선택 문서와 카드가 있다면 mindnprogress_get_context로 제품 규칙과 최신 문서 구조를 먼저 확인하세요. MCP 도구에서 카드를 지정할 때는 cardId 계열 인자를 사용하세요. nodeId 계열 인자는 기존 대화 호환용이므로 새 호출에서는 사용하지 마세요. AionUi가 발급한 attributionToken이 없는 외부 MCP 세션은 자신이 현재 AI 종류와 모델을 정확히 알고 있을 때 get_context의 aiType과 aiModel에 함께 전달하고, 알지 못하면 추측하지 마세요. get_context의 selection.taskLinks.startupInspection을 따르세요. mode가 knowledge-guided이면 primary 선행 지식 중 kind=image인 항목은 imageAccess.localPath의 원본을 사용 가능한 로컬 이미지 열람 도구로 직접 확인하고 설명과 댓글을 함께 사용하며, 일반 카드는 sharedKnowledge를 먼저 재사용하고 설명과 댓글로 보완합니다. fallbackSources와 fallbackTargets는 정보가 부족할 때만 선택적으로 조사합니다. mode가 default이고 required가 true이면 targets의 업무 본문, 댓글, 첨부파일 목록과 관련 링크를 조사하세요. 진행 과정과 결과는 댓글에 기록하고, 다른 카드나 후속 세션이 재사용할 안정적인 사실·결정·제약은 카드의 sharedKnowledge에 요약하세요. AI 댓글은 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 충실히 담은 detail로 작성하며, 요약 때문에 상세를 축약하지 마세요. 외부 전달물이나 결정 대기는 waitingItems로 기록하고 제목에 대기 문구를 붙이지 마세요. 대기를 등록할 때는 [차단], 해제할 때는 [진행] 댓글로 이유와 재개 상태를 기록하세요. 카드 일부 필드만 변경할 때는 mindnprogress_update_card의 data에 변경할 필드만 보내고 현재 카드 전체 데이터를 재전송하지 마세요. 기존 description 또는 sharedKnowledge 내부의 일부만 고칠 때는 조회 결과의 textIntegrity SHA-256과 mindnprogress_patch_card_text를 사용하세요. 일반 카드에서 생략한 필드와 위치는 보존되지만 완료 상태 또는 진행률 100 적용 시 waitingItems는 자동으로 해제되며, Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 선택 카드 밖의 형제·하위·선행 카드를 함께 수정하기 전에는 mindnprogress_get_ai_work_states로 해당 카드에 다른 AI 작업이 진행 중인지 확인하세요. running 또는 waiting-confirmation인 카드는 사용자 지시 없이 동시에 수정하지 마세요. Holdem AI 작업공간의 최신 목록·경로·상태가 필요하면 폴더명을 추측하지 말고 mindnprogress_get_ai_workspace_pool을 호출하세요. 작업공간 선택·점유·전환·해제는 MindNProgress만 수행하며 AI가 임의로 worker를 선택하지 않습니다. 사용자가 중지한 위임 대화를 같은 대화에서 직접 이어 실제 위임 작업을 완료했다면 카드 기록과 작업공간 체크포인트를 마친 뒤 최종 답변 직전에 mindnprogress_complete_ai_delegation을 호출하세요. 단순 질의 응답·중간 보고 또는 중단 없이 진행된 최초 위임에는 호출하지 마세요. 지식선만 변경할 때는 전체 문서를 다시 보내지 말고 지식선 전용 도구를 사용하세요. 조회 도구는 문서 버전을 변경하지 않지만 카드·관계 편집과 AI 대화 ID 연결은 버전을 증가시킬 수 있습니다. 특정 자료가 있다고 가정하지 마세요. 여러 카드로 구성된 새 문서는 mindnprogress_create_mindmap으로 한 번에 생성하고, 변경 후에는 최신 문서를 다시 조회해 결과를 검증하세요. 비밀번호 변경과 계정 관리 작업은 지원하지 않습니다.`
 const productGuide = {
-  version: '4.1',
+  version: '4.2',
   product: {
     name: 'MindNProgress',
     purpose: '아이디어를 계층형 마인드맵으로 구조화하고 실행 업무의 진행 상황을 같은 문서에서 관리하는 웹 서비스',
@@ -146,6 +146,7 @@ const productGuide = {
     '복수의 독립적인 완료 조건이 있는 업무를 위임할 때 상위 AI가 위임 전에 필요한 최소한의 결과 중심 체크리스트를 작성함. 누락된 경우 하위 AI가 실제 작업 전에 작성하고 진행에 맞춰 갱신하며, 개수를 맞추기 위해 억지로 나누지 않고 단순 업무나 아직 위임하지 않은 계획 카드에는 생략 가능',
     'mindnprogress_delegate_ai_work의 위임 기준은 AionUi 대화 ID에 영속 기록된 시작 카드로 고정되며, MCP 재연결·프로세스 재생성이나 다른 카드의 get_context 추가 조회에도 바뀌지 않음. 직계 자식뿐 아니라 모든 깊이의 계층상 하위 카드에 위임 가능',
     'AI 위임이 recovery-required 또는 integration-recovery-required이면 AionCore 재시작, 재시도 가능한 연결 끊김 또는 필수 체크포인트·통합 실패로 이전 실행을 명시적으로 이어야 하는 상태임. 원 지시를 자동 반복하거나 새 위임을 만들지 말고 mindnprogress_recover_ai_delegation으로 기존 대화와 작업공간을 재개함',
+    '사용자가 중지한 하위 위임을 같은 AI 대화에서 직접 이어 실제 작업을 완료했다면 카드 결과와 필요한 작업공간 체크포인트까지 마친 마지막 턴에서 최종 답변 직전에 mindnprogress_complete_ai_delegation을 호출함. 단순 질의 응답·중간 보고에는 호출하지 않으며, 중단 없이 끝난 최초 위임에는 필요하지 않음. mindnprogress_recover_ai_delegation으로 시작한 복구 operation도 다시 중지된 경우에만 같은 규칙을 적용함',
     '하위 작업 결과로 자동 재개된 턴에서 다음 작업을 위임하기로 판단하면 최종 응답 전에 mindnprogress_delegate_ai_work를 실제로 호출하고 성공 결과를 확인함. 실제 호출 없이 “위임하겠습니다” 또는 “이어서 진행하겠습니다”와 같은 미래형 약속으로 턴을 끝내지 않으며, 위임할 수 없으면 차단 원인과 필요한 조치를 현재 응답에 명시함',
     'AI 작업공간 pool에 등록된 Unity 프로젝트의 독립 하위 작업은 MindNProgress가 서로 다른 worker, 브랜치와 lease를 배정하므로 병렬 위임할 수 있음. 가용 worker가 없으면 위임은 waiting-workspace로 서버에 보존되고 worker 회수 후 FIFO로 자동 시작되므로 같은 요청을 재시도하지 않음. 등록된 pool 작업은 lease 없이 AionCore에 전달되지 않음. 중지된 위임을 resume하면 같은 AI 대화와 기존 worker lease 및 변경을 이어서 사용하고, 같은 카드·대화에 다른 활성 위임이 있으면 중복 실행하지 않음. 완료 결과는 체크포인트 후 main에 직렬 통합됨. 통합 충돌은 main을 건드리지 않고 해당 작업을 수행한 같은 AI 대화를 worker 통합 브랜치에서 재개해 해결·검증하며, 통합이 끝난 뒤에만 상위 대화를 재개함. pool 미등록 프로젝트만 같은 작업공간 충돌을 피하도록 순차 위임함',
     'AI worker에서 Unity Play, 재임포트, 동적 폰트·Atlas 생성 등 검증을 시작하기 전에 mindnprogress_checkpoint_ai_workspace로 의도한 변경 경로와 실제 변경을 설명하는 구조화 commitMessage를 함께 고정함. summary에는 [김용민] prefix를 넣지 않고 background, cause, changes를 구체적으로 작성하며 scope는 필요한 경우에만 작성함. 파일 변경이 없는 조사·검증 작업은 mindnprogress_confirm_ai_workspace_no_changes로 확인함. 검증 후 보완했다면 새 변경 내용에 맞는 commitMessage로 다시 체크포인트를 만들고 검증함. 체크포인트 이후 자동 변경은 main 통합에서 제외됨',
@@ -1169,6 +1170,22 @@ async function main() {
       },
       coordinationRule: 'AI는 작업공간을 직접 선택·점유·전환·해제하지 않습니다. 실제 작업에서는 MindNProgress 위임 전문과 .ai-session.json에 배정된 projectRoot만 사용하세요.',
     }
+  }, { compactResult: true })
+
+  registerTool(server, 'mindnprogress_complete_ai_delegation', '사용자가 중지한 하위 위임을 같은 AionUi 대화에서 직접 이어 실제 작업을 완료했음을 명시적으로 확인합니다. 카드 결과와 필요한 작업공간 체크포인트를 모두 기록한 마지막 작업 턴에서 최종 답변 직전에만 호출하세요. 단순 질의 응답·중간 보고, 중단 없이 진행된 최초 위임, 또는 아직 완료되지 않은 작업에는 호출하지 마세요. 현재 AionUi 대화와 카드에 연결된 재개 대기 위임을 서버가 안전하게 식별합니다.', {
+    mapId: z.string().min(1).describe('현재 위임 카드가 속한 문서 ID'),
+  }, async ({ mapId }) => {
+    const origin = delegationOriginForMap(mapId)
+    return apiRequest(`/api/maps/${encodeURIComponent(mapId)}/ai-delegations/complete`, {
+      method: 'POST',
+      aiMapId: origin.mapId,
+      aiCardId: origin.cardId,
+      aiAttributionToken: origin.attributionToken,
+      aiEditorId: origin.editorId,
+      aiType: origin.aiType,
+      aiModel: origin.aiModel,
+      body: JSON.stringify({}),
+    })
   }, { compactResult: true })
 
   registerTool(server, 'mindnprogress_list_ai_conversations', '카드에서 시작한 모든 AionUi 대화 후보를 최신순으로 조회합니다. 각 대화의 AI·모델·모드·사고 강도·스킬·MCP·작업공간·시작자·최근 활동 시각과 현재 실행 상태를 반환합니다. 기존 대화를 이어갈지 새 대화를 만들지 판단할 때 전문 조회보다 먼저 사용하세요. 이 조회는 문서 버전을 변경하지 않습니다.', {

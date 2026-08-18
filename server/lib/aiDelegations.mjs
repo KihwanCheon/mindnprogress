@@ -27,6 +27,13 @@ const CHILD_WORKSPACE_RECONCILIATION_STATES = new Set([
   'waiting-child-resume',
 ])
 
+const EXPLICIT_COMPLETION_CANDIDATE_STATES = new Set([
+  'starting',
+  'waiting-resource',
+  'running',
+  'waiting-child-resume',
+])
+
 export function shouldReconcileAiDelegationChildWorkspace(delegation) {
   return CHILD_WORKSPACE_RECONCILIATION_STATES.has(delegation?.state)
 }
@@ -201,6 +208,21 @@ export function activeAiDelegationsForConversation(delegations, {
       && delegation?.targetConversationId === targetConversationId
       && ACTIVE_AI_DELEGATION_STATES.has(delegation?.state))
     .sort((first, second) => String(second.createdAt ?? '').localeCompare(String(first.createdAt ?? '')))
+}
+
+export function explicitCompletionAiDelegationsForConversation(delegations, {
+  mapId,
+  targetCardId,
+  targetConversationId,
+} = {}) {
+  return [...delegations]
+    .filter((delegation) => delegation?.mapId === mapId
+      && delegation?.targetCardId === targetCardId
+      && delegation?.targetConversationId === targetConversationId
+      && EXPLICIT_COMPLETION_CANDIDATE_STATES.has(delegation?.state)
+      && String(delegation?.childOperationId ?? '').trim())
+    .sort((first, second) => String(second.updatedAt ?? second.createdAt ?? '')
+      .localeCompare(String(first.updatedAt ?? first.createdAt ?? '')))
 }
 
 export function formatAiConversationTitle(documentTitle, cardTitle) {

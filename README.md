@@ -229,7 +229,7 @@ AI가 MindNProgress 밖에서 시작되었다면 먼저 `mindnprogress_read_me_f
 
 ## MindNProgress MCP 명령어
 
-현재 MCP 서버는 45개 도구를 제공합니다. 카드가 선택된 작업은 먼저 `mindnprogress_get_context`로 최신 버전과 제품 규칙을 확인하고, 변경 후에는 `mindnprogress_get_document`로 실제 저장 결과를 다시 확인하는 흐름을 권장합니다. 조회 도구는 문서 버전을 변경하지 않으며 카드·관계 편집과 AI 대화 ID 연결 같은 저장 작업만 버전을 증가시킵니다. 선택 카드 이외의 형제·하위·선행 카드를 함께 수정할 때는 `mindnprogress_get_ai_work_states`로 다른 AI가 작업 중인지 먼저 확인합니다. Holdem AI 작업공간의 최신 목록과 상태는 폴더명을 추측하지 않고 `mindnprogress_get_ai_workspace_pool`로 조회합니다.
+현재 MCP 서버는 46개 도구를 제공합니다. 카드가 선택된 작업은 먼저 `mindnprogress_get_context`로 최신 버전과 제품 규칙을 확인하고, 변경 후에는 `mindnprogress_get_document`로 실제 저장 결과를 다시 확인하는 흐름을 권장합니다. 조회 도구는 문서 버전을 변경하지 않으며 카드·관계 편집과 AI 대화 ID 연결 같은 저장 작업만 버전을 증가시킵니다. 선택 카드 이외의 형제·하위·선행 카드를 함께 수정할 때는 `mindnprogress_get_ai_work_states`로 다른 AI가 작업 중인지 먼저 확인합니다. Holdem AI 작업공간의 최신 목록과 상태는 폴더명을 추측하지 않고 `mindnprogress_get_ai_workspace_pool`로 조회합니다.
 
 ### 시작과 조회
 
@@ -246,6 +246,7 @@ AI가 MindNProgress 밖에서 시작되었다면 먼저 `mindnprogress_read_me_f
 | `mindnprogress_confirm_ai_workspace_no_changes` | 조사·검증 결과 의도한 파일 변경이 전혀 없음을 확인합니다. 변경 체크포인트의 빈 경로 호환 입력 대신 이 도구를 사용합니다. |
 | `mindnprogress_list_ai_conversations` | 카드에 연결된 모든 AI 대화 후보의 실행 환경, 시작 정보, 최근 활동과 실시간 상태를 조회해 기존 대화 이어가기와 새 대화 시작 판단에 사용합니다. |
 | `mindnprogress_delegate_ai_work` | 대화 시작 카드의 모든 깊이 하위 카드에 실행 가능한 지시를 전달해 기존 대화를 이어가거나 새 대화를 만들고, 해당 턴 완료 후 결과와 함께 상위 대화를 자동 재개합니다. 다른 카드 조회는 위임 기준을 바꾸지 않습니다. |
+| `mindnprogress_complete_ai_delegation` | 사용자가 중지한 하위 위임을 같은 대화에서 직접 이어 실제 작업을 완료했을 때, 카드 기록과 작업공간 체크포인트 이후 마지막 턴에 명시적 완료 신호를 보냅니다. 단순 질의 응답과 중간 보고에는 사용하지 않습니다. |
 | `mindnprogress_list_ai_delegations` | 하위 실행부터 상위 대화 재개까지 AI 작업 위임의 현재 상태, 대상 대화와 turnId를 조회합니다. 구버전 실행 기록의 자원 대기(`waiting-resource`) 상태도 호환 조회합니다. |
 | `mindnprogress_recover_ai_delegation` | AionCore 재시작으로 복구가 필요해진 위임을 원 지시 자동 재생 없이 기존 대화·작업공간에서 명시적으로 이어갑니다. |
 | `mindnprogress_get_ai_conversation_transcript` | 카드에 연결된 최근 AionUi 대화 또는 `conversationId`로 지정한 이전 대화 전문을 `전체 복사`와 같은 텍스트 형식으로 조회합니다. |

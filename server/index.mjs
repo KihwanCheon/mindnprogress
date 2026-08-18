@@ -21,6 +21,7 @@ import {
   aiDelegationWorkspaceLeaseMatches,
   aiDelegationSelectionFromSource,
   createAiDelegationRequestSignature,
+  explicitCompletionAiDelegationsForConversation,
   failedAiIntegrationRecoveryRuntime,
   formatAiConversationTitle,
   initialAiDelegationRuntime,
@@ -1438,6 +1439,18 @@ async function aionCoreSupportsWorkspaceLease() {
   }
 }
 
+async function aionCoreSupportsExplicitCompletionAfterInterruption() {
+  try {
+    const capabilities = await fetchAionUi('/api/internal/external-conversation-dispatches/capabilities', {
+      timeoutMs: 3_000,
+    })
+    return capabilities?.schemaVersion >= 3
+      && capabilities?.explicitCompletionAfterInterruption === true
+  } catch {
+    return false
+  }
+}
+
 async function protectAionUiConversationTitle(conversationId, title) {
   const protectedConversation = await fetchAionUi(`/api/conversations/${encodeURIComponent(conversationId)}`, {
     method: 'PATCH',
@@ -1612,6 +1625,8 @@ function buildDelegatedInstruction({ mapId, cardId, editorId, attributionToken, 
 
 MCP 조회 결과의 \`guide\`, \`selection.taskLinks.startupInspection\`, \`selection.aiWorkCoordination\`과 \`nextStep\`을 확인하고 따르세요. 관련 카드를 수정하기 전에는 AI 작업 상태를 확인하고, 실행 결과를 카드 댓글과 공유 지식에 알맞게 기록하세요.
 
+이 위임 실행이 사용자의 중지로 끊긴 뒤 같은 대화에서 직접 이어진 경우, 단순 질의 응답이나 중간 보고는 위임 완료가 아닙니다. 실제 위임 작업과 카드 기록, 필요한 작업공간 체크포인트까지 모두 끝낸 마지막 턴에서만 최종 답변 직전에 \`mindnprogress_complete_ai_delegation\`을 호출하세요. 중단 없이 진행된 최초 실행에는 이 완료 신호가 필요하지 않습니다.
+
 MCP 도구를 사용할 수 없거나 문서 또는 카드를 찾지 못하면 임의로 추측하지 말고 확인 가능한 범위만 수행한 뒤 제약을 명확히 남기세요.
 
 ${workspaceInstruction ? `${workspaceInstruction}\n` : ''}
@@ -1751,6 +1766,13 @@ async function dispatchPreparedAiDelegation({
   user,
   expectsWorkspacePool = false,
 }) {
+  if (!await aionCoreSupportsExplicitCompletionAfterInterruption()) {
+    throw aiDelegationDispatchError(
+      '현재 AionCore가 중단 후 명시적 완료 신호를 지원하지 않습니다. AionCore를 최신 빌드로 재기동해 주세요.',
+      503,
+      'AIONCORE_EXPLICIT_COMPLETION_UNAVAILABLE',
+    )
+  }
   if (expectsWorkspacePool && !workspaceLease) {
     throw aiDelegationDispatchError(
       '등록된 AI 작업공간 풀의 lease 없이 작업을 시작할 수 없습니다.',
@@ -1798,6 +1820,7 @@ async function dispatchPreparedAiDelegation({
         operationId: id,
         actorConversationId: parentAttribution.conversationId,
         strategy,
+        explicitCompletionAfterInterruption: true,
         ...(workspaceLease ? { workspaceLease } : {}),
         ...(strategy === 'resume' ? { targetConversationId } : {
           create: {
@@ -2697,6 +2720,12 @@ async function drainWaitingWorkspaceDelegations() {
     if (!await aionCoreSupportsWorkspaceLease()) {
       await updateAiDelegation(queued.id, {
         workspaceWaitError: '현재 AionCore가 작업공간 lease를 지원하지 않아 재기동을 기다리고 있습니다.',
+      })
+      break
+    }
+    if (!await aionCoreSupportsExplicitCompletionAfterInterruption()) {
+      await updateAiDelegation(queued.id, {
+        workspaceWaitError: '현재 AionCore가 중단 후 명시적 완료 신호를 지원하지 않아 재기동을 기다리고 있습니다.',
       })
       break
     }
@@ -4722,6 +4751,7 @@ const server = createServer(async (request, response) => {
     const aionUiConversationTranscriptRoute = url.pathname.match(/^\/api\/integrations\/aionui\/conversations\/([^/]+)\/transcript$/)
 
     const aiDelegationsRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/ai-delegations$/)
+    const aiDelegationCompletionRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/ai-delegations\/complete$/)
     const aiDelegationRecoveryRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/ai-delegations\/([^/]+)\/recover$/)
     const aiWorkspacesRoute = url.pathname === '/api/ai-workspaces'
     const aiWorkspaceCheckpointRoute = url.pathname.match(/^\/api\/ai-workspaces\/([^/]+)\/checkpoint$/)
@@ -4804,6 +4834,76 @@ const server = createServer(async (request, response) => {
       }
     }
 
+    if (aiDelegationCompletionRoute && request.method === 'POST') {
+      const user = requireUser(request, response)
+      if (!user) return
+      if (!canEdit(user)) return sendJson(response, 403, { error: '편집자만 AI 위임 완료를 확인할 수 있습니다.' })
+      const mapId = decodeURIComponent(aiDelegationCompletionRoute[1])
+      const scope = integrationRequestScope(request)
+      if (!isValidMapId(mapId)
+        || scope.mapId !== mapId
+        || !scope.cardId
+        || !validAiConversationId(scope.conversationId)) {
+        return sendJson(response, 400, {
+          error: '현재 AI 대화의 문서, 카드와 대화 범위가 필요합니다.',
+          code: 'AI_DELEGATION_COMPLETION_SCOPE_REQUIRED',
+        })
+      }
+      const map = await readMap(mapId)
+      if (!map || map.trashedAt || !map.nodes.some((node) => node.id === scope.cardId)) {
+        return sendJson(response, 404, { error: 'AI 위임 완료 대상 문서 또는 카드를 찾지 못했습니다.' })
+      }
+      const candidates = explicitCompletionAiDelegationsForConversation(aiDelegations.values(), {
+        mapId,
+        targetCardId: scope.cardId,
+        targetConversationId: scope.conversationId,
+      })
+      if (candidates.length === 0) {
+        return sendJson(response, 409, {
+          error: '사용자 중지 후 명시적 완료를 기다리는 현재 카드의 AI 위임이 없습니다.',
+          code: 'AI_DELEGATION_EXPLICIT_COMPLETION_NOT_REQUIRED',
+        })
+      }
+      if (candidates.length > 1) {
+        return sendJson(response, 409, {
+          error: '명시적 완료를 기다리는 AI 위임이 여러 개라 자동으로 선택할 수 없습니다.',
+          code: 'AI_DELEGATION_EXPLICIT_COMPLETION_AMBIGUOUS',
+          delegations: candidates.map(delegationPublicView),
+        })
+      }
+      const delegation = candidates[0]
+      try {
+        const confirmation = await fetchAionUi(
+          `/api/internal/external-conversation-dispatches/${encodeURIComponent(delegation.childOperationId)}/complete`,
+          {
+            method: 'POST',
+            body: { conversationId: scope.conversationId },
+          },
+        )
+        const requestedAt = new Date().toISOString()
+        const updated = await updateAiDelegation(delegation.id, {
+          explicitCompletionRequestedAt: requestedAt,
+          explicitCompletionTurnId: confirmation.turnId ?? null,
+          explicitCompletionRequestedBy: user.id,
+        })
+        return sendJson(response, 202, {
+          accepted: confirmation.accepted === true,
+          turnId: confirmation.turnId ?? null,
+          delegation: delegationPublicView(updated),
+          instruction: '현재 턴의 최종 답변을 마치면 AionCore가 위임 완료를 확정하고 상위 AI 재개 절차를 진행합니다.',
+        })
+      } catch (error) {
+        const code = error?.code ?? 'AI_DELEGATION_EXPLICIT_COMPLETION_FAILED'
+        const turnNotActive = code === 'EXTERNAL_DISPATCH_COMPLETION_TURN_NOT_ACTIVE'
+        return sendJson(response, error?.status === 404 ? 404 : 409, {
+          error: turnNotActive
+            ? '현재 AI 대화에 진행 중인 턴이 없어 완료 신호를 연결할 수 없습니다. 실제 작업 턴의 최종 답변 전에 호출하세요.'
+            : 'AionCore가 현재 AI 위임의 명시적 완료 신호를 받지 못했습니다.',
+          code,
+        })
+      }
+    }
+
     if (aiDelegationRecoveryRoute && request.method === 'POST') {
       const user = requireUser(request, response)
       if (!user) return
@@ -4819,6 +4919,12 @@ const server = createServer(async (request, response) => {
       const delegation = aiDelegations.get(delegationId)
       if (!delegation || delegation.mapId !== mapId) {
         return sendJson(response, 404, { error: '복구할 AI 위임을 찾을 수 없습니다.' })
+      }
+      if (!await aionCoreSupportsExplicitCompletionAfterInterruption()) {
+        return sendJson(response, 503, {
+          error: '현재 실행 중인 AionCore가 중단 후 명시적 완료 신호를 지원하지 않습니다. AionCore를 최신 빌드로 재기동해 주세요.',
+          code: 'AIONCORE_EXPLICIT_COMPLETION_UNAVAILABLE',
+        })
       }
       if (delegation.parentCardId !== source.cardId
         || (source.conversationId && delegation.parentConversationId !== source.conversationId)) {
@@ -4943,6 +5049,7 @@ const server = createServer(async (request, response) => {
             operationId,
             actorConversationId: delegation.parentConversationId,
             strategy: 'resume',
+            explicitCompletionAfterInterruption: true,
             targetConversationId: delegation.targetConversationId,
             ...(workspaceLease ? { workspaceLease } : {}),
             instruction: delegatedInstruction,
@@ -5034,6 +5141,12 @@ const server = createServer(async (request, response) => {
           })
         }
         return sendJson(response, 400, { error: '현재 상위 카드의 문서와 카드 범위가 필요합니다.' })
+      }
+      if (!await aionCoreSupportsExplicitCompletionAfterInterruption()) {
+        return sendJson(response, 503, {
+          error: '현재 실행 중인 AionCore가 중단 후 명시적 완료 신호를 지원하지 않습니다. AionCore를 최신 빌드로 재기동해 주세요.',
+          code: 'AIONCORE_EXPLICIT_COMPLETION_UNAVAILABLE',
+        })
       }
 
       const body = await readJsonBody(request)
@@ -5420,6 +5533,7 @@ const server = createServer(async (request, response) => {
             operationId: id,
             actorConversationId: parentAttribution.conversationId,
             strategy,
+            explicitCompletionAfterInterruption: true,
             ...(workspaceLease ? { workspaceLease } : {}),
             ...(strategy === 'resume' ? { targetConversationId } : {
               create: {

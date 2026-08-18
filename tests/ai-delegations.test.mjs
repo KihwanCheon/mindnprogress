@@ -6,6 +6,7 @@ import {
   aiDelegationSucceeded,
   aiDelegationWorkspaceLeaseMatches,
   createAiDelegationRequestSignature,
+  explicitCompletionAiDelegationsForConversation,
   failedAiIntegrationRecoveryRuntime,
   mergeAiDelegationSelections,
   formatAiConversationTitle,
@@ -206,6 +207,37 @@ test('사용자가 중지한 하위 턴은 상위 대화 재개가 아닌 하위
     childError: 'Agent process disconnected',
     childInterruptedAt: '2026-08-13T09:00:00.000Z',
   })
+})
+
+test('명시적 완료는 현재 카드와 대화에서 중지 후 재개를 기다리는 위임만 대상으로 한다', () => {
+  const matches = explicitCompletionAiDelegationsForConversation([
+    {
+      id: 'waiting-old', mapId: 'map-a', targetCardId: 'card-a', targetConversationId: 'conversation-a',
+      childOperationId: 'operation-old', state: 'waiting-child-resume', updatedAt: '2026-08-18T08:00:00.000Z',
+    },
+    {
+      id: 'waiting-new', mapId: 'map-a', targetCardId: 'card-a', targetConversationId: 'conversation-a',
+      childOperationId: 'operation-new', state: 'waiting-child-resume', updatedAt: '2026-08-18T09:00:00.000Z',
+    },
+    {
+      id: 'running', mapId: 'map-a', targetCardId: 'card-a', targetConversationId: 'conversation-a',
+      childOperationId: 'operation-running', state: 'running', updatedAt: '2026-08-18T10:00:00.000Z',
+    },
+    {
+      id: 'other-card', mapId: 'map-a', targetCardId: 'card-b', targetConversationId: 'conversation-a',
+      childOperationId: 'operation-other', state: 'waiting-child-resume', updatedAt: '2026-08-18T11:00:00.000Z',
+    },
+    {
+      id: 'missing-operation', mapId: 'map-a', targetCardId: 'card-a', targetConversationId: 'conversation-a',
+      state: 'waiting-child-resume', updatedAt: '2026-08-18T12:00:00.000Z',
+    },
+  ], {
+    mapId: 'map-a',
+    targetCardId: 'card-a',
+    targetConversationId: 'conversation-a',
+  })
+
+  assert.deepEqual(matches.map((delegation) => delegation.id), ['running', 'waiting-new', 'waiting-old'])
 })
 
 test('AionCore 재시작 상태는 완료 처리하지 않고 명시적 복구 대기로 유지한다', () => {
