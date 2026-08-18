@@ -73,6 +73,7 @@ import {
   parseMindNProgressCompletionToken,
 } from './lib/aionUiExternalLaunch.mjs'
 import { localLoopbackRedirectLocation } from './lib/localLoopbackRedirect.mjs'
+import { buildSharedKnowledgeAudit } from './lib/sharedKnowledgeAudit.mjs'
 import {
   WorkspacePoolIntegrationError,
   WorkspacePoolManager,
@@ -6157,6 +6158,25 @@ const server = createServer(async (request, response) => {
         maps,
         documentLayout: await readDocumentLayout(maps.map((map) => map.id)),
       })
+    }
+
+    if (request.method === 'GET' && url.pathname === '/api/shared-knowledge/audit') {
+      const user = requireUser(request, response)
+      if (!user) return
+      const requestedMapIdParameter = url.searchParams.get('mapId')
+      const requestedMapId = requestedMapIdParameter?.trim() ?? ''
+      if (requestedMapIdParameter !== null && !isValidMapId(requestedMapId)) {
+        return sendJson(response, 400, { error: '올바르지 않은 문서 ID입니다.' })
+      }
+      const summaries = await listMaps()
+      const selectedSummaries = requestedMapId
+        ? summaries.filter((summary) => summary.id === requestedMapId)
+        : summaries
+      if (requestedMapId && selectedSummaries.length === 0) {
+        return sendJson(response, 404, { error: '마인드맵을 찾을 수 없습니다.' })
+      }
+      const maps = (await Promise.all(selectedSummaries.map((summary) => readMap(summary.id)))).filter(Boolean)
+      return sendJson(response, 200, { audit: buildSharedKnowledgeAudit(maps) })
     }
 
     const mapImageAssetRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/images\/([^/]+)$/)

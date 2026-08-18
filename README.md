@@ -47,6 +47,7 @@ Mind & Progress는 아이디어의 구조와 실제 업무 진행 상태를 하�
 - 다른 브라우저의 변경 감지, 실시간 커서와 뷰어 자동 반영
 - 문서 버전 충돌 감지와 노드·필드 단위 3방향 자동 병합
 - 담당 업무의 마감 3일 전·당일·기한 초과 알림
+- 전체 활성 문서의 공유 지식 길이·구조·정확 중복·지식선 소비 현황을 원문 노출과 문서 변경 없이 조회
 
 ### 계정과 권한
 
@@ -228,7 +229,7 @@ AI가 MindNProgress 밖에서 시작되었다면 먼저 `mindnprogress_read_me_f
 
 ## MindNProgress MCP 명령어
 
-현재 MCP 서버는 44개 도구를 제공합니다. 카드가 선택된 작업은 먼저 `mindnprogress_get_context`로 최신 버전과 제품 규칙을 확인하고, 변경 후에는 `mindnprogress_get_document`로 실제 저장 결과를 다시 확인하는 흐름을 권장합니다. 조회 도구는 문서 버전을 변경하지 않으며 카드·관계 편집과 AI 대화 ID 연결 같은 저장 작업만 버전을 증가시킵니다. 선택 카드 이외의 형제·하위·선행 카드를 함께 수정할 때는 `mindnprogress_get_ai_work_states`로 다른 AI가 작업 중인지 먼저 확인합니다. Holdem AI 작업공간의 최신 목록과 상태는 폴더명을 추측하지 않고 `mindnprogress_get_ai_workspace_pool`로 조회합니다.
+현재 MCP 서버는 45개 도구를 제공합니다. 카드가 선택된 작업은 먼저 `mindnprogress_get_context`로 최신 버전과 제품 규칙을 확인하고, 변경 후에는 `mindnprogress_get_document`로 실제 저장 결과를 다시 확인하는 흐름을 권장합니다. 조회 도구는 문서 버전을 변경하지 않으며 카드·관계 편집과 AI 대화 ID 연결 같은 저장 작업만 버전을 증가시킵니다. 선택 카드 이외의 형제·하위·선행 카드를 함께 수정할 때는 `mindnprogress_get_ai_work_states`로 다른 AI가 작업 중인지 먼저 확인합니다. Holdem AI 작업공간의 최신 목록과 상태는 폴더명을 추측하지 않고 `mindnprogress_get_ai_workspace_pool`로 조회합니다.
 
 ### 시작과 조회
 
@@ -261,6 +262,7 @@ AI가 MindNProgress 밖에서 시작되었다면 먼저 `mindnprogress_read_me_f
 | `mindnprogress_save_document` | 기준 버전을 확인하면서 문서의 전체 카드와 연결 관계를 저장합니다. |
 | `mindnprogress_add_card` | 새 카드 또는 지정한 상위 카드의 하위 카드를 추가합니다. |
 | `mindnprogress_update_card` | 전달한 필드만 부분 병합하여 카드 제목, 설명, 공유 지식, 상태, 진행률과 업무 관리 필드를 수정합니다. 일반 카드에서 생략한 필드와 위치는 보존됩니다. 기본 `responseMode=full`은 저활용 필드를 제외한 최신 전체 문서를, `affected`는 직접·간접 변경 카드와 문서·Root 요약을 반환합니다. |
+| `mindnprogress_patch_card_text` | 조회한 SHA-256이 유지된 경우에만 설명 또는 공유 지식의 유일 문자열·경계 내부를 교체하거나 뒤에 추가합니다. 장문 필드 전체를 다시 생성하지 않습니다. |
 | `mindnprogress_move_card` | 카드와 전체 하위 구조를 다른 카드 아래로 이동합니다. |
 | `mindnprogress_delete_card` | 카드와 선택적으로 전체 하위 카드를 삭제합니다. Root 카드는 삭제할 수 없습니다. |
 | `mindnprogress_add_knowledge_line` | 두 카드 사이에 지식선을 추가합니다. 중복과 순환 관계를 거부합니다. |
@@ -273,6 +275,8 @@ AI가 MindNProgress 밖에서 시작되었다면 먼저 `mindnprogress_read_me_f
 MCP 도구에서 카드를 지정할 때는 `cardId`를 사용합니다. 상위 카드는 `parentCardId`, 이동할 새 상위 카드는 `newParentCardId`, 답글의 상위 댓글은 `parentCommentId`로 지정합니다. 기존 `nodeId`, `parentId`, `newParentId`는 이미 시작된 AI 대화와의 호환을 위해 한시적으로 허용되지만 새 호출에서는 사용하지 않습니다. 선호 필드와 호환 필드를 동시에 서로 다른 값으로 전달하면 안전을 위해 요청이 거부됩니다. 원시 문서의 `nodes`, 댓글 저장 데이터의 `nodeId` 등 내부 저장 구조는 기존 문서 및 백업 호환을 위해 유지됩니다.
 
 단일 카드의 일부 필드만 변경할 때는 `mindnprogress_update_card`의 `data`에 변경할 필드만 전달합니다. 현재 카드 전체 데이터를 재전송하면 조회 이후 다른 편집자가 변경한 값을 오래된 값으로 덮어쓸 수 있습니다. 일반 카드에서 생략한 필드와 `position`은 보존되고, 빈 문자열이나 빈 배열을 명시하면 해당 필드가 초기화됩니다. 단, `status=done` 또는 `progress>=100`을 적용하면 `waitingItems`는 전달 여부와 관계없이 자동으로 해제되며 Ref 카드는 원본이 관리하는 제목·설명·공유 지식·업무 필드 등이 최신 원본 값으로 동기화될 수 있습니다. `responseMode`를 생략하면 `full`이며 저장 직후 모든 카드의 본문·위치와 계층선·지식선을 반환합니다. 응답 크기를 줄이기 위해 카드의 AI 대화 상세 목록은 최근 대화 ID와 개수로 축약하고, 카드 타입 고정값과 연결선 렌더링 전용 값은 제외합니다. 단일 카드 수정 결과만 필요하면 `responseMode=affected`를 사용하며, 이때 `affectedCards`에는 직접 수정 카드와 Root 진행률 재계산 등 서버가 함께 조정한 카드가 포함됩니다.
+
+전체 활성 문서의 공유 지식 현황은 인증된 `GET /api/shared-knowledge/audit`로 조회합니다. `mapId` 쿼리를 지정하면 한 문서만 검사하며, 응답에는 원문 대신 길이·UTF-8 바이트·SHA-256·문단과 목록 수·정확히 반복된 문장 수·10,000자 한도 사용률·지식선 소비 카드 수가 포함됩니다. 3,000자는 관심, 5,000자는 정리 권장, 8,000자는 우선 정리 기준이며 Ref 카드는 원본 카드에서만 정리하도록 직접 처리 후보에서 제외됩니다.
 
 ### 문서 목록과 그룹
 

@@ -1,0 +1,168 @@
+import { createHash } from 'node:crypto'
+
+export const sharedKnowledgeAuditThresholds = Object.freeze({
+  attentionCharacters: 3_000,
+  recommendedCharacters: 5_000,
+  priorityCharacters: 8_000,
+  limitCharacters: 10_000,
+})
+
+const reviewLevelRank = {
+  normal: 0,
+  attention: 1,
+  recommended: 2,
+  priority: 3,
+}
+
+function textSha256(text) {
+  return createHash('sha256').update(text, 'utf8').digest('hex')
+}
+
+function nonEmptyLines(text) {
+  return text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+}
+
+function exactDuplicateStatementStats(text) {
+  const statements = nonEmptyLines(text).flatMap((line) => {
+    if (/^(?:#{1,6}\s|```|[-*_]{3,}$)/.test(line)) return []
+    const withoutListMarker = line.replace(/^(?:[-*+]\s+|\d+[.)]\s+|\[[ xX]\]\s+)/, '')
+    return withoutListMarker
+      .split(/(?<=[.!?。！？])\s+/u)
+      .map((statement) => statement.replace(/\s+/g, ' ').trim())
+      .filter((statement) => statement.length >= 8)
+  })
+  const counts = new Map()
+  for (const statement of statements) counts.set(statement, (counts.get(statement) ?? 0) + 1)
+  const duplicateGroups = [...counts.values()].filter((count) => count > 1)
+  return {
+    groupCount: duplicateGroups.length,
+    repeatedCount: duplicateGroups.reduce((sum, count) => sum + count - 1, 0),
+  }
+}
+
+function lengthReviewLevel(length, thresholds) {
+  if (length >= thresholds.priorityCharacters) return 'priority'
+  if (length >= thresholds.recommendedCharacters) return 'recommended'
+  if (length >= thresholds.attentionCharacters) return 'attention'
+  return 'normal'
+}
+
+export function analyzeSharedKnowledgeText(value, thresholds = sharedKnowledgeAuditThresholds) {
+  const text = typeof value === 'string' ? value : ''
+  const trimmed = text.trim()
+  const lines = trimmed ? nonEmptyLines(text) : []
+  const exactDuplicates = exactDuplicateStatementStats(text)
+  const lengthLevel = lengthReviewLevel(text.length, thresholds)
+  const reviewLevel = lengthLevel === 'normal' && exactDuplicates.repeatedCount > 0 ? 'attention' : lengthLevel
+  const reasons = [
+    ...(lengthLevel === 'attention' ? ['length-attention'] : []),
+    ...(lengthLevel === 'recommended' ? ['length-recommended'] : []),
+    ...(lengthLevel === 'priority' ? ['length-priority'] : []),
+    ...(exactDuplicates.repeatedCount > 0 ? ['exact-duplicate-statements'] : []),
+  ]
+
+  return {
+    length: text.length,
+    utf8Bytes: Buffer.byteLength(text, 'utf8'),
+    sha256: textSha256(text),
+    paragraphCount: trimmed ? text.trim().split(/\r?\n(?:[ \t]*\r?\n)+/).filter((paragraph) => paragraph.trim()).length : 0,
+    nonEmptyLineCount: lines.length,
+    listItemCount: lines.filter((line) => /^(?:[-*+]\s+|\d+[.)]\s+|\[[ xX]\]\s+)/.test(line)).length,
+    exactDuplicateStatementGroupCount: exactDuplicates.groupCount,
+    exactDuplicateStatementCount: exactDuplicates.repeatedCount,
+    limitUsagePercent: Math.round((text.length / thresholds.limitCharacters) * 1_000) / 10,
+    remainingCharacters: Math.max(0, thresholds.limitCharacters - text.length),
+    lengthLevel,
+    reviewLevel,
+    needsReview: reviewLevel !== 'normal',
+    reasons,
+  }
+}
+
+function auditDocument(map, thresholds) {
+  const nodes = Array.isArray(map?.nodes) ? map.nodes : []
+  const nodeIds = new Set(nodes.map((node) => node.id))
+  const consumersBySource = new Map()
+  for (const edge of map?.edges ?? []) {
+    if (edge?.data?.relation !== 'knowledge' || !nodeIds.has(edge.source) || !nodeIds.has(edge.target)) continue
+    const consumers = consumersBySource.get(edge.source) ?? new Set()
+    consumers.add(edge.target)
+    consumersBySource.set(edge.source, consumers)
+  }
+
+  const cards = nodes.flatMap((node) => {
+    const sharedKnowledge = typeof node.data?.sharedKnowledge === 'string' ? node.data.sharedKnowledge : ''
+    if (!sharedKnowledge.trim()) return []
+    const analysis = analyzeSharedKnowledgeText(sharedKnowledge, thresholds)
+    const isReference = Boolean(node.data?.reference)
+    const sharedKnowledgeUpdatedAt = typeof node.data?.sharedKnowledgeUpdatedAt === 'string'
+      ? node.data.sharedKnowledgeUpdatedAt
+      : null
+    return [{
+      cardId: node.id,
+      label: node.data?.label ?? node.id,
+      kind: node.data?.kind ?? 'branch',
+      isReference,
+      maintenanceMode: isReference ? 'source-card-only' : 'direct',
+      actionable: analysis.needsReview && !isReference,
+      consumerCount: consumersBySource.get(node.id)?.size ?? 0,
+      consumerCardIds: [...(consumersBySource.get(node.id) ?? [])],
+      lastKnownUpdatedAt: sharedKnowledgeUpdatedAt ?? map.updatedAt ?? null,
+      lastKnownUpdatedAtSource: sharedKnowledgeUpdatedAt
+        ? 'sharedKnowledge'
+        : map.updatedAt ? 'document' : 'unavailable',
+      ...analysis,
+    }]
+  }).sort((first, second) =>
+    reviewLevelRank[second.reviewLevel] - reviewLevelRank[first.reviewLevel]
+    || second.length - first.length
+    || String(first.label).localeCompare(String(second.label), 'ko'))
+
+  return {
+    mapId: map.id,
+    title: map.title ?? map.id,
+    version: map.version ?? 1,
+    updatedAt: map.updatedAt ?? null,
+    cardCount: nodes.length,
+    cardsWithSharedKnowledge: cards.length,
+    candidateCount: cards.filter((card) => card.actionable).length,
+    cards,
+  }
+}
+
+export function buildSharedKnowledgeAudit(maps, {
+  generatedAt = new Date().toISOString(),
+  thresholds = sharedKnowledgeAuditThresholds,
+} = {}) {
+  const documents = (Array.isArray(maps) ? maps : [])
+    .filter((map) => map && !map.trashedAt)
+    .map((map) => auditDocument(map, thresholds))
+  const cards = documents.flatMap((document) => document.cards.map((card) => ({
+    mapId: document.mapId,
+    documentTitle: document.title,
+    ...card,
+  })))
+  const candidates = cards.filter((card) => card.actionable).sort((first, second) =>
+    reviewLevelRank[second.reviewLevel] - reviewLevelRank[first.reviewLevel]
+    || second.length - first.length
+    || String(first.documentTitle).localeCompare(String(second.documentTitle), 'ko')
+    || String(first.label).localeCompare(String(second.label), 'ko'))
+
+  return {
+    generatedAt,
+    thresholds,
+    summary: {
+      documentCount: documents.length,
+      cardCount: documents.reduce((sum, document) => sum + document.cardCount, 0),
+      cardsWithSharedKnowledge: cards.length,
+      actionableCandidateCount: candidates.length,
+      referenceCardCount: cards.filter((card) => card.isReference).length,
+      totalCharacters: cards.reduce((sum, card) => sum + card.length, 0),
+      reviewLevelCounts: Object.fromEntries(
+        Object.keys(reviewLevelRank).map((level) => [level, cards.filter((card) => card.reviewLevel === level).length]),
+      ),
+    },
+    candidates,
+    documents,
+  }
+}
