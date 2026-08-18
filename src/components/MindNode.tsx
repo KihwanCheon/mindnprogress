@@ -29,7 +29,9 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
     return <DoorayTaskNode data={data} selected={selected} isConnectable={isConnectable} />
   }
 
-  const isCompleted = data.progress >= 100
+  const hasProgressRollup = data.progressRollupTargetCount !== undefined
+  const showsProgress = Boolean(data.isWork || hasProgressRollup)
+  const isCompleted = showsProgress && data.progress >= 100
   const displayStatus = isCompleted ? 'done' : data.status
   const assignee = data.assignee
   const checklist = data.checklist ?? []
@@ -100,7 +102,11 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
             <span aria-hidden="true">💬</span>{data.commentCount}
           </span>
         )}
-        <strong>{data.progress}%</strong>
+        {showsProgress && (
+          <strong title={hasProgressRollup ? `하위 업무 ${data.progressRollupTargetCount}개 평균 · 자동 계산` : undefined}>
+            {hasProgressRollup ? `${data.kind === 'root' ? '전체' : '요약'} ${data.progress}%` : `${data.progress}%`}
+          </strong>
+        )}
       </div>
       {doorayUrl ? (
         <div className="node-title-row dooray-linked-title">
@@ -129,9 +135,11 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
         </div>
       ) : <h3>{data.label}</h3>}
       <p>{data.description}</p>
-      <div className="node-progress" aria-label={`진행률 ${data.progress}%`}>
-        <span style={{ width: `${data.progress}%` }} />
-      </div>
+      {showsProgress && (
+        <div className="node-progress" aria-label={`${hasProgressRollup ? '자동 요약 진행률' : '진행률'} ${data.progress}%`}>
+          <span style={{ width: `${data.progress}%` }} />
+        </div>
+      )}
       {(data.isWork || hasVisibleAiRuntime) && (
         <div className="node-work-meta">
           {data.isWork && <span className="work-label">업무</span>}

@@ -142,6 +142,7 @@ export type MindNodeData = {
   unresolvedDependencyCount?: number
   commentCount?: number
   unresolvedCommentCount?: number
+  progressRollupTargetCount?: number
   hasChildren?: boolean
   collapsed?: boolean
   hiddenDescendantCount?: number

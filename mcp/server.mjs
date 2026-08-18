@@ -57,7 +57,7 @@ function defaultChildMindMapPosition(parentPosition, siblingPositions, parentWid
 
 const serverInstructions = `MindNProgress는 마인드맵과 업무 진행 관리를 결합한 웹 서비스입니다. MindNProgress 밖에서 시작해 문서 ID나 카드 ID가 없다면 mindnprogress_read_me_first를 먼저 호출하세요. 선택 문서와 카드가 있다면 mindnprogress_get_context로 제품 규칙과 최신 문서 구조를 먼저 확인하세요. MCP 도구에서 카드를 지정할 때는 cardId 계열 인자를 사용하세요. nodeId 계열 인자는 기존 대화 호환용이므로 새 호출에서는 사용하지 마세요. AionUi가 발급한 attributionToken이 없는 외부 MCP 세션은 자신이 현재 AI 종류와 모델을 정확히 알고 있을 때 get_context의 aiType과 aiModel에 함께 전달하고, 알지 못하면 추측하지 마세요. get_context의 selection.taskLinks.startupInspection을 따르세요. mode가 knowledge-guided이면 primary 선행 지식 중 kind=image인 항목은 imageAccess.localPath의 원본을 사용 가능한 로컬 이미지 열람 도구로 직접 확인하고 설명과 댓글을 함께 사용하며, 일반 카드는 sharedKnowledge를 먼저 재사용하고 설명과 댓글로 보완합니다. fallbackSources와 fallbackTargets는 정보가 부족할 때만 선택적으로 조사합니다. mode가 default이고 required가 true이면 targets의 업무 본문, 댓글, 첨부파일 목록과 관련 링크를 조사하세요. 진행 과정과 결과는 댓글에 기록하고, 다른 카드나 후속 세션이 재사용할 안정적인 사실·결정·제약은 카드의 sharedKnowledge에 요약하세요. AI 댓글은 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 충실히 담은 detail로 작성하며, 요약 때문에 상세를 축약하지 마세요. 외부 전달물이나 결정 대기는 waitingItems로 기록하고 제목에 대기 문구를 붙이지 마세요. 대기를 등록할 때는 [차단], 해제할 때는 [진행] 댓글로 이유와 재개 상태를 기록하세요. 카드 일부 필드만 변경할 때는 mindnprogress_update_card의 data에 변경할 필드만 보내고 현재 카드 전체 데이터를 재전송하지 마세요. 일반 카드에서 생략한 필드와 위치는 보존되지만 완료 상태 또는 진행률 100 적용 시 waitingItems는 자동으로 해제되며, Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 선택 카드 밖의 형제·하위·선행 카드를 함께 수정하기 전에는 mindnprogress_get_ai_work_states로 해당 카드에 다른 AI 작업이 진행 중인지 확인하세요. running 또는 waiting-confirmation인 카드는 사용자 지시 없이 동시에 수정하지 마세요. Holdem AI 작업공간의 최신 목록·경로·상태가 필요하면 폴더명을 추측하지 말고 mindnprogress_get_ai_workspace_pool을 호출하세요. 작업공간 선택·점유·전환·해제는 MindNProgress만 수행하며 AI가 임의로 worker를 선택하지 않습니다. 지식선만 변경할 때는 전체 문서를 다시 보내지 말고 지식선 전용 도구를 사용하세요. 조회 도구는 문서 버전을 변경하지 않지만 카드·관계 편집과 AI 대화 ID 연결은 버전을 증가시킬 수 있습니다. 특정 자료가 있다고 가정하지 마세요. 여러 카드로 구성된 새 문서는 mindnprogress_create_mindmap으로 한 번에 생성하고, 변경 후에는 최신 문서를 다시 조회해 결과를 검증하세요. 비밀번호 변경과 계정 관리 작업은 지원하지 않습니다.`
 const productGuide = {
-  version: '3.9',
+  version: '4.0',
   product: {
     name: 'MindNProgress',
     purpose: '아이디어를 계층형 마인드맵으로 구조화하고 실행 업무의 진행 상황을 같은 문서에서 관리하는 웹 서비스',
@@ -84,8 +84,8 @@ const productGuide = {
       image: '마인드맵에 배치한 이미지 지식. MCP 응답의 imageAccess.localPath를 로컬 이미지 열람 도구로 직접 확인하고 description을 보조 설명으로 사용',
     },
     workFields: {
-      progress: '0~100의 진행률. 100이면 완료로 표시. 최상위 카드의 진행률·상태는 저장 시 서버가 계층 안의 모든 isWork=true 업무 진행률을 동일 가중치로 평균해 자동 재계산함',
-      status: 'planned, in-progress, done. done은 progress=100과 함께 사용',
+      progress: '0~100의 진행률. isWork=true 업무는 직접 관리하고, 최상위 카드와 하위 업무가 있는 일반 isWork=false 묶음 카드는 모든 실제 하위 업무를 동일 가중치로 평균한 읽기 전용 요약값을 서버가 자동 계산함',
+      status: 'planned, in-progress, done. 직접 관리하는 업무는 done을 progress=100과 함께 사용하며 자동 진행률 카드의 상태도 하위 업무에서 파생됨',
       assigneeId: '담당자 사용자 ID. 담당자가 없으면 생략',
       dueDate: '마감일. 없는 업무는 생략',
       taskUrl: '관련 업무나 외부 자료를 가리키는 범용 링크. Dooray 형식은 전용 카드 표현과 메타데이터를 사용하고 그 밖의 URL도 그대로 유지하며, 링크가 없는 경우 생략',
@@ -120,7 +120,7 @@ const productGuide = {
     '존재하지 않는 담당자, 불필요한 업무 링크와 임의의 선행 관계를 만들지 않음',
     '문서 내부 선행 업무는 blockedBy, 외부 전달물·결정 대기는 waitingItems로 구분하고 제목에 “(서버 대기)” 같은 문구를 붙이지 않음',
     '진행률이 100이면 status=done, 완료가 아니면 progress를 100 미만으로 유지',
-    '최상위 카드의 진행률과 상태는 저장 시 서버가 자동 재계산(최상위 카드를 제외한 계층 안의 모든 isWork=true 업무 진행률을 동일 가중치 평균 후 반올림, 100이면 done, 1~99면 in-progress, 0이면 기존 상태 유지, 집계 대상이 없으면 변경 없음)하므로 수동으로 계산해 덮어쓰지 않음. 단순 묶음 카드는 branch 또는 isWork=false로 구성',
+    '최상위 카드와 하위 업무가 있는 일반 isWork=false 묶음 카드의 진행률·상태는 서버가 모든 실제 isWork=true 후손에서 자동 계산하므로 수동으로 덮어쓰지 않음. 각 업무는 동일 가중치이며 중간 묶음의 요약값은 상위 집계에 다시 포함하지 않음. 이미지·Ref·Dooray 지식 카드와 하위 업무가 없는 비업무 카드는 자동 집계하지 않음',
   ],
   operationRules: [
     '분석과 편집 전에 mindnprogress_get_context로 최신 버전과 제품 규칙을 확인',
@@ -1389,11 +1389,11 @@ async function main() {
     return saveDocument(map, false, resolvedParentCardId ?? '')
   })
 
-  registerTool(server, 'mindnprogress_update_card', '카드의 일부 필드만 부분 병합 방식으로 변경합니다. data에 포함한 필드만 변경되고 일반 카드에서 생략한 필드와 position은 보존되므로 현재 카드 전체 데이터를 재전송하지 마세요. 빈 문자열과 빈 배열은 해당 필드를 명시적으로 초기화합니다. 단, status=done 또는 progress>=100이면 waitingItems가 자동으로 비워지며 Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. description은 업무 요청과 배경, sharedKnowledge는 다른 카드가 재사용할 안정적인 결론에 사용하고 외부 대기는 waitingItems로 기록하세요. responseMode는 full이 기본값이며 연속 작업용 전체 카드 본문과 관계를 반환합니다. 단일 카드와 서버가 함께 조정한 카드만 필요하면 affected를 사용하세요.', {
+  registerTool(server, 'mindnprogress_update_card', '카드의 일부 필드만 부분 병합 방식으로 변경합니다. data에 포함한 필드만 변경되고 일반 카드에서 생략한 필드와 position은 보존되므로 현재 카드 전체 데이터를 재전송하지 마세요. 빈 문자열과 빈 배열은 해당 필드를 명시적으로 초기화합니다. 단, status=done 또는 progress>=100이면 waitingItems가 자동으로 비워지며 Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 최상위 카드와 하위 업무가 있는 일반 isWork=false 묶음 카드의 progress·status는 서버가 다시 계산합니다. description은 업무 요청과 배경, sharedKnowledge는 다른 카드가 재사용할 안정적인 결론에 사용하고 외부 대기는 waitingItems로 기록하세요. responseMode는 full이 기본값이며 연속 작업용 전체 카드 본문과 관계를 반환합니다. 단일 카드와 서버가 함께 조정한 카드만 필요하면 affected를 사용하세요.', {
     mapId: z.string().min(1),
     cardId: z.string().min(1).optional().describe('수정할 카드 ID. 새 호출에서는 이 필드를 사용'),
     nodeId: z.string().min(1).optional().describe('기존 대화 호환용 카드 ID. 새 호출에서는 cardId 사용'),
-    data: nodeDataSchema.partial().describe('변경할 카드 필드만 포함하는 부분 병합 데이터. 일반 카드에서 생략한 필드는 보존되므로 현재 카드 전체 데이터를 재전송하지 않습니다. 빈 문자열과 빈 배열은 명시적 초기화이며, 완료 상태 또는 진행률 100 적용 시 waitingItems는 자동으로 비워지고 Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다.'),
+    data: nodeDataSchema.partial().describe('변경할 카드 필드만 포함하는 부분 병합 데이터. 일반 카드에서 생략한 필드는 보존되므로 현재 카드 전체 데이터를 재전송하지 않습니다. 빈 문자열과 빈 배열은 명시적 초기화이며, 완료 상태 또는 진행률 100 적용 시 waitingItems는 자동으로 비워지고 Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 자동 집계 대상 카드의 progress와 status는 저장 시 서버가 다시 계산합니다.'),
     position: z.object({ x: z.number(), y: z.number() }).optional(),
     responseMode: z.enum(['full', 'affected']).default('full').describe('full은 저활용 필드를 제외한 최신 전체 문서를 반환하며 기본값입니다. affected는 직접 수정 카드와 서버가 함께 조정한 카드 및 문서·Root 요약만 반환합니다.'),
   }, async ({ mapId, cardId, nodeId, data, position, responseMode }) => {

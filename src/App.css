@@ -459,6 +459,8 @@
 .progress-field > span strong { color: #6153cf; }
 .progress-field input[type="range"] { width: 100%; accent-color: #6657d9; cursor: pointer; }
 .progress-field input[type="range"]:disabled { cursor: default; }
+.progress-field.automatic input[type="range"] { opacity: .7; }
+.progress-rollup-help { display: block; margin-top: 4px; color: #958fa0; font-size: 7px; line-height: 1.45; }
 .work-section { margin: 24px 0 20px; padding: 14px; border: 1px solid #e8e5ed; border-radius: 10px; background: #faf9fc; transition: border-color .15s, background .15s; }
 .work-section.enabled { border-color: #dcd7f3; background: #f8f6fe; }
 .work-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }

@@ -47,6 +47,7 @@ import { shouldReconnectEventStream } from './utils/eventStreamHealth.mjs'
 import { aiConversationLinksFromData } from './utils/aiConversations.mjs'
 import { mapContentsEqual, reconcileRemoteMapContent } from './utils/mapDocumentSync.mjs'
 import { mergeMapContent } from './utils/mergeMapContent.mjs'
+import { computeProgressRollups } from './utils/progressRollup.mjs'
 import { snapAspectResizeToGrid, snapFreeResizeToGrid } from './utils/resizeGrid.mjs'
 import type { ResizeSnapRequest } from './utils/resizeGrid.mjs'
 import { extractTextLinks } from './utils/textLinks.mjs'
@@ -1989,7 +1990,12 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     return () => { cancelled = true }
   }, [])
 
+  const progressRollups = useMemo(() => new Map(computeProgressRollups(nodes, edges)
+    .map((rollup) => [rollup.nodeId, rollup])), [edges, nodes])
   const selectedNode = nodes.find((node) => node.id === selectedId) ?? null
+  const selectedProgressRollup = selectedNode ? progressRollups.get(selectedNode.id) : undefined
+  const selectedProgress = selectedProgressRollup?.progress ?? selectedNode?.data.progress ?? 0
+  const selectedStatus = selectedProgressRollup?.status ?? selectedNode?.data.status ?? 'planned'
   const selectedDoorayKnowledgeNode = selectedNode && isDoorayKnowledgeCard(selectedNode.data)
     ? selectedNode
     : null
@@ -2125,7 +2131,9 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const filterActive = nodeFilter !== 'all' || assigneeFilter !== 'all'
   const filterMatchedNodeIds = useMemo(() => new Set(nodes.filter((node) => {
     if (node.data.kind === 'image') return true
-    const status = node.data.progress >= 100 ? 'done' : node.data.status
+    const progressRollup = progressRollups.get(node.id)
+    const progress = progressRollup?.progress ?? node.data.progress
+    const status = progress >= 100 ? 'done' : progressRollup?.status ?? node.data.status
     const statusMatches = nodeFilter === 'all'
       || nodeFilter === 'work' && Boolean(node.data.isWork)
       || nodeFilter === 'blocked' && blockingNodes(node, nodes).length > 0
@@ -2134,7 +2142,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       || Boolean(node.data.isWork) && assigneeFilter === 'unassigned' && !node.data.assigneeId
       || Boolean(node.data.isWork) && node.data.assigneeId === assigneeFilter
     return statusMatches && assigneeMatches
-  }).map((node) => node.id)), [assigneeFilter, nodeFilter, nodes])
+  }).map((node) => node.id)), [assigneeFilter, nodeFilter, nodes, progressRollups])
   const filterVisibleNodeIds = useMemo(() => {
     if (!filterActive) return new Set(nodes.map((node) => node.id))
     const visible = new Set(filterMatchedNodeIds)
@@ -2180,6 +2188,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     const externalLink = isDoorayKnowledgeCard(node.data)
       ? node.data.externalLink
       : undefined
+    const progressRollup = progressRollups.get(node.id)
     const applyImageResize = image ? (resize: ResizeSnapRequest) => {
       const resized = resize.snapAxis
         ? snapAspectResizeToGrid(resize, {
@@ -2249,6 +2258,11 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
           : node.style,
       data: {
         ...node.data,
+        ...(progressRollup ? {
+          progress: progressRollup.progress,
+          status: progressRollup.status,
+          progressRollupTargetCount: progressRollup.targetCount,
+        } : {}),
         externalLink,
         imageAssetUrl: image ? imageAssetUrl(activeMapId, image.assetId) : undefined,
         imageEditable: Boolean(image && mode === 'editor'),
@@ -2304,7 +2318,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         filterActive && filterVisibleNodeIds.has(node.id) && !filterMatchedNodeIds.has(node.id) ? 'filter-context' : '',
       ].filter(Boolean).join(' '),
     }
-  }), [activeMapId, aiConversationRuntimes, beginHistoryTransaction, collapsedHiddenNodeIds, collapsedNodeIds, collapsibleNodeIds, commentStats, descendantCounts, dropTargetId, endHistoryTransaction, filterActive, filterMatchedNodeIds, filterVisibleNodeIds, hoveredKnowledgeConnectionIssue, knowledgeConnection, knowledgeConnectionTargetId, mode, nodes, normalizedNodeSearch, openWaitingItems, referenceCommentStats, searchContextNodeIds, searchMatchedNodeIds, setNodes, teamMembers])
+  }), [activeMapId, aiConversationRuntimes, beginHistoryTransaction, collapsedHiddenNodeIds, collapsedNodeIds, collapsibleNodeIds, commentStats, descendantCounts, dropTargetId, endHistoryTransaction, filterActive, filterMatchedNodeIds, filterVisibleNodeIds, hoveredKnowledgeConnectionIssue, knowledgeConnection, knowledgeConnectionTargetId, mode, nodes, normalizedNodeSearch, openWaitingItems, progressRollups, referenceCommentStats, searchContextNodeIds, searchMatchedNodeIds, setNodes, teamMembers])
   const visibleFlowNodeIds = useMemo(() => new Set(flowNodes.filter((node) => !node.hidden).map((node) => node.id)), [flowNodes])
   const visibleFlowNodeIdsKey = useMemo(() => [...visibleFlowNodeIds].sort().join('\u0000'), [visibleFlowNodeIds])
   const flowEdges = useMemo(() => {
@@ -6611,43 +6625,51 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                 <label>
                   <span>상태</span>
                   <select
-                    value={selectedNode.data.progress >= 100 ? 'done' : selectedNode.data.status}
+                    value={selectedProgress >= 100 ? 'done' : selectedStatus}
                     onChange={(event) => {
                       const status = event.target.value as MindNodeData['status']
                       updateNode(selectedNode.id, {
                         status,
                         progress: status === 'done'
                           ? 100
-                          : selectedNode.data.progress >= 100 ? 95 : selectedNode.data.progress,
+                          : selectedProgress >= 100 ? 95 : selectedProgress,
                       })
                     }}
-                    disabled={selectedReferenceReadOnly}
+                    disabled={selectedReferenceReadOnly || Boolean(selectedProgressRollup)}
                   >
                     <option value="planned">예정</option>
                     <option value="in-progress">진행 중</option>
                     <option value="done">완료</option>
                   </select>
                 </label>
-                <label className="progress-field">
-                  <span>진행률 <strong>{selectedNode.data.progress >= 100 ? '완료' : `${selectedNode.data.progress}%`}</strong></span>
-                  <input
-                    type="range"
-                    min="0"
-                    max="100"
-                    step="5"
-                    value={selectedNode.data.progress}
-                    onChange={(event) => {
-                      const progress = Number(event.target.value)
-                      updateNode(selectedNode.id, {
-                        progress,
-                        status: progress >= 100
-                          ? 'done'
-                          : selectedNode.data.status === 'done' ? 'in-progress' : selectedNode.data.status,
-                      })
-                    }}
-                    disabled={selectedReferenceReadOnly}
-                  />
-                </label>
+                {(selectedNode.data.isWork || selectedProgressRollup) && (
+                  <label className={`progress-field ${selectedProgressRollup ? 'automatic' : ''}`}>
+                    <span>
+                      {selectedProgressRollup ? '자동 진행률' : '진행률'}
+                      <strong>{selectedProgress >= 100 ? '완료' : selectedProgressRollup ? `${selectedNode.data.kind === 'root' ? '전체' : '요약'} ${selectedProgress}%` : `${selectedProgress}%`}</strong>
+                    </span>
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      step="5"
+                      value={selectedProgress}
+                      onChange={(event) => {
+                        const progress = Number(event.target.value)
+                        updateNode(selectedNode.id, {
+                          progress,
+                          status: progress >= 100
+                            ? 'done'
+                            : selectedStatus === 'done' ? 'in-progress' : selectedStatus,
+                        })
+                      }}
+                      disabled={selectedReferenceReadOnly || Boolean(selectedProgressRollup)}
+                    />
+                    {selectedProgressRollup && (
+                      <small className="progress-rollup-help">하위 업무 {selectedProgressRollup.targetCount}개 평균 · 자동 계산</small>
+                    )}
+                  </label>
+                )}
                 <section className={`work-section ${selectedNode.data.isWork ? 'enabled' : ''}`}>
                   <div className="work-section-heading">
                     <div>
@@ -6827,9 +6849,9 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                               onChange={(event) => setNewWaitingLabel(event.target.value)}
                               placeholder="예: 서버 API 완료, 캐릭터 아트 전달"
                               maxLength={120}
-                              disabled={selectedNode.data.progress >= 100}
+                              disabled={selectedProgress >= 100}
                             />
-                            <button type="submit" disabled={!newWaitingLabel.trim() || selectedNode.data.progress >= 100}><Icon name="plus" size={13} /></button>
+                            <button type="submit" disabled={!newWaitingLabel.trim() || selectedProgress >= 100}><Icon name="plus" size={13} /></button>
                           </form>
                         )}
                         <small className="waiting-help">대기 항목은 상태와 진행률을 바꾸지 않으며, 업무를 완료하면 자동으로 정리됩니다. 문서 내부 선행 업무는 위의 업무 의존성을 사용하세요.</small>
