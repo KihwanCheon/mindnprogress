@@ -100,6 +100,11 @@ test('활성 문서의 공유 지식 카드와 실제 지식선 소비자를 우
   ], { generatedAt: '2026-08-18T01:00:00.000Z' })
 
   assert.equal(audit.generatedAt, '2026-08-18T01:00:00.000Z')
+  assert.equal(audit.maintenance.periodicIntervalDays, 7)
+  assert.equal(audit.maintenance.runOnlyWhenActionableCandidatesExist, true)
+  assert.deepEqual(audit.maintenance.reviewOrder, ['priority', 'recommended', 'attention'])
+  assert.equal(audit.maintenance.requiresExplicitApproval, true)
+  assert.equal(audit.maintenance.automaticMutation, false)
   assert.equal(audit.summary.documentCount, 2)
   assert.equal(audit.summary.cardCount, 6)
   assert.equal(audit.summary.cardsWithSharedKnowledge, 5)

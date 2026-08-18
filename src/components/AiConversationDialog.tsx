@@ -42,6 +42,8 @@ const defaultEditorRequest = `이 카드의 최신 내용을 검토하세요.
 
 검토 결과 이미 확정된 요구사항, 결정 또는 조사 결과가 카드의 업무 설명, 공유 지식, 상태, 체크리스트 또는 대기 항목에 누락되어 있거나 현재 내용과 어긋나면 필요한 필드만 먼저 수정하고 저장 결과를 확인하세요. 추측이나 아직 결정되지 않은 내용은 카드에 확정 정보처럼 기록하지 마세요.
 
+공유 지식에는 다른 카드가 다시 사용할 현재 유효한 결론만 남기세요. 진행 기록·도구 로그·중복·폐기 결론은 넣지 말고, 같은 주제의 결론은 새 이력으로 덧붙이지 말고 기존 내용을 안전하게 갱신하세요.
+
 카드 수정이 필요하지 않다면 그 사실을 명시하세요. 그다음 수행할 작업을 우선순위와 완료 조건을 포함해 제안해 주세요.`
 const runtimeSelectionsStorageKey = 'mindnprogress-ai-runtime-selections'
 const mcpSelectionsStorageKey = 'mindnprogress-ai-mcp-selections'
