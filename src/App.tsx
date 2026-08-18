@@ -36,6 +36,7 @@ import { AiConversationPickerDialog } from './components/AiConversationPickerDia
 import { AiConversationActivityIndicator } from './components/AiConversationRuntimeBadge'
 import { DailyBackupPreviewDialog, type DailyBackupPreview } from './components/DailyBackupPreviewDialog'
 import { ImagePreviewDialog } from './components/ImagePreviewDialog'
+import { SharedKnowledgeReviewDialog, type SharedKnowledgeReviewApplied } from './components/SharedKnowledgeReviewDialog'
 import { DashboardView, KanbanView, TimelineView } from './components/WorkViews'
 import type { AiConversationLink, AiConversationRuntime, ChecklistItem, KnowledgePolicy, MindDoorayLinkData, MindDoorayTaskData, MindDoorayWikiData, MindImageData, MindMapEdgeData, MindNodeData, TeamMember, WaitingItem } from './types/mindMap'
 import { blockingNodes, createsDependencyCycle, dependentNodes, prerequisiteNodes } from './utils/dependencies'
@@ -1738,6 +1739,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const [loadedMapId, setLoadedMapId] = useState<string | null>(null)
   const [mapReloadToken, setMapReloadToken] = useState(0)
   const [historyOpen, setHistoryOpen] = useState(false)
+  const [sharedKnowledgeReviewOpen, setSharedKnowledgeReviewOpen] = useState(false)
   const [historyTab, setHistoryTab] = useState<'changes' | 'daily'>('changes')
   const [mapRevisions, setMapRevisions] = useState<MapRevisionSummary[]>([])
   const [dailyBackups, setDailyBackups] = useState<DailyBackupSummary[]>([])
@@ -1910,6 +1912,24 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       setSavedAt('서버와 동기화됨')
     }
   }, [resetHistory, setEdges, setNodes])
+  const handleSharedKnowledgeReviewApplied = useCallback((applied: SharedKnowledgeReviewApplied) => {
+    setDocuments((current) => current.map((document) => document.id === applied.document.id
+      ? {
+          ...document,
+          title: applied.document.title,
+          version: applied.document.version,
+          updatedAt: applied.document.updatedAt,
+        }
+      : document))
+    if (activeMapIdRef.current !== applied.mapId) return
+    void apiRequest<MapDocumentResponse>(`/api/maps/${encodeURIComponent(applied.mapId)}`)
+      .then(({ map }) => reconcileRemoteMap(map))
+      .catch((error) => {
+        setSaveError(error instanceof Error
+          ? `공유 지식 검토는 저장되었지만 화면을 갱신하지 못했습니다: ${error.message}`
+          : '공유 지식 검토는 저장되었지만 화면을 갱신하지 못했습니다.')
+      })
+  }, [reconcileRemoteMap])
   const acceptSavedMap = useCallback((savedMap: MapDocument, sentContent: Pick<MapDocument, 'nodes' | 'edges'>) => {
     if (activeMapIdRef.current !== savedMap.id) return
     const baseline = serverBaseline.current
@@ -5411,6 +5431,18 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
               <button onClick={redo} disabled={!canRedo} title="다시 실행 (Ctrl+Y)" aria-label="다시 실행"><Icon name="redo" size={15} /></button>
             </div>
           )}
+          {mode === 'editor' && (
+            <button
+              className={`shared-knowledge-review-trigger ${sharedKnowledgeReviewOpen ? 'active' : ''}`}
+              type="button"
+              onClick={() => setSharedKnowledgeReviewOpen(true)}
+              aria-haspopup="dialog"
+              aria-expanded={sharedKnowledgeReviewOpen}
+              title="공유 지식 정리 후보 검토"
+            >
+              <Icon name="sparkles" size={15} /><span>지식 정리</span>
+            </button>
+          )}
           <button className="icon-button" onClick={() => { void openMapHistory() }} disabled={!activeMapId} aria-label="서버 변경 이력" title="서버 변경 이력">
             <Icon name="history" size={16} />
           </button>
@@ -7092,6 +7124,14 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
             <footer>{mode === 'editor' ? '일일 백업은 날짜별 최신 상태를 자동 보관하며, 복원 전 현재 상태도 이력에 저장됩니다.' : '뷰어는 변경 이력과 일일 백업을 확인할 수 있지만 복원할 수 없습니다.'}</footer>
           </section>
         </div>
+      )}
+      {sharedKnowledgeReviewOpen && mode === 'editor' && (
+        <SharedKnowledgeReviewDialog
+          activeMapId={activeMapId || null}
+          clientId={CLIENT_ID}
+          onApplied={handleSharedKnowledgeReviewApplied}
+          onClose={() => setSharedKnowledgeReviewOpen(false)}
+        />
       )}
       {dailyBackupPreview && (
         <DailyBackupPreviewDialog
