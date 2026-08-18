@@ -11,6 +11,7 @@ import {
   formatAiConversationTitle,
   initialAiDelegationRuntime,
   isValidAiDelegationId,
+  shouldReconcileAiDelegationChildWorkspace,
 } from '../server/lib/aiDelegations.mjs'
 
 test('같은 위임 ID의 새 대화 실행 설정이 달라지면 다른 요청으로 판정한다', () => {
@@ -182,6 +183,15 @@ test('구버전 자원 대기 상태를 하위 작업 완료로 오인하지 않
   assert.equal(runtime.state, 'waiting-resource')
   assert.equal(runtime.childTurnId, 'turn-waiting')
   assert.equal(runtime.resource.key, 'unity:abc123')
+})
+
+test('서버 재시작 시 하위 실행 단계의 작업공간만 다시 연결한다', () => {
+  assert.equal(shouldReconcileAiDelegationChildWorkspace({ state: 'running' }), true)
+  assert.equal(shouldReconcileAiDelegationChildWorkspace({ state: 'waiting-child-resume' }), true)
+  assert.equal(shouldReconcileAiDelegationChildWorkspace({ state: 'waiting-integration' }), false)
+  assert.equal(shouldReconcileAiDelegationChildWorkspace({ state: 'waiting-parent' }), false)
+  assert.equal(shouldReconcileAiDelegationChildWorkspace({ state: 'waking-parent' }), false)
+  assert.equal(shouldReconcileAiDelegationChildWorkspace({ state: 'recovery-required' }), false)
 })
 
 test('사용자가 중지한 하위 턴은 상위 대화 재개가 아닌 하위 재개 대기로 유지한다', () => {

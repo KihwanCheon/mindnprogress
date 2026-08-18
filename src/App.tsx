@@ -668,7 +668,7 @@ type MapDocumentResponse = {
 type UserNotification = {
   id: string
   userId: string
-  type: 'comment' | 'mention' | 'reply' | 'assignment' | 'schedule' | 'waiting-released'
+  type: 'comment' | 'mention' | 'reply' | 'assignment' | 'schedule' | 'waiting-released' | 'ai-delegation'
   mapId: string
   mapTitle: string
   nodeId: string
@@ -5417,6 +5417,8 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                             ? '담당 업무 일정 알림'
                             : notification.type === 'waiting-released'
                               ? `${notification.actor.name}님이 외부 대기를 해제했습니다.`
+                              : notification.type === 'ai-delegation'
+                                ? 'AI 위임 상태 알림'
                               : notification.type === 'mention'
                                 ? `${notification.actor.name}님이 회원님을 멘션했습니다.`
                                 : notification.type === 'reply'

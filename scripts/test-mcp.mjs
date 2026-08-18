@@ -306,7 +306,7 @@ async function main() {
     await client.connect(transport)
     const listedTools = await client.listTools()
     const registeredToolNames = listedTools.tools.map((tool) => tool.name).sort()
-    assert.equal(registeredToolNames.length, 43, `예상과 다른 MCP 도구 수: ${registeredToolNames.length}`)
+    assert.equal(registeredToolNames.length, 44, `예상과 다른 MCP 도구 수: ${registeredToolNames.length}`)
     const toolSchema = (name) => listedTools.tools.find((tool) => tool.name === name)?.inputSchema
     for (const name of ['mindnprogress_update_card', 'mindnprogress_move_card', 'mindnprogress_delete_card', 'mindnprogress_list_comments', 'mindnprogress_add_comment']) {
       assert.ok(toolSchema(name)?.properties?.cardId, `${name}: cardId 공개 인자가 없습니다.`)
@@ -323,8 +323,16 @@ async function main() {
     assert.ok(toolSchema('mindnprogress_recover_ai_delegation')?.required?.includes('instruction'))
     assert.ok(toolSchema('mindnprogress_checkpoint_ai_workspace')?.properties?.leaseId)
     assert.ok(toolSchema('mindnprogress_checkpoint_ai_workspace')?.properties?.jobId)
-    assert.equal(toolSchema('mindnprogress_checkpoint_ai_workspace')?.properties?.paths?.default?.length, 0)
-    assert.equal(toolSchema('mindnprogress_checkpoint_ai_workspace')?.properties?.confirmNoChanges?.default, false)
+    assert.equal(toolSchema('mindnprogress_checkpoint_ai_workspace')?.properties?.paths?.minItems, 1)
+    assert.ok(toolSchema('mindnprogress_checkpoint_ai_workspace')?.required?.includes('paths'))
+    assert.ok(toolSchema('mindnprogress_checkpoint_ai_workspace')?.required?.includes('commitMessage'))
+    assert.deepEqual(
+      toolSchema('mindnprogress_checkpoint_ai_workspace')?.properties?.commitMessage?.required,
+      ['summary', 'background', 'cause', 'changes'],
+    )
+    assert.equal(toolSchema('mindnprogress_checkpoint_ai_workspace')?.properties?.confirmNoChanges, undefined)
+    assert.ok(toolSchema('mindnprogress_confirm_ai_workspace_no_changes')?.properties?.leaseId)
+    assert.ok(toolSchema('mindnprogress_confirm_ai_workspace_no_changes')?.properties?.jobId)
 
     const invoke = async (name, args = {}) => {
       calledTools.set(name, (calledTools.get(name) ?? 0) + 1)
@@ -340,7 +348,7 @@ async function main() {
 
     const guide = await invoke('mindnprogress_read_me_first')
     assert.equal(guide.guide.product.name, 'MindNProgress')
-    assert.equal(guide.guide.version, '3.8')
+    assert.equal(guide.guide.version, '3.9')
     assert.match(guide.guide.operationRules.join('\n'), /중지된 위임을 resume하면 같은 AI 대화와 기존 worker lease/)
     assert.match(guide.guide.dataModel.cardContent.sharedKnowledge, /재사용/)
     assert.match(guide.guide.authoringRules.join('\n'), /모든 isWork=true 업무 진행률을 동일 가중치 평균/)
@@ -352,7 +360,8 @@ async function main() {
     assert.match(guide.guide.operationRules.join('\n'), /mindnprogress_get_ai_workspace_pool.*임의로 worker를 사용하지 않음/)
     assert.match(guide.guide.operationRules.join('\n'), /작업공간 pool.*병렬 위임.*직렬 통합/)
     assert.match(guide.guide.operationRules.join('\n'), /mindnprogress_checkpoint_ai_workspace.*동적 폰트·Atlas|동적 폰트·Atlas.*mindnprogress_checkpoint_ai_workspace/)
-    assert.match(guide.guide.operationRules.join('\n'), /파일 변경이 없는 조사·검증 작업.*confirmNoChanges=true 체크포인트/)
+    assert.match(guide.guide.operationRules.join('\n'), /파일 변경이 없는 조사·검증 작업.*mindnprogress_confirm_ai_workspace_no_changes/)
+    assert.match(guide.guide.operationRules.join('\n'), /commitMessage.*summary.*background.*cause.*changes/)
     assert.match(guide.guide.operationRules.join('\n'), /기존 AI 대화를 이어갈지 새로 시작할지.*mindnprogress_list_ai_conversations/)
     assert.match(guide.guide.operationRules.join('\n'), /복수의 독립적인 완료 조건.*필요한 최소한의 결과 중심 체크리스트.*억지로 나누지 않고.*계획 카드에는 생략 가능/)
     assert.match(guide.guide.operationRules.join('\n'), /위임 기준.*AionUi 대화 ID.*MCP 재연결.*모든 깊이/)
@@ -623,8 +632,20 @@ async function main() {
       mapId,
       leaseId: 'lease-not-found',
       jobId: 'job-not-found',
-      paths: [],
-      confirmNoChanges: true,
+      paths: ['Assets/Test.cs'],
+      commitMessage: {
+        summary: '테스트 변경 체크포인트 생성',
+        background: '구조화된 커밋 메시지 전달 경로를 검증해야 합니다.',
+        cause: '기존 고정 템플릿은 실제 변경 내용을 설명하지 못했습니다.',
+        changes: '체크포인트 도구에 실제 변경 설명을 함께 전달합니다.',
+        scope: 'MCP 회귀 테스트에만 해당합니다.',
+      },
+    }, /활성 AI 작업공간 lease를 찾지 못했습니다/)
+
+    await invokeExpectError('mindnprogress_confirm_ai_workspace_no_changes', {
+      mapId,
+      leaseId: 'lease-not-found',
+      jobId: 'job-not-found',
     }, /활성 AI 작업공간 lease를 찾지 못했습니다/)
 
     const legacyMcpEnvironment = { ...environment }
@@ -649,13 +670,11 @@ async function main() {
         },
       }))
       const legacyCheckpointResult = await legacyCheckpointClient.callTool({
-        name: 'mindnprogress_checkpoint_ai_workspace',
+        name: 'mindnprogress_confirm_ai_workspace_no_changes',
         arguments: {
           mapId,
           leaseId: 'lease-not-found',
           jobId: 'job-not-found',
-          paths: [],
-          confirmNoChanges: true,
         },
       })
       assert.equal(legacyCheckpointResult.isError, true)

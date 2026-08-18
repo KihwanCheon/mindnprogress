@@ -20,6 +20,17 @@ export const ACTIVE_AI_DELEGATION_STATES = new Set([
   'waking-parent',
 ])
 
+const CHILD_WORKSPACE_RECONCILIATION_STATES = new Set([
+  'starting',
+  'waiting-resource',
+  'running',
+  'waiting-child-resume',
+])
+
+export function shouldReconcileAiDelegationChildWorkspace(delegation) {
+  return CHILD_WORKSPACE_RECONCILIATION_STATES.has(delegation?.state)
+}
+
 function normalizedSelectionOption(value, fallbackId = '') {
   if (value && typeof value === 'object') {
     const id = String(value.id ?? '').trim()

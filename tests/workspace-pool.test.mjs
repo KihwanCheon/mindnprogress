@@ -9,9 +9,17 @@ import {
   WorkspacePoolManager,
   WorkspacePoolUnavailableError,
   buildWorkspaceInstruction,
+  normalizeCheckpointCommitMessage,
 } from '../server/lib/workspacePool.mjs'
 
 const execFileAsync = promisify(execFile)
+const checkpointCommitMessage = {
+  summary: '일본 로그인 IDP 뷰 이중 등록 해소',
+  background: '일본 로그인 진입 과정에서 동일 뷰가 중복 등록되어 초기화 순서가 불안정했습니다.',
+  cause: '기존 초기화 경로와 일본 전용 진입 경로가 각각 뷰를 등록하고 있었습니다.',
+  changes: '일본 전용 진입 경로로 등록 책임을 일원화하고 중복 등록을 제거했습니다.',
+  scope: 'JAPAN_SERVICE 로그인 흐름에만 적용됩니다.',
+}
 
 async function git(cwd, ...args) {
   const result = await execFileAsync('git', args, { cwd, windowsHide: true })
@@ -33,6 +41,57 @@ test('작업공간 지침은 기존 대화에도 재배정 정보를 명확하�
   assert.match(instruction, /projectRoot: `C:\\Git\\Holdem_Fork2\\hdtf-client`/)
   assert.match(instruction, /다른 Holdem 작업공간으로 이동하거나/)
   assert.match(instruction, /직접 커밋하지 마세요/)
+  assert.match(instruction, /commitMessage/)
+  assert.match(instruction, /mindnprogress_confirm_ai_workspace_no_changes/)
+})
+
+test('체크포인트 커밋 메시지는 실제 변경 구조와 금지 항목을 검증한다', () => {
+  assert.deepEqual(normalizeCheckpointCommitMessage(checkpointCommitMessage), checkpointCommitMessage)
+  assert.throws(
+    () => normalizeCheckpointCommitMessage({ ...checkpointCommitMessage, summary: '[김용민] 중복 prefix' }),
+    /prefix/,
+  )
+  assert.throws(
+    () => normalizeCheckpointCommitMessage({ ...checkpointCommitMessage, changes: '변경\n\nCo-Authored-By: AI' }),
+    /Co-Authored-By/,
+  )
+  assert.throws(
+    () => normalizeCheckpointCommitMessage({ summary: '설명 누락' }),
+    /background/,
+  )
+  assert.throws(
+    () => normalizeCheckpointCommitMessage({ ...checkpointCommitMessage, legacyText: '호환 필드' }),
+    /지원하지 않는 필드/,
+  )
+})
+
+test('회수 기준 커밋 객체가 없으면 두 번 fetch한 뒤 worker 전환 없이 중단한다', async () => {
+  const integrationRoot = path.join(tmpdir(), 'mnp-idle-guard-main')
+  const workerRoot = path.join(tmpdir(), 'mnp-idle-guard-fork1')
+  const commands = []
+  const manager = new WorkspacePoolManager({
+    registryFile: path.join(tmpdir(), 'mnp-idle-guard-workspaces.json'),
+    stateFile: path.join(tmpdir(), 'mnp-idle-guard-state.json'),
+    gitRunner: async (cwd, args) => {
+      commands.push({ cwd, args })
+      if (cwd === workerRoot && args[0] === 'cat-file') {
+        throw new Error('fatal: Not a valid object name main456^{commit}')
+      }
+      return ''
+    },
+  })
+  manager.registry = { integration: { root: integrationRoot } }
+
+  await assert.rejects(
+    () => manager.switchWorkspaceToIdleCommit(
+      { id: 'fork1', root: workerRoot },
+      'japan-master',
+      'main456',
+    ),
+    /2회 가져온 뒤에도 객체를 확인하거나 전환하지 못했습니다/,
+  )
+  assert.equal(commands.filter(({ cwd, args }) => cwd === workerRoot && args[0] === 'fetch').length, 2)
+  assert.equal(commands.some(({ cwd, args }) => cwd === workerRoot && args[0] === 'switch'), false)
 })
 
 test('registry 작업공간만 풀로 인식하고 유휴 worker에 원자적 lease를 만든다', async () => {
@@ -468,14 +527,25 @@ test('변경 없는 완료도 명시적 no-change 체크포인트 뒤에만 leas
     }), 'utf8')
 
     let workerBranch = 'japan-master'
+    let integrationHead = 'base123'
+    let workerCommitCheckAttempts = 0
+    const commands = []
     const manager = new WorkspacePoolManager({
       registryFile,
       stateFile,
       gitRunner: async (cwd, args) => {
+        commands.push({ cwd, args })
         const worker = cwd === workerRoot
         if (args[0] === 'status') return ''
         if (args[0] === 'remote') return ''
-        if (args[0] === 'rev-parse') return 'base123'
+        if (args[0] === 'rev-parse') return worker ? 'base123' : integrationHead
+        if (args[0] === 'cat-file') {
+          if (worker) {
+            workerCommitCheckAttempts += 1
+            if (workerCommitCheckAttempts === 1) throw new Error('아직 커밋 객체가 없습니다.')
+          }
+          return ''
+        }
         if (args[0] === 'branch' && args[1] === '--show-current') return worker ? workerBranch : 'japan-master'
         if (args[0] === 'switch') {
           workerBranch = args[1] === '-C' ? args[2] : args[1]
@@ -497,6 +567,18 @@ test('변경 없는 완료도 명시적 no-change 체크포인트 뒤에만 leas
     assert.equal(checkpointRequired.status, 'checkpoint-required')
     assert.deepEqual(checkpointRequired.changedFiles, [])
 
+    await assert.rejects(
+      () => manager.bindConversation(lease.leaseId, 'conversation-other'),
+      /이미 다른 대화에 연결/,
+    )
+    const rebound = await manager.bindConversation(lease.leaseId, 'conversation-a')
+    assert.equal(rebound.leaseId, lease.leaseId)
+    assert.equal(
+      manager.publicSnapshot({ conversationId: 'conversation-a' })
+        .workspaces.find((workspace) => workspace.workspaceId === 'fork1')?.status,
+      'checkpoint-required',
+    )
+
     const checkpoint = await manager.checkpoint(lease.leaseId, {
       jobId: lease.jobId,
       mapId: 'map-a',
@@ -507,9 +589,25 @@ test('변경 없는 완료도 명시적 no-change 체크포인트 뒤에만 leas
     })
     assert.equal(checkpoint.checkpoint.noCodeChanges, true)
 
+    integrationHead = 'main456'
     const completed = await manager.finalize(lease.leaseId, { childStatus: 'completed' })
     assert.equal(completed.status, 'completed')
     assert.equal(completed.integratedCommit, null)
+    const reclaimFetches = commands.filter(({ cwd, args }) => cwd === workerRoot
+      && args[0] === 'fetch'
+      && args[2] === integrationRoot
+      && args[3] === 'refs/heads/japan-master')
+    assert.equal(reclaimFetches.length, 3)
+    assert.equal(workerCommitCheckAttempts, 2)
+    const idleSwitchIndex = commands.findIndex(({ cwd, args }) => cwd === workerRoot
+      && args[0] === 'switch'
+      && args[1] === '-C'
+      && args[3] === 'main456')
+    const lastCommitCheckIndex = commands.findLastIndex(({ cwd, args }) => cwd === workerRoot
+      && args[0] === 'cat-file'
+      && args[2] === 'main456^{commit}')
+    assert.ok(lastCommitCheckIndex >= 0)
+    assert.ok(idleSwitchIndex > lastCommitCheckIndex)
     const state = JSON.parse(await readFile(stateFile, 'utf8'))
     assert.equal(state.workspaces.fork1.status, 'idle')
     assert.equal(state.workspaces.fork1.idleBranch, 'mnp/idle/fork1')
@@ -583,12 +681,24 @@ test('완료된 worker 변경을 체크포인트로 고정하고 main에 직렬 
     })
     await manager.initialize()
     const lease = await manager.acquire({ workspaceHint: integrationRoot, cardLabel: '로그인 보완' })
+    await assert.rejects(
+      () => manager.checkpoint(lease.leaseId, {
+        jobId: lease.jobId,
+        mapId: '',
+        cardId: '',
+        conversationId: '',
+        paths: ['Assets/changed.cs'],
+      }),
+      (error) => error instanceof WorkspacePoolUnavailableError
+        && error.reasonCode === 'AI_WORKSPACE_CHECKPOINT_MESSAGE_INVALID',
+    )
     await manager.checkpoint(lease.leaseId, {
       jobId: lease.jobId,
       mapId: '',
       cardId: '',
       conversationId: '',
       paths: ['Assets/changed.cs'],
+      commitMessage: checkpointCommitMessage,
       cardLabel: '로그인 보완',
     })
     const result = await manager.finalize(lease.leaseId, {
@@ -599,12 +709,213 @@ test('완료된 worker 변경을 체크포인트로 고정하고 main에 직렬 
     assert.equal(result.status, 'completed')
     assert.equal(result.headCommit, 'checkpoint456')
     assert.equal(result.integratedCommit, 'integrated789')
-    assert.ok(commands.some(({ args }) => args[0] === 'commit' && args.includes('[김용민] MNP 작업 체크포인트 - 로그인 보완')))
+    const commitCommand = commands.find(({ args }) => args[0] === 'commit')?.args ?? []
+    assert.ok(commitCommand.includes('[김용민] 일본 로그인 IDP 뷰 이중 등록 해소'))
+    assert.match(commitCommand.at(-1) ?? '', /\[배경\].*\[원인\].*\[수정\].*\[적용 범위\]/s)
     assert.ok(commands.some(({ cwd, args }) => cwd === workerRoot && args[0] === 'cherry-pick'))
     assert.ok(commands.some(({ cwd, args }) => cwd === integrationRoot && args[0] === 'merge' && args[1] === '--ff-only'))
     assert.equal(workerBranch, 'mnp/idle/fork2')
     const state = JSON.parse(await readFile(stateFile, 'utf8'))
     assert.equal(state.workspaces.fork2.status, 'idle')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('main의 일시적 추적 변경은 worker를 격리하지 않고 정리될 때까지 통합을 대기한다', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'mnp-workspace-integration-wait-'))
+  try {
+    const integrationRoot = path.join(root, 'main')
+    const workerRoot = path.join(root, 'fork1')
+    const sharedRoot = path.join(root, 'shared')
+    await Promise.all([mkdir(integrationRoot), mkdir(workerRoot), mkdir(sharedRoot)])
+    const registryFile = path.join(sharedRoot, 'workspaces.json')
+    const stateFile = path.join(root, 'state.json')
+    await writeFile(registryFile, JSON.stringify({
+      schemaVersion: 1,
+      poolId: 'holdem',
+      sharedRoot,
+      workspaces: [
+        { id: 'main', root: integrationRoot, role: 'integration', enabled: true },
+        { id: 'fork1', root: workerRoot, role: 'worker', enabled: true },
+      ],
+    }), 'utf8')
+
+    let workerBranch = 'japan-master'
+    let workerHead = 'base123'
+    let integrationHead = 'base123'
+    let workerDirty = false
+    let integrationDirty = false
+    const gitRunner = async (cwd, args) => {
+      const worker = cwd === workerRoot
+      if (args[0] === 'status') return worker ? (workerDirty ? ' M worker.txt' : '') : (integrationDirty ? ' M main.txt' : '')
+      if (args[0] === 'diff') return !worker && integrationDirty ? 'main.txt' : ''
+      if (args[0] === 'remote') return ''
+      if (args[0] === 'rev-parse') return worker ? workerHead : integrationHead
+      if (args[0] === 'branch' && args[1] === '--show-current') return worker ? workerBranch : 'japan-master'
+      if (args[0] === 'switch') {
+        if (args[1] === '-C') {
+          workerBranch = args[2]
+          workerHead = args[3]
+        } else {
+          workerBranch = args[1]
+        }
+        return ''
+      }
+      if (args[0] === 'commit') {
+        workerHead = 'checkpoint456'
+        workerDirty = false
+        return ''
+      }
+      if (args[0] === 'rev-list') return 'checkpoint456'
+      if (args[0] === 'cherry-pick') {
+        workerHead = 'integrated789'
+        return ''
+      }
+      if (args[0] === 'merge' && !worker) {
+        integrationHead = args.at(-1)
+        return ''
+      }
+      return ''
+    }
+    const manager = new WorkspacePoolManager({ registryFile, stateFile, gitRunner })
+    await manager.initialize()
+    const lease = await manager.acquire({
+      workspaceHint: integrationRoot,
+      mapId: 'map-a',
+      cardId: 'card-a',
+      conversationId: 'conversation-a',
+      cardLabel: '통합 대기',
+    })
+    workerDirty = true
+    await manager.checkpoint(lease.leaseId, {
+      jobId: lease.jobId,
+      mapId: 'map-a',
+      cardId: 'card-a',
+      conversationId: 'conversation-a',
+      paths: ['worker.txt'],
+      commitMessage: checkpointCommitMessage,
+    })
+
+    integrationDirty = true
+    const waiting = await manager.finalize(lease.leaseId, { childStatus: 'completed' })
+    assert.equal(waiting.status, 'waiting-integration')
+    assert.equal(waiting.reasonCode, 'integration-worktree-dirty')
+    assert.deepEqual(waiting.trackedChanges, ['main.txt'])
+    assert.equal(workerBranch, lease.branch)
+    assert.equal(workerHead, 'checkpoint456')
+    assert.equal(JSON.parse(await readFile(path.join(workerRoot, '.ai-session.json'), 'utf8')).leaseId, lease.leaseId)
+    const waitingState = JSON.parse(await readFile(stateFile, 'utf8'))
+    assert.equal(waitingState.integrationLeaseId, null)
+    assert.equal(waitingState.workspaces.fork1.status, 'waiting-integration')
+
+    const unchanged = await manager.finalize(lease.leaseId, { childStatus: 'completed' })
+    assert.equal(unchanged.updatedAt, waiting.updatedAt)
+
+    integrationDirty = false
+    integrationHead = 'main456'
+    const completed = await manager.finalize(lease.leaseId, { childStatus: 'completed' })
+    assert.equal(completed.status, 'completed')
+    assert.equal(completed.integratedCommit, 'integrated789')
+    assert.equal(workerBranch, 'mnp/idle/fork1')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('과거 main dirty 격리는 세션·체크포인트·Git 소유권이 일치할 때만 통합 대기로 복구한다', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'mnp-workspace-legacy-integration-wait-'))
+  try {
+    const integrationRoot = path.join(root, 'main')
+    const workerRoot = path.join(root, 'fork1')
+    const sharedRoot = path.join(root, 'shared')
+    await Promise.all([mkdir(integrationRoot), mkdir(workerRoot), mkdir(sharedRoot)])
+    const registryFile = path.join(sharedRoot, 'workspaces.json')
+    const stateFile = path.join(root, 'state.json')
+    await writeFile(registryFile, JSON.stringify({
+      schemaVersion: 1,
+      poolId: 'holdem',
+      sharedRoot,
+      workspaces: [
+        { id: 'main', root: integrationRoot, role: 'integration', enabled: true },
+        { id: 'fork1', root: workerRoot, role: 'worker', enabled: true },
+      ],
+    }), 'utf8')
+
+    let workerBranch = 'japan-master'
+    let workerHead = 'base123'
+    let workerDirty = false
+    let integrationDirty = false
+    const gitRunner = async (cwd, args) => {
+      const worker = cwd === workerRoot
+      if (args[0] === 'status') return worker ? (workerDirty ? '?? unknown.txt' : '') : (integrationDirty ? ' M main.txt' : '')
+      if (args[0] === 'diff') return !worker && integrationDirty ? 'main.txt' : ''
+      if (args[0] === 'remote') return ''
+      if (args[0] === 'rev-parse') return worker ? workerHead : 'base123'
+      if (args[0] === 'branch' && args[1] === '--show-current') return worker ? workerBranch : 'japan-master'
+      if (args[0] === 'switch') {
+        workerBranch = args[1]
+        return ''
+      }
+      if (args[0] === 'commit') {
+        workerHead = 'checkpoint456'
+        workerDirty = false
+        return ''
+      }
+      if (args[0] === 'rev-list') return 'checkpoint456'
+      return ''
+    }
+    const manager = new WorkspacePoolManager({ registryFile, stateFile, gitRunner })
+    await manager.initialize()
+    const lease = await manager.acquire({
+      workspaceHint: integrationRoot,
+      mapId: 'map-a',
+      cardId: 'card-a',
+      conversationId: 'conversation-a',
+      cardLabel: '과거 격리 복구',
+    })
+    workerDirty = true
+    await manager.checkpoint(lease.leaseId, {
+      jobId: lease.jobId,
+      mapId: 'map-a',
+      cardId: 'card-a',
+      conversationId: 'conversation-a',
+      paths: ['worker.txt'],
+      commitMessage: checkpointCommitMessage,
+    })
+    integrationDirty = true
+    const waiting = await manager.finalize(lease.leaseId, { childStatus: 'completed' })
+    const storedLease = manager.state.leases[lease.leaseId]
+    storedLease.status = 'quarantined'
+    storedLease.result = {
+      ...waiting,
+      status: 'quarantined',
+      error: '통합 작업공간에 커밋되지 않은 추적 파일 변경이 있습니다.',
+      completedAt: new Date().toISOString(),
+    }
+    delete storedLease.result.reasonCode
+    delete storedLease.result.waitingReason
+    delete storedLease.result.trackedChanges
+    manager.state.workspaces.fork1 = {
+      status: 'quarantined',
+      reason: storedLease.result.error,
+      jobId: lease.jobId,
+      leaseId: lease.leaseId,
+      updatedAt: storedLease.result.completedAt,
+    }
+    await manager.persist()
+
+    workerDirty = true
+    assert.equal(await manager.recoverLegacyDirtyIntegration(lease.leaseId), null)
+    workerDirty = false
+    const recovered = await manager.recoverLegacyDirtyIntegration(lease.leaseId)
+    assert.equal(recovered.status, 'waiting-integration')
+    assert.equal(recovered.reasonCode, 'integration-worktree-dirty')
+    assert.equal(recovered.recoveredFromQuarantine, true)
+    assert.deepEqual(recovered.trackedChanges, ['main.txt'])
+    assert.equal(workerBranch, lease.branch)
+    assert.equal(workerHead, 'checkpoint456')
+    assert.equal(JSON.parse(await readFile(path.join(workerRoot, '.ai-session.json'), 'utf8')).leaseId, lease.leaseId)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -694,6 +1005,7 @@ test('통합 충돌은 main을 건드리지 않고 같은 worker의 AI 해결 �
       cardId: '',
       conversationId: '',
       paths: ['Assets/conflict.cs'],
+      commitMessage: checkpointCommitMessage,
       cardLabel: '충돌 작업',
     })
 
@@ -909,6 +1221,7 @@ test('명시적 체크포인트만 main에 통합하고 검증 후 drift는 보�
       cardId: 'card-a',
       conversationId: 'conversation-a',
       paths: ['intended.txt'],
+      commitMessage: checkpointCommitMessage,
       cardLabel: '명시적 체크포인트',
     })
     assert.equal(checkpoint.noChanges, false)
@@ -971,6 +1284,7 @@ test('실제 Git 저장소에서도 충돌을 worker에서 해결한 뒤 main을
       cardId: '',
       conversationId: '',
       paths: ['shared.txt'],
+      commitMessage: checkpointCommitMessage,
       cardLabel: '실제 충돌 작업',
     })
     await writeFile(path.join(integrationRoot, 'shared.txt'), 'main change\n', 'utf8')

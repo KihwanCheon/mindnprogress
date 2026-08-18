@@ -15,7 +15,6 @@ import {
   unavailableAiConversationRuntime,
 } from './lib/aionUiConversationRuntimes.mjs'
 import {
-  ACTIVE_AI_DELEGATION_STATES,
   activeAiDelegationsForConversation,
   aiDelegationStateAfterParentWake,
   aiDelegationSucceeded,
@@ -27,6 +26,7 @@ import {
   initialAiDelegationRuntime,
   isValidAiDelegationId,
   mergeAiDelegationSelections,
+  shouldReconcileAiDelegationChildWorkspace,
 } from './lib/aiDelegations.mjs'
 import {
   detectImageAssetType,
@@ -78,6 +78,7 @@ import {
   WorkspacePoolManager,
   WorkspacePoolUnavailableError,
   buildWorkspaceInstruction,
+  checkpointCommitMessageExample,
 } from './lib/workspacePool.mjs'
 
 const serverDirectory = path.dirname(fileURLToPath(import.meta.url))
@@ -1644,6 +1645,7 @@ function delegationPublicView(delegation) {
   delete publicDelegation.pendingInstruction
   delete publicDelegation.pendingSelection
   delete publicDelegation.pendingWorkspaceHint
+  delete publicDelegation.childResultSnapshot
   return publicDelegation
 }
 
@@ -2035,13 +2037,45 @@ async function reconcileAiDelegationWorkspaceLeases() {
     })
   }
 
+  for (const delegation of aiDelegations.values()) {
+    if (delegation.state !== 'failed'
+      || delegation.childStatus !== 'completed'
+      || delegation.workspaceResult?.status !== 'quarantined'
+      || !delegation.workspaceLease?.leaseId) continue
+    try {
+      const workspaceResult = await workspacePoolManager.recoverLegacyDirtyIntegration(
+        delegation.workspaceLease.leaseId,
+      )
+      if (workspaceResult?.status !== 'waiting-integration') continue
+      await updateAiDelegation(delegation.id, {
+        state: 'waiting-integration',
+        childError: workspaceResult.childError ?? null,
+        workspaceResult,
+        workspaceError: null,
+        parentDispatchState: null,
+        parentTurnId: null,
+        parentError: null,
+        parentResource: null,
+        completedAt: null,
+        legacyIntegrationRecoveredAt: new Date().toISOString(),
+      })
+      console.log(`[AI workspace pool] 격리된 통합 대기를 복구했습니다: ${delegation.id}`)
+    } catch (error) {
+      console.warn('[AI workspace pool legacy integration recovery]', JSON.stringify({
+        delegationId: delegation.id,
+        leaseId: delegation.workspaceLease.leaseId,
+        error: error?.message ?? String(error),
+      }))
+    }
+  }
+
   const delegations = [...aiDelegations.values()]
   if (await aionCoreSupportsWorkspaceLease()) {
     for (const delegation of delegations) {
       const suspiciousTerminalWorkspace = delegation.state === 'completed'
         && delegation.childStatus === 'completed'
         && ['failed-clean', 'cancelled', 'quarantined'].includes(delegation.workspaceResult?.status)
-      if ((!ACTIVE_AI_DELEGATION_STATES.has(delegation.state) && !suspiciousTerminalWorkspace)
+      if ((!shouldReconcileAiDelegationChildWorkspace(delegation) && !suspiciousTerminalWorkspace)
         || !delegation.childOperationId
         || !delegation.targetConversationId) continue
       try {
@@ -2193,6 +2227,22 @@ async function latestAssistantResult(conversationId) {
   }
 }
 
+async function captureAiDelegationChildResult(delegation) {
+  if (delegation?.childResultSnapshot) return delegation
+  const lastAttempt = Date.parse(String(delegation?.childResultCaptureAttemptedAt ?? ''))
+  if (Number.isFinite(lastAttempt) && Date.now() - lastAttempt < 10_000) return delegation
+  const result = await latestAssistantResult(delegation?.targetConversationId)
+  const attemptedAt = new Date().toISOString()
+  return updateAiDelegation(delegation.id, result
+    ? {
+        childResultSnapshot: result,
+        childResultHash: createHash('sha256').update(result).digest('hex'),
+        childResultCapturedAt: attemptedAt,
+        childResultCaptureAttemptedAt: attemptedAt,
+      }
+    : { childResultCaptureAttemptedAt: attemptedAt })
+}
+
 function parentWakeInstruction(delegation, result) {
   const integrationFailure = delegation.integrationStatus && delegation.integrationStatus !== 'completed'
     ? delegation.integrationError ?? delegation.workspaceError ?? delegation.integrationStatus
@@ -2223,13 +2273,153 @@ ${result ? `## 하위 AI의 마지막 응답\n\n${result}\n\n` : ''}MindNProgres
 다음 작업을 위임하기로 판단했다면 이번 턴의 최종 응답 전에 mindnprogress_delegate_ai_work를 실제로 호출하고 성공 결과를 확인하세요. 성공을 확인하기 전에는 “위임했습니다”라고 쓰지 말고, 실제 호출 없이 “위임하겠습니다” 또는 “이어서 진행하겠습니다”와 같은 미래형 약속으로 턴을 끝내지 마세요. 위임할 수 없다면 실행을 약속하지 말고 차단 원인과 필요한 조치를 현재 응답에 명시하세요.`
 }
 
+function aiDelegationRecoveryKey(delegation) {
+  return [
+    Number(delegation?.recoveryAttempt ?? 0),
+    String(delegation?.recoveryRequiredAt ?? ''),
+    String(delegation?.state ?? ''),
+  ].join(':')
+}
+
+function parentRecoveryInstruction(delegation) {
+  const error = delegation.integrationError ?? delegation.childError ?? delegation.workspaceError ?? '상세 원인 없음'
+  const checkpoint = delegation.workspaceResult?.status === 'checkpoint-required'
+    ? `- 체크포인트 회차: ${delegation.workspaceResult.checkpointRound ?? '미확인'}\n`
+    : ''
+  const result = delegation.childResultSnapshot
+  return `# MindNProgress 하위 AI 작업 복구 필요
+
+상위 카드에서 위임한 하위 카드 작업이 완료 보고 전 복구 필요 상태가 되었습니다. 이 알림은 완료 보고가 아니며 기존 위임은 아직 활성 상태입니다.
+
+- 위임 ID: ${delegation.id}
+- 하위 카드: ${delegation.targetCardLabel} (${delegation.targetCardId})
+- 실행 대화: ${delegation.targetConversationId}
+- 상태: ${delegation.state}
+${checkpoint}- 원인: ${error}
+
+${result ? `## 보존된 하위 AI의 마지막 응답\n\n${result}\n\n` : ''}같은 작업을 새로 위임하지 마세요. MindNProgress에서 기존 위임과 하위 카드·작업공간 상태를 확인한 뒤, 안전하게 이어갈 수 있을 때만 mindnprogress_recover_ai_delegation으로 기존 위임을 복구하세요. 자동 판단이 어렵다면 사용자에게 현재 상태와 필요한 확인을 알리세요.`
+}
+
+async function ensureAiDelegationNotification(delegation, { kind, message, dedupeKey }) {
+  const notificationKey = kind === 'checkpoint' ? 'checkpointNotificationKey' : 'recoveryNotificationKey'
+  if (delegation?.[notificationKey] === dedupeKey) return delegation
+  const recipient = users.find((candidate) => candidate.id === delegation?.startedBy
+    && candidate.role === 'editor' && candidate.active !== false)
+  const map = await readMap(delegation?.mapId)
+  const node = map?.nodes.find((candidate) => candidate.id === delegation?.targetCardId)
+  if (!recipient || !map || map.trashedAt || !node) return delegation
+  const notification = await createNotification(recipient, {
+    type: 'ai-delegation',
+    mapId: map.id,
+    mapTitle: map.title,
+    nodeId: node.id,
+    nodeLabel: node.data?.label ?? delegation.targetCardLabel ?? node.id,
+    message,
+    actor: systemUser,
+    dedupeKey,
+  })
+  return updateAiDelegation(delegation.id, {
+    [notificationKey]: dedupeKey,
+    [`${kind}NotificationId`]: notification.id,
+    [`${kind}NotifiedAt`]: notification.createdAt,
+  })
+}
+
+async function ensureCheckpointRequiredNotification(delegation, workspaceResult) {
+  const round = Number(workspaceResult?.checkpointRound ?? 0)
+  return ensureAiDelegationNotification(delegation, {
+    kind: 'checkpoint',
+    dedupeKey: `ai-delegation-checkpoint:${delegation.id}:${round}`,
+    message: `하위 AI 작업은 종료됐지만 명시적 체크포인트가 없어 자동 보완을 요청했습니다. (회차 ${round || '미확인'})`,
+  })
+}
+
+async function processAiDelegationRecoveryNotice(originalDelegation) {
+  let delegation = originalDelegation
+  const recoveryKey = aiDelegationRecoveryKey(delegation)
+  try {
+    delegation = await ensureAiDelegationNotification(delegation, {
+      kind: 'recovery',
+      dedupeKey: `ai-delegation-recovery:${delegation.id}:${createHash('sha256').update(recoveryKey).digest('hex').slice(0, 16)}`,
+      message: `하위 AI 작업이 완료 보고 전에 복구 필요 상태가 되었습니다. 기존 위임을 확인해 복구해 주세요. (${delegation.integrationError ?? delegation.childError ?? delegation.workspaceError ?? delegation.state})`,
+    })
+  } catch (error) {
+    console.warn('[AI delegation editor recovery notification]', error)
+  }
+
+  if (delegation.recoveryWakeKey === recoveryKey
+    && (delegation.recoveryWakeDeliveredAt || delegation.recoveryWakeFailedAt)) return
+  if (delegation.recoveryWakeKey === recoveryKey && delegation.recoveryWakeOperationId) {
+    try {
+      const status = await fetchAionUi(`/api/internal/external-conversation-dispatches/${encodeURIComponent(delegation.recoveryWakeOperationId)}`)
+      if (['starting', 'waiting_resource', 'running', 'waiting_resume'].includes(status.state)) {
+        await updateAiDelegation(delegation.id, {
+          recoveryWakeState: status.state,
+          recoveryWakeTurnId: status.turnId ?? delegation.recoveryWakeTurnId ?? null,
+          recoveryWakeError: status.errorMessage ?? null,
+        })
+        return
+      }
+      await updateAiDelegation(delegation.id, {
+        recoveryWakeState: status.state,
+        recoveryWakeTurnId: status.turnId ?? delegation.recoveryWakeTurnId ?? null,
+        recoveryWakeError: status.errorMessage ?? null,
+        recoveryWakeDeliveredAt: status.state === 'completed' ? new Date().toISOString() : null,
+        recoveryWakeFailedAt: status.state === 'completed' ? null : new Date().toISOString(),
+      })
+    } catch (error) {
+      await updateAiDelegation(delegation.id, {
+        recoveryWakeState: 'unavailable',
+        recoveryWakeError: error?.message ?? String(error),
+        recoveryWakeFailedAt: new Date().toISOString(),
+      })
+    }
+    return
+  }
+
+  delegation = await captureAiDelegationChildResult(delegation)
+
+  const anotherParentWakeInProgress = [...aiDelegations.values()].some((candidate) =>
+    candidate.id !== delegation.id
+    && candidate.parentConversationId === delegation.parentConversationId
+    && (candidate.state === 'waking-parent'
+      || ['starting', 'waiting_resource', 'running', 'waiting_resume'].includes(candidate.recoveryWakeState)))
+  if (anotherParentWakeInProgress) return
+  const parent = await fetchAiConversationRuntime(delegation.parentConversationId)
+  const runtime = normalizeAiConversationRuntime(delegation.parentConversationId, parent)
+  if (runtime.state !== 'idle') return
+
+  const recoveryWakeAttempt = Number(delegation.recoveryWakeAttempt ?? 0) + 1
+  const operationId = boundedAionOperationId(delegation.id, `recovery-notice-${recoveryWakeAttempt}`)
+  const response = await fetchAionUi('/api/internal/external-conversation-dispatches', {
+    method: 'POST',
+    body: {
+      operationId,
+      actorConversationId: delegation.parentConversationId,
+      strategy: 'resume',
+      targetConversationId: delegation.parentConversationId,
+      instruction: parentRecoveryInstruction(delegation),
+    },
+  })
+  await updateAiDelegation(delegation.id, {
+    recoveryWakeKey: recoveryKey,
+    recoveryWakeOperationId: operationId,
+    recoveryWakeAttempt,
+    recoveryWakeState: response.state,
+    recoveryWakeTurnId: response.turnId ?? null,
+    recoveryWakeError: null,
+    recoveryWakeStartedAt: new Date().toISOString(),
+    recoveryWakeDeliveredAt: null,
+    recoveryWakeFailedAt: null,
+  })
+}
+
 async function finalizeDelegationWorkspace(delegation, childStatus, childError) {
   if (!delegation.workspaceLease?.leaseId) return { result: null, error: null }
   try {
     const result = await workspacePoolManager.finalize(delegation.workspaceLease.leaseId, {
       childStatus,
       childError,
-      cardLabel: delegation.targetCardLabel,
     })
     return { result, error: null }
   } catch (error) {
@@ -2314,7 +2504,7 @@ function workspaceCheckpointInstruction(delegation, workspaceResult) {
 
 ${files}
 
-최신 카드 요구사항과 Git diff를 대조해 의도한 구현 변경과 검증 부산물을 구분하세요. 의도한 파일만 \`mindnprogress_checkpoint_ai_workspace\`의 \`paths\`에 넣어 체크포인트를 생성하고, 자동 변경은 포함하지 마세요. 의도한 파일 변경이 없다면 빈 \`paths\`와 \`confirmNoChanges=true\`로 확인하세요. 구현과 자동 변경이 같은 파일에 섞여 있으면 기준 내용으로 되돌린 뒤 의도한 수정만 다시 적용하세요. 체크포인트 후 필수 검증을 다시 수행하고 최종 결과를 보고하세요.`
+최신 카드 요구사항과 Git diff를 대조해 의도한 구현 변경과 검증 부산물을 구분하세요. 의도한 파일만 \`mindnprogress_checkpoint_ai_workspace\`의 \`paths\`에 넣고, \`commitMessage\`에는 이번 변경을 실제로 설명하는 \`summary\`·\`background\`·\`cause\`·\`changes\`와 필요한 경우 \`scope\`를 작성하세요. \`summary\`의 \`[김용민]\` prefix와 본문 섹션은 서버가 추가합니다. 자동 변경은 포함하지 마세요. 의도한 파일 변경이 없다면 \`mindnprogress_confirm_ai_workspace_no_changes\`를 호출하세요. 구현과 자동 변경이 같은 파일에 섞여 있으면 기준 내용으로 되돌린 뒤 의도한 수정만 다시 적용하세요. 체크포인트 후 필수 검증을 다시 수행하고 최종 결과를 보고하세요.`
 }
 
 async function startWorkspaceCheckpointResolution(delegation, workspaceResult) {
@@ -2429,7 +2619,13 @@ async function advanceWorkspaceIntegration(delegation, workspace) {
     return true
   }
   if (workspace.result?.status === 'checkpoint-required') {
-    await startWorkspaceCheckpointResolution(delegation, workspace.result)
+    let notifiedDelegation = delegation
+    try {
+      notifiedDelegation = await ensureCheckpointRequiredNotification(delegation, workspace.result)
+    } catch (error) {
+      console.warn('[AI delegation checkpoint notification]', error)
+    }
+    await startWorkspaceCheckpointResolution(notifiedDelegation, workspace.result)
     return true
   }
   return false
@@ -2591,10 +2787,20 @@ async function pollAiDelegations() {
     const active = [...aiDelegations.values()].filter((delegation) =>
       [
         'starting', 'waiting-resource', 'running', 'waiting-child-resume',
+        'recovery-required',
         'waiting-integration', 'integration-starting', 'integration-waiting-resource',
-        'integration-running', 'integration-waiting-resume', 'waiting-parent', 'waking-parent',
+        'integration-running', 'integration-waiting-resume', 'integration-recovery-required',
+        'waiting-parent', 'waking-parent',
       ].includes(delegation.state))
     for (const delegation of active) {
+      if (['recovery-required', 'integration-recovery-required'].includes(delegation.state)) {
+        try {
+          await processAiDelegationRecoveryNotice(delegation)
+        } catch (error) {
+          console.warn('[AI delegation recovery notification]', error)
+        }
+        continue
+      }
       if (['starting', 'waiting-resource', 'running', 'waiting-child-resume'].includes(delegation.state)) {
         try {
           const operationId = delegation.childOperationId ?? delegation.id
@@ -2630,8 +2836,9 @@ async function pollAiDelegations() {
           }
           const childStatus = status.state
           const childError = status.errorMessage ?? null
-          const workspace = await finalizeDelegationWorkspace(delegation, childStatus, childError)
-          const updated = await updateAiDelegation(delegation.id, {
+          const capturedDelegation = await captureAiDelegationChildResult(delegation)
+          const workspace = await finalizeDelegationWorkspace(capturedDelegation, childStatus, childError)
+          const updated = await updateAiDelegation(capturedDelegation.id, {
             childStatus,
             childTurnId: status.turnId ?? delegation.childTurnId ?? null,
             childError: workspace.error ?? childError,
@@ -2740,7 +2947,7 @@ async function pollAiDelegations() {
           const parent = await fetchAiConversationRuntime(delegation.parentConversationId)
           const runtime = normalizeAiConversationRuntime(delegation.parentConversationId, parent)
           if (runtime.state !== 'idle') continue
-          const result = await latestAssistantResult(delegation.targetConversationId)
+          const result = delegation.childResultSnapshot || await latestAssistantResult(delegation.targetConversationId)
           const parentWakeAttempt = Number(delegation.parentWakeAttempt ?? 0) + 1
           const wakeOperationId = boundedAionOperationId(delegation.id, `wake-${parentWakeAttempt}`)
           const response = await fetchAionUi('/api/internal/external-conversation-dispatches', {
@@ -3565,6 +3772,11 @@ function reportRejectedSideEffects(results, label) {
 }
 
 async function createNotification(user, payload) {
+  const notifications = await listNotifications(user.id)
+  if (payload.dedupeKey) {
+    const existing = notifications.find((notification) => notification.dedupeKey === payload.dedupeKey)
+    if (existing) return existing
+  }
   const notification = {
     id: `notification-${Date.now().toString(36)}-${randomBytes(4).toString('hex')}`,
     userId: user.id,
@@ -3572,7 +3784,6 @@ async function createNotification(user, payload) {
     readAt: null,
     ...payload,
   }
-  const notifications = await listNotifications(user.id)
   await writeStoredArray(notificationFileForUser(user.id), [notification, ...notifications].slice(0, 200))
   broadcastNotification(notification)
   return notification
@@ -4539,10 +4750,29 @@ const server = createServer(async (request, response) => {
       const body = await readJsonBody(request)
       const paths = Array.isArray(body.paths) ? body.paths : []
       const confirmNoChanges = body.confirmNoChanges === true
-      if (!body.jobId || (!confirmNoChanges && paths.length === 0) || paths.length > 2_000) {
+      if (!body.jobId || paths.length > 2_000) {
         return sendJson(response, 400, {
           error: '현재 jobId와 체크포인트에 포함할 변경 경로가 필요합니다.',
           code: 'AI_WORKSPACE_CHECKPOINT_INPUT_INVALID',
+        })
+      }
+      if (confirmNoChanges && (paths.length > 0 || body.commitMessage !== undefined)) {
+        return sendJson(response, 400, {
+          error: '무변경 확인에는 paths 또는 commitMessage를 전달할 수 없습니다.',
+          code: 'AI_WORKSPACE_CHECKPOINT_INPUT_INVALID',
+        })
+      }
+      if (!confirmNoChanges && paths.length === 0) {
+        return sendJson(response, 400, {
+          error: '변경 체크포인트에는 한 개 이상의 paths가 필요합니다. 변경이 없다면 무변경 확인 도구를 사용하세요.',
+          code: 'AI_WORKSPACE_CHECKPOINT_INPUT_INVALID',
+        })
+      }
+      if (!confirmNoChanges && (!body.commitMessage || typeof body.commitMessage !== 'object')) {
+        return sendJson(response, 400, {
+          error: '변경 체크포인트에는 실제 변경을 설명하는 commitMessage가 필요합니다.',
+          code: 'AI_WORKSPACE_CHECKPOINT_MESSAGE_REQUIRED',
+          details: [{ commitMessage: checkpointCommitMessageExample }],
         })
       }
       const map = await readMap(scope.mapId)
@@ -4558,14 +4788,14 @@ const server = createServer(async (request, response) => {
           conversationId: scope.conversationId,
           paths,
           confirmNoChanges,
-          cardLabel: card.data?.label ?? card.id,
+          commitMessage: body.commitMessage,
         })
         return sendJson(response, result.noChanges ? 200 : 201, result)
       } catch (error) {
         if (error instanceof WorkspacePoolUnavailableError) {
           return sendJson(response, 409, {
             error: error.message,
-            code: error.code,
+            code: error.reasonCode ?? error.code,
             details: error.details,
           })
         }
@@ -4756,6 +4986,12 @@ const server = createServer(async (request, response) => {
         integrationError: integrationRecovery ? null : delegation.integrationError,
         childTurnId: integrationRecovery ? delegation.childTurnId : (dispatch.turnId ?? null),
         integrationTurnId: integrationRecovery ? (dispatch.turnId ?? null) : delegation.integrationTurnId,
+        ...(integrationRecovery ? {} : {
+          childResultSnapshot: null,
+          childResultHash: null,
+          childResultCapturedAt: null,
+          childResultCaptureAttemptedAt: null,
+        }),
         workspaceLease,
       })
       return sendJson(response, 202, {

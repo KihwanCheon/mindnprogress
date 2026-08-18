@@ -137,8 +137,10 @@
 .notification-avatar { width: 30px; height: 30px; display: grid; place-items: center; color: white; border-radius: 50%; background: #7062d3; font-size: 8px; font-weight: 750; }
 .notification-item.assignment .notification-avatar { background: #4381c4; }
 .notification-item.schedule .notification-avatar { background: #d48a3e; }
+.notification-item.ai-delegation .notification-avatar { background: #7058c9; }
 .notification-item.assignment > i { background: #4381c4; }
 .notification-item.schedule > i { background: #d48a3e; }
+.notification-item.ai-delegation > i { background: #7058c9; }
 .notification-item > span:nth-child(2) { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .notification-item strong { color: #4c4653; font-size: 9px; }
 .notification-item small { overflow: hidden; color: #918b98; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
