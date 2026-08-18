@@ -6,6 +6,12 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
 import { AI_DELEGATION_ID_PATTERN } from '../server/lib/aiDelegations.mjs'
+import {
+  applyCardTextPatch,
+  cardTextIntegrity,
+  sharedKnowledgeMaxLength,
+  textIntegrity,
+} from './cardTextPatch.mjs'
 import { imageCardLocalAccess } from './imageAccess.mjs'
 
 const projectDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -55,9 +61,9 @@ function defaultChildMindMapPosition(parentPosition, siblingPositions, parentWid
   }
 }
 
-const serverInstructions = `MindNProgress는 마인드맵과 업무 진행 관리를 결합한 웹 서비스입니다. MindNProgress 밖에서 시작해 문서 ID나 카드 ID가 없다면 mindnprogress_read_me_first를 먼저 호출하세요. 선택 문서와 카드가 있다면 mindnprogress_get_context로 제품 규칙과 최신 문서 구조를 먼저 확인하세요. MCP 도구에서 카드를 지정할 때는 cardId 계열 인자를 사용하세요. nodeId 계열 인자는 기존 대화 호환용이므로 새 호출에서는 사용하지 마세요. AionUi가 발급한 attributionToken이 없는 외부 MCP 세션은 자신이 현재 AI 종류와 모델을 정확히 알고 있을 때 get_context의 aiType과 aiModel에 함께 전달하고, 알지 못하면 추측하지 마세요. get_context의 selection.taskLinks.startupInspection을 따르세요. mode가 knowledge-guided이면 primary 선행 지식 중 kind=image인 항목은 imageAccess.localPath의 원본을 사용 가능한 로컬 이미지 열람 도구로 직접 확인하고 설명과 댓글을 함께 사용하며, 일반 카드는 sharedKnowledge를 먼저 재사용하고 설명과 댓글로 보완합니다. fallbackSources와 fallbackTargets는 정보가 부족할 때만 선택적으로 조사합니다. mode가 default이고 required가 true이면 targets의 업무 본문, 댓글, 첨부파일 목록과 관련 링크를 조사하세요. 진행 과정과 결과는 댓글에 기록하고, 다른 카드나 후속 세션이 재사용할 안정적인 사실·결정·제약은 카드의 sharedKnowledge에 요약하세요. AI 댓글은 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 충실히 담은 detail로 작성하며, 요약 때문에 상세를 축약하지 마세요. 외부 전달물이나 결정 대기는 waitingItems로 기록하고 제목에 대기 문구를 붙이지 마세요. 대기를 등록할 때는 [차단], 해제할 때는 [진행] 댓글로 이유와 재개 상태를 기록하세요. 카드 일부 필드만 변경할 때는 mindnprogress_update_card의 data에 변경할 필드만 보내고 현재 카드 전체 데이터를 재전송하지 마세요. 일반 카드에서 생략한 필드와 위치는 보존되지만 완료 상태 또는 진행률 100 적용 시 waitingItems는 자동으로 해제되며, Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 선택 카드 밖의 형제·하위·선행 카드를 함께 수정하기 전에는 mindnprogress_get_ai_work_states로 해당 카드에 다른 AI 작업이 진행 중인지 확인하세요. running 또는 waiting-confirmation인 카드는 사용자 지시 없이 동시에 수정하지 마세요. Holdem AI 작업공간의 최신 목록·경로·상태가 필요하면 폴더명을 추측하지 말고 mindnprogress_get_ai_workspace_pool을 호출하세요. 작업공간 선택·점유·전환·해제는 MindNProgress만 수행하며 AI가 임의로 worker를 선택하지 않습니다. 지식선만 변경할 때는 전체 문서를 다시 보내지 말고 지식선 전용 도구를 사용하세요. 조회 도구는 문서 버전을 변경하지 않지만 카드·관계 편집과 AI 대화 ID 연결은 버전을 증가시킬 수 있습니다. 특정 자료가 있다고 가정하지 마세요. 여러 카드로 구성된 새 문서는 mindnprogress_create_mindmap으로 한 번에 생성하고, 변경 후에는 최신 문서를 다시 조회해 결과를 검증하세요. 비밀번호 변경과 계정 관리 작업은 지원하지 않습니다.`
+const serverInstructions = `MindNProgress는 마인드맵과 업무 진행 관리를 결합한 웹 서비스입니다. MindNProgress 밖에서 시작해 문서 ID나 카드 ID가 없다면 mindnprogress_read_me_first를 먼저 호출하세요. 선택 문서와 카드가 있다면 mindnprogress_get_context로 제품 규칙과 최신 문서 구조를 먼저 확인하세요. MCP 도구에서 카드를 지정할 때는 cardId 계열 인자를 사용하세요. nodeId 계열 인자는 기존 대화 호환용이므로 새 호출에서는 사용하지 마세요. AionUi가 발급한 attributionToken이 없는 외부 MCP 세션은 자신이 현재 AI 종류와 모델을 정확히 알고 있을 때 get_context의 aiType과 aiModel에 함께 전달하고, 알지 못하면 추측하지 마세요. get_context의 selection.taskLinks.startupInspection을 따르세요. mode가 knowledge-guided이면 primary 선행 지식 중 kind=image인 항목은 imageAccess.localPath의 원본을 사용 가능한 로컬 이미지 열람 도구로 직접 확인하고 설명과 댓글을 함께 사용하며, 일반 카드는 sharedKnowledge를 먼저 재사용하고 설명과 댓글로 보완합니다. fallbackSources와 fallbackTargets는 정보가 부족할 때만 선택적으로 조사합니다. mode가 default이고 required가 true이면 targets의 업무 본문, 댓글, 첨부파일 목록과 관련 링크를 조사하세요. 진행 과정과 결과는 댓글에 기록하고, 다른 카드나 후속 세션이 재사용할 안정적인 사실·결정·제약은 카드의 sharedKnowledge에 요약하세요. AI 댓글은 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 충실히 담은 detail로 작성하며, 요약 때문에 상세를 축약하지 마세요. 외부 전달물이나 결정 대기는 waitingItems로 기록하고 제목에 대기 문구를 붙이지 마세요. 대기를 등록할 때는 [차단], 해제할 때는 [진행] 댓글로 이유와 재개 상태를 기록하세요. 카드 일부 필드만 변경할 때는 mindnprogress_update_card의 data에 변경할 필드만 보내고 현재 카드 전체 데이터를 재전송하지 마세요. 기존 description 또는 sharedKnowledge 내부의 일부만 고칠 때는 조회 결과의 textIntegrity SHA-256과 mindnprogress_patch_card_text를 사용하세요. 일반 카드에서 생략한 필드와 위치는 보존되지만 완료 상태 또는 진행률 100 적용 시 waitingItems는 자동으로 해제되며, Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 선택 카드 밖의 형제·하위·선행 카드를 함께 수정하기 전에는 mindnprogress_get_ai_work_states로 해당 카드에 다른 AI 작업이 진행 중인지 확인하세요. running 또는 waiting-confirmation인 카드는 사용자 지시 없이 동시에 수정하지 마세요. Holdem AI 작업공간의 최신 목록·경로·상태가 필요하면 폴더명을 추측하지 말고 mindnprogress_get_ai_workspace_pool을 호출하세요. 작업공간 선택·점유·전환·해제는 MindNProgress만 수행하며 AI가 임의로 worker를 선택하지 않습니다. 지식선만 변경할 때는 전체 문서를 다시 보내지 말고 지식선 전용 도구를 사용하세요. 조회 도구는 문서 버전을 변경하지 않지만 카드·관계 편집과 AI 대화 ID 연결은 버전을 증가시킬 수 있습니다. 특정 자료가 있다고 가정하지 마세요. 여러 카드로 구성된 새 문서는 mindnprogress_create_mindmap으로 한 번에 생성하고, 변경 후에는 최신 문서를 다시 조회해 결과를 검증하세요. 비밀번호 변경과 계정 관리 작업은 지원하지 않습니다.`
 const productGuide = {
-  version: '4.0',
+  version: '4.1',
   product: {
     name: 'MindNProgress',
     purpose: '아이디어를 계층형 마인드맵으로 구조화하고 실행 업무의 진행 상황을 같은 문서에서 관리하는 웹 서비스',
@@ -132,6 +138,7 @@ const productGuide = {
     'create_document 후 save_document를 연속 호출해 전체 구조를 만들지 않음',
     '지식선 추가·정책 변경·삭제는 전체 save_document 대신 지식선 전용 도구를 사용',
     '카드 일부 필드만 변경할 때 mindnprogress_update_card의 data에는 변경할 필드만 보내고 현재 카드 전체 데이터를 재전송하지 않음. 일반 카드에서 생략한 필드와 위치는 보존되지만 완료 상태 또는 진행률 100 적용 시 waitingItems가 자동으로 해제되며 Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있음',
+    '기존 description 또는 sharedKnowledge 내부의 일부만 수정할 때는 조회 응답의 textIntegrity SHA-256을 expectedSha256으로 지정해 mindnprogress_patch_card_text를 사용하고 필드 전체를 다시 생성하지 않음',
     'mindnprogress_update_card의 responseMode는 full이 기본값이며 저장된 전체 카드 본문과 관계를 연속 작업용으로 반환하되 AI 대화 상세 목록과 렌더링 전용 필드는 제외함. 단일 카드와 서버가 함께 조정한 카드만 필요하면 affected를 명시함',
     '선택 카드 밖의 형제·하위·선행 카드를 함께 수정하기 전에는 mindnprogress_get_ai_work_states로 해당 카드의 AI 작업 상태를 확인하고, running 또는 waiting-confirmation인 카드는 사용자 지시 없이 동시에 수정하지 않음',
     'Holdem AI 작업공간의 최신 목록·경로·상태는 폴더명이나 과거 대화로 추측하지 않고 mindnprogress_get_ai_workspace_pool로 조회함. 작업공간 선택·점유·전환·해제는 MindNProgress만 수행하며 AI가 임의로 worker를 사용하지 않음',
@@ -423,6 +430,7 @@ function contentCard(node, mapId = '') {
     id: node.id,
     type: node.type ?? 'mind',
     data,
+    textIntegrity: cardTextIntegrity(data),
     ...(imageAccess ? { imageAccess } : {}),
   }
 }
@@ -616,6 +624,25 @@ const nodeDataSchema = z.object({
   waitingItems: z.array(waitingItemSchema).max(20).optional(),
 }).passthrough()
 
+const cardTextPatchOperationSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('replace_once'),
+    find: z.string().min(1).max(100_000).describe('원문에서 정확히 한 번 일치해야 하는 문자열'),
+    replace: z.string().max(100_000).describe('일치 문자열을 대신할 문자열. 삭제하려면 빈 문자열'),
+  }),
+  z.object({
+    type: z.literal('replace_between'),
+    startMarker: z.string().min(1).max(10_000).describe('원문에서 정확히 한 번 일치하는 시작 경계. 결과에 보존됨'),
+    endMarker: z.string().min(1).max(10_000).describe('원문에서 정확히 한 번 일치하며 시작 경계 뒤에 있는 종료 경계. 결과에 보존됨'),
+    replacement: z.string().max(100_000).describe('두 경계 사이를 대신할 문자열'),
+  }),
+  z.object({
+    type: z.literal('append'),
+    text: z.string().min(1).max(100_000).describe('기존 원문 뒤에 추가할 문자열'),
+    separator: z.enum(['none', 'newline', 'blank-line']).default('blank-line').describe('기존 원문과 추가 문자열 사이의 구분자'),
+  }),
+])
+
 const outlineCardSchema = z.object({
   key: outlineKey.describe('문서 안에서 고유한 카드 key'),
   parentKey: outlineKey.optional().describe('상위 카드 key. 루트 카드는 생략'),
@@ -769,6 +796,7 @@ async function main() {
       '진행 과정과 완료 사실은 짧은 summary와 충실한 detail 댓글로 기록하고 재사용할 결과는 sharedKnowledge에도 요약',
       '외부 전달물이나 결정 대기는 waitingItems에 기록하고 카드 제목에는 대기 문구를 추가하지 않음',
       '카드 일부 필드만 변경할 때는 mindnprogress_update_card에 변경할 필드만 전달하고 현재 카드 전체 데이터를 재전송하지 않음',
+      '기존 description 또는 sharedKnowledge 내부만 고칠 때는 조회 결과의 textIntegrity SHA-256과 mindnprogress_patch_card_text를 사용',
     '선택 카드 이외의 관련 카드를 수정하기 전에는 mindnprogress_get_ai_work_states로 다른 AI 작업과의 충돌 여부를 확인',
     '하위 카드의 기존 AI 대화를 이어갈지 새로 시작할지 판단할 때는 mindnprogress_list_ai_conversations로 후보를 먼저 비교하고, 같은 업무 흐름이며 idle이고 실행 환경이 호환되는 대화를 우선 이어감. 목적·모델·작업공간이 다르거나 문맥이 독립되어야 할 때만 새 대화를 선택',
       '지식선만 변경할 때는 전체 문서를 다시 보내지 않고 지식선 전용 도구를 사용',
@@ -1250,7 +1278,7 @@ async function main() {
     return apiRequest(`/api/maps/${encodeURIComponent(mapId)}/ai-delegations${suffix}`, { aiMapId: mapId })
   }, { compactResult: true })
 
-  registerTool(server, 'mindnprogress_get_card', '한 카드의 설명, 공유 지식, 업무 필드와 댓글을 선택적으로 조회합니다. 이미지 카드는 로컬 원본 경로도 반환합니다. get_context의 fallback 카드 또는 간략 개요에서 원문이 필요할 때 사용하세요.', {
+  registerTool(server, 'mindnprogress_get_card', '한 카드의 설명, 공유 지식, 업무 필드와 댓글을 선택적으로 조회합니다. description과 sharedKnowledge의 길이·SHA-256은 textIntegrity로 반환하며 이미지 카드는 로컬 원본 경로도 반환합니다. get_context의 fallback 카드 또는 간략 개요에서 원문이 필요할 때 사용하세요.', {
     mapId: z.string().min(1),
     cardId: z.string().min(1),
     commentOffset: z.number().int().nonnegative().default(0),
@@ -1389,7 +1417,7 @@ async function main() {
     return saveDocument(map, false, resolvedParentCardId ?? '')
   })
 
-  registerTool(server, 'mindnprogress_update_card', '카드의 일부 필드만 부분 병합 방식으로 변경합니다. data에 포함한 필드만 변경되고 일반 카드에서 생략한 필드와 position은 보존되므로 현재 카드 전체 데이터를 재전송하지 마세요. 빈 문자열과 빈 배열은 해당 필드를 명시적으로 초기화합니다. 단, status=done 또는 progress>=100이면 waitingItems가 자동으로 비워지며 Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 최상위 카드와 하위 업무가 있는 일반 isWork=false 묶음 카드의 progress·status는 서버가 다시 계산합니다. description은 업무 요청과 배경, sharedKnowledge는 다른 카드가 재사용할 안정적인 결론에 사용하고 외부 대기는 waitingItems로 기록하세요. responseMode는 full이 기본값이며 연속 작업용 전체 카드 본문과 관계를 반환합니다. 단일 카드와 서버가 함께 조정한 카드만 필요하면 affected를 사용하세요.', {
+  registerTool(server, 'mindnprogress_update_card', '카드의 일부 필드만 부분 병합 방식으로 변경합니다. data에 포함한 필드만 변경되고 일반 카드에서 생략한 필드와 position은 보존되므로 현재 카드 전체 데이터를 재전송하지 마세요. 기존 description 또는 sharedKnowledge 내부의 일부만 고칠 때는 이 도구로 필드 전체를 보내지 말고 mindnprogress_patch_card_text를 사용하세요. 빈 문자열과 빈 배열은 해당 필드를 명시적으로 초기화합니다. 단, status=done 또는 progress>=100이면 waitingItems가 자동으로 비워지며 Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 최상위 카드와 하위 업무가 있는 일반 isWork=false 묶음 카드의 progress·status는 서버가 다시 계산합니다. description은 업무 요청과 배경, sharedKnowledge는 다른 카드가 재사용할 안정적인 결론에 사용하고 외부 대기는 waitingItems로 기록하세요. responseMode는 full이 기본값이며 연속 작업용 전체 카드 본문과 관계를 반환합니다. 단일 카드와 서버가 함께 조정한 카드만 필요하면 affected를 사용하세요.', {
     mapId: z.string().min(1),
     cardId: z.string().min(1).optional().describe('수정할 카드 ID. 새 호출에서는 이 필드를 사용'),
     nodeId: z.string().min(1).optional().describe('기존 대화 호환용 카드 ID. 새 호출에서는 cardId 사용'),
@@ -1458,6 +1486,57 @@ async function main() {
       } : null,
       affectedCards,
       changedFields,
+    }
+  }, { compactResult: true })
+
+  registerTool(server, 'mindnprogress_patch_card_text', '기존 카드의 description 또는 sharedKnowledge 전체를 다시 생성하지 않고 일부만 안전하게 수정합니다. 먼저 mindnprogress_get_card에서 대상 필드의 textIntegrity.sha256을 받아 expectedSha256으로 전달하세요. 해시가 달라졌거나 경계 문자열이 유일하지 않으면 저장하지 않습니다. Ref 카드는 원본 카드를 직접 수정해야 합니다.', {
+    mapId: z.string().min(1),
+    cardId: z.string().min(1),
+    field: z.enum(['description', 'sharedKnowledge']).describe('부분 수정할 텍스트 필드'),
+    expectedSha256: z.string().regex(/^[a-f0-9]{64}$/).describe('mindnprogress_get_card의 card.textIntegrity에서 확인한 현재 필드 SHA-256'),
+    operation: cardTextPatchOperationSchema,
+  }, async ({ mapId, cardId, field, expectedSha256, operation }) => {
+    const { saved, result } = await mutateDocument(mapId, cardId, (map) => {
+      const node = map.nodes.find((item) => item.id === cardId)
+      if (!node) throw new Error(`카드를 찾을 수 없습니다: ${cardId}`)
+      if (node.data?.reference) {
+        throw new Error('TEXT_PATCH_REFERENCE_CARD: Ref 카드는 동기화 대상이므로 원본 카드를 직접 수정해 주세요.')
+      }
+
+      const beforeText = typeof node.data?.[field] === 'string' ? node.data[field] : ''
+      const before = textIntegrity(beforeText)
+      if (before.sha256 !== expectedSha256) {
+        throw new Error(`TEXT_HASH_MISMATCH: 원문이 조회 이후 변경되었습니다. 다시 조회해 최신 해시를 사용하세요. (currentSha256=${before.sha256})`)
+      }
+
+      const nextText = applyCardTextPatch(beforeText, operation)
+      if (nextText === beforeText) {
+        throw new Error('TEXT_PATCH_NO_CHANGE: 부분 수정 결과가 현재 원문과 같습니다.')
+      }
+      if (field === 'sharedKnowledge' && nextText.length > sharedKnowledgeMaxLength) {
+        throw new Error(`TEXT_PATCH_LENGTH_LIMIT: sharedKnowledge는 ${sharedKnowledgeMaxLength.toLocaleString('en-US')}자 이하여야 합니다. (resultLength=${nextText.length})`)
+      }
+      node.data = { ...node.data, [field]: nextText }
+      return { before, nextText }
+    })
+
+    const savedCard = saved.map.nodes.find((item) => item.id === cardId)
+    if (!savedCard) throw new Error('저장 후 카드를 찾을 수 없습니다.')
+    const storedText = typeof savedCard.data?.[field] === 'string' ? savedCard.data[field] : ''
+    if (storedText !== result.nextText) {
+      throw new Error('TEXT_PATCH_VERIFICATION_FAILED: 저장된 텍스트가 계산한 결과와 일치하지 않습니다.')
+    }
+    return {
+      document: saved.summary,
+      card: {
+        id: savedCard.id,
+        label: savedCard.data?.label ?? savedCard.id,
+      },
+      field,
+      operation: operation.type,
+      before: result.before,
+      after: textIntegrity(storedText),
+      verification: { storedMatchesExpected: true },
     }
   }, { compactResult: true })
 

@@ -306,7 +306,7 @@ async function main() {
     await client.connect(transport)
     const listedTools = await client.listTools()
     const registeredToolNames = listedTools.tools.map((tool) => tool.name).sort()
-    assert.equal(registeredToolNames.length, 44, `예상과 다른 MCP 도구 수: ${registeredToolNames.length}`)
+    assert.equal(registeredToolNames.length, 45, `예상과 다른 MCP 도구 수: ${registeredToolNames.length}`)
     const toolSchema = (name) => listedTools.tools.find((tool) => tool.name === name)?.inputSchema
     for (const name of ['mindnprogress_update_card', 'mindnprogress_move_card', 'mindnprogress_delete_card', 'mindnprogress_list_comments', 'mindnprogress_add_comment']) {
       assert.ok(toolSchema(name)?.properties?.cardId, `${name}: cardId 공개 인자가 없습니다.`)
@@ -314,6 +314,9 @@ async function main() {
     }
     assert.deepEqual(toolSchema('mindnprogress_update_card')?.properties?.responseMode?.enum, ['full', 'affected'])
     assert.equal(toolSchema('mindnprogress_update_card')?.properties?.responseMode?.default, 'full')
+    assert.deepEqual(toolSchema('mindnprogress_patch_card_text')?.properties?.field?.enum, ['description', 'sharedKnowledge'])
+    assert.equal(toolSchema('mindnprogress_patch_card_text')?.properties?.expectedSha256?.pattern, '^[a-f0-9]{64}$')
+    assert.ok(toolSchema('mindnprogress_patch_card_text')?.required?.includes('operation'))
     assert.ok(toolSchema('mindnprogress_add_card')?.properties?.parentCardId)
     assert.ok(toolSchema('mindnprogress_move_card')?.properties?.newParentCardId)
     assert.ok(toolSchema('mindnprogress_add_comment')?.properties?.parentCommentId)
@@ -348,7 +351,7 @@ async function main() {
 
     const guide = await invoke('mindnprogress_read_me_first')
     assert.equal(guide.guide.product.name, 'MindNProgress')
-    assert.equal(guide.guide.version, '4.0')
+    assert.equal(guide.guide.version, '4.1')
     assert.match(guide.guide.operationRules.join('\n'), /중지된 위임을 resume하면 같은 AI 대화와 기존 worker lease/)
     assert.match(guide.guide.dataModel.cardContent.sharedKnowledge, /재사용/)
     assert.match(guide.guide.dataModel.workFields.progress, /일반 isWork=false 묶음 카드.*읽기 전용 요약값/)
@@ -356,6 +359,7 @@ async function main() {
     assert.match(guide.guide.authoringRules.join('\n'), /이미지·Ref·Dooray 지식 카드.*자동 집계하지 않음/)
     assert.match(guide.guide.authoringRules.join('\n'), /확정된 결과를 직접 작업 근거.*주요 지식선.*단순 관련성이나 일회성 참조에는 연결하지 않음/)
     assert.match(guide.guide.operationRules.join('\n'), /변경할 필드만 보내고/)
+    assert.match(guide.guide.operationRules.join('\n'), /textIntegrity SHA-256.*mindnprogress_patch_card_text.*필드 전체를 다시 생성하지 않음/)
     assert.match(guide.guide.operationRules.join('\n'), /cardId.*nodeId.*기존 대화 호환용/)
     assert.match(guide.guide.operationRules.join('\n'), /조회 도구는 문서 version을 변경하지 않으며/)
     assert.match(guide.guide.operationRules.join('\n'), /mindnprogress_get_ai_work_states.*동시에 수정하지 않음/)
@@ -476,6 +480,13 @@ async function main() {
       referencedRootResult.card.data.reference,
       { mapId, nodeId: 'branch-b' },
     )
+    await invokeExpectError('mindnprogress_patch_card_text', {
+      mapId: secondaryMapId,
+      cardId: secondaryRootId,
+      field: 'description',
+      expectedSha256: referencedRootResult.card.textIntegrity.description.sha256,
+      operation: { type: 'append', text: '수정 시도' },
+    }, /TEXT_PATCH_REFERENCE_CARD/)
     const referencedDocumentResponse = await fetch(`${apiBaseUrl}/api/maps/${encodeURIComponent(secondaryMapId)}`, {
       headers: { Cookie: sessionCookie },
     })
@@ -484,7 +495,7 @@ async function main() {
     const resolvedReferenceNode = referencedDocument.map.nodes.find((node) => node.id === secondaryRootId)
     assert.equal(resolvedReferenceNode.data.label, '기능 B (ref)')
     assert.equal(resolvedReferenceNode.data.description, '원본에서 변경된 최신 업무 설명')
-    assert.equal(resolvedReferenceNode.data.progress, 65)
+    assert.equal(resolvedReferenceNode.data.progress, 0)
     assert.equal(resolvedReferenceNode.data.status, 'in-progress')
     assert.match(resolvedReferenceNode.data.sharedKnowledge, /현재 선택과 무관한 장문 지식/)
     assert.deepEqual(
@@ -1416,6 +1427,10 @@ async function main() {
     })
     assert.equal(cardDetail.card.id, 'task-a')
     assert.equal(cardDetail.card.position, undefined)
+    assert.equal(cardDetail.card.textIntegrity.description.length, cardDetail.card.data.description.length)
+    assert.match(cardDetail.card.textIntegrity.description.sha256, /^[a-f0-9]{64}$/)
+    assert.equal(cardDetail.card.textIntegrity.sharedKnowledge.length, cardDetail.card.data.sharedKnowledge.length)
+    assert.match(cardDetail.card.textIntegrity.sharedKnowledge.sha256, /^[a-f0-9]{64}$/)
     assert.equal(cardDetail.comments.length, 1)
     assert.ok(cardDetail.commentsPage.total >= 2)
     assert.equal(cardDetail.commentsPage.hasMore, true)
@@ -1549,6 +1564,101 @@ async function main() {
     assert.ok(partialUpdateResult.map.nodes.every((node) => node.data.aiConversations === undefined))
     assert.ok(partialUpdateResult.map.edges.every((edge) => edge.type === undefined && edge.markerEnd === undefined && edge.reconnectable === undefined))
     assert.ok(partialUpdateResult.map.edges.some((edge) => edge.data.relation === 'knowledge' && edge.data.knowledgePolicy === 'inspect-if-insufficient'))
+
+    const patchBase = await invoke('mindnprogress_get_card', { mapId, cardId: addedCard.id })
+    const descriptionPatch = await invoke('mindnprogress_patch_card_text', {
+      mapId,
+      cardId: addedCard.id,
+      field: 'description',
+      expectedSha256: patchBase.card.textIntegrity.description.sha256,
+      operation: { type: 'replace_once', find: '보존', replace: '안전' },
+    })
+    const descriptionPatchCard = await invoke('mindnprogress_get_card', { mapId, cardId: addedCard.id })
+    assert.equal(descriptionPatchCard.card.data.description, '부분 병합 안전 설명')
+    assert.deepEqual(descriptionPatchCard.card.textIntegrity.description, descriptionPatch.after)
+
+    const patchResult = await invoke('mindnprogress_patch_card_text', {
+      mapId,
+      cardId: addedCard.id,
+      field: 'sharedKnowledge',
+      expectedSha256: patchBase.card.textIntegrity.sharedKnowledge.sha256,
+      operation: { type: 'replace_once', find: '부분 수정', replace: '안전 수정' },
+    })
+    assert.equal(patchResult.operation, 'replace_once')
+    assert.deepEqual(patchResult.before, patchBase.card.textIntegrity.sharedKnowledge)
+    assert.notEqual(patchResult.after.sha256, patchResult.before.sha256)
+    assert.equal(patchResult.verification.storedMatchesExpected, true)
+
+    const replacedPatchCard = await invoke('mindnprogress_get_card', { mapId, cardId: addedCard.id })
+    assert.equal(replacedPatchCard.card.data.sharedKnowledge, '공유 지식만 안전 수정')
+    assert.deepEqual(replacedPatchCard.card.textIntegrity.sharedKnowledge, patchResult.after)
+    const versionAfterReplace = replacedPatchCard.document.version
+    await invokeExpectError('mindnprogress_patch_card_text', {
+      mapId,
+      cardId: addedCard.id,
+      field: 'sharedKnowledge',
+      expectedSha256: patchBase.card.textIntegrity.sharedKnowledge.sha256,
+      operation: { type: 'append', text: '추가' },
+    }, /TEXT_HASH_MISMATCH/)
+    const staleHashCard = await invoke('mindnprogress_get_card', { mapId, cardId: addedCard.id })
+    assert.equal(staleHashCard.document.version, versionAfterReplace)
+    assert.equal(staleHashCard.card.data.sharedKnowledge, '공유 지식만 안전 수정')
+
+    const appendedPatch = await invoke('mindnprogress_patch_card_text', {
+      mapId,
+      cardId: addedCard.id,
+      field: 'sharedKnowledge',
+      expectedSha256: staleHashCard.card.textIntegrity.sharedKnowledge.sha256,
+      operation: { type: 'append', text: '반복 반복' },
+    })
+    const appendedPatchCard = await invoke('mindnprogress_get_card', { mapId, cardId: addedCard.id })
+    assert.equal(appendedPatchCard.card.data.sharedKnowledge, '공유 지식만 안전 수정\n\n반복 반복')
+    assert.deepEqual(appendedPatchCard.card.textIntegrity.sharedKnowledge, appendedPatch.after)
+    await invokeExpectError('mindnprogress_patch_card_text', {
+      mapId,
+      cardId: addedCard.id,
+      field: 'sharedKnowledge',
+      expectedSha256: appendedPatch.after.sha256,
+      operation: { type: 'replace_once', find: '반복', replace: '교체' },
+    }, /TEXT_PATCH_MATCH_COUNT.*일치 2개/)
+
+    const structuredPatch = await invoke('mindnprogress_patch_card_text', {
+      mapId,
+      cardId: addedCard.id,
+      field: 'sharedKnowledge',
+      expectedSha256: appendedPatch.after.sha256,
+      operation: {
+        type: 'replace_once',
+        find: appendedPatchCard.card.data.sharedKnowledge,
+        replace: '앞[시작]기존[끝]뒤',
+      },
+    })
+    const betweenPatch = await invoke('mindnprogress_patch_card_text', {
+      mapId,
+      cardId: addedCard.id,
+      field: 'sharedKnowledge',
+      expectedSha256: structuredPatch.after.sha256,
+      operation: {
+        type: 'replace_between',
+        startMarker: '[시작]',
+        endMarker: '[끝]',
+        replacement: '교체',
+      },
+    })
+    const betweenPatchCard = await invoke('mindnprogress_get_card', { mapId, cardId: addedCard.id })
+    assert.equal(betweenPatchCard.card.data.sharedKnowledge, '앞[시작]교체[끝]뒤')
+    assert.deepEqual(betweenPatchCard.card.textIntegrity.sharedKnowledge, betweenPatch.after)
+    const versionBeforeLengthError = betweenPatchCard.document.version
+    await invokeExpectError('mindnprogress_patch_card_text', {
+      mapId,
+      cardId: addedCard.id,
+      field: 'sharedKnowledge',
+      expectedSha256: betweenPatch.after.sha256,
+      operation: { type: 'append', text: '가'.repeat(10_001) },
+    }, /TEXT_PATCH_LENGTH_LIMIT.*10,000자/)
+    const lengthErrorCard = await invoke('mindnprogress_get_card', { mapId, cardId: addedCard.id })
+    assert.equal(lengthErrorCard.document.version, versionBeforeLengthError)
+    assert.equal(lengthErrorCard.card.data.sharedKnowledge, '앞[시작]교체[끝]뒤')
 
     const updatedCardResult = await invoke('mindnprogress_update_card', {
       mapId,
