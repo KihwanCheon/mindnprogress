@@ -113,6 +113,15 @@ export type MindNodeData = {
     id: string
     name: string
   }
+  sharedKnowledgeReview?: {
+    reviewedAt: string
+    reviewedHash: string
+    reviewedBy: {
+      id: string
+      name: string
+    }
+    reviewResult: 'cleaned' | 'accepted-long'
+  }
   progress: number
   status: 'planned' | 'in-progress' | 'done'
   kind: 'root' | 'branch' | 'task' | 'image'

@@ -109,6 +109,7 @@ test('전체 활성 문서의 공유 지식 현황을 원문과 문서 변경 �
     assert.equal(result.audit.summary.cardCount, 3)
     assert.equal(result.audit.summary.cardsWithSharedKnowledge, 1)
     assert.equal(result.audit.summary.actionableCandidateCount, 1)
+    assert.deepEqual(result.audit.summary.reviewStateCounts, { unreviewed: 1, current: 0, stale: 0 })
     assert.equal(result.audit.candidates[0].mapId, mapId)
     assert.equal(result.audit.candidates[0].cardId, 'root-audit')
     assert.equal(result.audit.candidates[0].reviewLevel, 'recommended')
@@ -117,6 +118,38 @@ test('전체 활성 문서의 공유 지식 현황을 원문과 문서 변경 �
     assert.match(result.audit.candidates[0].sha256, /^[a-f0-9]{64}$/)
     assert.equal(JSON.stringify(result).includes(repeatedStatement), false)
     assert.equal(await readFile(mapFile, 'utf8'), beforeAudit)
+
+    const forgedMap = structuredClone(created.map)
+    forgedMap.nodes.find((node) => node.id === 'root-audit').data.sharedKnowledgeReview = {
+      reviewedAt: '2026-08-18T01:02:03.000Z',
+      reviewedHash: 'a'.repeat(64),
+      reviewedBy: { id: 'forged-user', name: '위조 사용자' },
+      reviewResult: 'accepted-long',
+    }
+    const forgedSaveResponse = await fetch(`${baseUrl}/api/maps/${mapId}`, {
+      method: 'PUT',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ map: forgedMap, baseVersion: created.map.version }),
+    })
+    assert.equal(forgedSaveResponse.status, 200)
+    const forgedSave = await forgedSaveResponse.json()
+    assert.equal(forgedSave.map.version, created.map.version)
+    assert.equal(forgedSave.map.nodes.find((node) => node.id === 'root-audit').data.sharedKnowledgeReview, undefined)
+    assert.equal(await readFile(mapFile, 'utf8'), beforeAudit)
+
+    const malformedMap = structuredClone(created.map)
+    malformedMap.nodes.find((node) => node.id === 'root-audit').data.sharedKnowledgeReview = {
+      reviewedAt: '2026-08-18',
+      reviewedHash: 'a'.repeat(64),
+      reviewedBy: { id: 'forged-user', name: '위조 사용자' },
+      reviewResult: 'accepted-long',
+    }
+    const malformedSaveResponse = await fetch(`${baseUrl}/api/maps/${mapId}`, {
+      method: 'PUT',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ map: malformedMap, baseVersion: created.map.version }),
+    })
+    assert.equal(malformedSaveResponse.status, 400)
 
     const filteredResponse = await fetch(`${baseUrl}/api/shared-knowledge/audit?mapId=${mapId}`, { headers })
     assert.equal(filteredResponse.status, 200)

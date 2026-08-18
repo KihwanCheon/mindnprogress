@@ -5,6 +5,7 @@ import {
   buildSharedKnowledgeAudit,
   sharedKnowledgeAuditThresholds,
 } from '../server/lib/sharedKnowledgeAudit.mjs'
+import { sharedKnowledgeSha256 } from '../server/lib/sharedKnowledgeReview.mjs'
 
 test('공유 지식의 구조와 정확히 반복된 문장을 본문 노출 없이 집계한다', () => {
   const text = [
@@ -42,6 +43,14 @@ test('글자 수 임계값에 따라 관심·정리 권장·우선 정리 단계
 test('활성 문서의 공유 지식 카드와 실제 지식선 소비자를 우선순위대로 집계한다', () => {
   const sourceKnowledge = `외부에 노출되면 안 되는 원문\n${'가'.repeat(5_100)}`
   const priorityKnowledge = '나'.repeat(8_100)
+  const reviewedKnowledge = '다'.repeat(8_200)
+  const staleKnowledge = '라'.repeat(5_200)
+  const reviewMetadata = (reviewedHash, reviewResult) => ({
+    reviewedAt: '2026-08-17T00:00:00.000Z',
+    reviewedHash,
+    reviewedBy: { id: 'user-editor', name: '김용민' },
+    reviewResult,
+  })
   const audit = buildSharedKnowledgeAudit([
     {
       id: 'map-a',
@@ -52,6 +61,22 @@ test('활성 문서의 공유 지식 카드와 실제 지식선 소비자를 우
         { id: 'source', data: { label: '공급 카드', kind: 'branch', sharedKnowledge: sourceKnowledge } },
         { id: 'consumer', data: { label: '소비 카드', kind: 'task' } },
         { id: 'reference', data: { label: '참조 카드', sharedKnowledge: priorityKnowledge, reference: { mapId: 'map-b', nodeId: 'root' } } },
+        {
+          id: 'reviewed',
+          data: {
+            label: '검토 완료 카드',
+            sharedKnowledge: reviewedKnowledge,
+            sharedKnowledgeReview: reviewMetadata(sharedKnowledgeSha256(reviewedKnowledge), 'accepted-long'),
+          },
+        },
+        {
+          id: 'stale',
+          data: {
+            label: '검토 후 변경 카드',
+            sharedKnowledge: staleKnowledge,
+            sharedKnowledgeReview: reviewMetadata(sharedKnowledgeSha256('변경 전 지식'), 'cleaned'),
+          },
+        },
       ],
       edges: [
         { source: 'source', target: 'consumer', data: { relation: 'knowledge' } },
@@ -76,13 +101,24 @@ test('활성 문서의 공유 지식 카드와 실제 지식선 소비자를 우
 
   assert.equal(audit.generatedAt, '2026-08-18T01:00:00.000Z')
   assert.equal(audit.summary.documentCount, 2)
-  assert.equal(audit.summary.cardCount, 4)
-  assert.equal(audit.summary.cardsWithSharedKnowledge, 3)
-  assert.equal(audit.summary.actionableCandidateCount, 1)
+  assert.equal(audit.summary.cardCount, 6)
+  assert.equal(audit.summary.cardsWithSharedKnowledge, 5)
+  assert.equal(audit.summary.actionableCandidateCount, 2)
   assert.equal(audit.summary.referenceCardCount, 1)
-  assert.deepEqual(audit.candidates.map((card) => card.cardId), ['source'])
-  assert.equal(audit.candidates[0].consumerCount, 1)
-  assert.deepEqual(audit.candidates[0].consumerCardIds, ['consumer'])
+  assert.deepEqual(audit.summary.reviewStateCounts, { unreviewed: 3, current: 1, stale: 1 })
+  assert.deepEqual(audit.candidates.map((card) => card.cardId), ['stale', 'source'])
+  assert.equal(audit.candidates[1].consumerCount, 1)
+  assert.deepEqual(audit.candidates[1].consumerCardIds, ['consumer'])
+  const reviewedCard = audit.documents[0].cards.find((card) => card.cardId === 'reviewed')
+  assert.equal(reviewedCard.reviewState, 'current')
+  assert.equal(reviewedCard.hasReviewSignals, true)
+  assert.equal(reviewedCard.needsReview, false)
+  assert.equal(reviewedCard.actionable, false)
+  assert.equal(reviewedCard.review.reviewResult, 'accepted-long')
+  const staleCard = audit.documents[0].cards.find((card) => card.cardId === 'stale')
+  assert.equal(staleCard.reviewState, 'stale')
+  assert.equal(staleCard.needsReview, true)
+  assert.equal(staleCard.actionable, true)
   assert.equal(audit.documents[0].cards.find((card) => card.cardId === 'reference').maintenanceMode, 'source-card-only')
   assert.equal(audit.documents[0].cards.find((card) => card.cardId === 'reference').actionable, false)
   assert.equal(JSON.stringify(audit).includes('외부에 노출되면 안 되는 원문'), false)

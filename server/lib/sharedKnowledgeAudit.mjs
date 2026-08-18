@@ -1,4 +1,7 @@
-import { createHash } from 'node:crypto'
+import {
+  sharedKnowledgeReviewState,
+  sharedKnowledgeSha256,
+} from './sharedKnowledgeReview.mjs'
 
 export const sharedKnowledgeAuditThresholds = Object.freeze({
   attentionCharacters: 3_000,
@@ -12,10 +15,6 @@ const reviewLevelRank = {
   attention: 1,
   recommended: 2,
   priority: 3,
-}
-
-function textSha256(text) {
-  return createHash('sha256').update(text, 'utf8').digest('hex')
 }
 
 function nonEmptyLines(text) {
@@ -64,7 +63,7 @@ export function analyzeSharedKnowledgeText(value, thresholds = sharedKnowledgeAu
   return {
     length: text.length,
     utf8Bytes: Buffer.byteLength(text, 'utf8'),
-    sha256: textSha256(text),
+    sha256: sharedKnowledgeSha256(text),
     paragraphCount: trimmed ? text.trim().split(/\r?\n(?:[ \t]*\r?\n)+/).filter((paragraph) => paragraph.trim()).length : 0,
     nonEmptyLineCount: lines.length,
     listItemCount: lines.filter((line) => /^(?:[-*+]\s+|\d+[.)]\s+|\[[ xX]\]\s+)/.test(line)).length,
@@ -94,6 +93,12 @@ function auditDocument(map, thresholds) {
     const sharedKnowledge = typeof node.data?.sharedKnowledge === 'string' ? node.data.sharedKnowledge : ''
     if (!sharedKnowledge.trim()) return []
     const analysis = analyzeSharedKnowledgeText(sharedKnowledge, thresholds)
+    const reviewStatus = sharedKnowledgeReviewState(
+      sharedKnowledge,
+      node.data?.sharedKnowledgeReview,
+      analysis.sha256,
+    )
+    const needsReview = analysis.needsReview && reviewStatus.state !== 'current'
     const isReference = Boolean(node.data?.reference)
     const sharedKnowledgeUpdatedAt = typeof node.data?.sharedKnowledgeUpdatedAt === 'string'
       ? node.data.sharedKnowledgeUpdatedAt
@@ -104,14 +109,18 @@ function auditDocument(map, thresholds) {
       kind: node.data?.kind ?? 'branch',
       isReference,
       maintenanceMode: isReference ? 'source-card-only' : 'direct',
-      actionable: analysis.needsReview && !isReference,
+      ...analysis,
+      hasReviewSignals: analysis.needsReview,
+      needsReview,
+      actionable: needsReview && !isReference,
+      reviewState: reviewStatus.state,
+      review: reviewStatus.review,
       consumerCount: consumersBySource.get(node.id)?.size ?? 0,
       consumerCardIds: [...(consumersBySource.get(node.id) ?? [])],
       lastKnownUpdatedAt: sharedKnowledgeUpdatedAt ?? map.updatedAt ?? null,
       lastKnownUpdatedAtSource: sharedKnowledgeUpdatedAt
         ? 'sharedKnowledge'
         : map.updatedAt ? 'document' : 'unavailable',
-      ...analysis,
     }]
   }).sort((first, second) =>
     reviewLevelRank[second.reviewLevel] - reviewLevelRank[first.reviewLevel]
@@ -160,6 +169,12 @@ export function buildSharedKnowledgeAudit(maps, {
       totalCharacters: cards.reduce((sum, card) => sum + card.length, 0),
       reviewLevelCounts: Object.fromEntries(
         Object.keys(reviewLevelRank).map((level) => [level, cards.filter((card) => card.reviewLevel === level).length]),
+      ),
+      reviewStateCounts: Object.fromEntries(
+        ['unreviewed', 'current', 'stale'].map((state) => [
+          state,
+          cards.filter((card) => card.reviewState === state).length,
+        ]),
       ),
     },
     candidates,

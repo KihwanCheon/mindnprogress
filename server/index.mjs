@@ -76,6 +76,11 @@ import {
 import { localLoopbackRedirectLocation } from './lib/localLoopbackRedirect.mjs'
 import { buildSharedKnowledgeAudit } from './lib/sharedKnowledgeAudit.mjs'
 import {
+  isValidSharedKnowledgeReview,
+  normalizeMapSharedKnowledgeReviews,
+  reconcileSharedKnowledgeReviews,
+} from './lib/sharedKnowledgeReview.mjs'
+import {
   WorkspacePoolIntegrationError,
   WorkspacePoolManager,
   WorkspacePoolUnavailableError,
@@ -714,6 +719,8 @@ function isValidMap(map) {
         && node.data.taskUrl === node.data.externalLink.url))
     && (node.data?.sharedKnowledge === undefined
       || (typeof node.data.sharedKnowledge === 'string' && node.data.sharedKnowledge.length <= 10_000))
+    && (node.data?.sharedKnowledgeReview === undefined
+      || isValidSharedKnowledgeReview(node.data.sharedKnowledgeReview))
     && (node.data?.waitingItems === undefined
       || (Array.isArray(node.data.waitingItems)
         && node.data.waitingItems.length <= 20
@@ -811,7 +818,9 @@ function normalizeMapAiConversations(map) {
 }
 
 function normalizeMapForPersistence(map) {
-  return applyProgressRollup(normalizeMapAiConversations(normalizeMapAssignees(normalizeMapRuntimeState(normalizeMapEdges(map)))))
+  return applyProgressRollup(normalizeMapAiConversations(normalizeMapAssignees(normalizeMapSharedKnowledgeReviews(
+    normalizeMapRuntimeState(normalizeMapEdges(map)),
+  ))))
 }
 
 function normalizeSharedKnowledgeMetadata(existing, map, user, updatedAt) {
@@ -3700,6 +3709,7 @@ const referenceContentKeys = [
   'sharedKnowledge',
   'sharedKnowledgeUpdatedAt',
   'sharedKnowledgeUpdatedBy',
+  'sharedKnowledgeReview',
   'progress',
   'status',
   'taskUrl',
@@ -4180,11 +4190,21 @@ async function readMapRevision(mapId, revisionId) {
   }
 }
 
-async function saveMap(mapId, map, user, title, color, revisionReason = 'edit') {
+async function saveMap(mapId, map, user, title, color, revisionReason = 'edit', {
+  sharedKnowledgeReviewRequests = new Map(),
+} = {}) {
   await mkdir(dataDirectory, { recursive: true })
   const existing = await readMap(mapId)
   const now = new Date().toISOString()
-  const normalizedMap = normalizeSharedKnowledgeMetadata(existing, normalizeMapForPersistence(map), user, now)
+  const normalizedMap = reconcileSharedKnowledgeReviews(
+    existing,
+    normalizeSharedKnowledgeMetadata(existing, normalizeMapForPersistence(map), user, now),
+    {
+      reviewRequests: sharedKnowledgeReviewRequests,
+      reviewer: publicUser(user),
+      reviewedAt: now,
+    },
+  )
   const payload = {
     nodes: normalizedMap.nodes,
     edges: normalizeMapEdges(normalizedMap).edges,
@@ -6936,7 +6956,7 @@ const server = createServer(async (request, response) => {
         if (existing?.trashedAt) return sendJson(response, 409, { error: '휴지통에 있는 문서는 변경할 수 없습니다.' })
         const body = await readJsonBody(request)
         if (!isValidMap(body.map)) return sendJson(response, 400, { error: '올바르지 않은 마인드맵 데이터입니다.' })
-        const normalizedIncomingMap = normalizeMapForPersistence(body.map)
+        const normalizedIncomingMap = reconcileSharedKnowledgeReviews(existing, normalizeMapForPersistence(body.map))
         const baseVersion = Number(body.baseVersion)
         if (existing && Number.isInteger(baseVersion) && baseVersion !== existing.version && body.force !== true) {
           return sendJson(response, 409, {
