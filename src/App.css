@@ -452,7 +452,7 @@
 .shared-knowledge-field textarea:focus { border-color: #5aaa8b; box-shadow: 0 0 0 3px rgba(67, 166, 132, .1); }
 .shared-knowledge-rich-text { min-height: 72px; border-color: #d6e8e0; background: white; }
 .empty-shared-knowledge { padding: 12px 9px; color: #91a59d; border: 1px dashed #cfe2da; border-radius: 8px; background: rgba(255,255,255,.7); font-size: 8px; text-align: center; }
-.text-link { color: #5d50ca; font-weight: 650; text-decoration: underline; text-decoration-color: #c9c3ef; text-underline-offset: 2px; }
+.text-link { color: #5d50ca; font-weight: 650; text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 33%, transparent); text-underline-offset: 2px; }
 .text-link:hover { color: #493bb5; text-decoration-color: currentColor; }
 .dooray-comment-link-icon { display: inline-flex; width: 1em; height: 1em; margin-left: .38em; color: #d97706; vertical-align: -.16em; }
 .dooray-comment-link-icon svg { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 1.35; stroke-linejoin: round; }
@@ -667,16 +667,16 @@
 .comment-item header strong { color: #4f4856; font-size: 8px; }
 .comment-item time { color: #aaa4af; font-size: 6px; white-space: nowrap; }
 .comment-item p { margin: 5px 0 0; color: #625c68; font-size: 9px; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; }
-.comment-item p a { color: #5d50ca; font-weight: 650; text-decoration: underline; text-decoration-color: #c9c3ef; text-underline-offset: 2px; }
+.comment-item p a { color: #5d50ca; font-weight: 650; text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 33%, transparent); text-underline-offset: 2px; }
 .comment-item p a:hover { color: #493bb5; text-decoration-color: currentColor; }
-.comment-detail { margin-top: 7px; }
-.comment-detail > summary { display: flex; align-items: center; gap: 6px; padding: 5px 7px; color: #6d6478; border: 1px solid #e2dee8; border-radius: 6px; background: #f3f1f6; font-size: 7px; font-weight: 750; list-style: none; cursor: pointer; }
-.comment-detail > summary::-webkit-details-marker { display: none; }
-.comment-detail > summary::before { width: 0; height: 0; content: ''; border-top: 4px solid transparent; border-bottom: 4px solid transparent; border-left: 5px solid #8175a1; transition: transform .14s; }
-.comment-detail[open] > summary::before { transform: rotate(90deg); }
-.comment-detail > summary small { margin-left: auto; color: #9d96a7; font-size: 6px; font-weight: 500; }
-.comment-detail > div { margin-top: 5px; padding: 9px; color: #5f5967; border: 1px solid #ddd9e4; border-radius: 7px; background: #f7f6f9; font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; font-size: 9px; line-height: 1.6; overflow-wrap: anywhere; white-space: pre-wrap; }
-.comment-detail > div a { color: #5d50ca; font-weight: 650; text-decoration: underline; text-underline-offset: 2px; }
+.comment-summary.expandable { margin-top: 6px; padding: 6px 7px; border: 1px solid transparent; border-radius: 7px; cursor: pointer; transition: background .14s, border-color .14s; }
+.comment-summary.has-detail { border-color: #e2dee8; background: #f3f1f6; }
+.comment-summary.expandable:hover { border-color: #d5cfe6; background: #efedf6; }
+.comment-summary.expandable:focus-visible { outline: 2px solid #8173df; outline-offset: 1px; }
+.comment-summary.expanded { color: #4f4757; border-color: #cec7eb; background: #eeebfa; }
+.comment-expanded { margin-top: 6px; }
+.comment-detail { padding: 9px; color: #5f5967; border: 1px solid #ddd9e4; border-radius: 7px; background: #f7f6f9; font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; font-size: 9px; line-height: 1.6; overflow-wrap: anywhere; white-space: pre-wrap; }
+.comment-detail a { color: #5d50ca; font-weight: 650; text-decoration: underline; text-underline-offset: 2px; }
 .comment-item > button { padding: 3px; color: #b0aab5; border: 0; border-radius: 5px; background: transparent; cursor: pointer; }
 .comment-item > button:hover { color: #c45b5b; background: #fff0f0; }
 .comment-message { padding: 17px 8px; color: #aaa4af; border: 1px dashed #dfdbe4; border-radius: 8px; font-size: 8px; text-align: center; }
@@ -708,15 +708,17 @@
 .comment-item .comment-body { min-width: 0; }
 .comment-item header > span { min-width: 0; display: flex; align-items: center; gap: 5px; }
 .comment-item header i { padding: 2px 5px; color: #348466; border-radius: 5px; background: #dff3eb; font-size: 6px; font-style: normal; font-weight: 750; }
-.comment-item.resolved p, .comment-item.resolved .comment-detail > div { color: #7f8984; }
+.comment-item.resolved p, .comment-item.resolved .comment-detail { color: #7f8984; }
 .comment-mention { padding: 1px 3px; color: #594bc1; border-radius: 4px; background: #eae6fb; font-weight: 750; }
-.comment-reactions { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; margin-top: 7px; }
-.comment-reactions button { min-height: 21px; display: inline-flex; align-items: center; gap: 3px; padding: 2px 5px; color: #8e8795; border: 1px solid transparent; border-radius: 6px; background: transparent; font-size: 7px; cursor: pointer; }
-.comment-reactions button:hover { border-color: #ddd8eb; background: white; }
-.comment-reactions button.active { color: #594bc1; border-color: #cbc4ee; background: #eeebfb; }
-.comment-reactions button b { font-size: 6px; }
-.comment-reactions .comment-reply, .comment-reactions .comment-resolve { margin-left: 2px; color: #6558c8; font-weight: 700; }
-.comment-reactions .comment-resolve { color: #348466; }
+.comment-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; margin-top: 6px; }
+.comment-actions:first-child { margin-top: 0; }
+.comment-actions button { min-height: 21px; display: inline-flex; align-items: center; gap: 3px; padding: 2px 5px; color: #8e8795; border: 1px solid transparent; border-radius: 6px; background: transparent; font-size: 7px; cursor: pointer; }
+.comment-actions button:hover { border-color: #ddd8eb; background: white; }
+.comment-actions button b { font-size: 6px; }
+.comment-actions .comment-reaction.active { color: #594bc1; border-color: #cbc4ee; background: #eeebfb; }
+.comment-actions .comment-reaction-add { color: #a49dad; font-size: 8px; }
+.comment-actions .comment-reply, .comment-actions .comment-resolve { margin-left: 2px; color: #6558c8; font-weight: 700; }
+.comment-actions .comment-resolve { color: #348466; }
 .comment-item > .comment-delete { padding: 3px; color: #b0aab5; border: 0; border-radius: 5px; background: transparent; cursor: pointer; }
 .comment-item > .comment-delete:hover { color: #c45b5b; background: #fff0f0; }
 .comment-form .reply-target { margin: -1px -1px 6px; padding: 6px 7px; color: #6659c7; border-radius: 6px; background: #ece9fa; font-size: 7px; }

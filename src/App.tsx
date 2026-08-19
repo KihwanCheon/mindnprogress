@@ -1309,12 +1309,33 @@ function CommentCard({ comment, isReply, mode, user, collaborators, readOnly = f
   onResolve: (comment: NodeComment) => void
   onReaction: (comment: NodeComment, emoji: CommentReaction) => void
 }) {
+  const [expanded, setExpanded] = useState(false)
+  const [reactionPickerOpen, setReactionPickerOpen] = useState(false)
   const canResolve = !readOnly && !isReply && (mode === 'editor' || comment.author.id === user.id)
   const canDelete = !readOnly && (mode === 'editor' || comment.author.id === user.id)
   const mentionNames = collaborators.map((collaborator) => collaborator.name)
   const structured = comment.contentFormat === 'summary-detail'
   const summary = structured ? comment.summary ?? comment.text : comment.text
   const detail = structured ? comment.detail?.trim() : ''
+  const detailId = `comment-detail-${comment.id}`
+  const expandable = Boolean(detail) || !readOnly
+  const toggleExpanded = () => {
+    setExpanded((open) => !open)
+    setReactionPickerOpen(false)
+  }
+  const isInteractiveTarget = (target: EventTarget | null) => Boolean((target as HTMLElement | null)?.closest?.('a, button'))
+  const hasSelectionInside = (container: HTMLElement) => {
+    const selection = window.getSelection()
+    return Boolean(selection && !selection.isCollapsed && selection.toString().trim() && container.contains(selection.anchorNode))
+  }
+  const reactedEmojis = COMMENT_REACTIONS.filter((emoji) => (comment.reactions?.[emoji] ?? []).length > 0)
+  const reactionTitle = (emoji: CommentReaction) => {
+    const names = (comment.reactions?.[emoji] ?? [])
+      .map((userId) => collaborators.find((candidate) => candidate.id === userId)?.name)
+      .filter(Boolean)
+      .join(', ')
+    return names || `${emoji} 반응 추가`
+  }
 
   return (
     <article className={`comment-item ${isReply ? 'reply' : ''} ${comment.resolvedAt ? 'resolved' : ''}`}>
@@ -1324,26 +1345,50 @@ function CommentCard({ comment, isReply, mode, user, collaborators, readOnly = f
           <span><strong>{comment.author.name}</strong>{comment.resolvedAt && <i>해결됨</i>}</span>
           <time>{new Date(comment.createdAt).toLocaleString('ko-KR')}</time>
         </header>
-        <p className="comment-summary"><MentionText text={summary} names={mentionNames} /></p>
-        {detail && (
-          <details className="comment-detail">
-            <summary><span>상세 보기</span><small>수행 내용과 검증 결과</small></summary>
-            <div><MentionText text={detail} names={mentionNames} /></div>
-          </details>
+        <p
+          className={`comment-summary ${expandable ? 'expandable' : ''} ${detail ? 'has-detail' : ''} ${expanded ? 'expanded' : ''}`}
+          {...(expandable ? {
+            role: 'button',
+            tabIndex: 0,
+            'aria-expanded': expanded,
+            'aria-controls': detailId,
+            onClick: (event: { target: EventTarget | null; currentTarget: HTMLParagraphElement }) => {
+              if (isInteractiveTarget(event.target) || hasSelectionInside(event.currentTarget)) return
+              toggleExpanded()
+            },
+            onKeyDown: (event: { key: string; target: EventTarget | null; preventDefault: () => void }) => {
+              if (event.key !== 'Enter' && event.key !== ' ') return
+              if (isInteractiveTarget(event.target)) return
+              event.preventDefault()
+              toggleExpanded()
+            },
+          } : {})}
+        >
+          <MentionText text={summary} names={mentionNames} />
+        </p>
+        {expanded && (
+          <div className="comment-expanded" id={detailId}>
+            {detail && <div className="comment-detail"><MentionText text={detail} names={mentionNames} /></div>}
+            {!readOnly && (
+              <div className="comment-actions">
+                {reactedEmojis.map((emoji) => (
+                  <button type="button" className={`comment-reaction ${(comment.reactions?.[emoji] ?? []).includes(user.id) ? 'active' : ''}`} key={emoji} onClick={() => onReaction(comment, emoji)} title={reactionTitle(emoji)}>
+                    <span>{emoji}</span><b>{(comment.reactions?.[emoji] ?? []).length}</b>
+                  </button>
+                ))}
+                {reactionPickerOpen
+                  ? COMMENT_REACTIONS.filter((emoji) => !reactedEmojis.includes(emoji)).map((emoji) => (
+                    <button type="button" className="comment-reaction" key={emoji} onClick={() => { onReaction(comment, emoji); setReactionPickerOpen(false) }} title={`${emoji} 반응 추가`}>
+                      <span>{emoji}</span>
+                    </button>
+                  ))
+                  : <button type="button" className="comment-reaction-add" aria-expanded={false} onClick={() => setReactionPickerOpen(true)} aria-label="반응 추가" title="반응 추가">＋</button>}
+                <button type="button" className="comment-reply" onClick={() => onReply(comment)}>답글</button>
+                {canResolve && <button type="button" className="comment-resolve" onClick={() => onResolve(comment)}>{comment.resolvedAt ? '다시 열기' : '해결'}</button>}
+              </div>
+            )}
+          </div>
         )}
-        {!readOnly && <div className="comment-reactions">
-          {COMMENT_REACTIONS.map((emoji) => {
-            const reactedUsers = comment.reactions?.[emoji] ?? []
-            const names = reactedUsers.map((userId) => collaborators.find((candidate) => candidate.id === userId)?.name).filter(Boolean).join(', ')
-            return (
-              <button className={reactedUsers.includes(user.id) ? 'active' : ''} key={emoji} onClick={() => onReaction(comment, emoji)} title={names || `${emoji} 반응 추가`}>
-                <span>{emoji}</span>{reactedUsers.length > 0 && <b>{reactedUsers.length}</b>}
-              </button>
-            )
-          })}
-          <button className="comment-reply" onClick={() => onReply(comment)}>답글</button>
-          {canResolve && <button className="comment-resolve" onClick={() => onResolve(comment)}>{comment.resolvedAt ? '다시 열기' : '해결'}</button>}
-        </div>}
       </div>
       {canDelete && (
         <button className="comment-delete" onClick={() => onDelete(comment)} aria-label="댓글 삭제" title="댓글 삭제"><Icon name="trash" size={12} /></button>
