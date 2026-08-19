@@ -147,12 +147,16 @@ function isTextTruncated(element: HTMLElement) {
   return textWidth > elementWidth + 0.1
 }
 
-function rootStateOf(nodes: MindMapNode[], edges: MindMapEdge[]) {
+function rootNodeOf(nodes: MindMapNode[], edges: MindMapEdge[]) {
   const hierarchyTargets = new Set(edges.filter(isHierarchyEdge).map((edge) => edge.target))
-  const root = nodes.find((node) => node.data.kind === 'root' && !hierarchyTargets.has(node.id))
+  return nodes.find((node) => node.data.kind === 'root' && !hierarchyTargets.has(node.id))
     ?? nodes.find((node) => node.data.kind === 'root')
     ?? nodes.find((node) => !hierarchyTargets.has(node.id))
     ?? nodes[0]
+}
+
+function rootStateOf(nodes: MindMapNode[], edges: MindMapEdge[]) {
+  const root = rootNodeOf(nodes, edges)
   const progress = Number(root?.data.progress)
   return {
     progress: Number.isFinite(progress) ? Math.round(Math.max(0, Math.min(100, progress))) : null,
@@ -2403,16 +2407,26 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const visibleFlowNodeIds = useMemo(() => new Set(flowNodes.filter((node) => !node.hidden).map((node) => node.id)), [flowNodes])
   const visibleFlowNodeIdsKey = useMemo(() => [...visibleFlowNodeIds].sort().join('\u0000'), [visibleFlowNodeIds])
   const flowEdges = useMemo(() => {
+    const rootNodeId = rootNodeOf(nodes, edges)?.id
+    const highlightSelectedId = selectedId && selectedId !== rootNodeId ? selectedId : null
     const pairKey = (edge: MindMapEdge) => JSON.stringify([edge.source, edge.target])
     const hierarchyPairs = new Set(edges.filter(isHierarchyEdge).map(pairKey))
     const nodesById = new Map(nodes.map((node) => [node.id, node]))
     return edges.map((edge) => {
       const hidden = !visibleFlowNodeIds.has(edge.source) || !visibleFlowNodeIds.has(edge.target)
       const sourceNode = nodesById.get(edge.source)
+      // 선택한 카드에 닿는 연결선만 강조하고 나머지는 흐리게 해 밀집 구간에서 구분한다.
+      // 최상위 카드는 문서 전체를 대표하므로 강조하지 않고 평소 표시를 유지한다.
+      const selectionState = highlightSelectedId
+        ? (edge.source === highlightSelectedId || edge.target === highlightSelectedId ? 'edge-linked' : 'edge-dimmed')
+        : ''
       if (!isKnowledgeEdge(edge)) return {
         ...edge,
         sourceHandle: sourceNode?.data.kind === 'image' ? 'image-source-right' : edge.sourceHandle,
         hidden,
+        className: [edge.className, selectionState].filter(Boolean).join(' ') || undefined,
+        // 지식선과 같은 방식으로 인라인 지정해 테마별 CSS 우선순위에 좌우되지 않게 한다.
+        style: selectionState === 'edge-linked' ? { ...edge.style, strokeWidth: 2.6 } : edge.style,
       }
       const primary = knowledgePolicyOf(edge) === 'reuse-first'
       const targetNode = nodesById.get(edge.target)
@@ -2432,17 +2446,17 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
           ...edge.data,
           parallelOffset: hierarchyPairs.has(pairKey(edge)) ? 18 : undefined,
         },
-        className: `knowledge-edge ${primary ? 'reuse-first' : 'inspect-if-insufficient'}`,
+        className: `knowledge-edge ${primary ? 'reuse-first' : 'inspect-if-insufficient'} ${selectionState}`.trim(),
         label: primary ? '주요 지식' : '부족할 때 확인',
         labelStyle: { fill: primary ? 'var(--theme-knowledge-primary-text)' : 'var(--theme-knowledge-fallback-text)', fontSize: 9, fontWeight: 700 },
         labelBgStyle: { fill: primary ? 'var(--theme-knowledge-primary-bg)' : 'var(--theme-knowledge-fallback-bg)', fillOpacity: .96 },
         labelBgPadding: [5, 3] as [number, number],
         labelBgBorderRadius: 5,
-        style: { stroke: primary ? 'var(--theme-knowledge-primary)' : 'var(--theme-knowledge-fallback)', strokeWidth: 2.2, strokeDasharray: primary ? undefined : '6 5' },
+        style: { stroke: primary ? 'var(--theme-knowledge-primary)' : 'var(--theme-knowledge-fallback)', strokeWidth: selectionState === 'edge-linked' ? 2.6 : 2.2, strokeDasharray: primary ? undefined : '6 5' },
         markerEnd: { type: MarkerType.ArrowClosed, width: 18, height: 18, color: primary ? 'var(--theme-knowledge-primary)' : 'var(--theme-knowledge-fallback)' },
       }
     })
-  }, [edges, nodes, visibleFlowNodeIds])
+  }, [edges, nodes, selectedId, visibleFlowNodeIds])
 
   useLayoutEffect(() => {
     if (viewMode !== 'mindmap' || loadedMapId !== activeMapId || !visibleFlowNodeIdsKey) return

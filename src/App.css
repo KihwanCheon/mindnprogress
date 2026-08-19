@@ -320,6 +320,8 @@
 .canvas-wrap .react-flow__edge.selected .react-flow__edge-path { stroke: #6b5bd7; }
 .canvas-wrap .react-flow__edge.knowledge-edge.selected .react-flow__edge-path { filter: drop-shadow(0 0 3px rgba(67,166,132,.42)); }
 .canvas-wrap .react-flow__edge.knowledge-edge.inspect-if-insufficient.selected .react-flow__edge-path { filter: drop-shadow(0 0 3px rgba(213,154,58,.42)); }
+.canvas-wrap .react-flow__edge { transition: opacity .16s ease; }
+.canvas-wrap .react-flow__edge.edge-dimmed { opacity: .18; }
 .canvas-toolbar { display: flex; align-items: center; gap: 3px; padding: 5px; margin: 15px !important; border: 1px solid #e3e0e9; border-radius: 10px; background: rgba(255, 255, 255, .94); box-shadow: 0 8px 24px rgba(54, 45, 85, .09); }
 .canvas-toolbar button { height: 30px; display: flex; align-items: center; justify-content: center; gap: 6px; padding: 0 8px; color: #777180; border: 0; border-radius: 7px; background: transparent; font-size: 10px; font-weight: 650; cursor: pointer; }
 .canvas-toolbar button:hover:not(:disabled) { color: #5448c3; background: #f0eefb; }
