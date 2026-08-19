@@ -1065,6 +1065,13 @@
   background: var(--theme-danger-soft);
 }
 
+@media (hover: hover) and (pointer: fine) {
+  [data-theme="dark"] .node-blocked:hover {
+    border-color: #8a4a52;
+    background: #4a262c;
+  }
+}
+
 [data-theme="dark"] .node-waiting {
   color: #9cc7ff;
   border-color: #355a84;

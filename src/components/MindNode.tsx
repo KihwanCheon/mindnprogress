@@ -44,6 +44,10 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
     item.note,
     item.resumeCondition ? `재개 조건: ${item.resumeCondition}` : '',
   ].filter(Boolean).join(' · ')).join('\n')
+  const blockedLabels = (data.blockedByLabels ?? []).filter((label) => label.trim())
+  const blockedTitle = blockedLabels.length > 0
+    ? `완료되지 않은 선행 업무\n${blockedLabels.map((label) => `· ${label}`).join('\n')}`
+    : `완료되지 않은 선행 업무 ${data.unresolvedDependencyCount ?? 0}건`
   const isOverdue = Boolean(data.dueDate && !isCompleted && new Date(`${data.dueDate}T23:59:59`) < new Date())
   const formattedDueDate = data.dueDate
     ? data.dueDate.split('-').slice(1).map(Number).join('.')
@@ -146,7 +150,17 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
           {data.isWork && assignee && <AssigneeTooltip name={assignee.name} className={`node-assignee ${assignee.color}`}>{assignee.initials}</AssigneeTooltip>}
           <AiConversationRuntimeBadge runtime={data.aiConversationRuntime} />
           {data.isWork && data.dueDate && <span className={`node-due ${isOverdue ? 'overdue' : ''}`}>~ {formattedDueDate}</span>}
-          {data.isWork && Boolean(data.unresolvedDependencyCount) && <span className="node-blocked">차단 {data.unresolvedDependencyCount}</span>}
+          {data.isWork && Boolean(data.unresolvedDependencyCount) && (
+            <button
+              type="button"
+              className="node-blocked nodrag nopan"
+              title={`${blockedTitle}\n차단 세부 정보 열기`}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={() => data.onOpenDependencies?.()}
+            >
+              차단 {data.unresolvedDependencyCount}
+            </button>
+          )}
           {data.isWork && checklist.length > 0 && <span className="node-checklist">✓ {completedItems}/{checklist.length}</span>}
         </div>
       )}

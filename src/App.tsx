@@ -256,6 +256,11 @@ function createClientId() {
 
 const CLIENT_ID = sessionStorage.getItem(CLIENT_ID_KEY) ?? createClientId()
 const COMMENT_REACTIONS = ['👍', '❤️', '🎉', '👀'] as const
+
+// 카드 위 컨트롤이지만 눌러서 맵을 끌 수 있어야 하는 요소.
+// 새 컨트롤을 카드에 추가하면 필요 시 여기에 클래스를 등록한다.
+const PAN_ALLOWED_NODE_CONTROLS = ['node-collapse-toggle', 'node-source-open', 'node-waiting', 'node-blocked']
+const PAN_ALLOWED_NODE_CONTROL_SELECTOR = PAN_ALLOWED_NODE_CONTROLS.map((name) => `.${name}`).join(', ')
 sessionStorage.setItem(CLIENT_ID_KEY, CLIENT_ID)
 
 type DocumentColorId = typeof DOCUMENT_COLORS[number]['id']
@@ -1865,6 +1870,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const effectiveSidebarWidth = Math.max(sidebarMinWidth, sidebarWidth)
   const skipChecklistCommit = useRef(false)
   const waitingBlockRef = useRef<HTMLDivElement | null>(null)
+  const dependencyBlockRef = useRef<HTMLDivElement | null>(null)
   const canvasWrapRef = useRef<HTMLElement | null>(null)
   const sidebarResizeStart = useRef({ pointerX: 0, width: 226 })
   const inspectorResizeStart = useRef({ pointerX: 0, width: 278 })
@@ -2116,6 +2122,15 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     })
   }, [])
 
+  const openDependencies = useCallback((nodeId: string) => {
+    setSelectedId(nodeId)
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        dependencyBlockRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      })
+    })
+  }, [])
+
   const activeDocument = documents.find((document) => document.id === activeMapId) ?? null
   const activeRootState = useMemo(() => rootStateOf(nodes, edges), [edges, nodes])
   const teamMembers = useMemo<TeamMember[]>(() => assigneeUsers.map((assignee) => ({
@@ -2252,6 +2267,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       ? node.data.externalLink
       : undefined
     const progressRollup = progressRollups.get(node.id)
+    const blocking = blockingNodes(node, nodes)
     const applyImageResize = image ? (resize: ResizeSnapRequest) => {
       const resized = resize.snapAxis
         ? snapAspectResizeToGrid(resize, {
@@ -2356,7 +2372,8 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
           })
         } : undefined,
         assignee: teamMembers.find((member) => member.id === node.data.assigneeId),
-        unresolvedDependencyCount: blockingNodes(node, nodes).length,
+        unresolvedDependencyCount: blocking.length,
+        blockedByLabels: blocking.map((candidate) => candidate.data.label),
         commentCount: (node.data.reference ? referenceCommentStats[node.id] : commentStats[node.id])?.total ?? 0,
         unresolvedCommentCount: (node.data.reference ? referenceCommentStats[node.id] : commentStats[node.id])?.unresolved ?? 0,
         aiConversationRuntime: aiConversationRuntimes[node.id],
@@ -2370,6 +2387,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
           return next
         }),
         onOpenWaitingItems: () => openWaitingItems(node.id),
+        onOpenDependencies: () => openDependencies(node.id),
       },
       className: [
         node.className,
@@ -2381,7 +2399,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         filterActive && filterVisibleNodeIds.has(node.id) && !filterMatchedNodeIds.has(node.id) ? 'filter-context' : '',
       ].filter(Boolean).join(' '),
     }
-  }), [activeMapId, aiConversationRuntimes, beginHistoryTransaction, collapsedHiddenNodeIds, collapsedNodeIds, collapsibleNodeIds, commentStats, descendantCounts, dropTargetId, endHistoryTransaction, filterActive, filterMatchedNodeIds, filterVisibleNodeIds, hoveredKnowledgeConnectionIssue, knowledgeConnection, knowledgeConnectionTargetId, mode, nodes, normalizedNodeSearch, openWaitingItems, progressRollups, referenceCommentStats, searchContextNodeIds, searchMatchedNodeIds, setNodes, teamMembers])
+  }), [activeMapId, aiConversationRuntimes, beginHistoryTransaction, collapsedHiddenNodeIds, collapsedNodeIds, collapsibleNodeIds, commentStats, descendantCounts, dropTargetId, endHistoryTransaction, filterActive, filterMatchedNodeIds, filterVisibleNodeIds, hoveredKnowledgeConnectionIssue, knowledgeConnection, knowledgeConnectionTargetId, mode, nodes, normalizedNodeSearch, openDependencies, openWaitingItems, progressRollups, referenceCommentStats, searchContextNodeIds, searchMatchedNodeIds, setNodes, teamMembers])
   const visibleFlowNodeIds = useMemo(() => new Set(flowNodes.filter((node) => !node.hidden).map((node) => node.id)), [flowNodes])
   const visibleFlowNodeIdsKey = useMemo(() => [...visibleFlowNodeIds].sort().join('\u0000'), [visibleFlowNodeIds])
   const flowEdges = useMemo(() => {
@@ -3765,9 +3783,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     if (!nodeTarget && !edgeTarget) return
     const interactiveTarget = target.closest('button, input, textarea, select, a, [contenteditable="true"]')
     if (interactiveTarget
-      && !interactiveTarget.classList.contains('node-collapse-toggle')
-      && !interactiveTarget.classList.contains('node-source-open')
-      && !interactiveTarget.classList.contains('node-waiting')) return
+      && !PAN_ALLOWED_NODE_CONTROLS.some((name) => interactiveTarget.classList.contains(name))) return
     event.preventDefault()
     event.stopPropagation()
     setNodeContextMenu(null)
@@ -3909,7 +3925,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     if (!(target instanceof Element)) return
     const panTarget = target.closest('.react-flow__node, .react-flow__edge, .react-flow__edge-textwrapper')
     if (!panTarget) return
-    const allowedControl = target.closest('.node-collapse-toggle, .node-source-open, .node-waiting')
+    const allowedControl = target.closest(PAN_ALLOWED_NODE_CONTROL_SELECTOR)
     const blockedTarget = target.closest('button, a, input, textarea, select, [contenteditable="true"], .nodrag, .react-flow__handle, .react-flow__resize-control')
     if (blockedTarget && !allowedControl) return
 
@@ -4101,6 +4117,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
           reference: pasteMode === 'reference' ? originalReference : pasteMode === 'clone' ? undefined : copiedData.reference,
           blockedBy: remappedBlockedBy.length > 0 ? remappedBlockedBy : undefined,
           unresolvedDependencyCount: undefined,
+          blockedByLabels: undefined,
           checklist: copiedData.checklist?.map((checklistItem, checklistIndex) => ({
             ...checklistItem,
             id: `check-${timestamp}-${nodeIndex}-${checklistIndex}`,
@@ -6868,7 +6885,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                         />
                       </label>
 
-                      <div className="dependency-block">
+                      <div className="dependency-block" ref={dependencyBlockRef}>
                         <div className="dependency-heading">
                           <span>업무 의존성</span>
                           <strong className={selectedBlockingIds.size > 0 ? 'blocked' : ''}>{selectedBlockingIds.size > 0 ? `차단됨 ${selectedBlockingIds.size}` : '진행 가능'}</strong>

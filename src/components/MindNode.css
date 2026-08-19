@@ -70,7 +70,11 @@
 .node-due { white-space: nowrap; }
 .node-due.overdue { color: #d25c5c; font-weight: 700; }
 .mind-node.root .node-due.overdue { color: #ffd1d1; }
-.node-blocked { margin-left: auto; padding: 2px 5px; color: #b34848; border: 1px solid #f0cccc; border-radius: 5px; background: #fff0f0; font-size: 7px; font-weight: 750; white-space: nowrap; }
+.node-blocked { margin-left: auto; padding: 2px 5px; color: #b34848; border: 1px solid #f0cccc; border-radius: 5px; outline: 0; background: #fff0f0; font-family: inherit; font-size: 7px; font-weight: 750; white-space: nowrap; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.node-blocked:focus-visible { box-shadow: 0 0 0 3px rgba(179,72,72,.22); }
+@media (hover: hover) and (pointer: fine) {
+  .node-blocked:hover { border-color: #dfa2a2; background: #ffe4e4; }
+}
 .mind-node.root .node-blocked { color: white; border-color: rgba(255,255,255,.24); background: rgba(255,255,255,.13); }
 .node-waiting { max-width: calc(100% - 24px); position: absolute; top: -33px; left: 12px; z-index: 5; display: flex; padding: 3px 8px; color: #315f9b; border: 1px solid #b9d2f2; border-radius: 8px; outline: 0; background: #eef6ff; box-shadow: 0 4px 10px rgba(47,91,145,.14); font-size: 10px; font-weight: 750; line-height: 1.35; text-align: left; white-space: nowrap; cursor: pointer; }
 .node-waiting:hover { border-color: #8db6e8; background: #e4f0ff; }

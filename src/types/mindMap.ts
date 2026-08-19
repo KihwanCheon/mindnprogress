@@ -149,6 +149,7 @@ export type MindNodeData = {
   blockedBy?: string[]
   waitingItems?: WaitingItem[]
   unresolvedDependencyCount?: number
+  blockedByLabels?: string[]
   commentCount?: number
   unresolvedCommentCount?: number
   progressRollupTargetCount?: number
@@ -158,4 +159,5 @@ export type MindNodeData = {
   aiConversationRuntime?: AiConversationRuntime
   onToggleCollapse?: () => void
   onOpenWaitingItems?: () => void
+  onOpenDependencies?: () => void
 }
