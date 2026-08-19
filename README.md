@@ -379,6 +379,17 @@ AionUi에 다음 로컬 MCP 서버를 등록하고 활성화합니다.
 
 Windows Git 일괄 설치본은 AionUi Dev 최초 실행 bootstrap에서 이 항목을 자동 등록하고 활성화하므로 수동 등록이 필요하지 않습니다. 다른 방식으로 직접 실행하는 환경에서는 위 값을 수동으로 등록합니다.
 
+Codex에서 AionUi 또는 Claude와 동시에 사용하려면 Codex 쪽에는 전용 진입점을 등록합니다.
+
+```text
+이름: MindNProgress-Codex
+전송 방식: stdio
+명령: node
+인수: <MindNProgress 저장소 경로>\mcp\server-codex.mjs
+```
+
+`server-codex.mjs`는 공용 `server.mjs`를 별도 stdio 프로세스로 실행합니다. 따라서 도구 구현과 데이터는 동일하게 사용하면서도 AionUi·Claude의 MCP 세션과 Codex 세션은 서로 독립적으로 연결됩니다.
+
 MCP는 데이터 폴더의 `_integration-token`을 사용해 로컬 API와 통신합니다. 이 토큰은 자동 생성되며 Git에 포함되지 않습니다. 비밀번호 변경 MCP 도구는 제공하지 않습니다.
 
 AI가 MindNProgress 밖에서 시작되었다면 먼저 `mindnprogress_read_me_first`를 호출해 제품 개념과 작업 규칙을 확인할 수 있습니다. 카드에서 시작된 대화는 `mindnprogress_get_context`를 한 번 성공적으로 호출해 대화 귀속, 제품 규칙과 호출 시점의 시작 문맥을 확인합니다. 이후 최신 상태는 `get_context` 반복 호출이 아니라 대상별 조회 도구로 갱신합니다. 카드 원문은 `mindnprogress_get_card`, 문서 구조와 버전은 `mindnprogress_get_document`, 그룹 기준과 승인 범위는 `mindnprogress_get_group_context`를 사용합니다. 버전이나 본문 SHA-256이 달라 저장이 거부되면 충돌한 대상만 다시 조회해 작업을 재평가합니다. 기본 `focused` 모드는 선택 카드와 주요 선행 지식 원문 및 문서 개요를 반환하고, 전체 원문이 필요한 경우 `detailLevel=full`을 사용할 수 있습니다. 오래된 댓글까지 필요하면 페이지 방식의 `mindnprogress_list_comments`를 사용합니다. 댓글 조회는 기본적으로 요약과 상세 존재 여부를 반환하며, 작업 근거나 검증 내용이 더 필요할 때 `includeDetail=true`를 사용합니다. 여러 카드로 구성된 새 문서는 `mindnprogress_create_mindmap`으로 한 번에 생성하는 것이 권장됩니다. 외부 전달물이나 결정 때문에 업무가 멈춘 경우 제목을 변경하지 않고 카드의 `waitingItems`에 자유 입력 항목을 추가하며, 대기 등록과 해제는 각각 `[차단]`, `[진행]` 댓글로 기록합니다.
