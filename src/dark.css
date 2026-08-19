@@ -704,11 +704,20 @@
   background: var(--theme-surface-soft);
 }
 
-[data-theme="dark"] .comment-summary.expandable:hover,
-[data-theme="dark"] .comment-summary.expanded {
+@media (hover: hover) and (pointer: fine) {
+  [data-theme="dark"] .comment-summary.expandable:hover {
+    color: var(--theme-text);
+    border-color: #4d476c;
+    background: var(--theme-surface-hover);
+  }
+}
+
+[data-theme="dark"] .comment-summary.expandable.expanded,
+[data-theme="dark"] .comment-summary.expandable.expanded:hover {
   color: var(--theme-text);
-  border-color: #4d476c;
+  border-color: var(--theme-accent);
   background: var(--theme-accent-soft);
+  box-shadow: inset 3px 0 0 var(--theme-accent);
 }
 
 [data-theme="dark"] .comment-form label > span {
@@ -722,16 +731,27 @@
   background: #18171f !important;
 }
 
-[data-theme="dark"] .comment-form .comment-detail-toggle:hover {
-  color: var(--theme-accent);
+[data-theme="dark"] .comment-reply-form {
   border-color: #4d476c;
   background: var(--theme-accent-soft);
 }
 
-[data-theme="dark"] .comment-actions button:hover,
 [data-theme="dark"] .comment-actions .comment-reaction.active {
   border-color: #4d476c;
   background: var(--theme-accent-soft);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  [data-theme="dark"] .comment-form .comment-detail-toggle:hover {
+    color: var(--theme-accent);
+    border-color: #4d476c;
+    background: var(--theme-accent-soft);
+  }
+
+  [data-theme="dark"] .comment-actions button:hover {
+    border-color: #4d476c;
+    background: var(--theme-accent-soft);
+  }
 }
 
 [data-theme="dark"] .check-toggle,

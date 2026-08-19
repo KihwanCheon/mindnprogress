@@ -669,19 +669,26 @@
 .comment-item p { margin: 5px 0 0; color: #625c68; font-size: 9px; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; }
 .comment-item p a { color: #5d50ca; font-weight: 650; text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 33%, transparent); text-underline-offset: 2px; }
 .comment-item p a:hover { color: #493bb5; text-decoration-color: currentColor; }
-.comment-summary.expandable { margin-top: 6px; padding: 6px 7px; border: 1px solid transparent; border-radius: 7px; cursor: pointer; transition: background .14s, border-color .14s; }
+.comment-summary.expandable { margin-top: 6px; padding: 6px 7px; border: 1px solid transparent; border-radius: 7px; cursor: pointer; transition: background .14s, border-color .14s; -webkit-tap-highlight-color: transparent; }
 .comment-summary.has-detail { border-color: #e2dee8; background: #f3f1f6; }
-.comment-summary.expandable:hover { border-color: #d5cfe6; background: #efedf6; }
+@media (hover: hover) and (pointer: fine) {
+  .comment-summary.expandable:hover { border-color: #ded9e8; background: #f4f2f7; }
+}
 .comment-summary.expandable:focus-visible { outline: 2px solid #8173df; outline-offset: 1px; }
-.comment-summary.expanded { color: #4f4757; border-color: #cec7eb; background: #eeebfa; }
+.comment-summary.expandable.expanded,
+.comment-summary.expandable.expanded:hover { color: #453e52; border-color: #a99ee0; background: #e9e4fb; box-shadow: inset 3px 0 0 #7563d8; }
 .comment-expanded { margin-top: 6px; }
 .comment-detail { padding: 9px; color: #5f5967; border: 1px solid #ddd9e4; border-radius: 7px; background: #f7f6f9; font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; font-size: 9px; line-height: 1.6; overflow-wrap: anywhere; white-space: pre-wrap; }
 .comment-detail a { color: #5d50ca; font-weight: 650; text-decoration: underline; text-underline-offset: 2px; }
 .comment-item > button { padding: 3px; color: #b0aab5; border: 0; border-radius: 5px; background: transparent; cursor: pointer; }
-.comment-item > button:hover { color: #c45b5b; background: #fff0f0; }
+@media (hover: hover) and (pointer: fine) {
+  .comment-item > button:hover { color: #c45b5b; background: #fff0f0; }
+}
 .comment-message { padding: 17px 8px; color: #aaa4af; border: 1px dashed #dfdbe4; border-radius: 8px; font-size: 8px; text-align: center; }
 .comment-error { margin-top: 7px; color: #c45555; font-size: 8px; }
 .comment-form { margin-top: 8px; padding: 8px; border: 1px solid #dfdbe6; border-radius: 9px; background: #faf9fc; }
+.comment-reply-form { margin: 6px 0 2px 18px; border-color: #cfc8ea; background: #f6f4fc; }
+.comment-reply-form .comment-error { margin-top: 6px; }
 .comment-form textarea { min-height: 62px; padding: 6px !important; border: 0 !important; background: transparent !important; box-shadow: none !important; font-size: 9px !important; }
 .comment-form label { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 4px 8px; }
 .comment-form label > span { color: #716979; font-size: 7px; font-weight: 750; }
@@ -695,7 +702,9 @@
 .comment-form button { display: flex; align-items: center; gap: 4px; padding: 6px 8px; color: white; border: 0; border-radius: 6px; background: #6657d9; font-size: 8px; font-weight: 700; cursor: pointer; }
 .comment-form .comment-detail-toggle { width: 100%; justify-content: space-between; margin-top: 5px; padding: 6px 7px; color: #6c6278; border: 1px solid #e0dce6; background: #f3f1f6; transform: translateY(-8px); }
 .comment-form .comment-detail-toggle.open + .comment-detail-editor { transform: translateY(-8px); }
-.comment-form .comment-detail-toggle:hover { color: #5b4fc2; border-color: #cec7eb; background: #eeebfa; }
+@media (hover: hover) and (pointer: fine) {
+  .comment-form .comment-detail-toggle:hover { color: #5b4fc2; border-color: #cec7eb; background: #eeebfa; }
+}
 .comment-form .comment-detail-toggle .icon { transition: transform .14s; }
 .comment-form .comment-detail-toggle.open .icon { transform: rotate(180deg); }
 .comment-form button:disabled { opacity: .4; cursor: default; }
@@ -713,21 +722,27 @@
 .comment-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; margin-top: 6px; }
 .comment-actions:first-child { margin-top: 0; }
 .comment-actions button { min-height: 21px; display: inline-flex; align-items: center; gap: 3px; padding: 2px 5px; color: #8e8795; border: 1px solid transparent; border-radius: 6px; background: transparent; font-size: 7px; cursor: pointer; }
-.comment-actions button:hover { border-color: #ddd8eb; background: white; }
+@media (hover: hover) and (pointer: fine) {
+  .comment-actions button:hover { border-color: #ddd8eb; background: white; }
+}
 .comment-actions button b { font-size: 6px; }
 .comment-actions .comment-reaction.active { color: #594bc1; border-color: #cbc4ee; background: #eeebfb; }
 .comment-actions .comment-reaction-add { color: #a49dad; font-size: 8px; }
 .comment-actions .comment-reply, .comment-actions .comment-resolve { margin-left: 2px; color: #6558c8; font-weight: 700; }
 .comment-actions .comment-resolve { color: #348466; }
 .comment-item > .comment-delete { padding: 3px; color: #b0aab5; border: 0; border-radius: 5px; background: transparent; cursor: pointer; }
-.comment-item > .comment-delete:hover { color: #c45b5b; background: #fff0f0; }
+@media (hover: hover) and (pointer: fine) {
+  .comment-item > .comment-delete:hover { color: #c45b5b; background: #fff0f0; }
+}
 .comment-form .reply-target { margin: -1px -1px 6px; padding: 6px 7px; color: #6659c7; border-radius: 6px; background: #ece9fa; font-size: 7px; }
 .comment-form .reply-target span { min-width: 0; }
 .comment-form .reply-target button { padding: 2px; color: #776bc7; background: transparent; box-shadow: none; }
 .comment-form .mention-tools { justify-content: flex-start; flex-wrap: wrap; margin-top: 2px; }
 .comment-form .mention-tools > span { color: #aaa4af; font-size: 6px; }
 .comment-form .mention-tools button { padding: 3px 5px; color: #6255c2; border: 1px solid #ddd8f2; border-radius: 5px; background: #f1eefc; font-size: 6px; box-shadow: none; }
-.comment-form .mention-tools button:hover { background: #e9e5fa; }
+@media (hover: hover) and (pointer: fine) {
+  .comment-form .mention-tools button:hover { background: #e9e5fa; }
+}
 .meta-card { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 11px; margin-top: 24px; padding: 13px; border: 1px solid #ece9f0; border-radius: 9px; background: #faf9fc; }
 .meta-card > span { color: #9b95a2; font-size: 9px; }
 .meta-card > strong { display: flex; align-items: center; gap: 5px; color: #5f5966; font-size: 9px; font-weight: 650; }

@@ -6733,7 +6733,6 @@ const server = createServer(async (request, response) => {
       const comments = await listComments(mapId)
       const target = comments.find((item) => item.id === commentId)
       if (!target) return sendJson(response, 404, { error: '댓글을 찾을 수 없습니다.' })
-      if (target.parentId) return sendJson(response, 400, { error: '답글이 아닌 댓글 스레드에서 해결 상태를 변경해 주세요.' })
       if (!canEdit(user) && target.author.id !== user.id) {
         return sendJson(response, 403, { error: '댓글 작성자 또는 편집자만 해결 상태를 변경할 수 있습니다.' })
       }

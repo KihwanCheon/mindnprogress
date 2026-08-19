@@ -1302,7 +1302,7 @@ function CommentCard({ comment, isReply, mode, user, collaborators, readOnly = f
 }) {
   const [expanded, setExpanded] = useState(false)
   const [reactionPickerOpen, setReactionPickerOpen] = useState(false)
-  const canResolve = !readOnly && !isReply && (mode === 'editor' || comment.author.id === user.id)
+  const canResolve = !readOnly && (mode === 'editor' || comment.author.id === user.id)
   const canDelete = !readOnly && (mode === 'editor' || comment.author.id === user.id)
   const mentionNames = collaborators.map((collaborator) => collaborator.name)
   const structured = comment.contentFormat === 'summary-detail'
@@ -1803,6 +1803,11 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const [newCommentDetail, setNewCommentDetail] = useState('')
   const [commentDetailOpen, setCommentDetailOpen] = useState(false)
   const [replyTarget, setReplyTarget] = useState<NodeComment | null>(null)
+  const [replySummary, setReplySummary] = useState('')
+  const [replyDetail, setReplyDetail] = useState('')
+  const [replyDetailOpen, setReplyDetailOpen] = useState(false)
+  const [replyError, setReplyError] = useState('')
+  const replyInputRef = useRef<HTMLTextAreaElement | null>(null)
   const [collaborators, setCollaborators] = useState<AuthUser[]>([])
   const [assigneeUsers, setAssigneeUsers] = useState<AuthUser[]>([])
   const [notifications, setNotifications] = useState<UserNotification[]>([])
@@ -2639,6 +2644,10 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
 
   useEffect(() => {
     setReplyTarget(null)
+    setReplySummary('')
+    setReplyDetail('')
+    setReplyDetailOpen(false)
+    setReplyError('')
     setNewComment('')
     setNewCommentDetail('')
     setCommentDetailOpen(false)
@@ -4848,14 +4857,13 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
           nodeId: selectedCommentNodeId,
           summary,
           ...(detail ? { detail } : {}),
-          parentId: replyTarget?.id ?? null,
+          parentId: null,
         }),
       })
       setComments((current) => current.some((comment) => comment.id === result.comment.id) ? current : [...current, result.comment])
       setNewComment('')
       setNewCommentDetail('')
       setCommentDetailOpen(false)
-      setReplyTarget(null)
     } catch (error) {
       setCommentError(error instanceof Error ? error.message : '댓글을 등록하지 못했습니다.')
     }
@@ -4868,7 +4876,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     try {
       const result = await apiRequest<{ deletedIds: string[] }>(`/api/maps/${encodeURIComponent(comment.mapId)}/comments/${encodeURIComponent(comment.id)}`, { method: 'DELETE' })
       setComments((current) => current.filter((item) => !result.deletedIds.includes(item.id)))
-      if (replyTarget && result.deletedIds.includes(replyTarget.id)) setReplyTarget(null)
+      if (replyTarget && result.deletedIds.includes(replyTarget.id)) cancelReply()
     } catch (error) {
       setCommentError(error instanceof Error ? error.message : '댓글을 삭제하지 못했습니다.')
     }
@@ -4900,8 +4908,44 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     }
   }
 
+  const appendMention = (current: string, name: string) => `${current}${current && !current.endsWith(' ') ? ' ' : ''}@${name} `
+
   const insertMention = (collaborator: AuthUser) => {
-    setNewComment((current) => `${current}${current && !current.endsWith(' ') ? ' ' : ''}@${collaborator.name} `)
+    setNewComment((current) => appendMention(current, collaborator.name))
+  }
+
+  const insertReplyMention = (collaborator: AuthUser) => {
+    setReplySummary((current) => appendMention(current, collaborator.name))
+  }
+
+  const cancelReply = () => {
+    setReplyTarget(null)
+    setReplySummary('')
+    setReplyDetail('')
+    setReplyDetailOpen(false)
+    setReplyError('')
+  }
+
+  const submitReply = async () => {
+    const summary = replySummary.trim()
+    const detail = replyDetail.trim()
+    if (!selectedCommentMapId || !selectedCommentNodeId || !replyTarget || !summary) return
+    setReplyError('')
+    try {
+      const result = await apiRequest<{ comment: NodeComment }>(`/api/maps/${encodeURIComponent(selectedCommentMapId)}/comments`, {
+        method: 'POST',
+        body: JSON.stringify({
+          nodeId: selectedCommentNodeId,
+          summary,
+          ...(detail ? { detail } : {}),
+          parentId: replyTarget.id,
+        }),
+      })
+      setComments((current) => current.some((comment) => comment.id === result.comment.id) ? current : [...current, result.comment])
+      cancelReply()
+    } catch (error) {
+      setReplyError(error instanceof Error ? error.message : '답글을 등록하지 못했습니다.')
+    }
   }
 
   const markNotificationRead = async (notification: UserNotification) => {
@@ -5338,6 +5382,46 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     cancelTouchCardGesture(true)
     cancelTouchCanvasPan()
   }, [activeMapId, cancelTouchCanvasPan, cancelTouchCardGesture, viewMode])
+
+  useEffect(() => {
+    if (replyTarget) replyInputRef.current?.focus()
+  }, [replyTarget])
+
+  const renderReplyForm = () => (
+    <form className="comment-form comment-reply-form" onSubmit={(event) => { event.preventDefault(); void submitReply() }}>
+      <div className="reply-target">
+        <span><strong>{replyTarget?.author.name}</strong>님에게 답글</span>
+        <button type="button" onClick={cancelReply} aria-label="답글 취소"><Icon name="close" size={11} /></button>
+      </div>
+      <label className="comment-summary-editor">
+        <span>요약</span>
+        <textarea ref={replyInputRef} value={replySummary} onChange={(event) => setReplySummary(event.target.value)} placeholder="답글의 핵심 내용을 입력하세요" maxLength={240} rows={2} />
+        <small>{replySummary.length}/240</small>
+      </label>
+      <button
+        type="button"
+        className={`comment-detail-toggle ${replyDetailOpen ? 'open' : ''}`}
+        onClick={() => setReplyDetailOpen((current) => !current)}
+        aria-expanded={replyDetailOpen}
+      >
+        <span>{replyDetailOpen ? '상세 내용 접기' : replyDetail ? '작성한 상세 내용 보기' : '상세 내용 추가'}</span>
+        <Icon name="chevron-down" size={12} />
+      </button>
+      {replyDetailOpen && (
+        <label className="comment-detail-editor">
+          <span>상세</span>
+          <textarea value={replyDetail} onChange={(event) => setReplyDetail(event.target.value)} placeholder="수행 내용, 중요한 판단, 변경 범위, 검증 결과, 산출물과 다음 단계를 입력하세요." maxLength={6000} rows={7} />
+          <small>{replyDetail.length}/6000</small>
+        </label>
+      )}
+      <div className="mention-tools">
+        <span>멘션</span>
+        {collaborators.filter((collaborator) => collaborator.id !== user.id).map((collaborator) => <button type="button" key={collaborator.id} onClick={() => insertReplyMention(collaborator)}>@{collaborator.name}</button>)}
+      </div>
+      {replyError && <div className="comment-error">{replyError}</div>}
+      <div><small>답글은 이 댓글 아래에 등록됩니다</small><button type="submit" disabled={!replySummary.trim()}><Icon name="send" size={13} />답글</button></div>
+    </form>
+  )
 
   const renderDocumentListItem = (document: MapSummary, location: { type: 'top'; item: DocumentLayoutItem } | { type: 'group'; groupId: string }) => {
     const hasLoadedActiveDocument = document.id === activeMapId && loadedMapId === activeMapId
@@ -7031,6 +7115,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                     {commentsLoading && <div className="comment-message">댓글을 불러오는 중…</div>}
                     {!commentsLoading && comments.filter((comment) => !comment.parentId).map((comment) => {
                       const replies = comments.filter((reply) => reply.parentId === comment.id)
+                      const replyingHere = Boolean(replyTarget) && (replyTarget?.parentId ?? replyTarget?.id) === comment.id
                       return (
                         <div className={`comment-thread ${comment.resolvedAt ? 'resolved' : ''}`} key={comment.id}>
                           <CommentCard comment={comment} mode={mode} user={user} collaborators={collaborators} readOnly={Boolean(user.publicAccess)} onReply={setReplyTarget} onDelete={(target) => { void deleteComment(target) }} onResolve={(target) => { void toggleCommentResolved(target) }} onReaction={(target, emoji) => { void toggleCommentReaction(target, emoji) }} />
@@ -7039,6 +7124,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                               {replies.map((reply) => <CommentCard key={reply.id} comment={reply} isReply mode={mode} user={user} collaborators={collaborators} readOnly={Boolean(user.publicAccess)} onReply={setReplyTarget} onDelete={(target) => { void deleteComment(target) }} onResolve={(target) => { void toggleCommentResolved(target) }} onReaction={(target, emoji) => { void toggleCommentReaction(target, emoji) }} />)}
                             </div>
                           )}
+                          {replyingHere && !user.publicAccess && renderReplyForm()}
                         </div>
                       )
                     })}
@@ -7046,10 +7132,9 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                   </div>
                   {commentError && <div className="comment-error">{commentError}</div>}
                   {user.publicAccess ? <div className="public-viewer-comment-note"><Icon name="lock" size={12} /><span>공개 뷰어에서는 댓글을 조회만 할 수 있습니다.</span></div> : <form className="comment-form" onSubmit={(event) => { event.preventDefault(); void submitComment() }}>
-                    {replyTarget && <div className="reply-target"><span><strong>{replyTarget.author.name}</strong>님에게 답글</span><button type="button" onClick={() => setReplyTarget(null)} aria-label="답글 취소"><Icon name="close" size={11} /></button></div>}
                     <label className="comment-summary-editor">
                       <span>요약</span>
-                      <textarea value={newComment} onChange={(event) => setNewComment(event.target.value)} placeholder={replyTarget ? '답글의 핵심 내용을 입력하세요' : '현재 상태와 핵심 결과를 입력하세요'} maxLength={240} rows={2} />
+                      <textarea value={newComment} onChange={(event) => setNewComment(event.target.value)} placeholder="현재 상태와 핵심 결과를 입력하세요" maxLength={240} rows={2} />
                       <small>{newComment.length}/240</small>
                     </label>
                     <button
@@ -7072,7 +7157,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                       <span>멘션</span>
                       {collaborators.filter((collaborator) => collaborator.id !== user.id).map((collaborator) => <button type="button" key={collaborator.id} onClick={() => insertMention(collaborator)}>@{collaborator.name}</button>)}
                     </div>
-                    <div><small>{selectedNode.data.reference ? '원본 노드에 등록' : '편집자와 뷰어 모두 작성 가능'}</small><button type="submit" disabled={!newComment.trim()}><Icon name="send" size={13} />{replyTarget ? '답글' : '등록'}</button></div>
+                    <div><small>{selectedNode.data.reference ? '원본 노드에 등록' : '편집자와 뷰어 모두 작성 가능'}</small><button type="submit" disabled={!newComment.trim()}><Icon name="send" size={13} />등록</button></div>
                   </form>}
                 </section>
                 <div className="meta-card">
