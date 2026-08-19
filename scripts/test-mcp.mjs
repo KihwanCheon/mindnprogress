@@ -343,6 +343,7 @@ async function main() {
     const registeredToolNames = listedTools.tools.map((tool) => tool.name).sort()
     assert.equal(registeredToolNames.length, 49, `예상과 다른 MCP 도구 수: ${registeredToolNames.length}`)
     const toolSchema = (name) => listedTools.tools.find((tool) => tool.name === name)?.inputSchema
+    const toolDescription = (name) => listedTools.tools.find((tool) => tool.name === name)?.description ?? ''
     for (const name of ['mindnprogress_update_card', 'mindnprogress_move_card', 'mindnprogress_delete_card', 'mindnprogress_list_comments', 'mindnprogress_add_comment']) {
       assert.ok(toolSchema(name)?.properties?.cardId, `${name}: cardId 공개 인자가 없습니다.`)
       assert.match(toolSchema(name)?.properties?.nodeId?.description ?? '', /기존 대화 호환용/)
@@ -394,7 +395,7 @@ async function main() {
 
     const guide = await invoke('mindnprogress_read_me_first')
     assert.equal(guide.guide.product.name, 'MindNProgress')
-    assert.equal(guide.guide.version, '4.5')
+    assert.equal(guide.guide.version, '4.6')
     assert.match(guide.guide.operationRules.join('\n'), /mindnprogress_complete_ai_delegation/)
     assert.match(guide.guide.operationRules.join('\n'), /중지된 위임을 resume하면 같은 AI 대화와 기존 worker lease/)
     assert.match(guide.guide.dataModel.cardContent.sharedKnowledge, /재사용/)
@@ -409,6 +410,10 @@ async function main() {
     assert.match(guide.guide.authoringRules.join('\n'), /확정된 결과를 직접 작업 근거.*주요 지식선.*단순 관련성이나 일회성 참조에는 연결하지 않음/)
     assert.match(guide.guide.operationRules.join('\n'), /변경할 필드만 보내고/)
     assert.match(guide.guide.operationRules.join('\n'), /textIntegrity SHA-256.*mindnprogress_patch_card_text.*필드 전체를 다시 생성하지 않음/)
+    assert.ok(guide.guide.operationRules.join('\n').includes('\\uXXXX'))
+    assert.match(guide.guide.operationRules.join('\n'), /after\.sha256.*expectedSha256.*이전 해시를 재사용하지 않음/)
+    assert.ok(toolDescription('mindnprogress_patch_card_text').includes('\\uXXXX'))
+    assert.match(toolDescription('mindnprogress_patch_card_text'), /after\.sha256.*expectedSha256.*이전 해시를 재사용하지 않음/)
     assert.match(guide.guide.operationRules.join('\n'), /mindnprogress_list_shared_knowledge_candidates.*mindnprogress_get_shared_knowledge_review_context.*mindnprogress_apply_shared_knowledge_review/)
     assert.match(guide.guide.operationRules.join('\n'), /cardId.*nodeId.*기존 대화 호환용/)
     assert.match(guide.guide.operationRules.join('\n'), /조회 도구는 문서 version을 변경하지 않으며/)
