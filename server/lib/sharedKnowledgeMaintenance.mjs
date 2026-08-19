@@ -295,3 +295,39 @@ export function prepareSharedKnowledgeReviewBatch(map, patches, { now = new Date
     })),
   }
 }
+
+export function verifySharedKnowledgeReviewChanges(map, changes) {
+  if (!map || !Array.isArray(map.nodes) || !Array.isArray(changes)) {
+    fail('SHARED_KNOWLEDGE_REVIEW_STORAGE_MISMATCH', '저장 전 공유 지식 검증 데이터가 올바르지 않습니다.', 500)
+  }
+  return changes.map((change) => {
+    const card = map.nodes.find((node) => node.id === change.cardId)
+    const sharedKnowledge = typeof card?.data?.sharedKnowledge === 'string' ? card.data.sharedKnowledge : ''
+    const storedSha256 = sharedKnowledgeSha256(sharedKnowledge)
+    if (!card || storedSha256 !== change.after?.sha256) {
+      fail('SHARED_KNOWLEDGE_REVIEW_STORAGE_MISMATCH', `저장 전 공유 지식 해시 검증에 실패했습니다: ${change.cardId}`, 500, {
+        cardId: change.cardId,
+        expectedSha256: change.after?.sha256 ?? null,
+        actualSha256: card ? storedSha256 : null,
+      })
+    }
+    const reviewStatus = sharedKnowledgeReviewState(sharedKnowledge, card.data?.sharedKnowledgeReview, storedSha256)
+    const expectedReviewState = change.cleared ? 'not-applicable' : 'current'
+    const storedReviewResult = reviewStatus.review?.reviewResult ?? null
+    if (reviewStatus.state !== expectedReviewState
+      || (!change.cleared && storedReviewResult !== change.reviewResult)) {
+      fail('SHARED_KNOWLEDGE_REVIEW_STORAGE_MISMATCH', `저장 전 공유 지식 검토 상태 검증에 실패했습니다: ${change.cardId}`, 500, {
+        cardId: change.cardId,
+        expectedReviewState,
+        actualReviewState: reviewStatus.state,
+        expectedReviewResult: change.cleared ? null : change.reviewResult,
+        actualReviewResult: storedReviewResult,
+      })
+    }
+    return {
+      ...change,
+      reviewState: reviewStatus.state,
+      review: reviewStatus.review,
+    }
+  })
+}

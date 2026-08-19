@@ -79,13 +79,12 @@ import {
   SharedKnowledgeMaintenanceError,
   buildSharedKnowledgeReviewContext,
   prepareSharedKnowledgeReviewBatch,
+  verifySharedKnowledgeReviewChanges,
 } from './lib/sharedKnowledgeMaintenance.mjs'
 import {
   isValidSharedKnowledgeReview,
   normalizeMapSharedKnowledgeReviews,
   reconcileSharedKnowledgeReviews,
-  sharedKnowledgeReviewState,
-  sharedKnowledgeSha256,
 } from './lib/sharedKnowledgeReview.mjs'
 import {
   WorkspacePoolIntegrationError,
@@ -4210,6 +4209,7 @@ async function readMapRevision(mapId, revisionId) {
 async function saveMap(mapId, map, user, title, color, revisionReason = 'edit', {
   sharedKnowledgeReviewRequests = new Map(),
   expectedVersion = null,
+  validatePayload = null,
 } = {}) {
   await mkdir(dataDirectory, { recursive: true })
   const existing = await readMap(mapId)
@@ -4241,6 +4241,7 @@ async function saveMap(mapId, map, user, title, color, revisionReason = 'edit', 
     updatedBy: publicUser(user),
     version: (existing?.version ?? 0) + 1,
   }
+  if (validatePayload) validatePayload(payload)
   if (existing && mapContentSignature(existing) === mapContentSignature(payload)) return existing
   if (existing && !existing.trashedAt) {
     await archiveMapRevision(existing, user, revisionReason)
@@ -6412,6 +6413,7 @@ const server = createServer(async (request, response) => {
       }
 
       let map
+      let verifiedChanges
       try {
         map = await saveMap(
           mapId,
@@ -6423,6 +6425,9 @@ const server = createServer(async (request, response) => {
           {
             sharedKnowledgeReviewRequests: prepared.reviewRequests,
             expectedVersion: baseVersion,
+            validatePayload: (payload) => {
+              verifiedChanges = verifySharedKnowledgeReviewChanges(payload, prepared.changes)
+            },
           },
         )
       } catch (error) {
@@ -6433,27 +6438,14 @@ const server = createServer(async (request, response) => {
             currentVersion: error.currentVersion,
           })
         }
+        if (sendSharedKnowledgeMaintenanceError(response, error)) return
         throw error
       }
 
-      const changes = prepared.changes.map((change) => {
-        const card = map.nodes.find((node) => node.id === change.cardId)
-        const sharedKnowledge = typeof card?.data?.sharedKnowledge === 'string' ? card.data.sharedKnowledge : ''
-        const storedSha256 = sharedKnowledgeSha256(sharedKnowledge)
-        if (storedSha256 !== change.after.sha256) {
-          throw new Error(`공유 지식 검토 결과 검증에 실패했습니다: ${change.cardId}`)
-        }
-        const reviewStatus = sharedKnowledgeReviewState(sharedKnowledge, card?.data?.sharedKnowledgeReview, storedSha256)
-        return {
-          ...change,
-          reviewState: reviewStatus.state,
-          review: reviewStatus.review,
-        }
-      })
       broadcastMapChange(request, mapId, 'shared-knowledge-reviewed', user)
       return sendJson(response, 200, {
         document: mapSummary(map),
-        changes,
+        changes: verifiedChanges,
         atomic: true,
       })
     }

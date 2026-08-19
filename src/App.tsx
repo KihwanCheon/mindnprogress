@@ -46,6 +46,7 @@ import { isSameDoorayKnowledgeUrl, normalizedDoorayKnowledgeUrl, taskUrlProvider
 import { splitImageFileName, uniqueImageFileName } from './utils/imageFileNames.mjs'
 import { shouldReconnectEventStream } from './utils/eventStreamHealth.mjs'
 import { aiConversationLinksFromData } from './utils/aiConversations.mjs'
+import { revisionReasonLabel, shouldRefreshMapContentForAction } from './utils/mapChangeMetadata.mjs'
 import { mapContentsEqual, reconcileRemoteMapContent } from './utils/mapDocumentSync.mjs'
 import { mergeMapContent } from './utils/mergeMapContent.mjs'
 import { computeProgressRollups } from './utils/progressRollup.mjs'
@@ -271,16 +272,6 @@ function documentColorStyle(color: DocumentColorId | undefined, fallbackIndex = 
 function presenceColor(clientId: string) {
   const index = [...clientId].reduce((sum, character) => sum + character.charCodeAt(0), 0) % DOCUMENT_COLORS.length
   return DOCUMENT_COLORS[index].solid
-}
-
-function revisionReasonLabel(reason: string) {
-  return ({
-    content: '내용 편집',
-    rename: '이름 변경',
-    color: '색상 변경',
-    metadata: '문서 정보 변경',
-    'history-restore': '이전 버전 복원',
-  } as Record<string, string>)[reason] ?? '문서 변경'
 }
 
 type MindMapNode = Node<MindNodeData, 'mind'>
@@ -2869,7 +2860,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
             setActiveMapId(library.maps[0]?.id ?? '')
             return
           }
-          if (event.mapId !== activeMapId || !['content', 'history-restored', 'daily-backup-restored'].includes(event.action)) return
+          if (event.mapId !== activeMapId || !shouldRefreshMapContentForAction(event.action)) return
           if (mode === 'viewer') setMapReloadToken((current) => current + 1)
           else setExternalChange(event)
         })().catch(() => undefined)

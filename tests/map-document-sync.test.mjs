@@ -54,6 +54,32 @@ test('로컬과 원격이 서로 다른 항목을 수정하면 병합한 내용�
   assert.equal(result.conflicts, 0)
 })
 
+test('다른 편집자의 공유 지식 정리와 내 다른 필드 수정을 함께 보존한다', () => {
+  const base = document(10, [{
+    ...node('root', '카드'),
+    data: { label: '카드', description: '기존 설명', sharedKnowledge: '정리 전 공유 지식' },
+  }])
+  const local = structuredClone(base)
+  local.nodes[0].data.description = '내가 수정한 설명'
+  const remote = structuredClone(base)
+  remote.version = 11
+  remote.nodes[0].data.sharedKnowledge = '정리된 공유 지식'
+  remote.nodes[0].data.sharedKnowledgeReview = {
+    reviewedAt: '2026-08-19T00:00:00.000Z',
+    reviewedHash: 'a'.repeat(64),
+    reviewedBy: { id: 'editor', name: '편집자' },
+    reviewResult: 'cleaned',
+  }
+
+  const result = reconcileRemoteMapContent(base, local, remote)
+
+  assert.equal(result.nodes[0].data.description, '내가 수정한 설명')
+  assert.equal(result.nodes[0].data.sharedKnowledge, '정리된 공유 지식')
+  assert.equal(result.nodes[0].data.sharedKnowledgeReview.reviewResult, 'cleaned')
+  assert.equal(result.needsSave, true)
+  assert.equal(result.conflicts, 0)
+})
+
 test('저장 요청 중 추가된 로컬 수정도 서버 응답과 다시 병합한다', () => {
   const sent = document(20, [node('root', '보낸 내용')])
   const current = document(20, [node('root', '보낸 뒤 추가 수정')])
