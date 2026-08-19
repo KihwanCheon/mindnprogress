@@ -166,7 +166,17 @@ test('중복 카드, Ref, 이미 검토한 카드와 결과별 잘못된 replace
   }
   assert.throws(() => prepareSharedKnowledgeReviewBatch(reviewedMap, [{
     cardId: 'first', expectedSha256: firstHash, reviewResult: 'accepted-long',
-  }]), { code: 'SHARED_KNOWLEDGE_REVIEW_CURRENT' })
+  }], { now: '2026-08-19T00:00:00.000Z' }), { code: 'SHARED_KNOWLEDGE_REVIEW_CURRENT' })
+
+  const expiredContext = buildSharedKnowledgeReviewContext(reviewedMap, 'first', {
+    now: '2026-09-17T00:00:00.000Z',
+  })
+  assert.equal(expiredContext.card.reviewDue, true)
+  assert.ok(expiredContext.candidate.reasons.includes('accepted-long-review-expired'))
+  const renewed = prepareSharedKnowledgeReviewBatch(reviewedMap, [{
+    cardId: 'first', expectedSha256: firstHash, reviewResult: 'accepted-long',
+  }], { now: '2026-09-17T00:00:00.000Z' })
+  assert.deepEqual([...renewed.reviewRequests], [['first', { reviewResult: 'accepted-long' }]])
 
   assert.throws(() => prepareSharedKnowledgeReviewBatch(map, [{
     cardId: 'first', expectedSha256: firstHash, reviewResult: 'cleaned',

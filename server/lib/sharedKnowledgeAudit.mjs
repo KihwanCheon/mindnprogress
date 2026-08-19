@@ -1,5 +1,7 @@
 import {
+  acceptedLongReviewMaxAgeDays,
   sharedKnowledgeReviewState,
+  sharedKnowledgeReviewDue,
   sharedKnowledgeSha256,
 } from './sharedKnowledgeReview.mjs'
 
@@ -20,12 +22,13 @@ export const sharedKnowledgeAuthoringPolicy = Object.freeze({
 
 export const sharedKnowledgeMaintenancePolicy = Object.freeze({
   periodicIntervalDays: 7,
+  acceptedLongReviewMaxAgeDays,
   runOnlyWhenActionableCandidatesExist: true,
   eventTriggers: Object.freeze(['주요 마일스톤 완료 후', '다른 사람이나 AI에게 인수인계하기 전']),
   reviewOrder: Object.freeze(['priority', 'recommended', 'attention']),
   requiresExplicitApproval: true,
   automaticMutation: false,
-  instruction: '후보가 있으면 주 1회와 주요 마일스톤·인수인계 시점에 점검하고, 우선 정리·정리 권장·관심 순으로 원문과 관계를 확인한 뒤 카드별로 승인',
+  instruction: '후보가 있으면 주 1회와 주요 마일스톤·인수인계 시점에 점검하고, 우선 정리·정리 권장·관심 순으로 원문과 관계를 확인한 뒤 카드별로 승인. accepted-long은 30일 뒤 다시 검토',
 })
 
 const reviewLevelRank = {
@@ -96,7 +99,7 @@ export function analyzeSharedKnowledgeText(value, thresholds = sharedKnowledgeAu
   }
 }
 
-function auditDocument(map, thresholds) {
+function auditDocument(map, thresholds, generatedAt) {
   const nodes = Array.isArray(map?.nodes) ? map.nodes : []
   const nodeIds = new Set(nodes.map((node) => node.id))
   const consumersBySource = new Map()
@@ -116,7 +119,8 @@ function auditDocument(map, thresholds) {
       node.data?.sharedKnowledgeReview,
       analysis.sha256,
     )
-    const needsReview = analysis.needsReview && reviewStatus.state !== 'current'
+    const reviewDue = sharedKnowledgeReviewDue(reviewStatus.review, generatedAt)
+    const needsReview = analysis.needsReview && (reviewStatus.state !== 'current' || reviewDue.due)
     const isReference = Boolean(node.data?.reference)
     const sharedKnowledgeUpdatedAt = typeof node.data?.sharedKnowledgeUpdatedAt === 'string'
       ? node.data.sharedKnowledgeUpdatedAt
@@ -128,11 +132,14 @@ function auditDocument(map, thresholds) {
       isReference,
       maintenanceMode: isReference ? 'source-card-only' : 'direct',
       ...analysis,
+      reasons: reviewDue.due ? [...analysis.reasons, 'accepted-long-review-expired'] : analysis.reasons,
       hasReviewSignals: analysis.needsReview,
       needsReview,
       actionable: needsReview && !isReference,
       reviewState: reviewStatus.state,
       review: reviewStatus.review,
+      reviewDue: reviewDue.due,
+      reviewDueAt: reviewDue.dueAt,
       consumerCount: consumersBySource.get(node.id)?.size ?? 0,
       consumerCardIds: [...(consumersBySource.get(node.id) ?? [])],
       lastKnownUpdatedAt: sharedKnowledgeUpdatedAt ?? map.updatedAt ?? null,
@@ -163,7 +170,7 @@ export function buildSharedKnowledgeAudit(maps, {
 } = {}) {
   const documents = (Array.isArray(maps) ? maps : [])
     .filter((map) => map && !map.trashedAt)
-    .map((map) => auditDocument(map, thresholds))
+    .map((map) => auditDocument(map, thresholds, generatedAt))
   const cards = documents.flatMap((document) => document.cards.map((card) => ({
     mapId: document.mapId,
     documentTitle: document.title,
@@ -186,6 +193,7 @@ export function buildSharedKnowledgeAudit(maps, {
       cardsWithSharedKnowledge: cards.length,
       actionableCandidateCount: candidates.length,
       referenceCardCount: cards.filter((card) => card.isReference).length,
+      acceptedLongReviewDueCount: cards.filter((card) => card.reviewDue).length,
       totalCharacters: cards.reduce((sum, card) => sum + card.length, 0),
       reviewLevelCounts: Object.fromEntries(
         Object.keys(reviewLevelRank).map((level) => [level, cards.filter((card) => card.reviewLevel === level).length]),

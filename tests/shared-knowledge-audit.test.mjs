@@ -40,6 +40,35 @@ test('글자 수 임계값에 따라 관심·정리 권장·우선 정리 단계
   assert.equal(analyzeSharedKnowledgeText('가'.repeat(priorityCharacters)).limitUsagePercent, 80)
 })
 
+test('30일이 지난 장문 유지 승인을 본문 변경 없이 다시 후보로 분류한다', () => {
+  const sharedKnowledge = '가'.repeat(3_100)
+  const audit = buildSharedKnowledgeAudit([{
+    id: 'map-expired-review',
+    title: '재검토 문서',
+    nodes: [{
+      id: 'accepted-long',
+      data: {
+        label: '장문 유지 카드',
+        sharedKnowledge,
+        sharedKnowledgeReview: {
+          reviewedAt: '2026-07-19T00:00:00.000Z',
+          reviewedHash: sharedKnowledgeSha256(sharedKnowledge),
+          reviewedBy: { id: 'editor', name: '편집자' },
+          reviewResult: 'accepted-long',
+        },
+      },
+    }],
+    edges: [],
+  }], { generatedAt: '2026-08-18T00:00:00.000Z' })
+
+  assert.equal(audit.summary.acceptedLongReviewDueCount, 1)
+  assert.equal(audit.summary.actionableCandidateCount, 1)
+  assert.equal(audit.candidates[0].reviewState, 'current')
+  assert.equal(audit.candidates[0].reviewDue, true)
+  assert.equal(audit.candidates[0].reviewDueAt, '2026-08-18T00:00:00.000Z')
+  assert.ok(audit.candidates[0].reasons.includes('accepted-long-review-expired'))
+})
+
 test('활성 문서의 공유 지식 카드와 실제 지식선 소비자를 우선순위대로 집계한다', () => {
   const sourceKnowledge = `외부에 노출되면 안 되는 원문\n${'가'.repeat(5_100)}`
   const priorityKnowledge = '나'.repeat(8_100)
