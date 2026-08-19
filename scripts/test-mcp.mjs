@@ -1292,9 +1292,9 @@ async function main() {
 
       const mapScopedComment = parseToolResult('mindnprogress_add_comment', await freshClient.callTool({
         name: 'mindnprogress_add_comment',
-        arguments: { mapId, nodeId: 'branch-b', summary: '[진행] 댓글 전 카드 작업의 세션 오귀속 방지를 검증합니다.' },
+        arguments: { mapId, nodeId: 'branch-b', summary: '[진행] 대화가 시작된 카드 밖 편집의 conversationId 귀속을 검증합니다.' },
       }))
-      assert.equal(mapScopedComment.comment.author.name, 'AI(모델 미지정)')
+      assert.equal(mapScopedComment.comment.author.name, 'Claude Code(Claude Test Model)')
 
       const [reconnectedResult, continuedResult] = await Promise.all([
         freshClient.callTool({
@@ -1345,6 +1345,27 @@ async function main() {
       assert.equal(clearedIdentityComment.comment.author.name, 'Claude Code(Claude Test Model)')
     } finally {
       await freshClient.close()
+    }
+
+    // conversationId 귀속이 정확한 식별자만 사용하는지 확인한다. 연결된 대화가 없는
+    // conversationId는 같은 문서를 편집해도 다른 AI 귀속을 추측하지 않아야 한다.
+    const unknownConversationTransport = new StdioClientTransport({
+      command: process.execPath,
+      args: ['mcp/server.mjs'],
+      cwd: projectDirectory,
+      env: { ...environment, AIONUI_CONVERSATION_ID: 'conversation-not-linked' },
+      stderr: 'pipe',
+    })
+    const unknownConversationClient = new Client({ name: 'mindnprogress-attribution-unknown-conversation', version: '1.0.0' })
+    await unknownConversationClient.connect(unknownConversationTransport)
+    try {
+      const unknownConversationComment = parseToolResult('mindnprogress_add_comment', await unknownConversationClient.callTool({
+        name: 'mindnprogress_add_comment',
+        arguments: { mapId, nodeId: 'branch-b', summary: '[진행] 연결되지 않은 conversationId의 귀속 추측 방지를 검증합니다.' },
+      }))
+      assert.equal(unknownConversationComment.comment.author.name, 'AI(모델 미지정)')
+    } finally {
+      await unknownConversationClient.close()
     }
 
     const idFallbackContext = await invoke('mindnprogress_get_context', {

@@ -517,8 +517,9 @@ function traceAttribution(request, source, user, scope, attributionToken = '') {
 
 function canContinueScopedAttribution(attribution, scope, match) {
   // 카드에 잠시 발급된 귀속만으로는 현재 호출자와 같은 AI인지 알 수 없다.
-  // 영속 대화 귀속이거나 동일 conversationId로 검증된 카드 귀속만 세션으로 이어간다.
-  if (match === 'conversation') return true
+  // 요청이 밝힌 conversationId로 찾은 귀속, 영속 대화 귀속이거나
+  // 동일 conversationId로 검증된 카드 귀속만 세션으로 이어간다.
+  if (match === 'conversation-id' || match === 'conversation') return true
   if (match !== 'card' || !attribution.conversationId) return false
   const conversation = aiConversationAttributions.get(conversationAttributionKey(scope.mapId, scope.cardId))
   return Boolean(conversation
