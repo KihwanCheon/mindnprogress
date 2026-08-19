@@ -185,6 +185,9 @@ npm run dev
 | `MNP_DOORAY_MCP_SERVER_NAME` | `docker-dooray-mcp` | Claude 설정에서 조회할 Dooray MCP 서버 이름 |
 | `MNP_API_URL` | `http://127.0.0.1:4176` | MCP가 호출할 MindNProgress API 주소 |
 | `MNP_TOKEN_FILE` | 데이터 폴더의 `_integration-token` | MCP 인증 토큰 파일 경로 |
+| `MNP_MCP_USAGE_DIR` | 데이터 폴더의 `_mcp-tool-usage` | MCP 도구 호출 계측 파일 저장 경로 |
+| `MNP_MCP_USAGE_DISABLED` | 없음 | `1`이면 MCP 도구 호출 계측을 끔 |
+| `MNP_MCP_USAGE_FLUSH_MS` | `2000` | 계측 파일 쓰기 최소 간격(ms) |
 
 카드의 `taskUrl`은 Dooray를 포함한 범용 업무 링크로 유지합니다. 일반 카드에 Dooray 업무 URL을 설정하면 카드 형태와 업무 문맥은 그대로 유지하고 제목 왼쪽에 Dooray 아이콘, 오른쪽에 원본 열기 아이콘을 표시합니다. 다른 웹 URL이면 일반 카드 표현을 그대로 유지합니다. 마인드맵 캔버스에 Dooray 업무 URL을 직접 붙여넣으면 MNP 서버가 업무 제목과 상태를 조회해 크기 조절 가능한 전용 Dooray 지식 카드로 추가합니다. 전용 카드의 Dooray 제목과 원본 정보는 저장된 값을 즉시 표시하며 제목은 편집할 수 없습니다. 원본 URL은 변경할 수 있고, 새 URL 확인에 성공하면 URL·제목·상태를 한 번에 교체합니다. 편집자가 문서를 열거나 카드 상세 보기를 열면 원본을 비동기로 다시 조회하고, 실제 변경이 있을 때만 저장 값을 갱신합니다. 조회에 실패하면 기존 저장 값을 유지합니다. 사용자는 AI가 지식으로 활용할 보충 설명을 입력하고 주요·보조 지식선으로 일반 카드에 연결합니다. 서버는 `MNP_DOORAY_API_KEY` 또는 `DOORAY_API_KEY`를 우선 사용하고, 값이 없으면 `MNP_DOORAY_CONFIG_FILE`의 `mcpServers.{MNP_DOORAY_MCP_SERVER_NAME}.env.DOORAY_API_KEY`를 읽습니다. API 키는 브라우저, 문서 데이터와 API 응답에 포함되지 않습니다. 사용자 홈의 `.claude.json`은 저장소 밖에 있으므로 Git 커밋이나 MindNProgress 백업에 포함되지 않습니다.
 
@@ -401,11 +404,23 @@ npm run lint         # oxlint 정적 검사
 npm run test:unit    # Node 20·22 호환 단위 테스트
 npm run test:mcp     # 격리된 임시 API를 이용한 전체 MCP 회귀 검사
 npm run mcp          # MCP stdio 서버 직접 실행
+npm run usage:mcp    # MCP 도구 호출 빈도와 응답 비용 집계 출력
 npm run comments:migration -- <명령> # 댓글 요약·상세 마이그레이션 관리
 npm start            # 빌드 결과와 API 서버 실행
 ```
 
 `test:unit`은 3방향 병합, 진행률 롤업, 대기 해제와 AI 작성자 귀속 같은 순수 로직을 검사합니다. `test:mcp`는 운영 데이터와 분리된 임시 API 서버에서 모든 등록 도구의 성공 경로와 버전 충돌, 순환 이동, 루트 삭제, 영구 삭제 확인 등의 안전 경계를 검사합니다. 테스트 데이터는 종료 시 제거됩니다.
+
+### MCP 도구 호출 계측
+
+MCP 서버는 `registerTool` 래퍼 한 곳에서 도구별 호출 횟수, 성공·실패, 마지막 호출 시각과 응답 문자 수를 기록합니다. 인자 값과 카드 본문은 기록하지 않습니다. MCP는 stdio 전송이라 AI 클라이언트 연결마다 별도 프로세스가 뜨므로, 프로세스마다 `_mcp-tool-usage/<pid>-<난수>.json` shard 파일 하나만 임시 파일 후 rename 방식으로 덮어쓰고 합산은 읽는 쪽에서 합니다. 이전 프로세스의 shard가 남아 재시작 후에도 누적값이 유지됩니다.
+
+```bash
+npm run usage:mcp           # 표로 출력
+npm run usage:mcp -- --json # 집계 JSON 출력
+```
+
+출력은 호출이 많은 도구 순 표, 응답 비용(호출 횟수 x 응답 크기) 상위 목록, 한 번도 호출되지 않은 도구 목록으로 구성됩니다. 각각 응답을 줄일 도구와 삭제 후보를 고르는 근거로 사용합니다. 계측을 끄려면 `MNP_MCP_USAGE_DISABLED=1`을 지정합니다.
 
 ## 현재 제한사항
 

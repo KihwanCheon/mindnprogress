@@ -7,6 +7,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
+import { MCP_TOOL_USAGE_DIRECTORY_NAME, readToolUsageTotals } from '../server/lib/mcpToolUsage.mjs'
 
 const projectDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const testDataDirectory = path.resolve(projectDirectory, '.mcp-test-data')
@@ -311,6 +312,8 @@ async function main() {
     MNP_AI_ATTRIBUTION_DURATION_MS: '10000',
     MNP_AI_DELEGATION_POLL_INTERVAL_MS: '100',
     AIONUI_CONVERSATION_ID: 'conversation-test',
+    // 계측 쓰기를 기다리지 않고 검증할 수 있도록 스로틀만 짧게 줄인다.
+    MNP_MCP_USAGE_FLUSH_MS: '1',
   }
   const serverLogs = []
   const startApiServer = () => {
@@ -2081,10 +2084,35 @@ async function main() {
 
     const uncalledTools = registeredToolNames.filter((name) => !calledTools.has(name))
     assert.deepEqual(uncalledTools, [], `호출되지 않은 MCP 도구: ${uncalledTools.join(', ')}`)
+
+    // 도구 호출 계측이 실제 MCP 프로세스에서 파일로 남는지 확인한다.
+    // 샌드박스는 finally에서 삭제되므로 반드시 여기서 검증한다.
+    const usageDirectory = path.join(testDataDirectory, MCP_TOOL_USAGE_DIRECTORY_NAME)
+    let usageTotals = await readToolUsageTotals(usageDirectory)
+    for (let attempt = 0; attempt < 50 && usageTotals.totalCalls === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      usageTotals = await readToolUsageTotals(usageDirectory)
+    }
+    assert.ok(usageTotals.shardCount > 0, '도구 호출 계측 파일이 생성되지 않았습니다.')
+    assert.equal(
+      usageTotals.registeredToolCount,
+      registeredToolNames.length,
+      `계측에 등록된 도구 수가 다릅니다: ${usageTotals.registeredToolCount}`,
+    )
+    const measuredContext = usageTotals.tools.find((tool) => tool.name === 'mindnprogress_get_context')
+    assert.ok(measuredContext.ok > 0, 'get_context 호출이 계측되지 않았습니다.')
+    assert.ok(measuredContext.chars > 0, 'get_context 응답 크기가 계측되지 않았습니다.')
+    assert.ok(
+      usageTotals.tools.some((tool) => tool.fail > 0),
+      '실패한 도구 호출이 계측되지 않았습니다.',
+    )
+
     console.log(JSON.stringify({
       registeredTools: registeredToolNames.length,
       calledTools: calledTools.size,
       totalCalls: [...calledTools.values()].reduce((sum, count) => sum + count, 0),
+      measuredTools: usageTotals.tools.filter((tool) => tool.calls > 0).length,
+      measuredCalls: usageTotals.totalCalls,
       status: 'passed',
     }, null, 2))
   } catch (error) {

@@ -17,12 +17,17 @@ import {
   textIntegrity,
 } from './cardTextPatch.mjs'
 import { imageCardLocalAccess } from './imageAccess.mjs'
+import { MCP_TOOL_USAGE_DIRECTORY_NAME, createFileToolUsageRecorder } from '../server/lib/mcpToolUsage.mjs'
 
 const projectDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const dataDirectory = path.resolve(String(process.env.MNP_DATA_DIR ?? '').trim() || path.join(projectDirectory, 'server', 'data'))
 const tokenFile = path.resolve(String(process.env.MNP_TOKEN_FILE ?? '').trim() || path.join(dataDirectory, '_integration-token'))
 const apiBaseUrl = String(process.env.MNP_API_URL ?? 'http://127.0.0.1:4176').replace(/\/+$/, '')
 const aionUiConversationId = String(process.env.AIONUI_CONVERSATION_ID ?? '').trim()
+const toolUsageDirectory = path.resolve(String(process.env.MNP_MCP_USAGE_DIR ?? '').trim()
+  || path.join(dataDirectory, MCP_TOOL_USAGE_DIRECTORY_NAME))
+const toolUsageDisabled = String(process.env.MNP_MCP_USAGE_DISABLED ?? '').trim() === '1'
+const toolUsageFlushIntervalMs = Number(String(process.env.MNP_MCP_USAGE_FLUSH_MS ?? '').trim())
 const contextSchemaVersion = '3.0'
 const commentSummaryMaxLength = 240
 const commentSummaryTooLongMessage = 'summary는 240자 이하의 1~2문장만 입력하세요. 상세 내용은 summary 문자열에 이어 붙이지 말고 detail 인자로 분리하세요. 예: {"summary":"[결과] 구현과 검증을 완료했습니다.","detail":"## 수행 내용\\n..."}. 호환용 text로 우회하거나 상세를 여러 댓글로 나누지 마세요.'
@@ -40,6 +45,31 @@ let activeCardId = ''
 let delegationOrigin = null
 const attributionContinuationToken = Symbol('attributionContinuationToken')
 let commentAttributionQueue = Promise.resolve()
+
+// 도구 호출 계측은 실패해도 도구 호출 자체를 막지 않는다.
+// 생성 실패나 쓰기 실패는 모두 삼키고 계측만 꺼진다.
+const toolUsage = (() => {
+  if (toolUsageDisabled) return null
+  try {
+    return createFileToolUsageRecorder(toolUsageDirectory, {
+      conversationId: aionUiConversationId,
+      flushOnExit: true,
+      flushIntervalMs: Number.isFinite(toolUsageFlushIntervalMs) && toolUsageFlushIntervalMs > 0
+        ? toolUsageFlushIntervalMs
+        : undefined,
+    })
+  } catch {
+    return null
+  }
+})()
+
+function toolResultLength(result) {
+  let length = 0
+  for (const part of result?.content ?? []) {
+    if (typeof part?.text === 'string') length += part.text.length
+  }
+  return length
+}
 
 function snapMindMapPosition(position) {
   return {
@@ -305,12 +335,17 @@ function cardAccessUrl(publicBaseUrl, mapId, cardId) {
 }
 
 function registerTool(server, name, description, schema, handler, options = {}) {
+  toolUsage?.declare(name)
   server.tool(name, description, schema, async (input) => {
     try {
-      return toolResult(await handler(input), options.compactResult === true)
+      const result = toolResult(await handler(input), options.compactResult === true)
+      toolUsage?.record(name, { ok: true, chars: toolResultLength(result) })
+      return result
     } catch (error) {
+      const message = error instanceof Error ? error.message : '요청을 처리하지 못했습니다.'
+      toolUsage?.record(name, { ok: false, chars: message.length })
       return {
-        content: [{ type: 'text', text: error instanceof Error ? error.message : '요청을 처리하지 못했습니다.' }],
+        content: [{ type: 'text', text: message }],
         isError: true,
       }
     }
