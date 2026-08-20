@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   activeAiDelegationsForConversation,
+  aiDelegationBlocksResume,
   aiDelegationStateAfterParentWake,
   aiDelegationSucceeded,
   aiDelegationWorkspaceLeaseMatches,
@@ -296,4 +297,54 @@ test('같은 카드와 대화에서 아직 끝나지 않은 위임만 최신순�
     targetConversationId: 'conversation-a',
     excludeId: 'new-running',
   }).at(0)?.id, 'workspace-queued')
+})
+
+test('완료 결과를 전달받은 동일 상위 turn은 waking-parent 중에도 같은 하위 대화를 다시 위임할 수 있다', () => {
+  const delegation = {
+    state: 'waking-parent',
+    parentConversationId: 'conversation-parent',
+    parentTurnId: 'turn-parent-wake',
+    childStatus: 'completed',
+    workspaceError: null,
+    workspaceLease: { leaseId: 'lease-a' },
+    workspaceResult: { status: 'completed' },
+    integrationOperationId: 'integration-a',
+    integrationStatus: 'completed',
+  }
+
+  assert.equal(aiDelegationBlocksResume(delegation, {
+    parentConversationId: 'conversation-parent',
+    parentTurnId: 'turn-parent-wake',
+  }), false)
+  assert.equal(aiDelegationBlocksResume(delegation, {
+    parentConversationId: 'conversation-parent',
+    parentTurnId: 'turn-other',
+  }), true)
+  assert.equal(aiDelegationBlocksResume(delegation, {
+    parentConversationId: 'conversation-other',
+    parentTurnId: 'turn-parent-wake',
+  }), true)
+})
+
+test('하위 작업이나 통합이 끝나지 않은 waking-parent 위임은 같은 상위 turn에서도 다시 위임할 수 없다', () => {
+  const base = {
+    state: 'waking-parent',
+    parentConversationId: 'conversation-parent',
+    parentTurnId: 'turn-parent-wake',
+    childStatus: 'completed',
+    workspaceError: null,
+    workspaceLease: { leaseId: 'lease-a' },
+    workspaceResult: { status: 'completed' },
+    integrationOperationId: 'integration-a',
+    integrationStatus: 'completed',
+  }
+  const scope = {
+    parentConversationId: 'conversation-parent',
+    parentTurnId: 'turn-parent-wake',
+  }
+
+  assert.equal(aiDelegationBlocksResume({ ...base, childStatus: 'running' }, scope), true)
+  assert.equal(aiDelegationBlocksResume({ ...base, workspaceResult: { status: 'waiting-integration' } }, scope), true)
+  assert.equal(aiDelegationBlocksResume({ ...base, integrationStatus: 'running' }, scope), true)
+  assert.equal(aiDelegationBlocksResume({ ...base, workspaceError: '통합 실패' }, scope), true)
 })

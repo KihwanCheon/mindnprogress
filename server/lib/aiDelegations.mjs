@@ -195,6 +195,19 @@ export function aiDelegationStateAfterParentWake(delegation, parentDispatchState
   return aiDelegationSucceeded(delegation) ? 'completed' : 'failed'
 }
 
+export function aiDelegationBlocksResume(delegation, {
+  parentConversationId,
+  parentTurnId,
+} = {}) {
+  const sameCompletedParentWake = delegation?.state === 'waking-parent'
+    && aiDelegationSucceeded(delegation)
+    && String(parentConversationId ?? '').trim()
+    && delegation.parentConversationId === parentConversationId
+    && String(parentTurnId ?? '').trim()
+    && delegation.parentTurnId === parentTurnId
+  return !sameCompletedParentWake
+}
+
 export function activeAiDelegationsForConversation(delegations, {
   mapId,
   targetCardId,

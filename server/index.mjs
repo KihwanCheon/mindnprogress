@@ -16,6 +16,7 @@ import {
 } from './lib/aionUiConversationRuntimes.mjs'
 import {
   activeAiDelegationsForConversation,
+  aiDelegationBlocksResume,
   aiDelegationStateAfterParentWake,
   aiDelegationSucceeded,
   aiDelegationWorkspaceLeaseMatches,
@@ -5380,7 +5381,21 @@ const server = createServer(async (request, response) => {
           targetConversationId,
           excludeId: id,
         })
-        const nonResumable = activeDelegations.find((delegation) => delegation.state !== 'waiting-child-resume')
+        let parentTurnId = null
+        if (activeDelegations.some((delegation) => delegation.state === 'waking-parent')) {
+          try {
+            const parentConversation = await fetchAiConversationRuntime(parentAttribution.conversationId)
+            const parentRuntime = normalizeAiConversationRuntime(parentAttribution.conversationId, parentConversation)
+            if (parentRuntime.state === 'running') parentTurnId = parentRuntime.turnId
+          } catch {
+            // 상위 대화의 현재 turn을 확증하지 못하면 기존 위임을 그대로 활성 상태로 취급합니다.
+          }
+        }
+        const blockingDelegations = activeDelegations.filter((delegation) => aiDelegationBlocksResume(delegation, {
+          parentConversationId: parentAttribution.conversationId,
+          parentTurnId,
+        }))
+        const nonResumable = blockingDelegations.find((delegation) => delegation.state !== 'waiting-child-resume')
         if (nonResumable) {
           return sendJson(response, 409, {
             error: '같은 카드와 AI 대화에 아직 끝나지 않은 위임이 있습니다.',
@@ -5388,14 +5403,14 @@ const server = createServer(async (request, response) => {
             delegation: delegationPublicView(nonResumable),
           })
         }
-        if (activeDelegations.length > 1) {
+        if (blockingDelegations.length > 1) {
           return sendJson(response, 409, {
             error: '같은 카드와 AI 대화에 재개 대기 중인 위임이 여러 개 있어 자동으로 선택할 수 없습니다.',
             code: 'AI_DELEGATION_RESUME_AMBIGUOUS',
-            delegations: activeDelegations.map(delegationPublicView),
+            delegations: blockingDelegations.map(delegationPublicView),
           })
         }
-        resumedDelegation = activeDelegations[0] ?? null
+        resumedDelegation = blockingDelegations[0] ?? null
       }
 
       const workspacePoolResolution = await resolveAiDelegationWorkspacePool({
