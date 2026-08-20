@@ -2401,6 +2401,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         } : undefined,
         assignee: teamMembers.find((member) => member.id === node.data.assigneeId),
         unresolvedDependencyCount: blocking.length,
+        referenceUnresolved: node.data.reference ? unresolvedReferenceNodeIds.has(node.id) : undefined,
         blockedByLabels: blocking.map((candidate) => candidate.data.label),
         commentCount: (node.data.reference ? referenceCommentStats[node.id] : commentStats[node.id])?.total ?? 0,
         unresolvedCommentCount: (node.data.reference ? referenceCommentStats[node.id] : commentStats[node.id])?.unresolved ?? 0,
@@ -2427,7 +2428,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         filterActive && filterVisibleNodeIds.has(node.id) && !filterMatchedNodeIds.has(node.id) ? 'filter-context' : '',
       ].filter(Boolean).join(' '),
     }
-  }), [activeMapId, aiConversationRuntimes, beginHistoryTransaction, collapsedHiddenNodeIds, collapsedNodeIds, collapsibleNodeIds, commentStats, descendantCounts, dropTargetId, endHistoryTransaction, filterActive, filterMatchedNodeIds, filterVisibleNodeIds, hoveredKnowledgeConnectionIssue, knowledgeConnection, knowledgeConnectionTargetId, mode, nodes, normalizedNodeSearch, openDependencies, openWaitingItems, progressRollups, referenceCommentStats, searchContextNodeIds, searchMatchedNodeIds, setNodes, teamMembers])
+  }), [activeMapId, aiConversationRuntimes, beginHistoryTransaction, collapsedHiddenNodeIds, collapsedNodeIds, collapsibleNodeIds, commentStats, descendantCounts, dropTargetId, endHistoryTransaction, filterActive, filterMatchedNodeIds, filterVisibleNodeIds, hoveredKnowledgeConnectionIssue, knowledgeConnection, knowledgeConnectionTargetId, mode, nodes, normalizedNodeSearch, openDependencies, openWaitingItems, progressRollups, referenceCommentStats, searchContextNodeIds, searchMatchedNodeIds, setNodes, teamMembers, unresolvedReferenceNodeIds])
   const visibleFlowNodeIds = useMemo(() => new Set(flowNodes.filter((node) => !node.hidden).map((node) => node.id)), [flowNodes])
   const visibleFlowNodeIdsKey = useMemo(() => [...visibleFlowNodeIds].sort().join('\u0000'), [visibleFlowNodeIds])
   const flowEdges = useMemo(() => {
@@ -4155,6 +4156,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
           reference: pasteMode === 'reference' ? originalReference : pasteMode === 'clone' ? undefined : copiedData.reference,
           blockedBy: remappedBlockedBy.length > 0 ? remappedBlockedBy : undefined,
           unresolvedDependencyCount: undefined,
+          referenceUnresolved: undefined,
           blockedByLabels: undefined,
           checklist: copiedData.checklist?.map((checklistItem, checklistIndex) => ({
             ...checklistItem,

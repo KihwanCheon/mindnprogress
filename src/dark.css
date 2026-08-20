@@ -1057,6 +1057,17 @@
   background: var(--theme-accent-soft);
 }
 
+/* 다크 카드 배경에서는 어두운 배지가 묻히므로 밝은 배지로 뒤집어 대비를 유지한다. */
+[data-theme="dark"] .node-ref-badge {
+  color: #23202e;
+  background: #cdc6e6;
+}
+
+[data-theme="dark"] .node-ref-badge.unresolved {
+  color: #3b2026;
+  background: #ef9aa0;
+}
+
 [data-theme="dark"] .node-blocked,
 [data-theme="dark"] .blocked-chip,
 [data-theme="dark"] .blocked-badge {

@@ -34,6 +34,21 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
   const isCompleted = showsProgress && data.progress >= 100
   const displayStatus = isCompleted ? 'done' : data.status
   const assignee = data.assignee
+  // Ref 표시를 제목 문자열에 두면 제목이 길 때 가장 먼저 잘리므로 별도 배지로 분리한다.
+  const isReference = Boolean(data.reference)
+  const referenceBroken = data.referenceUnresolved === true
+  const displayLabel = isReference
+    ? data.label.replace(/\s*\(ref\)\s*$/i, '').trim() || data.label
+    : data.label
+  const referenceBadge = isReference ? (
+    <span
+      className={`node-ref-badge ${referenceBroken ? 'unresolved' : ''}`}
+      title={referenceBroken ? 'Ref 원본 카드를 찾을 수 없습니다' : '다른 문서의 카드를 참조하는 Ref 카드입니다'}
+      aria-label={referenceBroken ? 'Ref 원본 연결 끊김' : 'Ref 카드'}
+    >
+      Ref
+    </span>
+  ) : null
   const checklist = data.checklist ?? []
   const completedItems = checklist.filter((item) => item.done).length
   const hasVisibleAiRuntime = data.aiConversationRuntime?.state === 'running'
@@ -123,7 +138,8 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
               </svg>
             </span>
           )}
-          <h3>{data.label}</h3>
+          {referenceBadge}
+          <h3>{displayLabel}</h3>
           <a
             className="dooray-linked-open node-source-open nodrag nopan"
             href={doorayUrl}
@@ -136,6 +152,11 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
           >
             ↗
           </a>
+        </div>
+      ) : isReference ? (
+        <div className="node-title-row">
+          {referenceBadge}
+          <h3>{displayLabel}</h3>
         </div>
       ) : <h3>{data.label}</h3>}
       <p>{data.description}</p>

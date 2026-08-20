@@ -45,6 +45,10 @@
 .node-title-row { max-width: 185px; display: flex; align-items: center; gap: 6px; margin: 10px 0 4px; }
 .node-title-row h3 { min-width: 0; max-width: none; flex: 1; margin: 0; }
 .dooray-linked-icon { width: 16px; height: 16px; display: grid; flex: none; place-items: center; color: white; border-radius: 5px; background: #4f79d8; font-size: 8px; font-weight: 850; line-height: 1; }
+.node-ref-badge { flex: none; padding: 2px 6px; color: white; border-radius: 5px; background: #3f3a52; font-size: 8px; font-weight: 800; line-height: 1.35; letter-spacing: .02em; white-space: nowrap; }
+.node-ref-badge.unresolved { background: #c45b5b; }
+.mind-node.root .node-ref-badge { color: white; background: rgba(255,255,255,.22); }
+.mind-node.root .node-ref-badge.unresolved { background: #d97a7a; }
 .dooray-linked-open { width: 18px; height: 18px; display: grid; flex: none; place-items: center; color: #4f6fb5; border-radius: 5px; background: #e8eefb; font-size: 11px; font-weight: 800; line-height: 1; text-decoration: none; }
 .dooray-linked-open:hover { color: white; background: #4f79d8; }
 .mind-node.root h3 { color: white; font-size: 14px; }

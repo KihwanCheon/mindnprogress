@@ -141,6 +141,7 @@ export type MindNodeData = {
   aiConversationId?: string
   aiConversations?: AiConversationLink[]
   reference?: MindNodeReference
+  referenceUnresolved?: boolean
   isWork?: boolean
   assigneeId?: string
   assignee?: TeamMember
