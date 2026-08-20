@@ -353,6 +353,10 @@ async function main() {
     }
     assert.deepEqual(toolSchema('mindnprogress_update_card')?.properties?.responseMode?.enum, ['full', 'affected'])
     assert.equal(toolSchema('mindnprogress_update_card')?.properties?.responseMode?.default, 'full')
+    for (const name of ['mindnprogress_add_card', 'mindnprogress_move_card', 'mindnprogress_delete_card']) {
+      assert.deepEqual(toolSchema(name)?.properties?.responseMode?.enum, ['full', 'affected'])
+      assert.equal(toolSchema(name)?.properties?.responseMode?.default, 'affected')
+    }
     assert.deepEqual(toolSchema('mindnprogress_patch_card_text')?.properties?.field?.enum, ['description', 'sharedKnowledge'])
     assert.equal(toolSchema('mindnprogress_patch_card_text')?.properties?.expectedSha256?.pattern, '^[a-f0-9]{64}$')
     assert.ok(toolSchema('mindnprogress_patch_card_text')?.required?.includes('operation'))
@@ -1643,11 +1647,18 @@ async function main() {
     })
     assert.equal(secondAddedCardResult.responseMode, 'full')
     assert.ok(secondAddedCardResult.createdCardId)
+    assert.ok(secondAddedCardResult.map.createdAt)
+    assert.ok(secondAddedCardResult.map.createdBy?.id)
     const secondAddedCard = secondAddedCardResult.map.nodes.find((node) => node.data.label === '두 번째 추가 카드')
     assert.ok(secondAddedCard)
     assert.equal(secondAddedCard.id, secondAddedCardResult.createdCardId)
+    assert.equal(secondAddedCard.type, 'mind')
     assert.equal(secondAddedCard.position.x, addedCard.position.x)
     assert.equal(secondAddedCard.position.y - addedCard.position.y, 144)
+    const secondAddedCardEdge = secondAddedCardResult.map.edges
+      .find((edge) => edge.source === 'root' && edge.target === secondAddedCard.id)
+    assert.equal(secondAddedCardEdge?.type, 'default')
+    assert.equal(secondAddedCardEdge?.markerEnd?.type, 'arrowclosed')
 
     const waitingCardResult = await invoke('mindnprogress_update_card', {
       mapId,
@@ -1856,17 +1867,54 @@ async function main() {
     assert.ok(movedCardResult.affectedCards.every((entry) => entry.card.id !== addedCard.id))
 
     const movedBackResult = await invoke('mindnprogress_move_card', {
-      mapId, cardId: addedCard.id, newParentCardId: 'branch-b', responseMode: 'full',
+      mapId, cardId: addedCard.id, newParentCardId: 'root', responseMode: 'full',
     })
-    assert.ok(movedBackResult.map.edges.some((edge) => edge.source === 'branch-b' && edge.target === addedCard.id))
+    assert.equal(movedBackResult.responseMode, 'full')
+    assert.equal(movedBackResult.movedCardId, addedCard.id)
+    assert.ok(movedBackResult.map.createdAt)
+    assert.ok(movedBackResult.map.createdBy?.id)
+    assert.ok(movedBackResult.map.edges.some((edge) => edge.source === 'root' && edge.target === addedCard.id))
+    assert.ok(!movedBackResult.map.edges.some((edge) => edge.source === 'branch-b' && edge.target === addedCard.id))
 
-    const deletedCardResult = await invoke('mindnprogress_delete_card', { mapId, cardId: addedCard.id, includeDescendants: true })
+    const detachedChildResult = await invoke('mindnprogress_add_card', {
+      mapId,
+      parentCardId: addedCard.id,
+      data: { label: '삭제 후 분리될 카드', description: '', kind: 'branch', status: 'planned', progress: 0 },
+    })
+    await invoke('mindnprogress_add_knowledge_line', {
+      mapId,
+      sourceCardId: 'branch-a',
+      targetCardId: addedCard.id,
+      knowledgePolicy: 'inspect-if-insufficient',
+    })
+
+    const deletedCardResult = await invoke('mindnprogress_delete_card', { mapId, cardId: addedCard.id, includeDescendants: false })
     assert.equal(deletedCardResult.responseMode, 'affected')
     assert.equal(deletedCardResult.map, undefined, 'delete_card 기본 응답에 전체 문서가 담기면 안 됩니다.')
     assert.deepEqual(deletedCardResult.deletedCardIds, [addedCard.id])
+    assert.equal(deletedCardResult.relationChanges.previousParentCardId, 'root')
+    assert.deepEqual(deletedCardResult.relationChanges.detachedChildCardIds, [detachedChildResult.card.id])
+    assert.deepEqual(deletedCardResult.relationChanges.removedKnowledgeLines.map((line) => ({
+      sourceCardId: line.sourceCardId,
+      targetCardId: line.targetCardId,
+      knowledgePolicy: line.knowledgePolicy,
+    })), [{
+      sourceCardId: 'branch-a',
+      targetCardId: addedCard.id,
+      knowledgePolicy: 'inspect-if-insufficient',
+    }])
     assert.equal(deletedCardResult.root.progress, 30)
     assert.ok(deletedCardResult.affectedCards.every((entry) => entry.card.id !== addedCard.id))
-    await invoke('mindnprogress_delete_card', { mapId, nodeId: secondAddedCard.id, includeDescendants: true })
+
+    const fullDeletedCardResult = await invoke('mindnprogress_delete_card', {
+      mapId, nodeId: secondAddedCard.id, includeDescendants: true, responseMode: 'full',
+    })
+    assert.equal(fullDeletedCardResult.responseMode, 'full')
+    assert.deepEqual(fullDeletedCardResult.deletedCardIds, [secondAddedCard.id])
+    assert.ok(fullDeletedCardResult.map.createdAt)
+    assert.ok(fullDeletedCardResult.map.createdBy?.id)
+    assert.ok(!fullDeletedCardResult.map.nodes.some((node) => node.id === secondAddedCard.id))
+    await invoke('mindnprogress_delete_card', { mapId, cardId: detachedChildResult.card.id, includeDescendants: true })
 
     documentResult = await invoke('mindnprogress_get_document', { mapId })
     const metadataResult = await invoke('mindnprogress_update_document_info', {

@@ -554,7 +554,7 @@ function rootRollup(rootCard) {
   }
 }
 
-const affectedFirstResponseModeDescription = 'affected가 기본이며 변경된 카드와 문서·Root 요약만 반환합니다. 전체 문서가 필요할 때만 full을 지정하거나 mindnprogress_get_document를 호출하세요.'
+const affectedFirstResponseModeDescription = 'affected가 기본이며 변경된 카드와 문서·Root 요약만 반환합니다. 변경 전과 같은 API 원본 전체 문서가 필요할 때만 full을 지정하거나 mindnprogress_get_document를 호출하세요.'
 
 function affectedCardsOf(previousMap, savedMap, mapId, requestedCardIds, rootCardId, excludedCardIds = []) {
   const requested = new Set(requestedCardIds)
@@ -569,6 +569,25 @@ function affectedCardsOf(previousMap, savedMap, mapId, requestedCardIds, rootCar
         position: item.position,
       },
     }))
+}
+
+function deletedRelationsOf(map, deletedCardIds, targetCardId) {
+  const deleted = new Set(deletedCardIds)
+  return {
+    previousParentCardId: map.edges
+      .find((edge) => isHierarchyEdge(edge) && edge.target === targetCardId)?.source ?? null,
+    detachedChildCardIds: [...new Set(map.edges
+      .filter((edge) => isHierarchyEdge(edge) && edge.source === targetCardId && !deleted.has(edge.target))
+      .map((edge) => edge.target))],
+    removedKnowledgeLines: map.edges
+      .filter((edge) => isKnowledgeEdge(edge) && (deleted.has(edge.source) || deleted.has(edge.target)))
+      .map((edge) => ({
+        id: edge.id,
+        sourceCardId: edge.source,
+        targetCardId: edge.target,
+        knowledgePolicy: knowledgePolicyOf(edge),
+      })),
+  }
 }
 
 function focusedDocument(map, publicBaseUrl) {
@@ -1521,7 +1540,7 @@ async function main() {
     body: JSON.stringify({ map: { nodes, edges }, baseVersion, force }),
   }))
 
-  registerTool(server, 'mindnprogress_add_card', '문서에 새 카드 또는 하위 카드를 추가합니다. 외부 전달물이나 결정 대기는 제목이 아니라 waitingItems로 기록합니다. 응답은 추가한 카드와 문서 요약만 돌려주므로 전체 문서를 다시 받지 않습니다.', {
+  registerTool(server, 'mindnprogress_add_card', '문서에 새 카드 또는 하위 카드를 추가합니다. 외부 전달물이나 결정 대기는 제목이 아니라 waitingItems로 기록합니다. 기본 affected 응답은 추가한 카드와 문서 요약만 반환하며, full은 변경 전과 같은 API 원본 전체 문서를 반환합니다.', {
     mapId: z.string().min(1),
     parentCardId: z.string().min(1).optional().describe('새 카드를 추가할 상위 카드 ID. 최상위 카드를 추가할 때는 생략'),
     parentId: z.string().min(1).optional().describe('기존 대화 호환용 상위 카드 ID. 새 호출에서는 parentCardId 사용'),
@@ -1573,7 +1592,7 @@ async function main() {
     if (responseMode === 'full') {
       return {
         responseMode,
-        map: updateCardFullMap(savedMap),
+        map: savedMap,
         summary: saved.summary,
         createdCardId: nodeId,
       }
@@ -1736,7 +1755,7 @@ async function main() {
     })
   })
 
-  registerTool(server, 'mindnprogress_move_card', '카드와 모든 하위 카드를 유지한 채 다른 카드의 하위로 이동합니다. 응답은 이동한 카드와 상위 관계 변화만 돌려주므로 전체 문서를 다시 받지 않습니다.', {
+  registerTool(server, 'mindnprogress_move_card', '카드와 모든 하위 카드를 유지한 채 다른 카드의 하위로 이동합니다. 기본 affected 응답은 이동한 카드와 상위 관계 변화만 반환하며, full은 변경 전과 같은 API 원본 전체 문서를 반환합니다.', {
     mapId: z.string().min(1),
     cardId: z.string().min(1).optional().describe('이동할 카드 ID. 새 호출에서는 이 필드를 사용'),
     nodeId: z.string().min(1).optional().describe('기존 대화 호환용 카드 ID. 새 호출에서는 cardId 사용'),
@@ -1776,7 +1795,7 @@ async function main() {
     if (responseMode === 'full') {
       return {
         responseMode,
-        map: updateCardFullMap(savedMap),
+        map: savedMap,
         summary: saved.summary,
         movedCardId: resolvedCardId,
       }
@@ -1800,7 +1819,7 @@ async function main() {
     }
   })
 
-  registerTool(server, 'mindnprogress_delete_card', '카드를 삭제합니다. 기본적으로 모든 하위 카드도 함께 삭제합니다. 응답은 삭제한 카드 ID와 함께 조정된 카드만 돌려주므로 전체 문서를 다시 받지 않습니다.', {
+  registerTool(server, 'mindnprogress_delete_card', '카드를 삭제합니다. 기본적으로 모든 하위 카드도 함께 삭제합니다. 기본 affected 응답은 삭제한 카드 ID와 끊어진 계층·지식선 관계 및 함께 조정된 카드만 반환하며, full은 변경 전과 같은 API 원본 전체 문서를 반환합니다.', {
     mapId: z.string().min(1),
     cardId: z.string().min(1).optional().describe('삭제할 카드 ID. 새 호출에서는 이 필드를 사용'),
     nodeId: z.string().min(1).optional().describe('기존 대화 호환용 카드 ID. 새 호출에서는 cardId 사용'),
@@ -1818,17 +1837,19 @@ async function main() {
     const previousMap = responseMode === 'affected' ? structuredClone(map) : null
     const deletedIds = includeDescendants ? descendantsOf(resolvedCardId, map.edges) : new Set()
     deletedIds.add(resolvedCardId)
+    const deletedCardIds = [...deletedIds]
+    const relationChanges = deletedRelationsOf(map, deletedCardIds, resolvedCardId)
     map.nodes = map.nodes.filter((node) => !deletedIds.has(node.id))
     map.edges = map.edges.filter((edge) => !deletedIds.has(edge.source) && !deletedIds.has(edge.target))
     const saved = await saveDocument(map, false, resolvedCardId)
     const savedMap = saved.map
-    const deletedCardIds = [...deletedIds]
     if (responseMode === 'full') {
       return {
         responseMode,
-        map: updateCardFullMap(savedMap),
+        map: savedMap,
         summary: saved.summary,
         deletedCardIds,
+        relationChanges,
       }
     }
     const rootCard = rootCardOf(savedMap)
@@ -1836,6 +1857,7 @@ async function main() {
       responseMode,
       document: saved.summary,
       deletedCardIds,
+      relationChanges,
       root: rootRollup(rootCard),
       affectedCards: affectedCardsOf(previousMap, savedMap, mapId, [], rootCard?.id),
     }
