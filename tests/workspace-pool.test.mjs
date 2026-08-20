@@ -94,6 +94,84 @@ test('회수 기준 커밋 객체가 없으면 두 번 fetch한 뒤 worker 전�
   assert.equal(commands.some(({ cwd, args }) => cwd === workerRoot && args[0] === 'switch'), false)
 })
 
+test('서버 재시작 후 finalizing lease는 같은 AI 대화에만 다시 연결한다', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'mnp-finalizing-rebind-'))
+  try {
+    const integrationRoot = path.join(root, 'main')
+    const workerRoot = path.join(root, 'fork4')
+    const sharedRoot = path.join(root, 'shared')
+    await Promise.all([mkdir(integrationRoot), mkdir(workerRoot), mkdir(sharedRoot)])
+    const registryFile = path.join(sharedRoot, 'workspaces.json')
+    const stateFile = path.join(root, 'state.json')
+    const lease = {
+      poolId: 'holdem',
+      workspaceId: 'fork4',
+      jobId: 'job-finalizing',
+      leaseId: 'lease-finalizing',
+      projectRoot: workerRoot,
+      assetsPath: `${workerRoot}/Assets`,
+      unityInstanceHash: 'hash-fork4',
+      branch: 'mnp/job-finalizing',
+      baseBranch: 'japan-master',
+      baseCommit: 'base123',
+      mapId: 'map-a',
+      cardId: 'card-b',
+      conversationId: 'conversation-c',
+      status: 'finalizing',
+      startedAt: '2026-08-20T09:00:00.000Z',
+      checkpoints: [],
+    }
+    await writeFile(registryFile, JSON.stringify({
+      schemaVersion: 1,
+      poolId: 'holdem',
+      sharedRoot,
+      originUrl: 'https://example.invalid/holdem.git',
+      workspaces: [
+        { id: 'main', root: integrationRoot, role: 'integration', enabled: true },
+        { id: 'fork4', root: workerRoot, role: 'worker', enabled: true },
+      ],
+    }), 'utf8')
+    await writeFile(stateFile, JSON.stringify({
+      schemaVersion: 1,
+      poolId: 'holdem',
+      integrationLeaseId: null,
+      workspaces: {
+        main: { status: 'integration' },
+        fork4: { status: 'finalizing', jobId: lease.jobId, leaseId: lease.leaseId },
+      },
+      leases: { [lease.leaseId]: lease },
+    }), 'utf8')
+    await writeFile(path.join(workerRoot, '.ai-session.json'), JSON.stringify({
+      schemaVersion: 1,
+      workspaceId: lease.workspaceId,
+      jobId: lease.jobId,
+      leaseId: lease.leaseId,
+      projectRoot: lease.projectRoot,
+      conversationId: lease.conversationId,
+    }), 'utf8')
+
+    const manager = new WorkspacePoolManager({
+      registryFile,
+      stateFile,
+      gitRunner: async (_cwd, args) => args[0] === 'branch' ? lease.branch : '',
+    })
+    assert.equal(await manager.initialize(), true)
+    const rebound = await manager.bindConversation(lease.leaseId, lease.conversationId)
+    assert.equal(rebound?.leaseId, lease.leaseId)
+    assert.equal(await manager.bindConversation(lease.leaseId, 'conversation-other'), null)
+    const reused = await manager.reuseLease(lease.leaseId, {
+      mapId: lease.mapId,
+      cardId: lease.cardId,
+      conversationId: lease.conversationId,
+    })
+    assert.equal(reused?.leaseId, lease.leaseId)
+    assert.equal(manager.publicSnapshot({ conversationId: lease.conversationId })
+      .workspaces.find((workspace) => workspace.workspaceId === lease.workspaceId)?.status, 'leased')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('registry 작업공간만 풀로 인식하고 유휴 worker에 원자적 lease를 만든다', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'mnp-workspace-pool-'))
   try {

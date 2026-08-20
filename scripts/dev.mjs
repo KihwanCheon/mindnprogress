@@ -4,8 +4,11 @@ import { fileURLToPath } from 'node:url'
 
 const projectDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const viteEntry = path.join(projectDirectory, 'node_modules', 'vite', 'bin', 'vite.js')
+const watchServer = process.argv.includes('--watch')
+const serverEntry = path.join(projectDirectory, 'server', 'index.mjs')
+console.log(`[Mind & Progress] API server mode: ${watchServer ? 'watch' : 'stable'}`)
 const children = [
-  spawn(process.execPath, ['--watch', path.join(projectDirectory, 'server', 'index.mjs')], {
+  spawn(process.execPath, watchServer ? ['--watch', serverEntry] : [serverEntry], {
     cwd: projectDirectory,
     stdio: 'inherit',
   }),

@@ -10,6 +10,13 @@ const idleDriftReason = '작업공간에 소유자를 확정할 수 없는 변�
 const integrationWorktreeDirtyMessage = '통합 작업공간에 커밋되지 않은 추적 파일 변경이 있습니다.'
 export const integrationWorktreeDirtyReasonCode = 'integration-worktree-dirty'
 const conversationBindableLeaseStatuses = new Set(['leased', 'checkpoint-required'])
+const conversationReusableLeaseStatuses = new Set(['leased', 'checkpoint-required', 'finalizing'])
+const conversationRebindOnlyLeaseStatuses = new Set([
+  'finalizing',
+  'waiting-integration',
+  'integrating',
+  'awaiting-conflict-resolution',
+])
 const protectedWorkspaceEntries = new Set([
   '.ai-workspace.json', '.agents', '.claude', '.codex', '_AIShared', 'AGENTS.md', 'CLAUDE.local.md',
 ])
@@ -657,7 +664,7 @@ export class WorkspacePoolManager {
   } = {}) {
     return this.runExclusive(async () => {
       const lease = this.state?.leases?.[String(leaseId ?? '').trim()]
-      if (!lease || !['leased', 'checkpoint-required'].includes(lease.status)) {
+      if (!lease || !conversationBindableLeaseStatuses.has(lease.status)) {
         throw new WorkspacePoolUnavailableError('체크포인트를 생성할 활성 AI 작업공간 lease를 찾지 못했습니다.')
       }
       const requestedConversationId = String(conversationId ?? '').trim()
@@ -884,7 +891,7 @@ export class WorkspacePoolManager {
       const normalizedLeaseId = String(leaseId ?? '').trim()
       const normalizedConversationId = String(conversationId ?? '').trim()
       const lease = this.state?.leases?.[normalizedLeaseId]
-      if (!lease || !['leased', 'checkpoint-required'].includes(lease.status)) {
+      if (!lease || !conversationReusableLeaseStatuses.has(lease.status)) {
         throw new WorkspacePoolUnavailableError('이어갈 AI 작업공간 lease를 찾지 못했습니다.')
       }
       if (lease.mapId !== String(mapId ?? '') || lease.cardId !== String(cardId ?? '')) {
@@ -915,7 +922,7 @@ export class WorkspacePoolManager {
       const workspace = this.registry?.workspaces.find((candidate) => candidate.id === lease.workspaceId)
       const workspaceState = this.state?.workspaces?.[lease.workspaceId]
       if (!workspace
-        || !['leased', 'checkpoint-required'].includes(workspaceState?.status)
+        || !conversationReusableLeaseStatuses.has(workspaceState?.status)
         || workspaceState?.leaseId !== normalizedLeaseId) {
         throw new WorkspacePoolUnavailableError('이어갈 AI 작업공간의 점유 상태가 lease와 일치하지 않습니다.')
       }
@@ -934,9 +941,11 @@ export class WorkspacePoolManager {
 
       const updatedAt = new Date().toISOString()
       lease.conversationId = normalizedConversationId
+      lease.status = 'leased'
       lease.updatedAt = updatedAt
       this.state.workspaces[lease.workspaceId] = {
         ...workspaceState,
+        status: 'leased',
         updatedAt,
       }
       await atomicJson(sessionFile, {
@@ -954,7 +963,10 @@ export class WorkspacePoolManager {
       const normalizedLeaseId = String(leaseId ?? '').trim()
       const normalizedConversationId = String(conversationId ?? '').trim()
       const lease = this.state?.leases?.[normalizedLeaseId]
-      if (!lease || !conversationBindableLeaseStatuses.has(lease.status) || !normalizedConversationId) return null
+      const canBind = conversationBindableLeaseStatuses.has(lease?.status)
+      const canRebind = conversationRebindOnlyLeaseStatuses.has(lease?.status)
+      if (!lease || (!canBind && !canRebind) || !normalizedConversationId) return null
+      if (canRebind && lease.conversationId !== normalizedConversationId) return null
       if (lease.conversationId && lease.conversationId !== normalizedConversationId) {
         throw new WorkspacePoolUnavailableError('AI 작업공간 lease가 이미 다른 대화에 연결되어 있습니다.')
       }
