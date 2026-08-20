@@ -39,6 +39,7 @@ import { ImagePreviewDialog } from './components/ImagePreviewDialog'
 import { SharedKnowledgeReviewDialog, type SharedKnowledgeReviewApplied } from './components/SharedKnowledgeReviewDialog'
 import { DashboardView, KanbanView, TimelineView } from './components/WorkViews'
 import type { AiConversationLink, AiConversationRuntime, ChecklistItem, KnowledgePolicy, MindDoorayLinkData, MindDoorayTaskData, MindDoorayWikiData, MindImageData, MindMapEdgeData, MindNodeData, TeamMember, WaitingItem } from './types/mindMap'
+import { resolveAiConversationTarget, type AiConversationExplicitTarget } from './utils/aiConversationLaunch.mjs'
 import { blockingNodes, createsDependencyCycle, dependentNodes, prerequisiteNodes } from './utils/dependencies'
 import { collapsedDocumentGroupsStorageKey, initialCollapsedDocumentGroupIds, normalizeCollapsedDocumentGroupIds } from './utils/documentGroupCollapse.mjs'
 import { createsKnowledgeCycle, isHierarchyEdge, isKnowledgeEdge, knowledgePolicyOf } from './utils/knowledgeEdges'
@@ -1757,6 +1758,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const [accountMenuOpen, setAccountMenuOpen] = useState(false)
   const [passwordDialogOpen, setPasswordDialogOpen] = useState(false)
   const [aiDialogOpen, setAiDialogOpen] = useState(false)
+  const [aiConversationLaunch, setAiConversationLaunch] = useState<AiConversationExplicitTarget & { initialRequest: string } | null>(null)
   const [aiConversationPicker, setAiConversationPicker] = useState<{ mapId: string; cardId: string; cardTitle: string } | null>(null)
   const [aionUiWebNavigation, setAionUiWebNavigation] = useState(() => ({
     baseUrl: defaultAionUiWebBaseUrl(),
@@ -2169,6 +2171,28 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       && !selectedKnowledgeEdges.some((edge) => edge.source === node.id)
       && !createsKnowledgeCycle(node.id, selectedNode.id, knowledgeEdges))
     : [], [knowledgeEdges, nodes, selectedKnowledgeEdges, selectedNode])
+  const aiConversationTarget = useMemo(() => resolveAiConversationTarget({
+    explicitTarget: aiConversationLaunch,
+    selection: {
+      open: aiDialogOpen,
+      mapId: selectedCommentMapId,
+      cardId: selectedCommentNodeId ?? selectedNode?.id,
+      cardLabel: selectedNode?.data.label,
+      cardKind: selectedNode?.data.kind,
+      isReference: Boolean(selectedNode?.data.reference),
+      documentTitle: activeDocument
+        ? documents.find((document) => document.id === selectedCommentMapId)?.title ?? activeDocument.title
+        : null,
+      knowledgeSources: selectedKnowledgeEdges.flatMap((edge) => {
+        const source = nodes.find((node) => node.id === edge.source)
+        return source ? [{ id: source.id, label: source.data.label, policy: knowledgePolicyOf(edge) }] : []
+      }),
+    },
+  }), [activeDocument, aiConversationLaunch, aiDialogOpen, documents, nodes, selectedCommentMapId, selectedCommentNodeId, selectedKnowledgeEdges, selectedNode])
+  const closeAiConversationDialog = useCallback(() => {
+    setAiConversationLaunch(null)
+    setAiDialogOpen(false)
+  }, [])
   const childrenById = useMemo(() => {
     const result = new Map<string, string[]>()
     hierarchyEdges.forEach((edge) => result.set(edge.source, [...(result.get(edge.source) ?? []), edge.target]))
@@ -7281,6 +7305,8 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         <SharedKnowledgeReviewDialog
           activeMapId={activeMapId || null}
           clientId={CLIENT_ID}
+          aiRequestOpen={Boolean(aiConversationLaunch)}
+          onRequestAiCleanup={setAiConversationLaunch}
           onApplied={handleSharedKnowledgeReviewApplied}
           onClose={() => setSharedKnowledgeReviewOpen(false)}
         />
@@ -7294,20 +7320,18 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
           onClose={() => setDailyBackupPreview(null)}
         />
       )}
-      {aiDialogOpen && selectedNode && selectedNode.data.kind !== 'image' && activeDocument && (
+      {aiConversationTarget && (
         <AiConversationDialog
-          key={selectedCommentMapId}
+          key={`${aiConversationTarget.mapId}:${aiConversationTarget.cardId}`}
           userId={user.id}
-          documentId={selectedCommentMapId}
-          documentTitle={documents.find((document) => document.id === selectedCommentMapId)?.title ?? activeDocument.title}
-          cardId={selectedCommentNodeId ?? selectedNode.id}
-          cardTitle={selectedNode.data.label.replace(/\s*\(ref\)\s*$/i, '')}
-          knowledgeSources={selectedNode.data.reference ? [] : selectedKnowledgeEdges.flatMap((edge) => {
-            const source = nodes.find((node) => node.id === edge.source)
-            return source ? [{ id: source.id, label: source.data.label, policy: knowledgePolicyOf(edge) }] : []
-          })}
+          documentId={aiConversationTarget.mapId}
+          documentTitle={aiConversationTarget.documentTitle}
+          cardId={aiConversationTarget.cardId}
+          cardTitle={aiConversationTarget.cardTitle}
+          knowledgeSources={aiConversationTarget.knowledgeSources}
+          initialRequest={aiConversationTarget.initialRequest}
           launchInWebUi={aionUiWebNavigation.configured || !isLoopbackHostname(window.location.hostname)}
-          onClose={() => setAiDialogOpen(false)}
+          onClose={closeAiConversationDialog}
         />
       )}
       {aiConversationPicker && (

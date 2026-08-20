@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { buildSharedKnowledgeCleanupLaunch, type AiConversationExplicitTarget } from '../utils/aiConversationLaunch.mjs'
 import './SharedKnowledgeReviewDialog.css'
 
 type ReviewLevel = 'attention' | 'recommended' | 'priority'
@@ -128,6 +129,9 @@ export type SharedKnowledgeReviewApplied = {
 type SharedKnowledgeReviewDialogProps = {
   activeMapId: string | null
   clientId: string
+  /** AI 정리 제안 대화를 이 다이얼로그 위에 겹쳐 여는 동안 Esc와 배경 닫기를 멈춥니다. */
+  aiRequestOpen?: boolean
+  onRequestAiCleanup?: (target: AiConversationExplicitTarget & { initialRequest: string }) => void
   onApplied: (applied: SharedKnowledgeReviewApplied) => void | Promise<void>
   onClose: () => void
 }
@@ -231,6 +235,8 @@ function EmptyReviewState({ filtered }: { filtered: boolean }) {
 export function SharedKnowledgeReviewDialog({
   activeMapId,
   clientId,
+  aiRequestOpen = false,
+  onRequestAiCleanup,
   onApplied,
   onClose,
 }: SharedKnowledgeReviewDialogProps) {
@@ -265,6 +271,7 @@ export function SharedKnowledgeReviewDialog({
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (aiRequestOpen) return
       if (event.key === 'Escape' && !applying) {
         event.preventDefault()
         onClose()
@@ -287,7 +294,7 @@ export function SharedKnowledgeReviewDialog({
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [applying, onClose])
+  }, [aiRequestOpen, applying, onClose])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -421,7 +428,7 @@ export function SharedKnowledgeReviewDialog({
     <div
       className="shared-knowledge-review-backdrop"
       onPointerDown={(event) => {
-        if (event.target === event.currentTarget && !applying) onClose()
+        if (event.target === event.currentTarget && !applying && !aiRequestOpen) onClose()
       }}
     >
       <section ref={dialogRef} className="shared-knowledge-review-dialog" role="dialog" aria-modal="true" aria-labelledby="shared-knowledge-review-title">
@@ -529,7 +536,21 @@ export function SharedKnowledgeReviewDialog({
                     <strong>{context.card.label}</strong>
                     <small>공유 지식 수정 {formatDate(context.card.sharedKnowledgeUpdatedAt)} · 문서 버전 {context.document.version}</small>
                   </div>
-                  <a href={context.accessUrl} target="_blank" rel="noreferrer">카드 열기 ↗</a>
+                  <div className="shared-knowledge-review-card-actions">
+                    {onRequestAiCleanup && (
+                      <button
+                        type="button"
+                        className="shared-knowledge-review-ai-request"
+                        onClick={() => {
+                          const target = buildSharedKnowledgeCleanupLaunch(context)
+                          if (target) onRequestAiCleanup(target)
+                        }}
+                        disabled={applying || aiRequestOpen}
+                        title="이 카드를 대상으로 AI에게 정리안을 요청합니다. 자동 저장되지 않습니다."
+                      >AI 정리 제안</button>
+                    )}
+                    <a href={context.accessUrl} target="_blank" rel="noreferrer">카드 열기 ↗</a>
+                  </div>
                 </div>
 
                 <div className="shared-knowledge-review-stats" aria-label="공유 지식 분석 결과">

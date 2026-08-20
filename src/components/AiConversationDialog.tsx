@@ -12,6 +12,12 @@ import {
   normalizeAiRuntimeSelections,
   rememberAiRuntimeSelection,
 } from '../utils/aiRuntimeSelections.mjs'
+import {
+  AI_EDITOR_REQUEST_MAX_LENGTH,
+  buildAiConversationPrompt,
+  DEFAULT_AI_EDITOR_REQUEST,
+  normalizeAiEditorRequest,
+} from '../utils/aiConversationLaunch.mjs'
 import './AiConversationDialog.css'
 
 type RuntimeOption = { id: string; label: string; description: string; providerId?: string }
@@ -38,13 +44,6 @@ type AionOptions = {
   mcpServers: AionMcpServer[]
 }
 const defaultWorkspace = 'C:\\Git\\MindNProgress'
-const defaultEditorRequest = `이 카드의 최신 내용을 검토하세요.
-
-검토 결과 이미 확정된 요구사항, 결정 또는 조사 결과가 카드의 업무 설명, 공유 지식, 상태, 체크리스트 또는 대기 항목에 누락되어 있거나 현재 내용과 어긋나면 필요한 필드만 먼저 수정하고 저장 결과를 확인하세요. 추측이나 아직 결정되지 않은 내용은 카드에 확정 정보처럼 기록하지 마세요.
-
-공유 지식에는 다른 카드가 다시 사용할 현재 유효한 결론만 남기세요. 진행 기록·도구 로그·중복·폐기 결론은 넣지 말고, 같은 주제의 결론은 새 이력으로 덧붙이지 말고 기존 내용을 안전하게 갱신하세요.
-
-카드 수정이 필요하지 않다면 그 사실을 명시하세요. 그다음 수행할 작업을 우선순위와 완료 조건을 포함해 제안해 주세요.`
 const runtimeSelectionsStorageKey = 'mindnprogress-ai-runtime-selections'
 const mcpSelectionsStorageKey = 'mindnprogress-ai-mcp-selections'
 const legacyWorkspaceHistoryStorageKey = 'mindnprogress-ai-workspace-history-v1'
@@ -156,13 +155,14 @@ function encodeBase64Json(value: unknown) {
   return btoa(binary)
 }
 
-export function AiConversationDialog({ userId, documentId, documentTitle, cardId, cardTitle, knowledgeSources, launchInWebUi, onClose }: {
+export function AiConversationDialog({ userId, documentId, documentTitle, cardId, cardTitle, knowledgeSources, initialRequest, launchInWebUi, onClose }: {
   userId: string
   documentId: string
   documentTitle: string
   cardId: string
   cardTitle: string
   knowledgeSources: { id: string; label: string; policy: KnowledgePolicy }[]
+  initialRequest?: string
   launchInWebUi: boolean
   onClose: () => void
 }) {
@@ -171,7 +171,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
   const [launching, setLaunching] = useState(false)
   const [error, setError] = useState('')
   const [launchError, setLaunchError] = useState('')
-  const [request, setRequest] = useState(defaultEditorRequest)
+  const [request, setRequest] = useState(() => normalizeAiEditorRequest(initialRequest) || DEFAULT_AI_EDITOR_REQUEST)
   const [agentId, setAgentId] = useState('')
   const [modelId, setModelId] = useState('')
   const [mode, setMode] = useState('')
@@ -369,8 +369,13 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
       if (!attributionResponse.ok || !attribution.attributionToken || !attribution.completionUrl || !attribution.editorId) {
         throw new Error(attribution.error ?? 'AI 작성자 정보를 준비하지 못했습니다.')
       }
-      const inspectionInstruction = `MCP 조회 결과의 \`guide\`, \`selection.taskLinks.startupInspection\`과 \`nextStep\`을 반드시 확인하고 그대로 따르세요. 상세 조사 순서와 AI 대화 기록 조회 조건은 현재 조회 결과를 기준으로 판단하세요.`
-      const prompt = `# MindNProgress 작업 요청\n\n가장 먼저 MindNProgress MCP 도구 \`mindnprogress_get_context\`를 아래 값으로 한 번 호출하세요. \`editorId\`는 이 대화를 시작한 편집자 계정으로 MindNProgress를 조회하고 수정하기 위한 값이므로 이후 MCP 작업이 끝날 때까지 유지하세요. \`attributionToken\`은 댓글과 변경 이력에 현재 AI 종류와 모델을 정확히 기록하기 위한 보조 값입니다. 이 도구가 MindNProgress의 제품 개념과 작성 규칙, 최신 문서 구조, 선택 카드 정보를 함께 제공합니다. 프롬프트에는 카드 스냅샷이 포함되어 있지 않으므로 반드시 MCP 조회 결과를 기준으로 답변하고 필요한 작업을 수행해야 합니다.\n\n- mapId: \`${documentId}\`\n- cardId: \`${cardId}\`\n- editorId: \`${attribution.editorId}\`\n- attributionToken: \`${attribution.attributionToken}\`\n\n${inspectionInstruction}\n\nMCP 도구를 사용할 수 없거나 해당 문서 또는 카드를 찾지 못하면 임의로 추측하지 말고 그 사실을 알려주세요.\n\n# 편집자 요청\n\n${request.trim()}`
+      const prompt = buildAiConversationPrompt({
+        mapId: documentId,
+        cardId,
+        editorId: attribution.editorId,
+        attributionToken: attribution.attributionToken,
+        request,
+      })
       const launchPayload = {
         agentId: selectedAgent.id,
         completionUrl: attribution.completionUrl,
@@ -436,7 +441,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
                 <small>최상위 업무와 원본 자료는 선행 지식만으로 부족할 때만 선택적으로 확인합니다.</small>
               </div>
             )}
-            <label className="ai-request"><span>AI에게 요청할 내용</span><textarea value={request} onChange={(event) => setRequest(event.target.value)} rows={4} maxLength={4000} autoFocus /></label>
+            <label className="ai-request"><span>AI에게 요청할 내용</span><textarea value={request} onChange={(event) => setRequest(event.target.value)} rows={4} maxLength={AI_EDITOR_REQUEST_MAX_LENGTH} autoFocus /></label>
             <div className="ai-dialog-grid">
               <label><span>AI 종류</span><select value={agentId} onChange={(event) => changeAgent(event.target.value)}>{options.agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label>
               <label><span>모델</span><select value={modelId} onChange={(event) => setModelId(event.target.value)}>{selectedAgent?.models.map((model) => <option key={`${model.providerId ?? ''}-${model.id}`} value={model.id}>{model.label}</option>)}</select></label>

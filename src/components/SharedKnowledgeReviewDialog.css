@@ -210,7 +210,9 @@
 .shared-knowledge-review-card-header span { color: #7063cf; font-size: 8px; font-weight: 750; }
 .shared-knowledge-review-card-header strong { overflow: hidden; font-size: 16px; text-overflow: ellipsis; white-space: nowrap; }
 .shared-knowledge-review-card-header small { color: var(--theme-text-muted, #918a97); font-size: 8px; }
-.shared-knowledge-review-card-header a {
+.shared-knowledge-review-card-header > .shared-knowledge-review-card-actions { flex: 0 0 auto; flex-direction: row; align-items: center; gap: 6px; }
+.shared-knowledge-review-card-header a,
+.shared-knowledge-review-ai-request {
   flex: 0 0 auto;
   padding: 6px 8px;
   color: #5d50c8;
@@ -221,6 +223,8 @@
   font-weight: 700;
   text-decoration: none;
 }
+.shared-knowledge-review-ai-request { cursor: pointer; }
+.shared-knowledge-review-ai-request:disabled { opacity: .55; cursor: default; }
 
 .shared-knowledge-review-stats {
   display: grid;
@@ -325,7 +329,8 @@
 
 [data-theme="dark"] .shared-knowledge-review-scope button.active,
 [data-theme="dark"] .shared-knowledge-review-decision > label.selected,
-[data-theme="dark"] .shared-knowledge-review-card-header a { color: #c6bfff; border-color: #57506f; background: #332e4c; }
+[data-theme="dark"] .shared-knowledge-review-card-header a,
+[data-theme="dark"] .shared-knowledge-review-ai-request { color: #c6bfff; border-color: #57506f; background: #332e4c; }
 [data-theme="dark"] .shared-knowledge-review-trigger { color: #8cc9b2; border-color: #395c4f; background: #233a32; }
 [data-theme="dark"] .shared-knowledge-review-trigger:hover,
 [data-theme="dark"] .shared-knowledge-review-trigger.active { color: #fff; border-color: #4c9e80; background: #397b62; }
