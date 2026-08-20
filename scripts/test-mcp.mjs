@@ -962,8 +962,9 @@ async function main() {
       parentId: 'task-a',
       data: { label: '위임 하위 카드', kind: 'task', isWork: false, status: 'planned', progress: 0 },
     })
-    const delegatedChild = delegatedChildCreated.map.nodes.find((node) => node.data?.label === '위임 하위 카드')
+    const delegatedChild = delegatedChildCreated.card
     assert.ok(delegatedChild)
+    assert.equal(delegatedChild.data?.label, '위임 하위 카드')
     const inspectedCardAttributionResponse = await fetch(`${apiBaseUrl}/api/integrations/aionui/attributions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Cookie: editorSessionCookie },
@@ -1619,8 +1620,17 @@ async function main() {
       parentCardId: 'root',
       data: { label: '추가 카드', description: '', kind: 'branch', status: 'planned', progress: 0 },
     })
-    const addedCard = addedCardResult.map.nodes.find((node) => node.data.label === '추가 카드')
+    assert.equal(addedCardResult.responseMode, 'affected')
+    assert.equal(addedCardResult.map, undefined, 'add_card 기본 응답에 전체 문서가 담기면 안 됩니다.')
+    assert.equal(addedCardResult.parentCardId, 'root')
+    assert.equal(addedCardResult.document.id, mapId)
+    assert.ok(
+      addedCardResult.affectedCards.every((entry) => entry.card.id !== addedCardResult.card.id),
+      'affected 응답은 card와 affectedCards에 같은 카드를 중복해서 담지 않아야 합니다.',
+    )
+    const addedCard = addedCardResult.card
     assert.ok(addedCard)
+    assert.equal(addedCard.data.label, '추가 카드')
     assert.equal(addedCard.data.sharedKnowledge, '')
     assert.equal(addedCard.position.x % 24, 0)
     assert.equal(addedCard.position.y % 24, 0)
@@ -1629,9 +1639,13 @@ async function main() {
       mapId,
       parentId: 'root',
       data: { label: '두 번째 추가 카드', description: '', kind: 'branch', status: 'planned', progress: 0 },
+      responseMode: 'full',
     })
+    assert.equal(secondAddedCardResult.responseMode, 'full')
+    assert.ok(secondAddedCardResult.createdCardId)
     const secondAddedCard = secondAddedCardResult.map.nodes.find((node) => node.data.label === '두 번째 추가 카드')
     assert.ok(secondAddedCard)
+    assert.equal(secondAddedCard.id, secondAddedCardResult.createdCardId)
     assert.equal(secondAddedCard.position.x, addedCard.position.x)
     assert.equal(secondAddedCard.position.y - addedCard.position.y, 144)
 
@@ -1834,11 +1848,24 @@ async function main() {
     assert.equal(waitingReleaseNotification.actor.name, 'Claude Code(Claude Test Model)')
 
     const movedCardResult = await invoke('mindnprogress_move_card', { mapId, cardId: addedCard.id, newParentCardId: 'branch-b' })
-    assert.ok(movedCardResult.map.edges.some((edge) => edge.source === 'branch-b' && edge.target === addedCard.id))
+    assert.equal(movedCardResult.responseMode, 'affected')
+    assert.equal(movedCardResult.map, undefined, 'move_card 기본 응답에 전체 문서가 담기면 안 됩니다.')
+    assert.equal(movedCardResult.card.id, addedCard.id)
+    assert.equal(movedCardResult.hierarchy.newParentCardId, 'branch-b')
+    assert.equal(movedCardResult.hierarchy.previousParentCardId, 'root')
+    assert.ok(movedCardResult.affectedCards.every((entry) => entry.card.id !== addedCard.id))
+
+    const movedBackResult = await invoke('mindnprogress_move_card', {
+      mapId, cardId: addedCard.id, newParentCardId: 'branch-b', responseMode: 'full',
+    })
+    assert.ok(movedBackResult.map.edges.some((edge) => edge.source === 'branch-b' && edge.target === addedCard.id))
 
     const deletedCardResult = await invoke('mindnprogress_delete_card', { mapId, cardId: addedCard.id, includeDescendants: true })
-    assert.ok(!deletedCardResult.map.nodes.some((node) => node.id === addedCard.id))
-    assert.equal(deletedCardResult.map.nodes.find((node) => node.id === 'root')?.data.progress, 30)
+    assert.equal(deletedCardResult.responseMode, 'affected')
+    assert.equal(deletedCardResult.map, undefined, 'delete_card 기본 응답에 전체 문서가 담기면 안 됩니다.')
+    assert.deepEqual(deletedCardResult.deletedCardIds, [addedCard.id])
+    assert.equal(deletedCardResult.root.progress, 30)
+    assert.ok(deletedCardResult.affectedCards.every((entry) => entry.card.id !== addedCard.id))
     await invoke('mindnprogress_delete_card', { mapId, nodeId: secondAddedCard.id, includeDescendants: true })
 
     documentResult = await invoke('mindnprogress_get_document', { mapId })

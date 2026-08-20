@@ -534,6 +534,41 @@ function changedCardIds(previousMap, savedMap) {
     .map((node) => node.id)
 }
 
+function rootCardOf(map) {
+  const hierarchyTargets = new Set(map.edges.filter(isHierarchyEdge).map((edge) => edge.target))
+  return map.nodes.find((item) => item.data?.kind === 'root' && !hierarchyTargets.has(item.id))
+    ?? map.nodes.find((item) => item.data?.kind === 'root')
+    ?? map.nodes.find((item) => !hierarchyTargets.has(item.id))
+    ?? map.nodes[0]
+}
+
+function rootRollup(rootCard) {
+  if (!rootCard) return null
+  return {
+    id: rootCard.id,
+    label: rootCard.data?.label ?? rootCard.id,
+    status: rootCard.data?.progress >= 100 ? 'done' : rootCard.data?.status,
+    progress: rootCard.data?.progress ?? 0,
+  }
+}
+
+const affectedFirstResponseModeDescription = 'affected가 기본이며 변경된 카드와 문서·Root 요약만 반환합니다. 전체 문서가 필요할 때만 full을 지정하거나 mindnprogress_get_document를 호출하세요.'
+
+function affectedCardsOf(previousMap, savedMap, mapId, requestedCardIds, rootCardId, excludedCardIds = []) {
+  const requested = new Set(requestedCardIds)
+  const excluded = new Set(excludedCardIds)
+  const affectedIds = new Set([...requested, ...changedCardIds(previousMap, savedMap)])
+  return savedMap.nodes
+    .filter((item) => affectedIds.has(item.id) && !excluded.has(item.id))
+    .map((item) => ({
+      reason: requested.has(item.id) ? 'requested' : item.id === rootCardId ? 'root-rollup' : 'server-adjusted',
+      card: {
+        ...contentCard(item, mapId),
+        position: item.position,
+      },
+    }))
+}
+
 function focusedDocument(map, publicBaseUrl) {
   const hierarchyEdges = map.edges.filter(isHierarchyEdge)
   const knowledgeEdges = map.edges.filter(isKnowledgeEdge)
@@ -1484,19 +1519,21 @@ async function main() {
     body: JSON.stringify({ map: { nodes, edges }, baseVersion, force }),
   }))
 
-  registerTool(server, 'mindnprogress_add_card', '문서에 새 카드 또는 하위 카드를 추가합니다. 외부 전달물이나 결정 대기는 제목이 아니라 waitingItems로 기록합니다.', {
+  registerTool(server, 'mindnprogress_add_card', '문서에 새 카드 또는 하위 카드를 추가합니다. 외부 전달물이나 결정 대기는 제목이 아니라 waitingItems로 기록합니다. 응답은 추가한 카드와 문서 요약만 돌려주므로 전체 문서를 다시 받지 않습니다.', {
     mapId: z.string().min(1),
     parentCardId: z.string().min(1).optional().describe('새 카드를 추가할 상위 카드 ID. 최상위 카드를 추가할 때는 생략'),
     parentId: z.string().min(1).optional().describe('기존 대화 호환용 상위 카드 ID. 새 호출에서는 parentCardId 사용'),
     data: nodeDataSchema,
     position: z.object({ x: z.number(), y: z.number() }).optional(),
-  }, async ({ mapId, parentCardId, parentId, data, position }) => {
+    responseMode: z.enum(['full', 'affected']).default('affected').describe(affectedFirstResponseModeDescription),
+  }, async ({ mapId, parentCardId, parentId, data, position, responseMode }) => {
     const resolvedParentCardId = resolveAliasedId(parentCardId, parentId, {
       preferredName: 'parentCardId',
       legacyName: 'parentId',
       required: false,
     })
     const map = await getDocument(mapId)
+    const previousMap = responseMode === 'affected' ? structuredClone(map) : null
     const parent = resolvedParentCardId ? map.nodes.find((node) => node.id === resolvedParentCardId) : null
     if (resolvedParentCardId && !parent) throw new Error('상위 카드를 찾을 수 없습니다.')
     const siblingIds = new Set(resolvedParentCardId
@@ -1529,8 +1566,31 @@ async function main() {
       data: { relation: 'hierarchy' },
       markerEnd: { type: 'arrowclosed', width: 16, height: 16 },
     })
-    return saveDocument(map, false, resolvedParentCardId ?? '')
-  })
+    const saved = await saveDocument(map, false, resolvedParentCardId ?? '')
+    const savedMap = saved.map
+    if (responseMode === 'full') {
+      return {
+        responseMode,
+        map: updateCardFullMap(savedMap),
+        summary: saved.summary,
+        createdCardId: nodeId,
+      }
+    }
+    const createdCard = savedMap.nodes.find((item) => item.id === nodeId)
+    if (!createdCard) throw new Error('저장 후 추가한 카드를 찾을 수 없습니다.')
+    const rootCard = rootCardOf(savedMap)
+    return {
+      responseMode,
+      document: saved.summary,
+      card: {
+        ...contentCard(createdCard, mapId),
+        position: createdCard.position,
+      },
+      parentCardId: resolvedParentCardId ?? null,
+      root: rootRollup(rootCard),
+      affectedCards: affectedCardsOf(previousMap, savedMap, mapId, [], rootCard?.id, [nodeId]),
+    }
+  }, { compactResult: true })
 
   registerTool(server, 'mindnprogress_update_card', '카드의 일부 필드만 부분 병합 방식으로 변경합니다. data에 포함한 필드만 변경되고 일반 카드에서 생략한 필드와 position은 보존되므로 현재 카드 전체 데이터를 재전송하지 마세요. 기존 description 또는 sharedKnowledge 내부의 일부만 고칠 때는 이 도구로 필드 전체를 보내지 말고 mindnprogress_patch_card_text를 사용하세요. 빈 문자열과 빈 배열은 해당 필드를 명시적으로 초기화합니다. 단, status=done 또는 progress>=100이면 waitingItems가 자동으로 비워지며 Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 최상위 카드와 하위 업무가 있는 일반 isWork=false 묶음 카드의 progress·status는 서버가 다시 계산합니다. description은 업무 요청과 배경에 사용합니다. sharedKnowledge는 다른 카드가 재사용할 현재 유효한 결론에만 사용하고 진행 기록·도구 로그·중복·폐기 결론은 댓글로 분리하세요. responseMode는 full이 기본값이며 연속 작업용 전체 카드 본문과 관계를 반환합니다. 단일 카드와 서버가 함께 조정한 카드만 필요하면 affected를 사용하세요.', {
     mapId: z.string().min(1),
@@ -1561,11 +1621,6 @@ async function main() {
     const savedMap = saved.map
     const savedCard = savedMap.nodes.find((item) => item.id === resolvedCardId)
     if (!savedCard) throw new Error('저장 후 카드를 찾을 수 없습니다.')
-    const hierarchyTargets = new Set(savedMap.edges.filter(isHierarchyEdge).map((edge) => edge.target))
-    const rootCard = savedMap.nodes.find((item) => item.data?.kind === 'root' && !hierarchyTargets.has(item.id))
-      ?? savedMap.nodes.find((item) => item.data?.kind === 'root')
-      ?? savedMap.nodes.find((item) => !hierarchyTargets.has(item.id))
-      ?? savedMap.nodes[0]
     const changedFields = [...Object.keys(data), ...(position ? ['position'] : [])]
     if (responseMode === 'full') {
       return {
@@ -1576,16 +1631,7 @@ async function main() {
         changedFields,
       }
     }
-    const affectedIds = new Set([resolvedCardId, ...changedCardIds(previousMap, savedMap)])
-    const affectedCards = savedMap.nodes
-      .filter((item) => affectedIds.has(item.id))
-      .map((item) => ({
-        reason: item.id === resolvedCardId ? 'requested' : item.id === rootCard?.id ? 'root-rollup' : 'server-adjusted',
-        card: {
-          ...contentCard(item, mapId),
-          position: item.position,
-        },
-      }))
+    const rootCard = rootCardOf(savedMap)
     return {
       responseMode,
       document: saved.summary,
@@ -1593,13 +1639,8 @@ async function main() {
         ...contentCard(savedCard, mapId),
         position: savedCard.position,
       },
-      root: rootCard ? {
-        id: rootCard.id,
-        label: rootCard.data?.label ?? rootCard.id,
-        status: rootCard.data?.progress >= 100 ? 'done' : rootCard.data?.status,
-        progress: rootCard.data?.progress ?? 0,
-      } : null,
-      affectedCards,
+      root: rootRollup(rootCard),
+      affectedCards: affectedCardsOf(previousMap, savedMap, mapId, [resolvedCardId], rootCard?.id),
       changedFields,
     }
   }, { compactResult: true })
@@ -1693,13 +1734,14 @@ async function main() {
     })
   }, { compactResult: true })
 
-  registerTool(server, 'mindnprogress_move_card', '카드와 모든 하위 카드를 유지한 채 다른 카드의 하위로 이동합니다.', {
+  registerTool(server, 'mindnprogress_move_card', '카드와 모든 하위 카드를 유지한 채 다른 카드의 하위로 이동합니다. 응답은 이동한 카드와 상위 관계 변화만 돌려주므로 전체 문서를 다시 받지 않습니다.', {
     mapId: z.string().min(1),
     cardId: z.string().min(1).optional().describe('이동할 카드 ID. 새 호출에서는 이 필드를 사용'),
     nodeId: z.string().min(1).optional().describe('기존 대화 호환용 카드 ID. 새 호출에서는 cardId 사용'),
     newParentCardId: z.string().min(1).optional().describe('새 상위 카드 ID. 새 호출에서는 이 필드를 사용'),
     newParentId: z.string().min(1).optional().describe('기존 대화 호환용 새 상위 카드 ID. 새 호출에서는 newParentCardId 사용'),
-  }, async ({ mapId, cardId, nodeId, newParentCardId, newParentId }) => {
+    responseMode: z.enum(['full', 'affected']).default('affected').describe(affectedFirstResponseModeDescription),
+  }, async ({ mapId, cardId, nodeId, newParentCardId, newParentId, responseMode }) => {
     const resolvedCardId = resolveAliasedId(cardId, nodeId, {
       preferredName: 'cardId',
       legacyName: 'nodeId',
@@ -1715,6 +1757,9 @@ async function main() {
     if (resolvedCardId === resolvedParentCardId || descendantsOf(resolvedCardId, map.edges).has(resolvedParentCardId)) {
       throw new Error('자기 자신이나 하위 카드 아래로 이동할 수 없습니다.')
     }
+    const previousMap = responseMode === 'affected' ? structuredClone(map) : null
+    const previousParentCardId = map.edges
+      .find((edge) => isHierarchyEdge(edge) && edge.target === resolvedCardId)?.source ?? null
     map.edges = map.edges.filter((edge) => isKnowledgeEdge(edge) || edge.target !== resolvedCardId)
     map.edges.push({
       id: `edge-${resolvedParentCardId}-${resolvedCardId}`,
@@ -1724,15 +1769,42 @@ async function main() {
       data: { relation: 'hierarchy' },
       markerEnd: { type: 'arrowclosed', width: 16, height: 16 },
     })
-    return saveDocument(map, false, resolvedCardId)
-  })
+    const saved = await saveDocument(map, false, resolvedCardId)
+    const savedMap = saved.map
+    if (responseMode === 'full') {
+      return {
+        responseMode,
+        map: updateCardFullMap(savedMap),
+        summary: saved.summary,
+        movedCardId: resolvedCardId,
+      }
+    }
+    const movedCard = savedMap.nodes.find((item) => item.id === resolvedCardId)
+    if (!movedCard) throw new Error('저장 후 이동한 카드를 찾을 수 없습니다.')
+    const rootCard = rootCardOf(savedMap)
+    return {
+      responseMode,
+      document: saved.summary,
+      card: {
+        ...contentCard(movedCard, mapId),
+        position: movedCard.position,
+      },
+      hierarchy: {
+        previousParentCardId,
+        newParentCardId: resolvedParentCardId,
+      },
+      root: rootRollup(rootCard),
+      affectedCards: affectedCardsOf(previousMap, savedMap, mapId, [], rootCard?.id, [resolvedCardId]),
+    }
+  }, { compactResult: true })
 
-  registerTool(server, 'mindnprogress_delete_card', '카드를 삭제합니다. 기본적으로 모든 하위 카드도 함께 삭제합니다.', {
+  registerTool(server, 'mindnprogress_delete_card', '카드를 삭제합니다. 기본적으로 모든 하위 카드도 함께 삭제합니다. 응답은 삭제한 카드 ID와 함께 조정된 카드만 돌려주므로 전체 문서를 다시 받지 않습니다.', {
     mapId: z.string().min(1),
     cardId: z.string().min(1).optional().describe('삭제할 카드 ID. 새 호출에서는 이 필드를 사용'),
     nodeId: z.string().min(1).optional().describe('기존 대화 호환용 카드 ID. 새 호출에서는 cardId 사용'),
     includeDescendants: z.boolean().default(true),
-  }, async ({ mapId, cardId, nodeId, includeDescendants }) => {
+    responseMode: z.enum(['full', 'affected']).default('affected').describe(affectedFirstResponseModeDescription),
+  }, async ({ mapId, cardId, nodeId, includeDescendants, responseMode }) => {
     const resolvedCardId = resolveAliasedId(cardId, nodeId, {
       preferredName: 'cardId',
       legacyName: 'nodeId',
@@ -1741,12 +1813,31 @@ async function main() {
     const target = map.nodes.find((node) => node.id === resolvedCardId)
     if (!target) throw new Error('카드를 찾을 수 없습니다.')
     if (target.data?.kind === 'root') throw new Error('루트 카드는 삭제할 수 없습니다.')
+    const previousMap = responseMode === 'affected' ? structuredClone(map) : null
     const deletedIds = includeDescendants ? descendantsOf(resolvedCardId, map.edges) : new Set()
     deletedIds.add(resolvedCardId)
     map.nodes = map.nodes.filter((node) => !deletedIds.has(node.id))
     map.edges = map.edges.filter((edge) => !deletedIds.has(edge.source) && !deletedIds.has(edge.target))
-    return saveDocument(map, false, resolvedCardId)
-  })
+    const saved = await saveDocument(map, false, resolvedCardId)
+    const savedMap = saved.map
+    const deletedCardIds = [...deletedIds]
+    if (responseMode === 'full') {
+      return {
+        responseMode,
+        map: updateCardFullMap(savedMap),
+        summary: saved.summary,
+        deletedCardIds,
+      }
+    }
+    const rootCard = rootCardOf(savedMap)
+    return {
+      responseMode,
+      document: saved.summary,
+      deletedCardIds,
+      root: rootRollup(rootCard),
+      affectedCards: affectedCardsOf(previousMap, savedMap, mapId, [], rootCard?.id),
+    }
+  }, { compactResult: true })
 
   registerTool(server, 'mindnprogress_add_knowledge_line', 'source 카드의 결과를 target 카드가 선행 지식으로 사용하도록 지식선을 추가합니다. 전체 문서를 전달하지 않고 최신 버전에 관계만 안전하게 반영하며 순환과 중복 연결을 거부합니다.', {
     mapId: z.string().min(1),

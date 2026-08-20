@@ -266,12 +266,12 @@ AI가 MindNProgress 밖에서 시작되었다면 먼저 `mindnprogress_read_me_f
 | `mindnprogress_create_mindmap` | 여러 카드로 구성된 새 문서와 계층 구조를 한 번에 생성하고 자동 배치합니다. |
 | `mindnprogress_create_document` | Root 카드 하나만 포함한 빈 문서를 생성합니다. |
 | `mindnprogress_save_document` | 기준 버전을 확인하면서 문서의 전체 카드와 연결 관계를 저장합니다. |
-| `mindnprogress_add_card` | 새 카드 또는 지정한 상위 카드의 하위 카드를 추가합니다. |
+| `mindnprogress_add_card` | 새 카드 또는 지정한 상위 카드의 하위 카드를 추가합니다. 기본 `responseMode=affected`는 추가한 카드와 문서·Root 요약만, `full`은 최신 전체 문서를 반환합니다. |
 | `mindnprogress_update_card` | 전달한 필드만 부분 병합하여 카드 제목, 설명, 공유 지식, 상태, 진행률과 업무 관리 필드를 수정합니다. 일반 카드에서 생략한 필드와 위치는 보존됩니다. 기본 `responseMode=full`은 저활용 필드를 제외한 최신 전체 문서를, `affected`는 직접·간접 변경 카드와 문서·Root 요약을 반환합니다. |
 | `mindnprogress_patch_card_text` | 조회한 SHA-256이 유지된 경우에만 설명 또는 공유 지식의 유일 문자열·경계 내부를 교체하거나 뒤에 추가합니다. 장문 필드 전체를 다시 생성하지 않습니다. |
 | `mindnprogress_apply_shared_knowledge_review` | 문서 버전과 카드별 SHA-256이 모두 일치할 때만 최대 20개 카드의 정리 결과와 검토 기록을 한 번에 저장합니다. |
-| `mindnprogress_move_card` | 카드와 전체 하위 구조를 다른 카드 아래로 이동합니다. |
-| `mindnprogress_delete_card` | 카드와 선택적으로 전체 하위 카드를 삭제합니다. Root 카드는 삭제할 수 없습니다. |
+| `mindnprogress_move_card` | 카드와 전체 하위 구조를 다른 카드 아래로 이동합니다. 기본 `responseMode=affected`는 이동한 카드와 이전·새 상위 관계만, `full`은 최신 전체 문서를 반환합니다. |
+| `mindnprogress_delete_card` | 카드와 선택적으로 전체 하위 카드를 삭제합니다. Root 카드는 삭제할 수 없습니다. 기본 `responseMode=affected`는 삭제한 카드 ID와 함께 조정된 카드만, `full`은 최신 전체 문서를 반환합니다. |
 | `mindnprogress_add_knowledge_line` | 두 카드 사이에 지식선을 추가합니다. 중복과 순환 관계를 거부합니다. |
 | `mindnprogress_update_knowledge_line` | 지식선 정책을 `reuse-first` 또는 `inspect-if-insufficient`로 변경합니다. |
 | `mindnprogress_delete_knowledge_line` | 두 카드 사이의 지식선만 삭제합니다. |
@@ -282,6 +282,8 @@ AI가 MindNProgress 밖에서 시작되었다면 먼저 `mindnprogress_read_me_f
 MCP 도구에서 카드를 지정할 때는 `cardId`를 사용합니다. 상위 카드는 `parentCardId`, 이동할 새 상위 카드는 `newParentCardId`, 답글의 상위 댓글은 `parentCommentId`로 지정합니다. 기존 `nodeId`, `parentId`, `newParentId`는 이미 시작된 AI 대화와의 호환을 위해 한시적으로 허용되지만 새 호출에서는 사용하지 않습니다. 선호 필드와 호환 필드를 동시에 서로 다른 값으로 전달하면 안전을 위해 요청이 거부됩니다. 원시 문서의 `nodes`, 댓글 저장 데이터의 `nodeId` 등 내부 저장 구조는 기존 문서 및 백업 호환을 위해 유지됩니다.
 
 단일 카드의 일부 필드만 변경할 때는 `mindnprogress_update_card`의 `data`에 변경할 필드만 전달합니다. 현재 카드 전체 데이터를 재전송하면 조회 이후 다른 편집자가 변경한 값을 오래된 값으로 덮어쓸 수 있습니다. 일반 카드에서 생략한 필드와 `position`은 보존되고, 빈 문자열이나 빈 배열을 명시하면 해당 필드가 초기화됩니다. 단, `status=done` 또는 `progress>=100`을 적용하면 `waitingItems`는 전달 여부와 관계없이 자동으로 해제되며 Ref 카드는 원본이 관리하는 제목·설명·공유 지식·업무 필드 등이 최신 원본 값으로 동기화될 수 있습니다. `responseMode`를 생략하면 `full`이며 저장 직후 모든 카드의 본문·위치와 계층선·지식선을 반환합니다. 응답 크기를 줄이기 위해 카드의 AI 대화 상세 목록은 최근 대화 ID와 개수로 축약하고, 카드 타입 고정값과 연결선 렌더링 전용 값은 제외합니다. 단일 카드 수정 결과만 필요하면 `responseMode=affected`를 사용하며, 이때 `affectedCards`에는 직접 수정 카드와 Root 진행률 재계산 등 서버가 함께 조정한 카드가 포함됩니다.
+
+`mindnprogress_add_card`, `mindnprogress_move_card`, `mindnprogress_delete_card`는 `responseMode`를 생략하면 `affected`입니다. 카드 하나를 추가·이동·삭제하는 호출에 문서 전체를 실어 보내면 응답이 문서 크기에 비례해 커지므로 기본값을 변경 결과로 두었습니다. `add_card`는 추가한 카드와 `parentCardId`, `move_card`는 이동한 카드와 `hierarchy`의 이전·새 상위 카드, `delete_card`는 `deletedCardIds`를 돌려주며 세 도구 모두 문서 요약과 Root 요약, 서버가 함께 조정한 `affectedCards`를 포함합니다. `card`로 이미 돌려주는 카드는 `affectedCards`에 중복해서 담지 않습니다. 저장 직후 전체 구조가 필요하면 `responseMode=full`을 지정하거나 `mindnprogress_get_document`를 호출합니다.
 
 전체 활성 문서의 공유 지식 현황은 인증된 `GET /api/shared-knowledge/audit`로 조회합니다. `mapId` 쿼리를 지정하면 한 문서만 검사하며, 응답에는 원문 대신 길이·UTF-8 바이트·SHA-256·문단과 목록 수·정확히 반복된 문장 수·10,000자 한도 사용률·지식선 소비 카드 수가 포함됩니다. 3,000자는 관심, 5,000자는 정리 권장, 8,000자는 우선 정리 기준이며 Ref 카드는 원본 카드에서만 정리하도록 직접 처리 후보에서 제외됩니다.
 
