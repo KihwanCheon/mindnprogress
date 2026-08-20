@@ -72,7 +72,8 @@ export function computeProgressRollups(nodes, edges) {
     if (!canRollupNode(node, root.id)) return []
     const targets = collectDescendantIds(node.id, childrenByParent)
       .map((nodeId) => nodesById.get(nodeId))
-      .filter((candidate) => candidate?.data?.isWork === true)
+      // Ref 카드는 다른 문서 업무를 투영해 보여주는 지식이므로 이 문서의 진행률에 넣지 않는다.
+      .filter((candidate) => candidate?.data?.isWork === true && !candidate?.data?.reference)
     if (targets.length === 0) return []
 
     const total = targets.reduce((sum, target) => sum + clampProgress(target.data?.progress), 0)

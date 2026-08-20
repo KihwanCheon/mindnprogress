@@ -192,3 +192,37 @@ test('계층 순환이 있어도 무한 루프에 빠지지 않는다', () => {
   assert.equal(rollup.targetCount, 2)
   assert.equal(rollup.progress, 30)
 })
+
+test('다른 문서를 투영하는 Ref 카드는 이 문서 진행률에 넣지 않는다', () => {
+  const nodes = [
+    node('root', { kind: 'root', label: '루트', status: 'planned', progress: 0 }),
+    node('a', { kind: 'task', label: '내 업무', isWork: true, progress: 40 }),
+    node('ref', {
+      kind: 'task',
+      label: '남의 업무 (ref)',
+      isWork: true,
+      progress: 100,
+      reference: { mapId: 'map-other', nodeId: 'node-other' },
+    }),
+  ]
+  const edges = [hierarchy('root', 'a'), hierarchy('root', 'ref')]
+  const rollup = computeWorkRollup(nodes, edges)
+  assert.deepEqual(rollup, { rootId: 'root', targetCount: 1, progress: 40, status: 'in-progress' })
+})
+
+test('Ref 카드만 있는 묶음 카드는 집계 대상이 아니다', () => {
+  const nodes = [
+    node('root', { kind: 'root', label: '루트', status: 'planned', progress: 0 }),
+    node('group', { kind: 'branch', label: '지식 묶음', progress: 0 }),
+    node('ref', {
+      kind: 'task',
+      label: '남의 업무 (ref)',
+      isWork: true,
+      progress: 100,
+      reference: { mapId: 'map-other', nodeId: 'node-other' },
+    }),
+  ]
+  const edges = [hierarchy('root', 'group'), hierarchy('group', 'ref')]
+  assert.deepEqual(computeProgressRollups(nodes, edges), [])
+  assert.equal(computeWorkRollup(nodes, edges), null)
+})

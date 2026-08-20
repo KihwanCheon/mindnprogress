@@ -850,6 +850,13 @@ type TouchCanvasPanGesture = {
   active: boolean
 }
 
+type TouchPaneGesture = {
+  identifier: number
+  startClient: { x: number; y: number }
+  timer: number | null
+  menuOpen: boolean
+}
+
 type TouchCardGesture = {
   identifier: number
   nodeId: string
@@ -1851,6 +1858,8 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const [knowledgeConnectionMessage, setKnowledgeConnectionMessage] = useState('')
   const [documentContextMenu, setDocumentContextMenu] = useState<{ x: number; y: number; mapId: string } | null>(null)
   const [aiConversationContextMenu, setAiConversationContextMenu] = useState<{ x: number; y: number } | null>(null)
+  const [canvasPasteMenu, setCanvasPasteMenu] = useState<{ x: number; y: number } | null>(null)
+  const paneRightPressRef = useRef({ x: 0, y: 0 })
   const [copiedNodes, setCopiedNodes] = useState<CopiedNodes | null>(null)
   const [draggingLibraryItem, setDraggingLibraryItem] = useState<DocumentLayoutItem | null>(null)
   const [documentDropTargetId, setDocumentDropTargetId] = useState<string | null>(null)
@@ -1892,6 +1901,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const touchPanGesture = useRef<TouchPanGesture | null>(null)
   const touchCanvasPanGesture = useRef<TouchCanvasPanGesture | null>(null)
   const touchPanOwned = useRef(false)
+  const touchPaneGesture = useRef<TouchPaneGesture | null>(null)
   const touchCardGesture = useRef<TouchCardGesture | null>(null)
   const lastTouchCardTap = useRef<TouchCardTap | null>(null)
   const suppressNodeContextMenuUntil = useRef(0)
@@ -4108,20 +4118,29 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     setNodeContextMenu(null)
   }, [activeMapId, edges, nodes])
 
-  const pasteNodeAsChild = useCallback((parentId: string, pasteMode: NodePasteMode = 'copy') => {
+  // parentId가 없으면 계층선을 만들지 않고 clientPoint 위치에 자유 배치한다.
+  // 지식 전용 Ref 카드는 계층에 들어가지 않아야 하며, 이미지·Dooray 지식 카드와 같은 배치 방식이다.
+  const pasteNodeAsChild = useCallback((
+    parentId: string | null,
+    pasteMode: NodePasteMode = 'copy',
+    clientPoint?: { x: number; y: number },
+  ) => {
     if (!copiedNodes || copiedNodes.nodes.length === 0 || mode !== 'editor' || !activeMapId) return
-    const parent = nodes.find((node) => node.id === parentId)
-    if (!parent) return
+    const parent = parentId ? nodes.find((node) => node.id === parentId) ?? null : null
+    if (parentId && !parent) return
+    if (!parent && !clientPoint) return
     const isCrossDocument = copiedNodes.sourceMapId !== activeMapId
     if ((isCrossDocument && pasteMode === 'copy') || (!isCrossDocument && pasteMode !== 'copy')) return
-    const childCount = hierarchyEdges.filter((edge) => edge.source === parentId).length
+    const childCount = parent ? hierarchyEdges.filter((edge) => edge.source === parent.id).length : 0
     const timestamp = Date.now()
     const sourceMinX = Math.min(...copiedNodes.nodes.map((item) => item.position.x))
     const sourceMinY = Math.min(...copiedNodes.nodes.map((item) => item.position.y))
-    const targetOrigin = {
-      x: childMindMapHorizontalPosition(parent.position, nodeDimensions(parent).width),
-      y: parent.position.y + childCount * 150 - 40,
-    }
+    const targetOrigin = parent
+      ? {
+        x: childMindMapHorizontalPosition(parent.position, nodeDimensions(parent).width),
+        y: parent.position.y + childCount * 150 - 40,
+      }
+      : snapMindMapPosition(screenToFlowPosition({ x: clientPoint!.x, y: clientPoint!.y }))
     const nodeIdMap = new Map(copiedNodes.nodes.map((item, index) => [item.sourceNodeId, `node-${timestamp}-${index}`]))
     const pastedNodes = copiedNodes.nodes.map((item, nodeIndex): MindMapNode => {
       const copiedData = structuredClone(item.data)
@@ -4183,17 +4202,19 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         target,
       }]
     })
-    const pastedRootEdges = copiedNodes.nodes
-      .filter((item) => !copiedHierarchyTargets.has(item.sourceNodeId))
-      .map((item, index): MindMapEdge => ({
-        id: `edge-${parentId}-${timestamp}-root-${index}`,
-        source: parentId,
-        target: nodeIdMap.get(item.sourceNodeId) as string,
-        sourceHandle: parent.data.kind === 'image' ? 'image-source-right' : undefined,
-        type: 'default',
-        data: { relation: 'hierarchy' },
-        markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
-      }))
+    const pastedRootEdges = parent
+      ? copiedNodes.nodes
+        .filter((item) => !copiedHierarchyTargets.has(item.sourceNodeId))
+        .map((item, index): MindMapEdge => ({
+          id: `edge-${parent.id}-${timestamp}-root-${index}`,
+          source: parent.id,
+          target: nodeIdMap.get(item.sourceNodeId) as string,
+          sourceHandle: parent.data.kind === 'image' ? 'image-source-right' : undefined,
+          type: 'default',
+          data: { relation: 'hierarchy' },
+          markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
+        }))
+      : []
     const suppressedNodeIds = pastedNodeNotificationSuppressions.current.get(activeMapId) ?? new Set<string>()
     pastedNodes.forEach((pastedNode) => suppressedNodeIds.add(pastedNode.id))
     pastedNodeNotificationSuppressions.current.set(activeMapId, suppressedNodeIds)
@@ -4201,7 +4222,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     setEdges((current) => [...current, ...pastedInternalEdges, ...pastedRootEdges])
     setSelectedId(pastedNodes[0].id)
     setNodeContextMenu(null)
-  }, [activeMapId, copiedNodes, hierarchyEdges, mode, nodes, setEdges, setNodes])
+  }, [activeMapId, copiedNodes, hierarchyEdges, mode, nodes, screenToFlowPosition, setEdges, setNodes])
 
   useEffect(() => {
     const closeContextMenu = (event: PointerEvent) => {
@@ -4210,6 +4231,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         setNodeContextMenu(null)
         setDocumentContextMenu(null)
         setAiConversationContextMenu(null)
+        setCanvasPasteMenu(null)
       }
       if (!target?.closest('.notification-center')) setNotificationsOpen(false)
     }
@@ -4223,6 +4245,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         setNodeContextMenu(null)
         setDocumentContextMenu(null)
         setAiConversationContextMenu(null)
+        setCanvasPasteMenu(null)
         setHistoryOpen(false)
         setNotificationsOpen(false)
       }
@@ -5300,6 +5323,62 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     if (restorePosition && gesture.phase === 'dragging') restoreNodeDragForTouchPan()
   }, [restoreNodeDragForTouchPan])
 
+  const cancelTouchPaneGesture = useCallback(() => {
+    const gesture = touchPaneGesture.current
+    if (!gesture) return
+    if (gesture.timer !== null) window.clearTimeout(gesture.timer)
+    touchPaneGesture.current = null
+  }, [])
+
+  // 빈 캔버스 롱 프레스는 브라우저 기본 컨텍스트 메뉴가 뜨지 않으므로(React Flow가 터치 이벤트를 잡는다)
+  // 카드 롱 프레스와 같은 방식으로 직접 캔버스 메뉴를 띄운다.
+  const startTouchPaneGesture = useCallback((event: ReactTouchEvent<HTMLElement>) => {
+    cancelTouchPaneGesture()
+    if (mode !== 'editor' || viewMode !== 'mindmap' || knowledgeConnection || touchPanOwned.current) return
+    if (event.touches.length !== 1) return
+    if (!copiedNodes || copiedNodes.nodes.length === 0 || copiedNodes.sourceMapId === activeMapId) return
+    const target = event.target
+    if (!(target instanceof Element) || !target.closest('.react-flow__pane')) return
+    const touch = event.touches.item(0)
+    if (!touch) return
+
+    const gesture: TouchPaneGesture = {
+      identifier: touch.identifier,
+      startClient: { x: touch.clientX, y: touch.clientY },
+      timer: null,
+      menuOpen: false,
+    }
+    touchPaneGesture.current = gesture
+    gesture.timer = window.setTimeout(() => {
+      if (touchPaneGesture.current !== gesture) return
+      gesture.timer = null
+      gesture.menuOpen = true
+      suppressTouchClickUntil.current = Date.now() + 500
+      setNodeContextMenu(null)
+      setDocumentContextMenu(null)
+      setAiConversationContextMenu(null)
+      setCanvasPasteMenu({ x: gesture.startClient.x, y: gesture.startClient.y })
+    }, TOUCH_CARD_LONG_PRESS_MS)
+  }, [activeMapId, cancelTouchPaneGesture, copiedNodes, knowledgeConnection, mode, viewMode])
+
+  const moveTouchPaneGesture = useCallback((event: ReactTouchEvent<HTMLElement>) => {
+    const gesture = touchPaneGesture.current
+    if (!gesture) return
+    const touch = touchWithIdentifier(event.touches, gesture.identifier)
+    if (!touch) {
+      cancelTouchPaneGesture()
+      return
+    }
+    const distance = Math.hypot(
+      touch.clientX - gesture.startClient.x,
+      touch.clientY - gesture.startClient.y,
+    )
+    if (distance <= TOUCH_DRAG_MOVE_THRESHOLD) return
+    // 메뉴가 뜬 뒤 손가락을 움직여 맵을 옮기면 메뉴가 엉뚱한 위치에 남으므로 함께 닫는다.
+    if (gesture.menuOpen) setCanvasPasteMenu(null)
+    cancelTouchPaneGesture()
+  }, [cancelTouchPaneGesture])
+
   const startTouchCardGesture = useCallback((event: ReactTouchEvent<HTMLElement>) => {
     if (viewMode !== 'mindmap' || knowledgeConnection || touchPanOwned.current) return
     if (event.touches.length !== 1) return
@@ -6040,6 +6119,8 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
           ref={canvasWrapRef}
           className={`canvas-wrap ${rightPanning ? 'right-panning' : ''} ${touchPanning ? 'touch-panning' : ''} ${knowledgeConnection ? `knowledge-connecting ${knowledgeConnection.policy === 'reuse-first' ? 'primary' : 'secondary'}` : ''}`}
           onPointerDownCapture={(event) => {
+            // 우클릭 드래그로 맵을 이동한 뒤에는 캔버스 메뉴가 열리지 않도록 시작 좌표를 남긴다.
+            if (event.button === 2) paneRightPressRef.current = { x: event.clientX, y: event.clientY }
             startCanvasRightPan(event)
           }}
           onContextMenuCapture={(event) => {
@@ -6076,21 +6157,25 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
           }}
           onTouchStartCapture={(event) => {
             if (touchPointsWithin(event.currentTarget, event.touches).length >= 2) {
+              cancelTouchPaneGesture()
               cancelTouchCardGesture(true)
               cancelTouchCanvasPan()
               startTouchPan(event)
               return
             }
+            startTouchPaneGesture(event)
             startTouchCardGesture(event)
             startTouchCanvasPan(event)
           }}
           onTouchMoveCapture={(event) => {
+            moveTouchPaneGesture(event)
             if (touchCanvasPanGesture.current?.active) moveTouchCanvasPan(event)
             else if (touchPanOwned.current) moveTouchPan(event)
             else if (touchCardGesture.current) moveTouchCardGesture(event)
             else moveTouchCanvasPan(event)
           }}
           onTouchEndCapture={(event) => {
+            cancelTouchPaneGesture()
             if (touchCanvasPanGesture.current?.active) finishTouchCanvasPan(event)
             else if (touchPanOwned.current) finishTouchPan(event)
             else if (touchCardGesture.current) {
@@ -6099,6 +6184,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
             } else finishTouchCanvasPan(event)
           }}
           onTouchCancelCapture={(event) => {
+            cancelTouchPaneGesture()
             if (touchCanvasPanGesture.current?.active) finishTouchCanvasPan(event)
             else if (touchPanOwned.current) finishTouchPan(event)
             else if (touchCardGesture.current) {
@@ -6164,7 +6250,18 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
               setSelectedId(null)
               setNodeContextMenu(null)
             }}
-            onPaneContextMenu={(event) => event.preventDefault()}
+            onPaneContextMenu={(event) => {
+              event.preventDefault()
+              if (mode !== 'editor') return
+              const pressed = paneRightPressRef.current
+              const clientX = 'clientX' in event ? event.clientX : pressed.x
+              const clientY = 'clientY' in event ? event.clientY : pressed.y
+              if (Math.abs(clientX - pressed.x) > 4 || Math.abs(clientY - pressed.y) > 4) return
+              setNodeContextMenu(null)
+              setDocumentContextMenu(null)
+              setAiConversationContextMenu(null)
+              setCanvasPasteMenu({ x: clientX, y: clientY })
+            }}
             onDoubleClick={(event) => {
               if (mode === 'editor' && (event.target as HTMLElement).classList.contains('react-flow__pane')) {
                 addNode(undefined, screenToFlowPosition({ x: event.clientX, y: event.clientY }))
@@ -7450,6 +7547,35 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
               </button>
             </>
           )}
+        </div>
+      )}
+      {canvasPasteMenu && mode === 'editor' && viewMode === 'mindmap'
+        && copiedNodes && copiedNodes.nodes.length > 0 && copiedNodes.sourceMapId !== activeMapId && (
+        <div
+          className="node-context-menu"
+          style={{
+            left: Math.max(8, Math.min(canvasPasteMenu.x, window.innerWidth - 230)),
+            top: Math.max(8, Math.min(canvasPasteMenu.y, window.innerHeight - 120)),
+          }}
+          onContextMenu={(event) => event.preventDefault()}
+          role="menu"
+        >
+          <div className="context-menu-title">
+            <span>캔버스 메뉴</span>
+            <strong>{copiedNodes.nodes.length === 1
+              ? copiedNodes.nodes[0].data.label.replace(/\s*\(ref\)\s*$/i, '')
+              : `복사한 카드 ${copiedNodes.nodes.length}개`}</strong>
+          </div>
+          <button
+            role="menuitem"
+            onClick={() => {
+              pasteNodeAsChild(null, 'reference', { x: canvasPasteMenu.x, y: canvasPasteMenu.y })
+              setCanvasPasteMenu(null)
+            }}
+          >
+            <span className="context-icon"><Icon name="share" size={15} /></span>
+            <span><strong>Ref 지식 카드로 붙여넣기</strong><small>계층선 없이 이 위치에 배치 · 진행률 집계 제외</small></span>
+          </button>
         </div>
       )}
       {aiConversationContextMenu && selectedNode && selectedNode.data.kind !== 'image' && mode === 'editor' && (
