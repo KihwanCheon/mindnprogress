@@ -26,6 +26,10 @@ function matchByConversationId(scope, attributionList, conversationAttributionsB
 export function resolveScopedAttribution(scope, attributionList, conversationAttributionsByKey, now = Date.now()) {
   const byConversationId = matchByConversationId(scope, attributionList, conversationAttributionsByKey, now)
   if (byConversationId) return { attribution: byConversationId, match: 'conversation-id', scope }
+  // conversationId를 보낸 호출자는 자신의 정확한 대화 정체성을 밝힌 상태다.
+  // 해당 대화를 찾지 못했다고 대상 카드에 연결된 다른 AI로 내려가면
+  // 호출자와 작성자가 바뀌므로 명시된 대화가 있을 때는 카드 추정을 금지한다.
+  if (String(scope.conversationId ?? '').trim()) return { attribution: null, match: null, scope }
   if (!scope.mapId) return { attribution: null, match: null, scope }
   const editorId = String(scope.editorId ?? '').trim()
   const candidates = (attributionList ?? [])

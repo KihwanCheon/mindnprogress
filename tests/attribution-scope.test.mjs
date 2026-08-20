@@ -213,10 +213,18 @@ test('문서 범위 밖 요청도 conversationId로 귀속한다', () => {
 })
 
 test('conversationId가 다르면 대화 귀속을 사용하지 않는다', () => {
+  const otherAiOnTargetCard = startedConversation({
+    authorName: 'Claude Code(Opus)',
+    cardId: 'card-new',
+    conversationId: 'conv-target',
+  })
   const result = resolveScopedAttribution(
     { mapId: 'map-test', cardId: 'card-new', conversationId: 'conv-other' },
-    [],
-    new Map([['map-test:card-start', startedConversation()]]),
+    [attribution('card-new', 9)],
+    new Map([
+      ['map-test:card-start', startedConversation()],
+      ['map-test:card-new', otherAiOnTargetCard],
+    ]),
     NOW,
   )
   assert.equal(result.attribution, null)
