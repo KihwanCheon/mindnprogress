@@ -322,8 +322,10 @@ function runCommentWithAttribution(operation) {
   return queued
 }
 
-function toolResult(value, compact = false) {
-  return { content: [{ type: 'text', text: JSON.stringify(value, null, compact ? 0 : 2) }] }
+// 응답은 AI가 소비하므로 압축이 기본이다. 들여쓰기는 구조 파악에 도움이 되지 않고 토큰만 늘린다.
+// 사람이 직접 읽어야 하는 도구에서만 prettyResult로 명시한다.
+function toolResult(value, pretty = false) {
+  return { content: [{ type: 'text', text: JSON.stringify(value, null, pretty ? 2 : 0) }] }
 }
 
 function documentAccessUrl(publicBaseUrl, mapId) {
@@ -338,7 +340,7 @@ function registerTool(server, name, description, schema, handler, options = {}) 
   toolUsage?.declare(name)
   server.tool(name, description, schema, async (input) => {
     try {
-      const result = toolResult(await handler(input), options.compactResult === true)
+      const result = toolResult(await handler(input), options.prettyResult === true)
       toolUsage?.record(name, { ok: true, chars: toolResultLength(result) })
       return result
     } catch (error) {
@@ -883,7 +885,7 @@ async function main() {
         nextOffset: nextOffset < result.audit.candidates.length ? nextOffset : null,
       },
     }
-  }, { compactResult: true })
+  })
 
   registerTool(server, 'mindnprogress_read_me_first', 'MindNProgress를 처음 사용하거나 MindNProgress 밖에서 대화를 시작했다면 가장 먼저 읽어야 하는 제품 가이드입니다. 문서 ID 없이 호출할 수 있으며 마인드맵 작성 규칙과 안전한 도구 사용 순서를 알려줍니다.', {}, async () => ({
     guide: productGuide,
@@ -1233,7 +1235,7 @@ async function main() {
       teamMembers: full ? (usersResult.users ?? []) : (usersResult.users ?? []).map(compactTeamMember),
       nextStep: '사용자 요청을 수행한 뒤 의미 있는 진행과 결과는 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 담은 detail 댓글로 기록하고, 재사용할 결론은 sharedKnowledge에 요약한 다음 mindnprogress_get_document로 결과를 다시 확인하세요. 외부 전달물이나 결정 때문에 멈추면 제목을 바꾸지 말고 waitingItems와 [차단] 댓글을 추가하며, 재개할 때 해당 항목을 제거하고 [진행] 댓글을 남기세요.',
     }
-  }, { compactResult: true })
+  })
 
   registerTool(server, 'mindnprogress_get_document', '문서의 모든 카드와 연결 관계, 외부 접근 URL 및 이미지 카드의 로컬 원본 경로를 조회합니다.', mapIdSchema, async ({ mapId }) => {
     const [documentResult, health] = await Promise.all([
@@ -1258,7 +1260,7 @@ async function main() {
         rule: '웹 링크를 기록할 때 localhost나 127.0.0.1로 재작성하지 말고 accessUrl을 그대로 사용하세요. 이미지 카드의 imageAccess.localPath는 기록용 링크가 아니라 로컬 원본을 직접 열람할 때만 사용하세요.',
       },
     }
-  }, { compactResult: true })
+  })
 
   registerTool(server, 'mindnprogress_get_ai_work_states', '카드에 연결된 AionUi 대화의 현재 작업 상태를 조회합니다. 형제·하위·선행 카드 등 선택 카드 밖의 관련 카드를 수정하기 전에 호출해 다른 AI와의 동시 작업 충돌을 확인하세요. 이 조회는 문서 데이터, 버전과 변경 이력을 수정하지 않습니다.', {
     mapId: z.string().min(1).describe('조회할 문서 ID'),
@@ -1272,7 +1274,7 @@ async function main() {
       ...result,
       coordinationRule: 'state가 running 또는 waiting-confirmation인 카드는 다른 AI가 작업 중인 것으로 취급하고 사용자 지시 없이 동시에 수정하지 마세요. idle은 카드 업무 완료를 뜻하지 않으며, unknown은 AionUi 상태 확인 실패이므로 충돌 없음으로 간주하지 마세요.',
     }
-  }, { compactResult: true })
+  })
 
   registerTool(server, 'mindnprogress_get_ai_workspace_pool', 'MindNProgress가 관리하는 AI 작업공간의 최신 목록, 역할, 경로, Unity 인스턴스 해시와 현재 상태를 읽기 전용으로 조회합니다. 폴더명이나 과거 대화에서 worker 목록을 추측하지 말고 이 도구를 사용하세요. 작업공간을 직접 점유하거나 상태를 변경하지 않으며 다른 대화의 lease ID와 job ID는 반환하지 않습니다.', {}, async () => {
     const result = await apiRequest('/api/ai-workspaces')
@@ -1286,7 +1288,7 @@ async function main() {
       },
       coordinationRule: 'AI는 작업공간을 직접 선택·점유·전환·해제하지 않습니다. 실제 작업에서는 MindNProgress 위임 전문과 .ai-session.json에 배정된 projectRoot만 사용하세요.',
     }
-  }, { compactResult: true })
+  })
 
   registerTool(server, 'mindnprogress_complete_ai_delegation', '사용자가 중지한 하위 위임을 같은 AionUi 대화에서 직접 이어 실제 작업을 완료했음을 명시적으로 확인합니다. 카드 결과와 필요한 작업공간 체크포인트를 모두 기록한 마지막 작업 턴에서 최종 답변 직전에만 호출하세요. 단순 질의 응답·중간 보고, 중단 없이 진행된 최초 위임, 또는 아직 완료되지 않은 작업에는 호출하지 마세요. 현재 AionUi 대화와 카드에 연결된 재개 대기 위임을 서버가 안전하게 식별합니다.', {
     mapId: z.string().min(1).describe('현재 위임 카드가 속한 문서 ID'),
@@ -1302,7 +1304,7 @@ async function main() {
       aiModel: origin.aiModel,
       body: JSON.stringify({}),
     })
-  }, { compactResult: true })
+  })
 
   registerTool(server, 'mindnprogress_list_ai_conversations', '카드에서 시작한 모든 AionUi 대화 후보를 최신순으로 조회합니다. 각 대화의 AI·모델·모드·사고 강도·스킬·MCP·작업공간·시작자·최근 활동 시각과 현재 실행 상태를 반환합니다. 기존 대화를 이어갈지 새 대화를 만들지 판단할 때 전문 조회보다 먼저 사용하세요. 이 조회는 문서 버전을 변경하지 않습니다.', {
     mapId: z.string().min(1).describe('조회할 문서 ID'),
@@ -1321,7 +1323,7 @@ async function main() {
         inspect: '목록 메타데이터만으로 관련성을 판단하기 어려운 후보에 한해서 mindnprogress_get_ai_conversation_transcript에 conversationId를 지정해 확인하세요.',
       },
     }
-  }, { compactResult: true })
+  })
 
   registerTool(server, 'mindnprogress_checkpoint_ai_workspace', 'MindNProgress가 할당한 AI worker에서 의도한 구현 변경만 실제 변경을 설명하는 커밋 메시지로 체크포인트에 고정합니다. Unity Play Mode, 재임포트, 동적 폰트·Atlas 생성 등 검증을 시작하기 전에 호출하고, 검증 후 수정했다면 새 변경 내용에 맞는 메시지로 다시 호출하세요. 전달한 paths만 커밋되며 체크포인트 이후의 자동 변경은 완료 통합에서 제외됩니다. 파일 변경이 없다면 이 도구가 아니라 mindnprogress_confirm_ai_workspace_no_changes를 사용하세요.', {
     mapId: z.string().min(1).describe('할당된 작업 문서 ID'),
@@ -1344,7 +1346,7 @@ async function main() {
       timeoutMs: 60_000,
       body: JSON.stringify({ jobId, paths, commitMessage }),
     })
-  }, { compactResult: true })
+  })
 
   registerTool(server, 'mindnprogress_confirm_ai_workspace_no_changes', 'MindNProgress가 할당한 AI worker에서 의도한 파일 변경이 없는 조사·검증 작업임을 명시적으로 확인합니다. git status와 diff를 확인해 구현 변경이 전혀 없을 때만 호출하세요. 파일 변경이 있으면 mindnprogress_checkpoint_ai_workspace에 paths와 구조화 commitMessage를 전달해야 합니다.', {
     mapId: z.string().min(1).describe('할당된 작업 문서 ID'),
@@ -1363,7 +1365,7 @@ async function main() {
       timeoutMs: 60_000,
       body: JSON.stringify({ jobId, paths: [], confirmNoChanges: true }),
     })
-  }, { compactResult: true })
+  })
 
   registerTool(server, 'mindnprogress_delegate_ai_work', '이 대화가 시작된 카드의 계층상 하위 카드 AI 대화에 구체적인 작업을 위임합니다. 직계 자식뿐 아니라 모든 깊이의 하위 카드를 지원하며, 다른 카드를 get_context로 조회해도 위임 기준 카드는 바뀌지 않습니다. 기존 대화를 이어가거나 새 대화를 만들 수 있습니다. 중지된 위임을 resume하면 같은 AI 대화와 기존 작업공간 lease를 함께 이어가며, 같은 카드·대화의 활성 위임은 중복 생성하지 않습니다. 등록된 AI 작업공간 pool은 독립 worker를 자동 배정하고 lease 없이 실행하지 않으며, 가용 worker가 없으면 waiting-workspace로 접수해 FIFO 대기 후 자동 시작합니다. 완료 변경은 main에 직렬 통합합니다. 통합 충돌은 같은 하위 AI가 worker에서 해결하며, 실제 통합과 최종 검증이 끝난 뒤에만 결과를 포함한 메시지로 현재 상위 AI 대화를 자동 재개합니다. 먼저 후보 목록과 작업 상태를 확인하고, 현재 문서 version을 sourceRevision으로 전달하세요.', {
     mapId: z.string().min(1).describe('이 대화가 시작된 상위 카드가 속한 문서 ID'),
@@ -1397,7 +1399,7 @@ async function main() {
       timeoutMs: 60_000,
       body: JSON.stringify(delegation),
     })
-  }, { compactResult: true })
+  })
 
   registerTool(server, 'mindnprogress_list_ai_delegations', '문서의 AI 작업 위임 상태와 감사 정보를 조회합니다. worker 대기(waiting-workspace), 하위 실행·자원 대기(waiting-resource), 통합 대기, AI 충돌 해결, 상위 대기·재개, 완료 또는 실패 상태와 대상 대화·turnId·작업공간 결과를 반환하며 문서 버전을 변경하지 않습니다.', {
     mapId: z.string().min(1),
@@ -1409,7 +1411,7 @@ async function main() {
     if (targetCardId) query.set('targetCardId', targetCardId)
     const suffix = query.size > 0 ? `?${query}` : ''
     return apiRequest(`/api/maps/${encodeURIComponent(mapId)}/ai-delegations${suffix}`, { aiMapId: mapId })
-  }, { compactResult: true })
+  })
 
   registerTool(server, 'mindnprogress_get_card', '한 카드의 설명, 공유 지식, 업무 필드와 댓글을 선택적으로 조회합니다. description과 sharedKnowledge의 길이·SHA-256은 textIntegrity로 반환하며 이미지 카드는 로컬 원본 경로도 반환합니다. get_context의 fallback 카드 또는 간략 개요에서 원문이 필요할 때 사용하세요.', {
     mapId: z.string().min(1),
@@ -1590,7 +1592,7 @@ async function main() {
       root: rootRollup(rootCard),
       affectedCards: affectedCardsOf(previousMap, savedMap, mapId, [], rootCard?.id, [nodeId]),
     }
-  }, { compactResult: true })
+  })
 
   registerTool(server, 'mindnprogress_update_card', '카드의 일부 필드만 부분 병합 방식으로 변경합니다. data에 포함한 필드만 변경되고 일반 카드에서 생략한 필드와 position은 보존되므로 현재 카드 전체 데이터를 재전송하지 마세요. 기존 description 또는 sharedKnowledge 내부의 일부만 고칠 때는 이 도구로 필드 전체를 보내지 말고 mindnprogress_patch_card_text를 사용하세요. 빈 문자열과 빈 배열은 해당 필드를 명시적으로 초기화합니다. 단, status=done 또는 progress>=100이면 waitingItems가 자동으로 비워지며 Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 최상위 카드와 하위 업무가 있는 일반 isWork=false 묶음 카드의 progress·status는 서버가 다시 계산합니다. description은 업무 요청과 배경에 사용합니다. sharedKnowledge는 다른 카드가 재사용할 현재 유효한 결론에만 사용하고 진행 기록·도구 로그·중복·폐기 결론은 댓글로 분리하세요. responseMode는 full이 기본값이며 연속 작업용 전체 카드 본문과 관계를 반환합니다. 단일 카드와 서버가 함께 조정한 카드만 필요하면 affected를 사용하세요.', {
     mapId: z.string().min(1),
@@ -1643,7 +1645,7 @@ async function main() {
       affectedCards: affectedCardsOf(previousMap, savedMap, mapId, [resolvedCardId], rootCard?.id),
       changedFields,
     }
-  }, { compactResult: true })
+  })
 
   registerTool(server, 'mindnprogress_patch_card_text', `기존 카드의 description 또는 sharedKnowledge 전체를 다시 생성하지 않고 일부만 안전하게 수정합니다. 먼저 mindnprogress_get_card에서 대상 필드의 textIntegrity.sha256을 받아 expectedSha256으로 전달하세요. 해시가 달라졌거나 경계 문자열이 유일하지 않으면 저장하지 않습니다. ${cardTextSafetyInstructions} sharedKnowledge에서 같은 주제의 결론을 갱신할 때는 새 이력을 뒤에 추가하지 말고 이 도구로 기존 절을 교체하세요. Ref 카드는 원본 카드를 직접 수정해야 합니다.`, {
     mapId: z.string().min(1),
@@ -1694,7 +1696,7 @@ async function main() {
       after: textIntegrity(storedText),
       verification: { storedMatchesExpected: true },
     }
-  }, { compactResult: true })
+  })
 
   registerTool(server, 'mindnprogress_apply_shared_knowledge_review', '검토 문맥에서 만든 sharedKnowledge 정리 결과를 한 문서에 원자적으로 저장하고 검토 완료로 기록합니다. 모든 카드의 현재 SHA-256과 문서 버전이 일치할 때만 전체 요청을 한 번에 반영하며 하나라도 다르면 아무것도 저장하지 않습니다. 본문을 줄이거나 재구성한 경우 cleaned와 replacement를, 현재 장문 전체가 계속 필요하면 accepted-long만 사용하세요. Ref 카드는 지원하지 않습니다.', {
     mapId: z.string().min(1),
@@ -1712,7 +1714,7 @@ async function main() {
       aiMapId: mapId,
       body: JSON.stringify({ baseVersion, patches }),
     },
-  ), { compactResult: true })
+  ))
 
   registerTool(server, 'mindnprogress_recover_ai_delegation', 'AionCore 재시작, 연결 끊김 또는 필수 체크포인트·통합 실패로 recovery-required 또는 integration-recovery-required가 된 AI 위임을 기존 대화와 기존 작업공간에서 명시적으로 재개합니다. 원래 지시를 자동 재생하지 않으며, 현재 카드·Git·작업공간 상태를 확인한 뒤 미완료 부분만 수행하도록 새 복구 지시를 전달합니다.', {
     mapId: z.string().min(1).describe('복구할 위임이 속한 문서 ID'),
@@ -1732,7 +1734,7 @@ async function main() {
       timeoutMs: 60_000,
       body: JSON.stringify({ instruction, sourceRevision }),
     })
-  }, { compactResult: true })
+  })
 
   registerTool(server, 'mindnprogress_move_card', '카드와 모든 하위 카드를 유지한 채 다른 카드의 하위로 이동합니다. 응답은 이동한 카드와 상위 관계 변화만 돌려주므로 전체 문서를 다시 받지 않습니다.', {
     mapId: z.string().min(1),
@@ -1796,7 +1798,7 @@ async function main() {
       root: rootRollup(rootCard),
       affectedCards: affectedCardsOf(previousMap, savedMap, mapId, [], rootCard?.id, [resolvedCardId]),
     }
-  }, { compactResult: true })
+  })
 
   registerTool(server, 'mindnprogress_delete_card', '카드를 삭제합니다. 기본적으로 모든 하위 카드도 함께 삭제합니다. 응답은 삭제한 카드 ID와 함께 조정된 카드만 돌려주므로 전체 문서를 다시 받지 않습니다.', {
     mapId: z.string().min(1),
@@ -1837,7 +1839,7 @@ async function main() {
       root: rootRollup(rootCard),
       affectedCards: affectedCardsOf(previousMap, savedMap, mapId, [], rootCard?.id),
     }
-  }, { compactResult: true })
+  })
 
   registerTool(server, 'mindnprogress_add_knowledge_line', 'source 카드의 결과를 target 카드가 선행 지식으로 사용하도록 지식선을 추가합니다. 전체 문서를 전달하지 않고 최신 버전에 관계만 안전하게 반영하며 순환과 중복 연결을 거부합니다.', {
     mapId: z.string().min(1),
