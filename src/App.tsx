@@ -1029,6 +1029,16 @@ function useMapHistory(
     refreshAvailability()
   }, [applySnapshot, clearCommitTimer, refreshAvailability])
 
+  // 서버 정규화(진행률 롤업·Ref 원본 동기화) 결과는 사용자 편집이 아니므로
+  // 새 undo 단계로 쌓지 않고 기준선만 옮긴다. 확정 대기 중인 사용자 편집은 먼저 단계로 남긴다.
+  const rebaseline = useCallback((nextNodes: MindMapNode[], nextEdges: MindMapEdge[]) => {
+    commitPending()
+    clearCommitTimer()
+    baseline.current = createHistorySnapshot(nextNodes, nextEdges)
+    pending.current = null
+    refreshAvailability()
+  }, [clearCommitTimer, commitPending, refreshAvailability])
+
   const resetHistory = useCallback((nextNodes: MindMapNode[], nextEdges: MindMapEdge[]) => {
     clearCommitTimer()
     undoStack.current = []
@@ -1058,7 +1068,7 @@ function useMapHistory(
     refreshAvailability()
   }, [clearCommitTimer, refreshAvailability])
 
-  return { ...availability, undo, redo, resetHistory, beginTransaction, endTransaction, cancelTransaction }
+  return { ...availability, undo, redo, resetHistory, rebaseline, beginTransaction, endTransaction, cancelTransaction }
 }
 
 const MAP_CACHE_KEY = 'mindnprogress-map-cache-v1'
@@ -1758,7 +1768,7 @@ function PasswordChangeDialog({ onClose }: { onClose: () => void }) {
 function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { user: AuthUser; onLogout: () => void; initialDeepLink: WorkspaceDeepLink | null; theme: UiTheme; onToggleTheme: () => void }) {
   const [nodes, setNodes, onNodesChange] = useNodesState<MindMapNode>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState<MindMapEdge>([])
-  const { canUndo, canRedo, undo, redo, resetHistory, beginTransaction: beginHistoryTransaction, endTransaction: endHistoryTransaction, cancelTransaction: cancelHistoryTransaction } = useMapHistory(nodes, setNodes, edges, setEdges)
+  const { canUndo, canRedo, undo, redo, resetHistory, rebaseline: rebaselineHistory, beginTransaction: beginHistoryTransaction, endTransaction: endHistoryTransaction, cancelTransaction: cancelHistoryTransaction } = useMapHistory(nodes, setNodes, edges, setEdges)
   const mode: AccessMode = user.role === 'viewer' ? 'viewer' : 'editor'
   const [adminOpen, setAdminOpen] = useState(false)
   const closeAdminPanel = useCallback(() => setAdminOpen(false), [])
@@ -2003,20 +2013,22 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     serverBaseline.current = structuredClone(savedMap)
     if (!mapContentsEqual(currentContent, reconciliation)) {
       const currentSelectedId = selectedIdRef.current
+      // 선택 카드가 사라졌으면 선택을 해제한다. 첫 카드로 넘기면 실행 취소 도중 최상위 카드가 갑자기 선택된다.
       const nextSelectedId = currentSelectedId && reconciliation.nodes.some((node) => node.id === currentSelectedId)
         ? currentSelectedId
-        : reconciliation.nodes[0]?.id ?? null
+        : null
       const nextNodes = synchronizeNodeSelection(reconciliation.nodes, nextSelectedId)
       setNodes(nextNodes)
       setEdges(reconciliation.edges)
       setSelectedId(nextSelectedId)
+      rebaselineHistory(nextNodes, reconciliation.edges)
       localStorage.setItem(storageKeyForMap(savedMap.id), JSON.stringify({
         nodes: nextNodes,
         edges: reconciliation.edges,
       }))
     }
     setServerBaselineRevision((current) => current + 1)
-  }, [setEdges, setNodes])
+  }, [rebaselineHistory, setEdges, setNodes])
   const { fitView, screenToFlowPosition, setCenter, setViewport } = useReactFlow<MindMapNode, MindMapEdge>()
   const reactFlowStore = useStoreApi<MindMapNode, MindMapEdge>()
   const showFullMindMap = useCallback((duration = 500) => {
@@ -2754,14 +2766,19 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
             nodes: mergeResolvedReferenceNodes(baseline.nodes, map.nodes),
           }
         }
-        setNodes((current) => mergeResolvedReferenceNodes(current, map.nodes))
+        // Ref 원본 값 반영도 사용자 편집이 아니므로 실행 취소 단계를 만들지 않는다.
+        const nextNodes = mergeResolvedReferenceNodes(nodesRef.current, map.nodes)
+        if (nextNodes !== nodesRef.current) {
+          setNodes(nextNodes)
+          rebaselineHistory(nextNodes, edgesRef.current)
+        }
         if (nextCommentStats) {
           setReferenceCommentStats((current) => isSameCommentStats(current, nextCommentStats) ? current : nextCommentStats)
         }
         setUnresolvedReferenceNodeIds(new Set(unresolvedIds ?? []))
       })
       .catch(() => undefined)
-  }, [activeMapId, setNodes])
+  }, [activeMapId, rebaselineHistory, setNodes])
 
   useEffect(() => {
     setAiConversationRuntimes({})
