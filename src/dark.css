@@ -412,6 +412,10 @@
   background: var(--theme-canvas);
 }
 
+[data-theme="dark"] .box-selection-rect {
+  background: rgba(176, 165, 255, .16);
+}
+
 [data-theme="dark"] .canvas-toolbar,
 [data-theme="dark"] .node-explorer,
 [data-theme="dark"] .hint-pill {

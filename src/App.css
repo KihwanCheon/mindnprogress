@@ -302,6 +302,11 @@
   .canvas-wrap .react-flow__node { -webkit-user-select: none; user-select: none; }
 }
 .canvas-wrap.right-panning, .canvas-wrap.right-panning *, .canvas-wrap.touch-panning, .canvas-wrap.touch-panning * { cursor: grabbing !important; user-select: none; }
+/* Ctrl 또는 Meta를 누르면 범위 선택 커서를 보여 카드 다중 선택 모드임을 알린다. */
+.canvas-wrap { --box-select-cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M3 2 L3 15.4 L6.6 11.9 L8.9 17.2 L11.3 16.2 L9 10.9 L13.7 10.6 Z' fill='%23ffffff' stroke='%231b1b22' stroke-width='1.2' stroke-linejoin='round'/%3E%3Crect x='11.6' y='11.6' width='11.4' height='9.4' fill='none' stroke='%23ffffff' stroke-width='2.8'/%3E%3Crect x='11.6' y='11.6' width='11.4' height='9.4' fill='none' stroke='%231b1b22' stroke-width='1.2' stroke-dasharray='2.6 2'/%3E%3C/svg%3E") 3 2, crosshair; }
+.canvas-wrap.box-select-armed .react-flow__pane { cursor: var(--box-select-cursor); }
+.canvas-wrap.box-selecting, .canvas-wrap.box-selecting * { cursor: var(--box-select-cursor) !important; user-select: none; }
+.box-selection-rect { position: absolute; z-index: 6; pointer-events: none; border: 1px dashed var(--theme-selection-ring); border-radius: 3px; background: rgba(95, 75, 216, .12); }
 .canvas-wrap.knowledge-connecting .react-flow__node, .canvas-wrap.knowledge-connecting .react-flow__node * { cursor: crosshair !important; }
 .knowledge-connection-preview { width: 100%; height: 100%; position: absolute; inset: 0; z-index: 8; overflow: hidden; color: var(--theme-knowledge-primary); pointer-events: none; }
 .knowledge-connection-preview.secondary { color: var(--theme-knowledge-fallback); }

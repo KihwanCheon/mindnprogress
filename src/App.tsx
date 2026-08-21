@@ -40,6 +40,7 @@ import { SharedKnowledgeReviewDialog, type SharedKnowledgeReviewApplied } from '
 import { DashboardView, KanbanView, TimelineView } from './components/WorkViews'
 import type { AiConversationLink, AiConversationRuntime, ChecklistItem, KnowledgePolicy, MindDoorayLinkData, MindDoorayTaskData, MindDoorayWikiData, MindImageData, MindMapEdgeData, MindNodeData, TeamMember, WaitingItem } from './types/mindMap'
 import { resolveAiConversationTarget, type AiConversationExplicitTarget } from './utils/aiConversationLaunch.mjs'
+import { applyBoxSelection, boxSelectionNodeIds, boxSelectionRect, isBoxSelectionDrag } from './utils/boxSelection.mjs'
 import { blockingNodes, createsDependencyCycle, dependentNodes, prerequisiteNodes } from './utils/dependencies'
 import { collapsedDocumentGroupsStorageKey, initialCollapsedDocumentGroupIds, normalizeCollapsedDocumentGroupIds } from './utils/documentGroupCollapse.mjs'
 import { createsKnowledgeCycle, isHierarchyEdge, isKnowledgeEdge, knowledgePolicyOf } from './utils/knowledgeEdges'
@@ -835,6 +836,14 @@ type RightPanGesture = {
   viewport: { x: number; y: number; zoom: number }
   moved: boolean
   contextMenuSuppressed: boolean
+}
+
+type BoxSelectionGesture = {
+  pointerId: number
+  startClient: { x: number; y: number }
+  startFlow: { x: number; y: number }
+  baseSelectedIds: string[]
+  dragging: boolean
 }
 
 type TouchPanGesture = {
@@ -1876,6 +1885,8 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const [dropTargetId, setDropTargetId] = useState<string | null>(null)
   const [rightPanning, setRightPanning] = useState(false)
   const [touchPanning, setTouchPanning] = useState(false)
+  const [boxSelectionArmed, setBoxSelectionArmed] = useState(false)
+  const [boxSelectionScreenRect, setBoxSelectionScreenRect] = useState<{ left: number; top: number; width: number; height: number } | null>(null)
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const savedWidth = Number(localStorage.getItem('mindnprogress-sidebar-width'))
     return Number.isFinite(savedWidth) ? Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, savedWidth)) : 226
@@ -1908,6 +1919,9 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const [serverBaselineRevision, setServerBaselineRevision] = useState(0)
   const dragSnapshot = useRef<DragSnapshot | null>(null)
   const rightPanGesture = useRef<RightPanGesture | null>(null)
+  const boxSelectionGesture = useRef<BoxSelectionGesture | null>(null)
+  const suppressBoxSelectionClick = useRef(false)
+  const visibleFlowNodeIdsRef = useRef<Set<string>>(new Set())
   const touchPanGesture = useRef<TouchPanGesture | null>(null)
   const touchCanvasPanGesture = useRef<TouchCanvasPanGesture | null>(null)
   const touchPanOwned = useRef(false)
@@ -2452,6 +2466,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     }
   }), [activeMapId, aiConversationRuntimes, beginHistoryTransaction, collapsedHiddenNodeIds, collapsedNodeIds, collapsibleNodeIds, commentStats, descendantCounts, dropTargetId, endHistoryTransaction, filterActive, filterMatchedNodeIds, filterVisibleNodeIds, hoveredKnowledgeConnectionIssue, knowledgeConnection, knowledgeConnectionTargetId, mode, nodes, normalizedNodeSearch, openDependencies, openWaitingItems, progressRollups, referenceCommentStats, searchContextNodeIds, searchMatchedNodeIds, setNodes, teamMembers, unresolvedReferenceNodeIds])
   const visibleFlowNodeIds = useMemo(() => new Set(flowNodes.filter((node) => !node.hidden).map((node) => node.id)), [flowNodes])
+  visibleFlowNodeIdsRef.current = visibleFlowNodeIds
   const visibleFlowNodeIdsKey = useMemo(() => [...visibleFlowNodeIds].sort().join('\u0000'), [visibleFlowNodeIds])
   const flowEdges = useMemo(() => {
     const rootNodeId = rootNodeOf(nodes, edges)?.id
@@ -3943,6 +3958,121 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       window.removeEventListener('blur', cancelRightPan)
     }
   }, [setViewport])
+
+  const applySelectedNodeIds = useCallback((selectedIds: string[]) => {
+    const selection = new Set(selectedIds)
+    setNodes((current) => {
+      let changed = false
+      const next = current.map((node) => {
+        const selected = selection.has(node.id)
+        if (Boolean(node.selected) === selected) return node
+        changed = true
+        return { ...node, selected }
+      })
+      return changed ? next : current
+    })
+  }, [setNodes])
+
+  // Ctrl 또는 Meta를 누른 상태의 좌버튼 드래그는 화면 이동 대신 카드 범위 선택으로 사용한다.
+  const startBoxSelection = useCallback((event: ReactPointerEvent<HTMLElement>) => {
+    if (event.button !== 0 || viewMode !== 'mindmap' || knowledgeConnection || touchPanOwned.current) return
+    if (!event.ctrlKey && !event.metaKey) return
+    if (!(event.target instanceof Element) || !event.target.classList.contains('react-flow__pane')) return
+
+    event.preventDefault()
+    event.stopPropagation()
+    boxSelectionGesture.current = {
+      pointerId: event.pointerId,
+      startClient: { x: event.clientX, y: event.clientY },
+      startFlow: screenToFlowPosition({ x: event.clientX, y: event.clientY }),
+      baseSelectedIds: nodesRef.current.filter((node) => node.selected).map((node) => node.id),
+      dragging: false,
+    }
+  }, [knowledgeConnection, screenToFlowPosition, viewMode])
+
+  useEffect(() => {
+    const moveBoxSelection = (event: PointerEvent) => {
+      const gesture = boxSelectionGesture.current
+      if (!gesture || event.pointerId !== gesture.pointerId) return
+      const currentClient = { x: event.clientX, y: event.clientY }
+      if (!gesture.dragging && !isBoxSelectionDrag(gesture.startClient, currentClient)) return
+      gesture.dragging = true
+      event.preventDefault()
+
+      const bounds = canvasWrapRef.current?.getBoundingClientRect()
+      const clientRect = boxSelectionRect(gesture.startClient, currentClient)
+      if (bounds) {
+        setBoxSelectionScreenRect({
+          left: clientRect.x - bounds.left,
+          top: clientRect.y - bounds.top,
+          width: clientRect.width,
+          height: clientRect.height,
+        })
+      }
+
+      const flowRect = boxSelectionRect(gesture.startFlow, screenToFlowPosition(currentClient))
+      const candidates = nodesRef.current
+        .filter((node) => visibleFlowNodeIdsRef.current.has(node.id))
+        .map((node) => ({ id: node.id, x: node.position.x, y: node.position.y, ...nodeDimensions(node) }))
+      applySelectedNodeIds(applyBoxSelection(gesture.baseSelectedIds, boxSelectionNodeIds(candidates, flowRect)))
+    }
+
+    const finishBoxSelection = (event: PointerEvent) => {
+      const gesture = boxSelectionGesture.current
+      if (!gesture || event.button !== 0) return
+      if (gesture.dragging) suppressBoxSelectionClick.current = true
+      boxSelectionGesture.current = null
+      setBoxSelectionScreenRect(null)
+    }
+
+    const cancelBoxSelection = () => {
+      const gesture = boxSelectionGesture.current
+      if (!gesture) return
+      boxSelectionGesture.current = null
+      setBoxSelectionScreenRect(null)
+      if (!gesture.dragging) return
+      suppressBoxSelectionClick.current = true
+      applySelectedNodeIds(gesture.baseSelectedIds)
+    }
+
+    const cancelBoxSelectionOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') cancelBoxSelection()
+    }
+
+    window.addEventListener('pointermove', moveBoxSelection, { passive: false })
+    window.addEventListener('pointerup', finishBoxSelection)
+    window.addEventListener('pointercancel', cancelBoxSelection)
+    window.addEventListener('blur', cancelBoxSelection)
+    window.addEventListener('keydown', cancelBoxSelectionOnEscape)
+    return () => {
+      window.removeEventListener('pointermove', moveBoxSelection)
+      window.removeEventListener('pointerup', finishBoxSelection)
+      window.removeEventListener('pointercancel', cancelBoxSelection)
+      window.removeEventListener('blur', cancelBoxSelection)
+      window.removeEventListener('keydown', cancelBoxSelectionOnEscape)
+    }
+  }, [applySelectedNodeIds, screenToFlowPosition])
+
+  useEffect(() => {
+    if (viewMode !== 'mindmap') {
+      setBoxSelectionArmed(false)
+      return
+    }
+
+    const syncBoxSelectionArmed = (event: KeyboardEvent) => setBoxSelectionArmed(event.ctrlKey || event.metaKey)
+    const disarmBoxSelection = () => setBoxSelectionArmed(false)
+
+    window.addEventListener('keydown', syncBoxSelectionArmed)
+    window.addEventListener('keyup', syncBoxSelectionArmed)
+    window.addEventListener('blur', disarmBoxSelection)
+    document.addEventListener('visibilitychange', disarmBoxSelection)
+    return () => {
+      window.removeEventListener('keydown', syncBoxSelectionArmed)
+      window.removeEventListener('keyup', syncBoxSelectionArmed)
+      window.removeEventListener('blur', disarmBoxSelection)
+      document.removeEventListener('visibilitychange', disarmBoxSelection)
+    }
+  }, [viewMode])
 
   const restoreNodeDragForTouchPan = useCallback(() => {
     const snapshot = dragSnapshot.current
@@ -6134,10 +6264,11 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         {viewMode === 'mindmap' ? (
         <section
           ref={canvasWrapRef}
-          className={`canvas-wrap ${rightPanning ? 'right-panning' : ''} ${touchPanning ? 'touch-panning' : ''} ${knowledgeConnection ? `knowledge-connecting ${knowledgeConnection.policy === 'reuse-first' ? 'primary' : 'secondary'}` : ''}`}
+          className={`canvas-wrap ${rightPanning ? 'right-panning' : ''} ${touchPanning ? 'touch-panning' : ''} ${boxSelectionArmed ? 'box-select-armed' : ''} ${boxSelectionScreenRect ? 'box-selecting' : ''} ${knowledgeConnection ? `knowledge-connecting ${knowledgeConnection.policy === 'reuse-first' ? 'primary' : 'secondary'}` : ''}`}
           onPointerDownCapture={(event) => {
             // 우클릭 드래그로 맵을 이동한 뒤에는 캔버스 메뉴가 열리지 않도록 시작 좌표를 남긴다.
             if (event.button === 2) paneRightPressRef.current = { x: event.clientX, y: event.clientY }
+            startBoxSelection(event)
             startCanvasRightPan(event)
           }}
           onContextMenuCapture={(event) => {
@@ -6148,7 +6279,15 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
             }
           }}
           onClickCapture={(event) => {
-            if (Date.now() >= suppressTouchClickUntil.current || !(event.target instanceof Element)) return
+            if (!(event.target instanceof Element)) return
+            // 범위 선택 직후의 클릭이나 Ctrl 클릭으로 선택이 초기화되지 않게 막는다.
+            const paneTarget = event.target.classList.contains('react-flow__pane')
+            if (paneTarget && (suppressBoxSelectionClick.current || event.ctrlKey || event.metaKey)) {
+              suppressBoxSelectionClick.current = false
+              event.stopPropagation()
+              return
+            }
+            if (Date.now() >= suppressTouchClickUntil.current) return
             if (!event.target.closest('.react-flow__node, .react-flow__edge, .react-flow__edge-textwrapper')) return
             event.preventDefault()
             event.stopPropagation()
@@ -6289,7 +6428,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
             edgesReconnectable={mode === 'editor'}
             nodeClickDistance={4}
             nodeDragThreshold={4}
-            panOnDrag={touchPanning ? false : [0, 1, 2]}
+            panOnDrag={touchPanning ? false : boxSelectionArmed ? [1, 2] : [0, 1, 2]}
             zoomOnPinch={!touchPanning}
             deleteKeyCode={mode === 'editor' ? ['Backspace', 'Delete'] : null}
             fitView
@@ -6372,6 +6511,18 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
                 : mode === 'editor' ? '이미지 드롭·Ctrl+V · Alt+드래그로 눈금 맞춤 · 우클릭 드래그로 이동 · Insert로 하위 노드 추가' : '우클릭 드래그로 이동 · 읽기 전용'}
             </Panel>
           </ReactFlow>
+          {boxSelectionScreenRect && (
+            <div
+              className="box-selection-rect"
+              aria-hidden="true"
+              style={{
+                left: boxSelectionScreenRect.left,
+                top: boxSelectionScreenRect.top,
+                width: boxSelectionScreenRect.width,
+                height: boxSelectionScreenRect.height,
+              }}
+            />
+          )}
           {knowledgeConnection && knowledgeConnectionSourceBox && (
             <KnowledgeConnectionPreview
               key={`${knowledgeConnection.sourceId}-${knowledgeConnection.policy}`}
