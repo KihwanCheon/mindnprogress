@@ -167,6 +167,25 @@ function Install-MnPSuiteManagedSkill {
   }
 }
 
+function New-MnPSuiteInstructionBackup {
+  param([string]$Path)
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+    throw "백업할 전역 지침 파일이 없습니다: $Path"
+  }
+
+  $timestamp = Get-Date -Format 'yyyyMMdd-HHmmssfff'
+  $backupBase = $Path + '.mnp-suite-backup-' + $timestamp
+  $backupPath = $backupBase + '.bak'
+  $sequence = 1
+  while (Test-Path -LiteralPath $backupPath) {
+    $backupPath = $backupBase + '-' + $sequence + '.bak'
+    $sequence++
+  }
+
+  Copy-Item -LiteralPath $Path -Destination $backupPath
+  return $backupPath
+}
+
 function Set-MnPSuiteManagedBlock {
   param([string]$Path, [string]$Content)
   Assert-MnPSuiteManagedBlockTarget $Path
@@ -186,11 +205,8 @@ function Set-MnPSuiteManagedBlock {
 
   $backupPath = ''
   if ($updated -ne $existing) {
-    if (-not [string]::IsNullOrWhiteSpace($existing)) {
-      $backupPath = $Path + '.mnp-suite.preinstall.bak'
-      if (-not (Test-Path -LiteralPath $backupPath)) {
-        Copy-Item -LiteralPath $Path -Destination $backupPath
-      }
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+      $backupPath = New-MnPSuiteInstructionBackup $Path
     }
     Write-Utf8File $Path $updated
   }
@@ -1070,7 +1086,9 @@ MnP의 `AI 대화 시작` 창을 다시 열면 `MindNProgress · 필수`로 표�
 - Codex: `.codex\skills`와 `.codex\AGENTS.md`
 - Claude Code: `.claude\skills`와 `.claude\CLAUDE.md`
 
-Claude Code 또는 Codex의 전역 구성 폴더가 아직 없어도 필요한 폴더와 파일을 생성합니다. 기존 전역 지침은 유지하고 MnP Suite 표식 사이의 관리 블록만 추가·갱신합니다. 최초 변경 전 원문이 있으면 같은 위치에 `.mnp-suite.preinstall.bak` 백업을 한 번 만듭니다. 같은 이름의 사용자 소유 스킬이 있으면 덮어쓰지 않고 설치를 중단합니다. 실제 적용 경로와 선택 스킬은 `installation-manifest.json`에서 확인할 수 있습니다.
+Claude Code 또는 Codex의 전역 구성 폴더가 아직 없어도 필요한 폴더와 파일을 생성합니다. 기존 전역 지침은 유지하고 MnP Suite 표식 사이의 관리 블록만 추가·갱신합니다. 기존 지침 파일을 실제로 변경하기 직전에 같은 폴더에 `<파일명>.mnp-suite-backup-YYYYMMDD-HHmmssfff.bak` 복사본을 매번 만듭니다. 같은 이름의 사용자 소유 스킬이 있으면 덮어쓰지 않고 설치를 중단합니다. 실제 적용 경로, 선택 스킬과 이번 설치에서 만든 백업 경로는 `installation-manifest.json`에서 확인할 수 있습니다.
+
+전역 지침에 문제가 생기면 Claude Code·Codex 세션을 닫고, 복원할 날짜의 `.bak` 파일을 원래 `AGENTS.md` 또는 `CLAUDE.md` 이름으로 복사한 뒤 새 세션을 시작하세요. `.bak` 원본은 이후 복원을 위해 남겨두는 것이 좋습니다.
 
 ## Unity MCP와 Fork
 
@@ -1235,7 +1253,11 @@ function Invoke-SelfTest {
         if ((Read-Utf8File (Join-Path $testCodexHome 'AGENTS.md')) -notmatch [regex]::Escape($codexOriginal)) {
           throw "Codex 기존 지침 보존 실패: $($agentCase.Name)"
         }
-        if ((Read-Utf8File (Join-Path $testCodexHome 'AGENTS.md.mnp-suite.preinstall.bak')) -ne $codexOriginal) {
+        $codexBackups = @(Get-ChildItem -LiteralPath $testCodexHome -File -Filter 'AGENTS.md.mnp-suite-backup-*.bak')
+        if ($codexBackups.Count -ne 1 -or $codexBackups[0].Name -notmatch '^AGENTS\.md\.mnp-suite-backup-\d{8}-\d{9}(?:-\d+)?\.bak$') {
+          throw "Codex 날짜 백업 파일명 검증 실패: $($agentCase.Name)"
+        }
+        if ((Read-Utf8File $codexBackups[0].FullName) -ne $codexOriginal) {
           throw "Codex 기존 지침 백업 검증 실패: $($agentCase.Name)"
         }
       }
@@ -1243,17 +1265,64 @@ function Invoke-SelfTest {
         if ((Read-Utf8File (Join-Path $testClaudeHome 'CLAUDE.md')) -notmatch [regex]::Escape($claudeOriginal)) {
           throw "Claude 기존 지침 보존 실패: $($agentCase.Name)"
         }
-        if ((Read-Utf8File (Join-Path $testClaudeHome 'CLAUDE.md.mnp-suite.preinstall.bak')) -ne $claudeOriginal) {
+        $claudeBackups = @(Get-ChildItem -LiteralPath $testClaudeHome -File -Filter 'CLAUDE.md.mnp-suite-backup-*.bak')
+        if ($claudeBackups.Count -ne 1 -or $claudeBackups[0].Name -notmatch '^CLAUDE\.md\.mnp-suite-backup-\d{8}-\d{9}(?:-\d+)?\.bak$') {
+          throw "Claude 날짜 백업 파일명 검증 실패: $($agentCase.Name)"
+        }
+        if ((Read-Utf8File $claudeBackups[0].FullName) -ne $claudeOriginal) {
           throw "Claude 기존 지침 백업 검증 실패: $($agentCase.Name)"
         }
       }
 
+      $backupCountsBeforeRerun = @{}
+      foreach ($instructionsPath in @((Join-Path $testCodexHome 'AGENTS.md'), (Join-Path $testClaudeHome 'CLAUDE.md'))) {
+        $backupCountsBeforeRerun[$instructionsPath] = @(Get-ChildItem -LiteralPath (Split-Path -Parent $instructionsPath) -File -Filter ((Split-Path -Leaf $instructionsPath) + '.mnp-suite-backup-*.bak')).Count
+      }
       Install-MnPSuiteAgentConfiguration $testCodexHome $testClaudeHome $true | Out-Null
       foreach ($instructionsPath in @((Join-Path $testCodexHome 'AGENTS.md'), (Join-Path $testClaudeHome 'CLAUDE.md'))) {
         $instructionText = Read-Utf8File $instructionsPath
         if ([regex]::Matches($instructionText, [regex]::Escape($script:AgentGuidanceStartMarker)).Count -ne 1) {
           throw "전역 지침 재설치 멱등성 검증 실패 ($($agentCase.Name)): $instructionsPath"
         }
+        $backupCountAfterRerun = @(Get-ChildItem -LiteralPath (Split-Path -Parent $instructionsPath) -File -Filter ((Split-Path -Leaf $instructionsPath) + '.mnp-suite-backup-*.bak')).Count
+        if ($backupCountAfterRerun -ne $backupCountsBeforeRerun[$instructionsPath]) {
+          throw "내용이 같은 재설치에서 불필요한 날짜 백업이 생성됨 ($($agentCase.Name)): $instructionsPath"
+        }
+      }
+    }
+
+    $changedGuidanceRoot = Join-Path $temporaryRoot 'agent-case-changed-guidance'
+    $changedGuidanceCodex = Join-Path $changedGuidanceRoot '.codex'
+    $changedGuidanceClaude = Join-Path $changedGuidanceRoot '.claude'
+    Write-Utf8File (Join-Path $changedGuidanceCodex 'AGENTS.md') 'CODEX_BEFORE_FIRST_CHANGE'
+    Write-Utf8File (Join-Path $changedGuidanceClaude 'CLAUDE.md') 'CLAUDE_BEFORE_FIRST_CHANGE'
+    Install-MnPSuiteAgentConfiguration $changedGuidanceCodex $changedGuidanceClaude $false | Out-Null
+    $codexAfterFirstChange = Read-Utf8File (Join-Path $changedGuidanceCodex 'AGENTS.md')
+    $claudeAfterFirstChange = Read-Utf8File (Join-Path $changedGuidanceClaude 'CLAUDE.md')
+    Install-MnPSuiteAgentConfiguration $changedGuidanceCodex $changedGuidanceClaude $true | Out-Null
+    $changedGuidanceChecks = @(
+      [pscustomobject]@{ Home = $changedGuidanceCodex; File = 'AGENTS.md'; Original = 'CODEX_BEFORE_FIRST_CHANGE'; AfterFirst = $codexAfterFirstChange },
+      [pscustomobject]@{ Home = $changedGuidanceClaude; File = 'CLAUDE.md'; Original = 'CLAUDE_BEFORE_FIRST_CHANGE'; AfterFirst = $claudeAfterFirstChange }
+    )
+    foreach ($backupCheck in $changedGuidanceChecks) {
+      $backups = @(Get-ChildItem -LiteralPath $backupCheck.Home -File -Filter ($backupCheck.File + '.mnp-suite-backup-*.bak'))
+      if ($backups.Count -ne 2) { throw "전역 지침 변경별 날짜 백업 개수 오류: $($backupCheck.File)" }
+      $backupContents = @($backups | ForEach-Object { Read-Utf8File $_.FullName })
+      if ($backupContents -notcontains $backupCheck.Original -or $backupContents -notcontains $backupCheck.AfterFirst) {
+        throw "전역 지침 변경별 복원 원문 보존 실패: $($backupCheck.File)"
+      }
+    }
+
+    $emptyGuidanceRoot = Join-Path $temporaryRoot 'agent-case-empty-guidance'
+    $emptyGuidanceCodex = Join-Path $emptyGuidanceRoot '.codex'
+    $emptyGuidanceClaude = Join-Path $emptyGuidanceRoot '.claude'
+    Write-Utf8File (Join-Path $emptyGuidanceCodex 'AGENTS.md') ''
+    Write-Utf8File (Join-Path $emptyGuidanceClaude 'CLAUDE.md') ''
+    Install-MnPSuiteAgentConfiguration $emptyGuidanceCodex $emptyGuidanceClaude $false | Out-Null
+    foreach ($emptyInstructions in @((Join-Path $emptyGuidanceCodex 'AGENTS.md'), (Join-Path $emptyGuidanceClaude 'CLAUDE.md'))) {
+      $emptyBackups = @(Get-ChildItem -LiteralPath (Split-Path -Parent $emptyInstructions) -File -Filter ((Split-Path -Leaf $emptyInstructions) + '.mnp-suite-backup-*.bak'))
+      if ($emptyBackups.Count -ne 1 -or $emptyBackups[0].Length -ne 0) {
+        throw "빈 전역 지침 파일의 날짜 백업 검증 실패: $emptyInstructions"
       }
     }
 

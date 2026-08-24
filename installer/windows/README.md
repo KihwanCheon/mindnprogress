@@ -88,12 +88,31 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\Install-MnPSui
 
 - 폴더나 지침 파일이 없으면 새로 만듭니다.
 - 기존 지침 파일의 MnP Suite 관리 블록 밖 내용은 유지합니다.
-- 기존 지침을 처음 변경할 때 `<지침 파일>.mnp-suite.preinstall.bak`을 만듭니다.
+- 기존 지침 파일을 실제로 변경하기 직전에 같은 폴더에 `<지침 파일>.mnp-suite-backup-YYYYMMDD-HHmmssfff.bak` 복사본을 매번 만듭니다.
+- 내용이 동일한 재실행에서는 전역 지침을 다시 쓰거나 불필요한 백업을 만들지 않습니다.
 - 설치된 스킬 폴더에는 `.mnp-suite-managed.json`을 기록해 후속 설치가 패키지 소유 항목만 갱신하게 합니다.
 - 같은 이름의 사용자 소유 스킬 폴더가 있으면 덮어쓰지 않고 실제 설치를 시작하기 전에 중단합니다.
 - `unity-work`를 선택하지 않은 경우 Unity 전역 규칙도 추가하지 않습니다.
 
 적용된 절대 경로와 선택 스킬은 설치 루트의 `installation-manifest.json` 안 `agentConfiguration`에서 확인합니다. 새 전역 지침과 스킬은 일반적으로 새 AI 세션부터 적용됩니다.
+
+### 전역 지침 복원
+
+백업은 수정 대상과 같은 폴더에 다음과 같은 이름으로 쌓입니다.
+
+```text
+AGENTS.md.mnp-suite-backup-20260824-183015123.bak
+CLAUDE.md.mnp-suite-backup-20260824-183015123.bak
+```
+
+전역 지침 변경 후 AI 동작에 문제가 생기면 다음 순서로 복원합니다.
+
+1. 실행 중인 Claude Code와 Codex 세션을 닫습니다.
+2. 파일의 날짜를 확인해 복원할 `.bak` 복사본을 선택합니다.
+3. 선택한 파일을 같은 폴더의 `AGENTS.md` 또는 `CLAUDE.md`에 복사해 덮어씁니다. 백업 파일 자체는 삭제하거나 이름을 바꾸지 않고 남겨둡니다.
+4. AI를 새 세션으로 시작해 지침이 정상 적용되는지 확인합니다.
+
+이번 설치에서 새로 만든 백업의 절대 경로는 `installation-manifest.json`의 각 `agentConfiguration.platforms[].instructionsBackup`에도 기록됩니다. 원본 지침 파일이 존재하지 않아 새로 만든 경우에는 백업할 이전 파일이 없으므로 이 값이 비어 있습니다.
 
 ## 원격 저장소 또는 브랜치 변경
 
