@@ -33,7 +33,7 @@ test('같은 위임 ID의 새 대화 실행 설정이 달라지면 다른 요청
       thoughtLevelId: 'high',
       enabledSkillIds: ['skill-b', 'skill-a'],
       mcpIds: ['mcp-b', 'mcp-a'],
-      workspace: 'C:\\Git\\Holdem_Fork2\\hdtf-client',
+      workspace: 'C:\\Git\\Game_Worker02\\game-client',
     },
   }
   const signature = createAiDelegationRequestSignature(base)
@@ -51,7 +51,7 @@ test('같은 위임 ID의 새 대화 실행 설정이 달라지면 다른 요청
   }))
   assert.notEqual(signature, createAiDelegationRequestSignature({
     ...base,
-    newConversation: { ...base.newConversation, workspace: 'C:\\Git\\Holdem_Fork3\\hdtf-client' },
+    newConversation: { ...base.newConversation, workspace: 'C:\\Git\\Game_Worker03\\game-client' },
   }))
 })
 
@@ -60,11 +60,11 @@ test('AionCore가 실제 사용한 작업공간 lease를 모든 식별자로 비
     workspaceId: 'fork2',
     jobId: 'job-12',
     leaseId: 'lease-12',
-    projectRoot: 'C:\\Git\\Holdem_Fork2\\hdtf-client\\',
+    projectRoot: 'C:\\Git\\Game_Worker02\\game-client\\',
   }
   assert.equal(aiDelegationWorkspaceLeaseMatches(expected, {
     ...expected,
-    projectRoot: 'c:/git/holdem_fork2/hdtf-client',
+    projectRoot: 'c:/git/game_worker02/game-client',
   }), true)
   assert.equal(aiDelegationWorkspaceLeaseMatches(expected, {
     ...expected,
@@ -125,7 +125,7 @@ test('새 대화에서 명시하지 않은 실행 환경은 최근 대화와 상
     {
       agent: { id: 'claude', label: 'Claude Code' }, model: { id: 'opus', label: 'Opus' },
       enabledSkillIds: ['skill-a'], mcpIds: ['mcp-a'],
-      workspace: 'C:\\Git\\Holdem\\hdtf-client',
+      workspace: 'C:\\Git\\Game_Integration\\game-client',
     },
   )
 
@@ -135,7 +135,7 @@ test('새 대화에서 명시하지 않은 실행 환경은 최근 대화와 상
   assert.equal(selection.thoughtLevel.id, 'high')
   assert.deepEqual(selection.enabledSkillIds, ['skill-a'])
   assert.deepEqual(selection.mcpIds, ['mcp-a'])
-  assert.equal(selection.workspace, 'C:\\Git\\Holdem\\hdtf-client')
+  assert.equal(selection.workspace, 'C:\\Git\\Game_Integration\\game-client')
 })
 
 test('명시적인 빈 스킬과 MCP 목록은 상위 설정으로 다시 채우지 않는다', () => {
@@ -179,7 +179,7 @@ test('구버전 자원 대기 상태를 하위 작업 완료로 오인하지 않
     resource: {
       kind: 'unity_project',
       key: 'unity:abc123',
-      projectRoot: 'C:/Git/Holdem/hdtf-client',
+      projectRoot: 'C:/Git/Game_Integration/game-client',
     },
   })
   assert.equal(runtime.state, 'waiting-resource')

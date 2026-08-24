@@ -48,9 +48,12 @@ function Test-MindNProgressRunning([string]$ProjectRoot) {
 }
 
 function Stop-MindNProgress([string]$WorkspaceRoot) {
-  $stopScript = Join-Path $WorkspaceRoot 'MindNProgress_Stop.bat'
-  if (-not (Test-Path -LiteralPath $stopScript -PathType Leaf)) {
-    throw "복원을 위해 서버를 중지해야 하지만 중지 배치를 찾지 못했습니다: $stopScript"
+  $stopScript = @(
+    (Join-Path $WorkspaceRoot 'MindNProgress_Stop.bat'),
+    (Join-Path $WorkspaceRoot 'dev\Stop-MindNProgress-Dev.bat')
+  ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+  if (-not $stopScript) {
+    throw "복원을 위해 서버를 중지해야 하지만 지원하는 중지 배치를 찾지 못했습니다: $WorkspaceRoot"
   }
   & $stopScript
   if ($LASTEXITCODE -ne 0) {
@@ -60,11 +63,21 @@ function Stop-MindNProgress([string]$WorkspaceRoot) {
 
 function Start-MindNProgress([string]$WorkspaceRoot) {
   $launcher = Join-Path $WorkspaceRoot 'MindNProgress_Launcher.cjs'
-  if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) {
-    throw "복원 전 실행 상태를 되돌릴 실행 파일을 찾지 못했습니다: $launcher"
+  if (Test-Path -LiteralPath $launcher -PathType Leaf) {
+    Start-Process -FilePath 'node.exe' -ArgumentList ('"' + $launcher + '"') `
+      -WorkingDirectory $WorkspaceRoot -WindowStyle Hidden
+    return
   }
-  Start-Process -FilePath 'node.exe' -ArgumentList ('"' + $launcher + '"') `
-    -WorkingDirectory $WorkspaceRoot -WindowStyle Hidden
+
+  $suiteLauncher = Join-Path $WorkspaceRoot 'dev\Start-MindNProgress-Dev.bat'
+  if (Test-Path -LiteralPath $suiteLauncher -PathType Leaf) {
+    $commandProcessor = if ($env:ComSpec) { $env:ComSpec } else { Join-Path $env:SystemRoot 'System32\cmd.exe' }
+    Start-Process -FilePath $commandProcessor -ArgumentList @('/d', '/c', ('"' + $suiteLauncher + '"')) `
+      -WorkingDirectory $WorkspaceRoot -WindowStyle Hidden
+    return
+  }
+
+  throw "복원 전 실행 상태를 되돌릴 실행 파일을 찾지 못했습니다: $WorkspaceRoot"
 }
 
 function Wait-MindNProgress([int]$TimeoutSeconds = 30) {

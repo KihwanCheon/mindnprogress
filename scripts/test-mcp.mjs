@@ -1398,6 +1398,7 @@ async function main() {
     assert.equal(restartedOptionsResponse.status, 200)
     const restartedOptions = await restartedOptionsResponse.json()
     assert.equal(restartedOptions.aionUiUrl, mockAionUi.baseUrl)
+    assert.equal(restartedOptions.defaultWorkspace, projectDirectory)
     assert.equal(restartedOptions.agents[0].id, 'agent-codex-restarted')
 
     const users = await invoke('mindnprogress_list_users')

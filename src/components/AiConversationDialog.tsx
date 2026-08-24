@@ -39,11 +39,11 @@ type AionMcpServer = { id: string; name: string; description: string; toolCount:
 type AionOptions = {
   connected: boolean
   protocol: string
+  defaultWorkspace: string
   agents: AionAgent[]
   skills: AionSkill[]
   mcpServers: AionMcpServer[]
 }
-const defaultWorkspace = 'C:\\Git\\MindNProgress'
 const runtimeSelectionsStorageKey = 'mindnprogress-ai-runtime-selections'
 const mcpSelectionsStorageKey = 'mindnprogress-ai-mcp-selections'
 const legacyWorkspaceHistoryStorageKey = 'mindnprogress-ai-workspace-history-v1'
@@ -60,9 +60,17 @@ function workspaceHistoryStorageKey(userId: string) {
 function readDocumentWorkspace(userId: string, documentId: string) {
   try {
     return localStorage.getItem(workspaceStorageKey(userId, documentId))
-      ?? defaultWorkspace
+      ?? ''
   } catch {
-    return defaultWorkspace
+    return ''
+  }
+}
+
+function hasStoredDocumentWorkspace(userId: string, documentId: string) {
+  try {
+    return localStorage.getItem(workspaceStorageKey(userId, documentId)) !== null
+  } catch {
+    return false
   }
 }
 
@@ -231,6 +239,11 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
       })
       .then((body) => {
         setOptions(body)
+        if (hasStoredDocumentWorkspace(userId, documentId)) {
+          setWorkspace(readDocumentWorkspace(userId, documentId))
+        } else if (typeof body.defaultWorkspace === 'string') {
+          setWorkspace(body.defaultWorkspace.trim())
+        }
         const savedSelections = runtimeSelectionsRef.current
         const savedMcpIds = readMcpSelections()
         const initialAgent = body.agents.find((agent) => agent.id === savedSelections.lastAgentId && agent.models.length > 0)
@@ -252,7 +265,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
       })
       .finally(() => setLoading(false))
     return () => controller.abort()
-  }, [])
+  }, [documentId, userId])
 
   useEffect(() => {
     if (!options || !agentId) return

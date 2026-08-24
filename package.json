@@ -7,7 +7,7 @@
     "dev": "node scripts/dev.mjs --watch",
     "dev:4177": "vite --port 4177 --strictPort",
     "dev:client": "vite",
-    "dev:server": "node --watch server/index.mjs",
+    "dev:server": "node --watch scripts/start-server.mjs",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "test:mcp": "node scripts/test-mcp.mjs",
@@ -16,7 +16,7 @@
     "usage:mcp": "node scripts/mcp-tool-usage.mjs",
     "comments:migration": "node scripts/comment-migration.mjs",
     "preview": "vite preview",
-    "start": "node server/index.mjs"
+    "start": "node scripts/start-server.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

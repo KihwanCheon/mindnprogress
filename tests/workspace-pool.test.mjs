@@ -31,15 +31,18 @@ test('작업공간 지침은 기존 대화에도 재배정 정보를 명확하�
     workspaceId: 'fork2',
     jobId: 'job-12',
     leaseId: 'lease-12',
-    projectRoot: 'C:\\Git\\Holdem_Fork2\\hdtf-client',
+    projectRoot: 'C:\\Dev\\Game_Worker02\\client',
+    sharedRoot: 'C:\\Dev\\Game_Workspaces',
     branch: 'mnp/job-12',
     baseCommit: 'abc123',
-    assetsPath: 'C:/Git/Holdem_Fork2/hdtf-client/Assets',
+    assetsPath: 'C:/Dev/Game_Worker02/client/Assets',
     unityInstanceHash: '35b9a6e8409bd02a',
   })
   assert.match(instruction, /workspaceId: `fork2`/)
-  assert.match(instruction, /projectRoot: `C:\\Git\\Holdem_Fork2\\hdtf-client`/)
-  assert.match(instruction, /다른 Holdem 작업공간으로 이동하거나/)
+  assert.match(instruction, /projectRoot: `C:\\Dev\\Game_Worker02\\client`/)
+  assert.match(instruction, /sharedRoot: `C:\\Dev\\Game_Workspaces`/)
+  assert.match(instruction, /다른 등록 작업공간으로 이동하거나/)
+  assert.match(instruction, /knowledge-inbox\/job-12\.md/)
   assert.match(instruction, /직접 커밋하지 마세요/)
   assert.match(instruction, /commitMessage/)
   assert.match(instruction, /mindnprogress_confirm_ai_workspace_no_changes/)

@@ -133,9 +133,7 @@ const aionUiSubscriptionUsageStaleAfterMs = Math.max(
 )
 const workspacePoolRegistryFile = path.resolve(
   String(process.env.MNP_WORKSPACE_POOL_REGISTRY ?? '').trim()
-    || (process.platform === 'win32'
-      ? 'C:\\Git\\Holdem_AIShared\\workspaces.json'
-      : path.join(projectDirectory, 'workspaces.json')),
+    || path.join(projectDirectory, 'workspaces.json'),
 )
 const imageAssetMaxBytes = Math.max(1_000_000, Number(process.env.MNP_IMAGE_MAX_BYTES) || 15_000_000)
 let activeAionUiBaseUrl = configuredAionUiBaseUrls[0] ?? fallbackAionUiBaseUrls[0]
@@ -2533,7 +2531,7 @@ function workspaceConflictInstruction(delegation, workspaceResult) {
 
 ${files}
 
-현재 진행 중인 cherry-pick의 충돌만 해결하세요. 요구사항과 기존 구현 의도를 함께 대조하고, 해결한 파일을 stage한 뒤 모든 cherry-pick이 끝날 때까지 \`git cherry-pick --continue\`를 수행하세요. 이 통합 과정에 필요한 보완 변경은 허용하지만 다른 Holdem 작업공간이나 main을 직접 수정하지 말고, 브랜치를 바꾸거나 lease를 해제하지 마세요. 관련 검증을 실행한 뒤 해결 내용과 검증 결과를 최종 응답으로 보고하세요. 해결할 수 없다면 임의 선택하지 말고 충돌한 의도와 필요한 판단을 구체적으로 보고하세요.`
+현재 진행 중인 cherry-pick의 충돌만 해결하세요. 요구사항과 기존 구현 의도를 함께 대조하고, 해결한 파일을 stage한 뒤 모든 cherry-pick이 끝날 때까지 \`git cherry-pick --continue\`를 수행하세요. 이 통합 과정에 필요한 보완 변경은 허용하지만 다른 등록 작업공간이나 main을 직접 수정하지 말고, 브랜치를 바꾸거나 lease를 해제하지 마세요. 관련 검증을 실행한 뒤 해결 내용과 검증 결과를 최종 응답으로 보고하세요. 해결할 수 없다면 임의 선택하지 말고 충돌한 의도와 필요한 판단을 구체적으로 보고하세요.`
 }
 
 function workspaceCheckpointInstruction(delegation, workspaceResult) {
@@ -6086,6 +6084,7 @@ const server = createServer(async (request, response) => {
           connected: true,
           aionUiUrl: activeAionUiBaseUrl,
           protocol: 'aionui://conversation/new',
+          defaultWorkspace: projectDirectory,
           agents: normalizedAgents,
           skills: normalizedSkills,
           mcpServers: normalizedMcpServers,

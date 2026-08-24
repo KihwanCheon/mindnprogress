@@ -2,7 +2,7 @@
 setlocal EnableExtensions
 
 if "%~1"=="" (
-  echo Usage: %~nx0 "D:\MindNProgress_Backup\YYYY-MM-DD\MindNProgress_YYYY-MM-DD_HHmmss.zip"
+  echo Usage: %~nx0 "%~dp0..\MindNProgress_Backup\YYYY-MM-DD\MindNProgress_YYYY-MM-DD_HHmmss.zip"
   exit /b 1
 )
 

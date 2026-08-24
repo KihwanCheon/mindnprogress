@@ -1,0 +1,180 @@
+diff --git a/packages/desktop/src/process/utils/mindNProgressMcpBootstrap.ts b/packages/desktop/src/process/utils/mindNProgressMcpBootstrap.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/desktop/src/process/utils/mindNProgressMcpBootstrap.ts
+@@ -0,0 +1,49 @@
++/**
++ * @license
++ * Copyright 2025 AionUi (aionui.com)
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++import { statSync } from 'node:fs';
++import path from 'node:path';
++import type { IMcpServer } from '@/common/config/storage';
++
++export const MINDNPROGRESS_MCP_NAME = 'MindNProgress';
++export const MINDNPROGRESS_MCP_ENTRY_ENV = 'MINDNPROGRESS_MCP_ENTRY';
++
++type MindNProgressMcpServer = Partial<IMcpServer> & Pick<IMcpServer, 'name' | 'transport'>;
++
++function isExistingFile(filePath: string): boolean {
++  try {
++    return statSync(filePath).isFile();
++  } catch {
++    return false;
++  }
++}
++
++export function buildMindNProgressMcpServer(
++  entryPath = process.env[MINDNPROGRESS_MCP_ENTRY_ENV]
++): MindNProgressMcpServer | null {
++  const normalizedEntryPath = entryPath?.trim();
++  if (!normalizedEntryPath || !path.isAbsolute(normalizedEntryPath) || !isExistingFile(normalizedEntryPath)) {
++    return null;
++  }
++
++  const serverConfig = {
++    command: 'node',
++    args: [normalizedEntryPath],
++  };
++
++  return {
++    name: MINDNPROGRESS_MCP_NAME,
++    description: 'Required local MCP server for MindNProgress conversations',
++    enabled: true,
++    builtin: false,
++    transport: {
++      type: 'stdio',
++      command: serverConfig.command,
++      args: serverConfig.args,
++    },
++    original_json: JSON.stringify({ mcpServers: { [MINDNPROGRESS_MCP_NAME]: serverConfig } }, null, 2),
++  };
++}
+diff --git a/tests/unit/mindNProgressMcpBootstrap.test.ts b/tests/unit/mindNProgressMcpBootstrap.test.ts
+new file mode 100644
+--- /dev/null
++++ b/tests/unit/mindNProgressMcpBootstrap.test.ts
+@@ -0,0 +1,49 @@
++/**
++ * @license
++ * Copyright 2025 AionUi (aionui.com)
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
++import { tmpdir } from 'node:os';
++import path from 'node:path';
++import { buildMindNProgressMcpServer } from '@/process/utils/mindNProgressMcpBootstrap';
++import { afterEach, describe, expect, it } from 'vitest';
++
++const temporaryDirectories: string[] = [];
++
++afterEach(() => {
++  for (const directory of temporaryDirectories.splice(0)) {
++    rmSync(directory, { recursive: true, force: true });
++  }
++});
++
++describe('buildMindNProgressMcpServer', () => {
++  it('ignores missing, relative, and nonexistent entry paths', () => {
++    expect(buildMindNProgressMcpServer('')).toBeNull();
++    expect(buildMindNProgressMcpServer('MindNProgress/mcp/server.mjs')).toBeNull();
++    expect(buildMindNProgressMcpServer(path.join(tmpdir(), 'missing-mindnprogress-mcp.mjs'))).toBeNull();
++  });
++
++  it('builds an enabled stdio server for an existing absolute entry path', () => {
++    const directory = mkdtempSync(path.join(tmpdir(), 'aionui-mnp-mcp-'));
++    temporaryDirectories.push(directory);
++    expect(buildMindNProgressMcpServer(directory)).toBeNull();
++    const entryPath = path.join(directory, 'server.mjs');
++    writeFileSync(entryPath, '');
++
++    const server = buildMindNProgressMcpServer(entryPath);
++
++    expect(server).toMatchObject({
++      name: 'MindNProgress',
++      enabled: true,
++      builtin: false,
++      transport: {
++        type: 'stdio',
++        command: 'node',
++        args: [entryPath],
++      },
++    });
++    expect(server?.original_json).toContain(entryPath.replaceAll('\\', '\\\\'));
++  });
++});
+diff --git a/packages/desktop/src/process/utils/runBackendMigrations.ts b/packages/desktop/src/process/utils/runBackendMigrations.ts
+--- a/packages/desktop/src/process/utils/runBackendMigrations.ts
++++ b/packages/desktop/src/process/utils/runBackendMigrations.ts
+@@ -20,3 +20,4 @@ import { migrateAssistantsToBackend } from './migrateAssistants';
+ import { migrateAssistantsToBackend } from './migrateAssistants';
+-
++import { buildMindNProgressMcpServer, MINDNPROGRESS_MCP_NAME } from './mindNProgressMcpBootstrap';
++
+ type ConfigFile = typeof ProcessConfigType;
+@@ -311,5 +312,14 @@ async function ensureBootstrapMcpServersInDb(configFile: ConfigFile): Promise<vo
+   const defaultServers = buildDefaultMcpServers();
+-  const missing = [...defaultServers, imageServer].filter((server) => !existingByName.has(server.name));
++  const mindNProgressServer = buildMindNProgressMcpServer();
++  const existingMindNProgressServer = existing.find(
++    (server) => server.name.trim().toLowerCase() === MINDNPROGRESS_MCP_NAME.toLowerCase()
++  );
++  const bootstrapServers = [...defaultServers, imageServer];
++  if (mindNProgressServer && !existingMindNProgressServer) {
++    bootstrapServers.push(mindNProgressServer);
++  }
++  const missing = bootstrapServers.filter((server) => !existingByName.has(server.name));
+   let imageServerUpdated = false;
++  let mindNProgressServerUpdated = false;
+-
++
+   if (missing.length > 0) {
+@@ -317,3 +327,33 @@ async function ensureBootstrapMcpServersInDb(configFile: ConfigFile): Promise<vo
+   }
+-
++
++  if (mindNProgressServer && existingMindNProgressServer) {
++    const transportChanged = !isSameStdioTransport(
++      existingMindNProgressServer.transport,
++      mindNProgressServer.transport
++    );
++    const metadataChanged =
++      existingMindNProgressServer.name !== mindNProgressServer.name ||
++      existingMindNProgressServer.description !== mindNProgressServer.description ||
++      existingMindNProgressServer.original_json !== mindNProgressServer.original_json ||
++      existingMindNProgressServer.builtin !== false;
++
++    if (transportChanged || metadataChanged) {
++      await mcpService.updateServer.invoke({
++        id: existingMindNProgressServer.id,
++        data: {
++          name: mindNProgressServer.name,
++          description: mindNProgressServer.description,
++          transport: mindNProgressServer.transport,
++          original_json: mindNProgressServer.original_json,
++          builtin: false,
++        },
++      });
++      mindNProgressServerUpdated = true;
++    }
++    if (existingMindNProgressServer.enabled === false) {
++      await mcpService.toggleServer.invoke({ id: existingMindNProgressServer.id });
++      mindNProgressServerUpdated = true;
++    }
++  }
++
+   const existingChromeDevtools = existingByName.get(BUILTIN_CHROME_DEVTOOLS_NAME);
+@@ -437,8 +477,9 @@ async function ensureBootstrapMcpServersInDb(configFile: ConfigFile): Promise<vo
+   console.info(
+-    '[Migration] MCP bootstrap completed, imported %d missing defaults, updated image server: %s, updated browser server: %s, image config source: %s, image enabled: %s',
++    '[Migration] MCP bootstrap completed, imported %d missing defaults, updated image server: %s, updated browser server: %s, updated MindNProgress server: %s, image config source: %s, image enabled: %s',
+     missing.length,
+     imageServerUpdated ? 'yes' : 'no',
+     browserServerUpdated ? 'yes' : 'no',
++    mindNProgressServerUpdated ? 'yes' : 'no',
+     imageConfigSource,
+     imageConfig?.switch === true ? 'yes' : 'no'
+   );

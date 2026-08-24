@@ -94,7 +94,7 @@ AionUi ── Claude / Codex / Copilot 등
 
 ## 외부 전체 백업과 복원
 
-Windows에서는 저장소 루트의 `MindNProgress_Backup.bat`을 실행하면 Git으로 복구할 수 없는 운영 데이터를 `D:\MindNProgress_Backup\YYYY-MM-DD` 아래의 시간별 ZIP 파일로 백업합니다.
+Windows에서는 저장소 루트의 `MindNProgress_Backup.bat`을 실행하면 Git으로 복구할 수 없는 운영 데이터를 기본적으로 저장소와 같은 상위 폴더의 `MindNProgress_Backup\YYYY-MM-DD` 아래에 시간별 ZIP 파일로 백업합니다.
 
 ```bat
 MindNProgress_Backup.bat
@@ -105,7 +105,7 @@ MindNProgress_Backup.bat
 각 ZIP에는 파일별 크기와 SHA-256을 기록한 `manifest.json`과 수동 복원 안내 `RESTORE.txt`가 포함됩니다. 배치는 ZIP을 다시 풀어 manifest와 대조한 뒤에만 완료 처리합니다. 복원은 동일한 소스 버전을 준비한 후 다음처럼 실행합니다.
 
 ```bat
-MindNProgress_Restore.bat "D:\MindNProgress_Backup\2026-07-30\MindNProgress_2026-07-30_120000.zip"
+MindNProgress_Restore.bat "..\MindNProgress_Backup\2026-07-30\MindNProgress_2026-07-30_120000.zip"
 ```
 
 복원 배치는 ZIP을 검증하고 현재 `server/data`를 `.mindnprogress\pre-restore-data-*`에 보관한 뒤 백업 데이터로 교체합니다. 데이터 마이그레이션은 수행하지 않으므로 다른 버전으로의 복원은 보장하지 않습니다. 백업에는 계정과 세션, MCP 인증 토큰이 포함되므로 외부에 공유하지 마세요.
@@ -119,6 +119,16 @@ MindNProgress_Restore.bat "D:\MindNProgress_Backup\2026-07-30\MindNProgress_2026
 - AI 대화 기능을 사용할 경우 실행 중인 AionUi
 
 ## 설치 및 실행
+
+### Windows Git 개발 환경 일괄 설치
+
+MindNProgress, AionUi와 AionCore를 한 루트 아래 Git 저장소로 설치하고 의존성, 로컬 AionCore release 빌드와 Dev 실행 배치까지 준비하려면 [`installer/windows`](installer/windows/README.md)의 `Install-MnPSuite.bat`을 실행합니다. 대화형 설치는 최종 설치 폴더 선택부터 누락 도구 확인, 저장소 설치, 검증과 완료 안내까지 순서대로 진행합니다.
+
+클라이언트 개발자가 Unity MCP를 연결하고 AionUi·AionCore 소스 fork와 Unity worker 작업공간을 구분해 운영하는 방법은 [`클라이언트 사용자용 Unity MCP 및 Fork 운영 가이드`](installer/windows/UNITY_MCP_AND_FORK_GUIDE.md)를 참고합니다.
+
+PC마다 이렇게 설치한 MindNProgress의 `server/data`는 서로 독립되며 자동 동기화되지 않습니다. 공동 문서가 필요하면 별도의 팀 호스트 구성을 사용해야 합니다.
+
+### MindNProgress만 직접 실행
 
 ```bash
 git clone https://github.com/mabobsa/MindNProgress.git
@@ -177,6 +187,7 @@ npm run dev
 | `MNP_AIONUI_URL` | 자동 탐색 | AionUi 백엔드 주소 강제 지정 |
 | `MNP_AIONUI_WEB_URL` | `MNP_PUBLIC_URL` 호스트의 7777 포트 | 원격 브라우저에서 AI 대화를 열 AionUi WebUI 주소 |
 | `MNP_AIONUI_DISCOVERY_FILE` | OS 임시 폴더의 `aionui-backend.json` | AionUi 가변 포트 탐색 파일 |
+| `MNP_WORKSPACE_POOL_REGISTRY` | 저장소의 `workspaces.json` | Unity integration·worker 작업공간 풀 구성 파일 |
 | `MNP_AI_DELEGATION_POLL_INTERVAL_MS` | `3000` | 하위 AI 턴과 상위 대화 재개 상태 확인 간격. 최소 100ms |
 | `MNP_AI_ATTRIBUTION_DURATION_MS` | 8시간 | AI 종류·모델 작성자 귀속 정보의 유지 시간(ms) |
 | `MNP_DOORAY_API_KEY` | Claude 설정에서 조회 | Dooray API 키 환경변수 우선 지정 |
@@ -188,6 +199,8 @@ npm run dev
 | `MNP_MCP_USAGE_DIR` | 데이터 폴더의 `_mcp-tool-usage` | MCP 도구 호출 계측 파일 저장 경로 |
 | `MNP_MCP_USAGE_DISABLED` | 없음 | `1`이면 MCP 도구 호출 계측을 끔 |
 | `MNP_MCP_USAGE_FLUSH_MS` | `2000` | 계측 파일 쓰기 최소 간격(ms) |
+
+저장소에서 `npm run dev`, `npm run dev:server` 또는 `npm start`로 실행할 때는 Git에서 제외되는 루트 `.env.local`에 PC별 값을 둘 수 있습니다. 테스트가 서버 엔트리를 직접 실행할 때는 이 파일을 읽지 않으므로 개인 작업공간과 격리됩니다. 이미 OS나 실행 배치에서 지정한 환경변수가 있으면 그 값이 우선합니다. 설치본의 Dev 배치는 작업공간 구성 경로를 직접 전달하므로 `.env.local`이 없어도 됩니다.
 
 카드의 `taskUrl`은 Dooray를 포함한 범용 업무 링크로 유지합니다. 일반 카드에 Dooray 업무 URL을 설정하면 카드 형태와 업무 문맥은 그대로 유지하고 제목 왼쪽에 Dooray 아이콘, 오른쪽에 원본 열기 아이콘을 표시합니다. 다른 웹 URL이면 일반 카드 표현을 그대로 유지합니다. 마인드맵 캔버스에 Dooray 업무 URL을 직접 붙여넣으면 MNP 서버가 업무 제목과 상태를 조회해 크기 조절 가능한 전용 Dooray 지식 카드로 추가합니다. 전용 카드의 Dooray 제목과 원본 정보는 저장된 값을 즉시 표시하며 제목은 편집할 수 없습니다. 원본 URL은 변경할 수 있고, 새 URL 확인에 성공하면 URL·제목·상태를 한 번에 교체합니다. 편집자가 문서를 열거나 카드 상세 보기를 열면 원본을 비동기로 다시 조회하고, 실제 변경이 있을 때만 저장 값을 갱신합니다. 조회에 실패하면 기존 저장 값을 유지합니다. 사용자는 AI가 지식으로 활용할 보충 설명을 입력하고 주요·보조 지식선으로 일반 카드에 연결합니다. 서버는 `MNP_DOORAY_API_KEY` 또는 `DOORAY_API_KEY`를 우선 사용하고, 값이 없으면 `MNP_DOORAY_CONFIG_FILE`의 `mcpServers.{MNP_DOORAY_MCP_SERVER_NAME}.env.DOORAY_API_KEY`를 읽습니다. API 키는 브라우저, 문서 데이터와 API 응답에 포함되지 않습니다. 사용자 홈의 `.claude.json`은 저장소 밖에 있으므로 Git 커밋이나 MindNProgress 백업에 포함되지 않습니다.
 
@@ -211,7 +224,7 @@ MindNProgress는 AionUi가 OS 임시 디렉터리에 게시하는 `aionui-backen
 
 다른 PC의 브라우저에서 `AI 대화 열기`를 누르면 AionUi WebUI의 `/#/conversation/{대화 ID}`를 매번 새 탭으로 엽니다. 닫힌 탭의 이름을 브라우저가 보존해 다음 실행이 무반응이 되는 상황을 피하기 위한 동작입니다. 기본 WebUI 주소는 `MNP_PUBLIC_URL`과 같은 호스트의 7777 포트이며, 주소나 포트가 다르면 `MNP_AIONUI_WEB_URL`을 지정합니다. `localhost` 또는 `127.0.0.1`로 접속한 브라우저는 기존 AionUi 데스크톱 딥링크를 사용하지만, `MNP_AIONUI_WEB_URL`을 명시하면 WebUI 열기가 우선됩니다.
 
-`AI 대화 시작`의 작업공간은 로그인 계정과 문서별 마지막 입력값을 유지합니다. 실제 대화를 시작한 작업공간은 로그인 계정의 서버 이력에 최대 10개까지 저장되어 PC와 4175 웹에서 같은 계정으로 접속하면 함께 표시되며, 각 항목의 `×` 버튼으로 양쪽 이력에서 제거할 수 있습니다. 기존 브라우저 이력은 처음 열 때 현재 로그인 계정의 서버 이력과 한 번 병합됩니다.
+`AI 대화 시작`의 작업공간은 새 PC·문서에서 현재 실행 중인 MindNProgress 저장소 경로를 동적으로 기본값으로 사용하며, 하드코딩된 PC 경로를 사용하지 않습니다. 이후에는 로그인 계정과 문서별 마지막 입력값을 유지합니다. 실제 대화를 시작한 작업공간은 로그인 계정의 서버 이력에 최대 10개까지 저장되어 PC와 4175 웹에서 같은 계정으로 접속하면 함께 표시되며, 각 항목의 `×` 버튼으로 양쪽 이력에서 제거할 수 있습니다. 기존 브라우저 이력은 처음 열 때 현재 로그인 계정의 서버 이력과 한 번 병합됩니다.
 
 상위 카드의 AI는 하위 카드에 연결된 대화 후보의 AI·모델·사고 강도·MCP·스킬·작업공간·최근 활동과 실행 상태를 비교하고, 필요한 후보의 전문만 확인해 기존 대화를 이어가거나 새 대화를 선택할 수 있습니다. 위임할 때는 일반적인 작업 제안이 아니라 실행할 지시와 완료 조건을 전달합니다. `MNP_WORKSPACE_POOL_REGISTRY`에 등록된 Unity 프로젝트는 MindNProgress가 `main`의 현재 HEAD를 기준으로 유휴 worker와 작업 브랜치를 lease하고, 기존 대화도 AionCore를 통해 새 CWD로 재바인딩하므로 독립 하위 작업을 병렬로 실행할 수 있습니다. 가용 worker가 없으면 위임은 `_ai-delegations.json`에 `waiting-workspace`로 보존되고, worker가 회수된 후 FIFO로 자동 시작됩니다. 등록된 pool 작업은 lease 없이 임시 폴더 대화로 우회하지 않습니다. 완료된 worker 변경은 AI가 제출한 실제 변경의 제목·배경·원인·수정 내용을 `[김용민]` 커밋 형식으로 고정한 뒤 worker의 최신 `main` 기반 통합 브랜치에서 먼저 적용하고, 충돌이 없을 때만 실제 `main`을 fast-forward합니다. 충돌이 발생하면 `main`을 건드리지 않고 해당 작업을 수행한 같은 AI 대화를 같은 worker에서 재개해 충돌 해결과 검증을 수행하며, 통합이 성공한 뒤에만 상위 AI를 재개합니다. 다른 완료 작업은 통합 잠금이 풀릴 때까지 대기하지만 구현 작업은 계속 병렬로 진행할 수 있습니다. 중단·불명확한 변경·반복해서 해결하지 못한 충돌은 자동 삭제하지 않고 격리하지만, 변경·체크포인트·통합 진행이 전혀 없는 시작 실패는 worker를 안전하게 자동 회수합니다. pool 미등록 프로젝트에만 기존 작업공간 방식을 사용합니다. 서버는 하위 대화의 해당 `turnId`가 완료되거나 실패할 때까지 문서 JSON 밖의 `_ai-delegations.json`에서 상태를 추적하고, 상위 대화가 유휴 상태가 되면 하위 AI의 마지막 응답과 카드 재확인 지침을 보내 상위 AI를 자동 재개합니다. 여러 하위 결과가 동시에 끝나면 같은 상위 대화에 한 번에 하나씩 전달해 턴 충돌을 막습니다. 새 대화를 만들 때만 대상 카드의 AI 대화 목록 연결로 문서 버전이 증가하며, 위임 상태와 작업공간 lease 자체는 문서 버전과 변경 이력을 변경하지 않습니다.
 
@@ -224,7 +237,9 @@ AionUi에 다음 로컬 MCP 서버를 등록하고 활성화합니다.
 인수: <MindNProgress 저장소 경로>\mcp\server.mjs
 ```
 
-예를 들어 저장소가 `C:\Git\MindNProgress`라면 인수는 `C:\Git\MindNProgress\mcp\server.mjs`입니다. 다른 위치에 복제했다면 실제 절대 경로로 바꿔야 합니다.
+`<MindNProgress 저장소 경로>`는 현재 PC에 복제한 저장소의 실제 절대 경로로 바꿉니다.
+
+Windows Git 일괄 설치본은 AionUi Dev 최초 실행 bootstrap에서 이 항목을 자동 등록하고 활성화하므로 수동 등록이 필요하지 않습니다. 다른 방식으로 직접 실행하는 환경에서는 위 값을 수동으로 등록합니다.
 
 MCP는 데이터 폴더의 `_integration-token`을 사용해 로컬 API와 통신합니다. 이 토큰은 자동 생성되며 Git에 포함되지 않습니다. 비밀번호 변경 MCP 도구는 제공하지 않습니다.
 
@@ -232,7 +247,7 @@ AI가 MindNProgress 밖에서 시작되었다면 먼저 `mindnprogress_read_me_f
 
 ## MindNProgress MCP 명령어
 
-현재 MCP 서버는 49개 도구를 제공합니다. 카드가 선택된 작업은 먼저 `mindnprogress_get_context`로 최신 버전과 제품 규칙을 확인하고, 변경 후에는 `mindnprogress_get_document`로 실제 저장 결과를 다시 확인하는 흐름을 권장합니다. 조회 도구는 문서 버전을 변경하지 않으며 카드·관계 편집과 AI 대화 ID 연결 같은 저장 작업만 버전을 증가시킵니다. 선택 카드 이외의 형제·하위·선행 카드를 함께 수정할 때는 `mindnprogress_get_ai_work_states`로 다른 AI가 작업 중인지 먼저 확인합니다. Holdem AI 작업공간의 최신 목록과 상태는 폴더명을 추측하지 않고 `mindnprogress_get_ai_workspace_pool`로 조회합니다.
+현재 MCP 서버는 49개 도구를 제공합니다. 카드가 선택된 작업은 먼저 `mindnprogress_get_context`로 최신 버전과 제품 규칙을 확인하고, 변경 후에는 `mindnprogress_get_document`로 실제 저장 결과를 다시 확인하는 흐름을 권장합니다. 조회 도구는 문서 버전을 변경하지 않으며 카드·관계 편집과 AI 대화 ID 연결 같은 저장 작업만 버전을 증가시킵니다. 선택 카드 이외의 형제·하위·선행 카드를 함께 수정할 때는 `mindnprogress_get_ai_work_states`로 다른 AI가 작업 중인지 먼저 확인합니다. 등록된 AI 작업공간의 최신 목록과 상태는 폴더명을 추측하지 않고 `mindnprogress_get_ai_workspace_pool`로 조회합니다.
 
 ### 시작과 조회
 

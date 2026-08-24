@@ -18,7 +18,9 @@ const conversationRebindOnlyLeaseStatuses = new Set([
   'awaiting-conflict-resolution',
 ])
 const protectedWorkspaceEntries = new Set([
-  '.ai-workspace.json', '.agents', '.claude', '.codex', '_AIShared', 'AGENTS.md', 'CLAUDE.local.md',
+  '.ai-workspace.json', '.agents', '.claude', '.codex',
+  '_AIShared', // 기존 작업공간의 공용 폴더를 drift 정리에서 삭제하지 않기 위한 호환 보호 항목
+  'AGENTS.md', 'CLAUDE.local.md',
 ])
 
 export class WorkspacePoolUnavailableError extends Error {
@@ -206,6 +208,7 @@ function normalizeRegistry(raw, registryFile) {
 function publicLease(lease) {
   return {
     poolId: lease.poolId,
+    sharedRoot: lease.sharedRoot ?? null,
     workspaceId: lease.workspaceId,
     jobId: lease.jobId,
     leaseId: lease.leaseId,
@@ -250,18 +253,19 @@ function integrationConflictCheckpointMessage(lease) {
 
 export function buildWorkspaceInstruction(lease) {
   if (!lease) return ''
+  const sharedRoot = String(lease.sharedRoot ?? '').trim()
   return `# 할당된 작업공간
 
 - workspaceId: \`${lease.workspaceId}\`
 - jobId: \`${lease.jobId}\`
 - leaseId: \`${lease.leaseId}\`
 - projectRoot: \`${lease.projectRoot}\`
-- branch: \`${lease.branch}\`
+${sharedRoot ? `- sharedRoot: \`${sharedRoot}\`\n` : ''}- branch: \`${lease.branch}\`
 - baseCommit: \`${lease.baseCommit}\`
 - Unity assetsPath: \`${lease.assetsPath}\`
 - Unity instance hash: \`${lease.unityInstanceHash}\`
 
-이 작업에서는 위 \`projectRoot\`만 수정하세요. 다른 Holdem 작업공간으로 이동하거나 브랜치를 바꾸거나 lease를 직접 해제하지 마세요. \`.ai-session.json\`의 값이 위 정보와 일치하는지 먼저 확인하고, 공통 지식은 \`_AIShared\`에서 읽기 전용으로 사용하세요.
+이 작업에서는 위 \`projectRoot\`만 수정하세요. 다른 등록 작업공간으로 이동하거나 브랜치를 바꾸거나 lease를 직접 해제하지 마세요. \`.ai-session.json\`의 값이 위 정보와 일치하는지 먼저 확인하세요.${sharedRoot ? ` 공통 규칙과 지식은 \`sharedRoot\`에서 읽기 전용으로 사용하고, 제안은 \`knowledge-inbox/${lease.jobId}.md\`에 기록하세요.` : ''}
 
 Unity Play Mode, 재임포트, 동적 폰트·Atlas 생성 등의 검증은 어떤 tracked 파일이든 자동으로 바꿀 수 있습니다. 구현 수정을 마친 뒤 각 검증을 시작하기 전에 \`mindnprogress_checkpoint_ai_workspace\`를 호출하여 의도한 변경 경로와 실제 변경을 설명하는 \`commitMessage\`를 함께 고정하세요. \`summary\`에는 \`[김용민]\` prefix를 넣지 말고, \`background\`·\`cause\`·\`changes\`에는 이번 체크포인트의 실제 변경을 작성하며 \`scope\`는 필요한 경우에만 작성하세요. 파일 변경이 전혀 없는 조사·검증 작업은 \`mindnprogress_confirm_ai_workspace_no_changes\`로 확인하세요. 검증 후 보완했다면 새 변경에 맞는 메시지로 다시 체크포인트를 만들고 검증하세요. Git으로 직접 커밋하지 마세요. 완료 시 MindNProgress는 명시적 체크포인트만 main에 통합하고 그 이후의 자동 변경은 복구 자료로 보존한 뒤 worker에서 제거합니다.`
 }
@@ -825,6 +829,7 @@ export class WorkspacePoolManager {
           const lease = {
             schemaVersion: 1,
             poolId: this.registry.poolId,
+            sharedRoot: this.registry.sharedRoot,
             workspaceId: workspace.id,
             jobId,
             leaseId,
@@ -849,6 +854,7 @@ export class WorkspacePoolManager {
             leaseId,
             conversationId: lease.conversationId,
             projectRoot: lease.projectRoot,
+            sharedRoot: lease.sharedRoot,
             branch,
             baseCommit,
             knowledgeMode: 'read-only',
