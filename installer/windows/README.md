@@ -1,6 +1,6 @@
 # MnP Suite Windows Git 설치 패키지
 
-`Install-MnPSuite.bat`을 실행하면 설치 위치 선택부터 필수 도구 확인, 세 Git 저장소 설치, AionUi의 MindNProgress MCP bootstrap 준비, 의존성 설치, AionCore 빌드, Dev 실행 배치 생성과 완료 안내까지 순서대로 진행합니다.
+`Install-MnPSuite.bat`을 실행하면 설치 위치 선택부터 필수 도구 확인, 세 Git 저장소 설치, AionUi의 MindNProgress MCP bootstrap 준비, 의존성 설치, AionCore 빌드, Dev 실행 배치 생성, Claude Code·Codex 사용자 전역 스킬 구성과 완료 안내까지 순서대로 진행합니다.
 
 ## 기본 설치 구성
 
@@ -21,6 +21,20 @@
 
 AionUi와 AionCore에는 개인 fork를 `origin`, 공식 저장소를 `upstream`으로 등록합니다. 세 저장소의 기본 브랜치는 `main`입니다.
 
+설치 루트 밖의 현재 Windows 사용자 프로필에는 다음 구성이 추가됩니다.
+
+```text
+<사용자 프로필>/
+  ├─ .codex/
+  │   ├─ AGENTS.md
+  │   └─ skills/<설치되는 스킬>/SKILL.md
+  └─ .claude/
+      ├─ CLAUDE.md
+      └─ skills/<설치되는 스킬>/SKILL.md
+```
+
+Codex는 `CODEX_HOME`, Claude Code는 `CLAUDE_CONFIG_DIR` 환경변수가 있으면 해당 경로를 대신 사용합니다. 두 전역 구성 폴더의 존재 여부는 서로 독립적으로 처리합니다. 둘 다 없거나 하나만 있어도 설치기는 두 대상 모두에 필요한 폴더를 생성하며, 기존 지침 파일이 있으면 원문을 보존한 채 MnP Suite 관리 블록만 병합합니다.
+
 `workspace-pool\workspaces.json`에는 integration과 worker 예시가 `enabled=false`로 생성됩니다. 따라서 실제 Unity 프로젝트 경로를 설정하기 전에는 어떤 작업공간도 점유하지 않습니다.
 
 현재 AionUi fork에 MindNProgress MCP bootstrap이 아직 포함되지 않은 경우 설치기는 `overlays\AionUi-MindNProgress-Mcp.patch`를 사전 검사한 뒤 AionUi 작업 트리에 적용합니다. fork가 같은 기능을 포함하면 overlay는 자동으로 생략됩니다. overlay가 적용된 AionUi 저장소에는 의도된 로컬 변경이 남으므로, 원격 업데이트 전에는 아래의 업데이트 주의사항을 확인하세요.
@@ -36,11 +50,12 @@ Install-MnPSuite.bat
 설치 과정에서 다음을 선택하거나 확인합니다.
 
 1. 최종 설치 루트
-2. 설치 계획
-3. 누락 필수 도구의 winget 설치 여부
-4. 기존 저장소가 있을 때 재사용 또는 fast-forward 업데이트
-5. 바탕화면 바로가기 생성
-6. 설치 직후 Dev 환경 실행
+2. 선택 스킬 `unity-work` 설치 여부
+3. 설치 계획
+4. 누락 필수 도구의 winget 설치 여부
+5. 기존 저장소가 있을 때 재사용 또는 fast-forward 업데이트
+6. 바탕화면 바로가기 생성
+7. 설치 직후 Dev 환경 실행
 
 ## 무인 설치 예시
 
@@ -49,11 +64,36 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\Install-MnPSui
   -InstallRoot 'C:\Dev\MnPSuite' `
   -NonInteractive `
   -InstallMissingPrerequisites `
+  -IncludeUnityWorkSkill `
   -CreateDesktopShortcuts `
   -NoLaunchPrompt
 ```
 
+`mnp-dooray`는 항상 Claude Code와 Codex 양쪽에 설치됩니다. `unity-work`는 위 스위치를 지정할 때 설치되며 대화형 설치에서는 선택 여부를 질문합니다. 패키지가 이전에 설치한 `unity-work`를 한쪽 전역 구성에서라도 발견하면 재설치 때도 양쪽 구성을 유지합니다.
+
 기존의 올바른 저장소를 그대로 사용할 때는 `-ReuseExistingRepositories`, 깨끗한 현재 `main`을 `origin/main`으로 fast-forward할 때는 `-UpdateExistingRepositories`를 지정합니다. 원격 주소가 다르거나 업데이트 대상에 커밋되지 않은 변경이 있으면 중단합니다.
+
+## Claude Code·Codex 전역 스킬
+
+설치 패키지에 포함되는 스킬은 다음과 같습니다.
+
+| 스킬 | 설치 | 역할 |
+| --- | --- | --- |
+| `mnp-dooray` | 필수 | MnP 장문 안전 편집·복구, 기록 역할, 상태·진행률, Dooray 권한과 AI 작성 표기 |
+| `unity-work` | 선택 | Unity 인스턴스 오수정 방지, `execute_code` 경로 가드, UI 레이아웃 책임 분리 |
+
+같은 스킬 원본을 Claude Code와 Codex의 각 사용자 전역 `skills` 폴더에 복사합니다. AI가 관련 작업 전에 스킬을 실제로 읽도록 Codex의 `AGENTS.md`와 Claude Code의 `CLAUDE.md`에도 짧은 불변 규칙과 스킬 호출 조건을 관리 블록으로 추가합니다. AionUi Assistant의 스킬 목록이나 시스템 프롬프트를 변경하는 방식은 아닙니다.
+
+전역 구성은 다음 원칙으로 갱신합니다.
+
+- 폴더나 지침 파일이 없으면 새로 만듭니다.
+- 기존 지침 파일의 MnP Suite 관리 블록 밖 내용은 유지합니다.
+- 기존 지침을 처음 변경할 때 `<지침 파일>.mnp-suite.preinstall.bak`을 만듭니다.
+- 설치된 스킬 폴더에는 `.mnp-suite-managed.json`을 기록해 후속 설치가 패키지 소유 항목만 갱신하게 합니다.
+- 같은 이름의 사용자 소유 스킬 폴더가 있으면 덮어쓰지 않고 실제 설치를 시작하기 전에 중단합니다.
+- `unity-work`를 선택하지 않은 경우 Unity 전역 규칙도 추가하지 않습니다.
+
+적용된 절대 경로와 선택 스킬은 설치 루트의 `installation-manifest.json` 안 `agentConfiguration`에서 확인합니다. 새 전역 지침과 스킬은 일반적으로 새 AI 세션부터 적용됩니다.
 
 ## 원격 저장소 또는 브랜치 변경
 
@@ -123,7 +163,7 @@ workspace-pool/
 .\Install-MnPSuite.ps1 -InstallRoot 'C:\Dev\MnPSuite' -NonInteractive -PlanOnly
 ```
 
-Dev 배치 템플릿에 하드코딩된 드라이브 경로가 없는지 자체 검증합니다.
+Dev 배치 템플릿의 하드코딩 경로와 Claude Code·Codex 전역 구성의 네 가지 사전 상태(둘 다 없음, Codex만 있음, Claude만 있음, 둘 다 있음)를 임시 사용자 프로필에서 자체 검증합니다. 이 검증은 실제 사용자 전역 설정을 변경하지 않습니다.
 
 ```powershell
 .\Install-MnPSuite.ps1 -SelfTest -NonInteractive
@@ -139,6 +179,8 @@ Dev 배치 템플릿에 하드코딩된 드라이브 경로가 없는지 자체 
 - 다른 브랜치로 자동 전환하거나 로컬 변경을 초기화하지 않습니다.
 - `server/data`의 운영 데이터를 Git 업데이트 대상으로 취급하지 않습니다.
 - 작업공간 템플릿과 공통 규칙은 기존 파일이 있으면 덮어쓰지 않습니다.
+- Claude Code·Codex 전역 지침은 관리 표식 사이만 갱신하며 기존 원문을 보존합니다.
+- 같은 이름의 사용자 소유 스킬은 덮어쓰지 않습니다.
 - 바탕화면 바로가기는 영문 파일명으로 만들며, Windows 정책 때문에 생성이 실패해도 설치 결과는 유지하고 경고만 표시합니다.
 
 ## 설치 후 MCP 확인

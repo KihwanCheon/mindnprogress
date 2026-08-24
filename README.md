@@ -122,7 +122,7 @@ MindNProgress_Restore.bat "..\MindNProgress_Backup\2026-07-30\MindNProgress_2026
 
 ### Windows Git 개발 환경 일괄 설치
 
-MindNProgress, AionUi와 AionCore를 한 루트 아래 Git 저장소로 설치하고 의존성, 로컬 AionCore release 빌드와 Dev 실행 배치까지 준비하려면 [`installer/windows`](installer/windows/README.md)의 `Install-MnPSuite.bat`을 실행합니다. 대화형 설치는 최종 설치 폴더 선택부터 누락 도구 확인, 저장소 설치, 검증과 완료 안내까지 순서대로 진행합니다.
+MindNProgress, AionUi와 AionCore를 한 루트 아래 Git 저장소로 설치하고 의존성, 로컬 AionCore release 빌드, Dev 실행 배치와 Claude Code·Codex 사용자 전역 안전 스킬까지 준비하려면 [`installer/windows`](installer/windows/README.md)의 `Install-MnPSuite.bat`을 실행합니다. `mnp-dooray`는 필수, `unity-work`는 선택으로 설치하며, 대화형 설치는 최종 설치 폴더 선택부터 누락 도구 확인, 저장소 설치, 검증과 완료 안내까지 순서대로 진행합니다.
 
 클라이언트 개발자가 Unity MCP를 연결하고 AionUi·AionCore 소스 fork와 Unity worker 작업공간을 구분해 운영하는 방법은 [`클라이언트 사용자용 Unity MCP 및 Fork 운영 가이드`](installer/windows/UNITY_MCP_AND_FORK_GUIDE.md)를 참고합니다.
 

@@ -13,6 +13,7 @@ param(
   [switch]$UpdateExistingRepositories,
   [switch]$SkipDependencyInstall,
   [switch]$SkipAionCoreBuild,
+  [switch]$IncludeUnityWorkSkill,
   [switch]$CreateDesktopShortcuts,
   [switch]$NoLaunchPrompt,
   [switch]$PlanOnly,
@@ -26,6 +27,9 @@ $ErrorActionPreference = 'Stop'
 
 $script:TranscriptStarted = $false
 $script:InstallLogPath = ''
+$script:AgentGuidanceStartMarker = '<!-- BEGIN MnP Suite managed agent guidance -->'
+$script:AgentGuidanceEndMarker = '<!-- END MnP Suite managed agent guidance -->'
+$script:ManagedSkillMarkerName = '.mnp-suite-managed.json'
 
 function Write-Step {
   param([int]$Number, [int]$Total, [string]$Message)
@@ -50,6 +54,229 @@ function Write-Utf8File {
     New-Item -ItemType Directory -Path $parent -Force | Out-Null
   }
   [IO.File]::WriteAllText($Path, $Content, [Text.UTF8Encoding]::new($false))
+}
+
+function Read-Utf8File {
+  param([string]$Path)
+  try {
+    return [IO.File]::ReadAllText($Path, [Text.UTF8Encoding]::new($false, $true))
+  } catch {
+    throw "UTF-8 텍스트 파일을 안전하게 읽을 수 없습니다: $Path. 원본 파일을 UTF-8로 저장한 뒤 다시 실행하세요. ($($_.Exception.Message))"
+  }
+}
+
+function Get-MnPSuitePackagedSkillPath {
+  param([string]$Name)
+  $path = Join-Path $PSScriptRoot "skills\$Name"
+  if (-not (Test-Path -LiteralPath $path -PathType Container)) {
+    throw "설치 패키지 스킬 폴더가 없습니다: $path"
+  }
+  if (-not (Test-Path -LiteralPath (Join-Path $path 'SKILL.md') -PathType Leaf)) {
+    throw "설치 패키지 스킬의 SKILL.md가 없습니다: $path"
+  }
+  return $path
+}
+
+function Get-MnPSuiteManagedSkillMarker {
+  param([string]$DestinationPath)
+  return Join-Path $DestinationPath $script:ManagedSkillMarkerName
+}
+
+function Test-MnPSuiteManagedSkill {
+  param([string]$SkillsRoot, [string]$Name)
+  $destination = Join-Path $SkillsRoot $Name
+  $markerPath = Get-MnPSuiteManagedSkillMarker $destination
+  if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) { return $false }
+  try {
+    $marker = Read-Utf8File $markerPath | ConvertFrom-Json
+    return [string]$marker.packageId -eq 'mnp-suite' -and [string]$marker.skillName -eq $Name
+  } catch {
+    return $false
+  }
+}
+
+function Assert-MnPSuiteManagedSkillTarget {
+  param([string]$SkillsRoot, [string]$Name)
+  $destination = Join-Path $SkillsRoot $Name
+  if (Test-Path -LiteralPath $destination -PathType Leaf) {
+    throw "스킬 설치 대상이 폴더가 아닙니다: $destination"
+  }
+  if ((Test-Path -LiteralPath $destination) -and -not (Test-MnPSuiteManagedSkill $SkillsRoot $Name)) {
+    throw "사용자 소유 스킬과 이름이 충돌합니다. 기존 폴더를 보존하기 위해 설치를 중단합니다: $destination"
+  }
+}
+
+function Assert-MnPSuiteManagedBlockTarget {
+  param([string]$Path)
+  if (Test-Path -LiteralPath $Path -PathType Container) {
+    throw "전역 지침 파일 대상이 폴더입니다: $Path"
+  }
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }
+  $existing = Read-Utf8File $Path
+  $startCount = [regex]::Matches($existing, [regex]::Escape($script:AgentGuidanceStartMarker)).Count
+  $endCount = [regex]::Matches($existing, [regex]::Escape($script:AgentGuidanceEndMarker)).Count
+  if ($startCount -ne $endCount -or $startCount -gt 1) {
+    throw "MnP Suite 관리 블록 표식이 손상되어 전역 지침을 안전하게 갱신할 수 없습니다: $Path"
+  }
+  if ($startCount -eq 1) {
+    $pattern = [regex]::Escape($script:AgentGuidanceStartMarker) + '[\s\S]*?' + [regex]::Escape($script:AgentGuidanceEndMarker)
+    if ([regex]::Matches($existing, $pattern).Count -ne 1) {
+      throw "MnP Suite 관리 블록 표식 순서가 손상되어 전역 지침을 안전하게 갱신할 수 없습니다: $Path"
+    }
+  }
+}
+
+function Install-MnPSuiteManagedSkill {
+  param(
+    [string]$SourcePath,
+    [string]$SkillsRoot,
+    [string]$Name
+  )
+  Assert-MnPSuiteManagedSkillTarget $SkillsRoot $Name
+  $destination = Join-Path $SkillsRoot $Name
+  New-Item -ItemType Directory -Path $destination -Force | Out-Null
+
+  $sourceRoot = [IO.Path]::GetFullPath($SourcePath).TrimEnd('\', '/')
+  $installedFiles = @()
+  foreach ($sourceFile in Get-ChildItem -LiteralPath $sourceRoot -File -Recurse) {
+    $relativePath = $sourceFile.FullName.Substring($sourceRoot.Length).TrimStart([char[]]'\/')
+    $destinationFile = Join-Path $destination $relativePath
+    $destinationParent = Split-Path -Parent $destinationFile
+    if (-not (Test-Path -LiteralPath $destinationParent)) {
+      New-Item -ItemType Directory -Path $destinationParent -Force | Out-Null
+    }
+    Copy-Item -LiteralPath $sourceFile.FullName -Destination $destinationFile -Force
+    $installedFiles += [ordered]@{
+      path = $relativePath.Replace('/', '\')
+      sha256 = (Get-FileHash -LiteralPath $destinationFile -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+  }
+
+  $marker = [ordered]@{
+    schemaVersion = 1
+    packageId = 'mnp-suite'
+    skillName = $Name
+    installedAt = (Get-Date).ToString('o')
+    files = $installedFiles
+  }
+  Write-Utf8File (Get-MnPSuiteManagedSkillMarker $destination) ($marker | ConvertTo-Json -Depth 5)
+  return [pscustomobject]@{
+    Name = $Name
+    Path = $destination
+    Files = $installedFiles
+  }
+}
+
+function Set-MnPSuiteManagedBlock {
+  param([string]$Path, [string]$Content)
+  Assert-MnPSuiteManagedBlockTarget $Path
+  $existing = if (Test-Path -LiteralPath $Path -PathType Leaf) { Read-Utf8File $Path } else { '' }
+  $newLine = if ($existing -match "`r`n") { "`r`n" } else { "`n" }
+  $block = $script:AgentGuidanceStartMarker + $newLine + $Content.Trim() + $newLine + $script:AgentGuidanceEndMarker
+  $startCount = [regex]::Matches($existing, [regex]::Escape($script:AgentGuidanceStartMarker)).Count
+
+  if ($startCount -eq 1) {
+    $pattern = [regex]::Escape($script:AgentGuidanceStartMarker) + '[\s\S]*?' + [regex]::Escape($script:AgentGuidanceEndMarker)
+    $updated = [regex]::Replace($existing, $pattern, [Text.RegularExpressions.MatchEvaluator]{ param($match) $block }, 1)
+  } elseif ([string]::IsNullOrWhiteSpace($existing)) {
+    $updated = $block + $newLine
+  } else {
+    $updated = $existing.TrimEnd([char[]]"`r`n") + $newLine + $newLine + $block + $newLine
+  }
+
+  $backupPath = ''
+  if ($updated -ne $existing) {
+    if (-not [string]::IsNullOrWhiteSpace($existing)) {
+      $backupPath = $Path + '.mnp-suite.preinstall.bak'
+      if (-not (Test-Path -LiteralPath $backupPath)) {
+        Copy-Item -LiteralPath $Path -Destination $backupPath
+      }
+    }
+    Write-Utf8File $Path $updated
+  }
+  return [pscustomobject]@{ Path = $Path; BackupPath = $backupPath; Changed = $updated -ne $existing }
+}
+
+function Get-MnPSuiteAgentGuidance {
+  param([bool]$IncludeUnityWork)
+  $sections = @(@'
+## MindNProgress·Dooray 작업
+
+- MindNProgress MCP 도구를 호출하거나 Dooray 업무·댓글을 다루기 전에 `mnp-dooray` 스킬을 읽고 따른다.
+- 사용자가 작성한 요구사항과 아직 유효한 기존 내용을 임의로 삭제하거나 의미가 달라지도록 바꾸지 않는다.
+- 한국어 자연어는 실제 문자로 작성하고, 긴 원문은 파일로 확보해 프로그램으로 수정한 뒤 저장 문자열을 비교한다.
+- Dooray 업무 생성·수정은 사용자가 승인했거나 현재 요청에서 명시한 경우에만 수행한다.
+'@.Trim())
+
+  if ($IncludeUnityWork) {
+    $sections += @'
+## Unity 작업
+
+- Unity MCP로 프로젝트를 변경하거나 Unity UI 배치 코드를 작성하기 전에 `unity-work` 스킬을 읽고 따른다.
+- 변경 호출마다 대상 `unity_instance`를 명시하고, `execute_code` 첫 줄에서 `Application.dataPath`를 검증하며 `replay`를 사용하지 않는다.
+- `RectTransform`, `LayoutGroup`, `ScrollRect`의 시각적 배치를 런타임 코드로 덮어쓰지 않는다.
+'@.Trim()
+  }
+
+  return $sections -join "`n`n"
+}
+
+function Assert-MnPSuiteAgentConfigurationTargets {
+  param(
+    [string]$CodexHome,
+    [string]$ClaudeHome,
+    [bool]$IncludeUnityWork
+  )
+  $skillNames = @('mnp-dooray')
+  if ($IncludeUnityWork) { $skillNames += 'unity-work' }
+  $platforms = @(
+    [pscustomobject]@{ Name = 'Codex'; SkillsRoot = (Join-Path $CodexHome 'skills'); Instructions = (Join-Path $CodexHome 'AGENTS.md') },
+    [pscustomobject]@{ Name = 'Claude Code'; SkillsRoot = (Join-Path $ClaudeHome 'skills'); Instructions = (Join-Path $ClaudeHome 'CLAUDE.md') }
+  )
+  foreach ($skillName in $skillNames) {
+    Get-MnPSuitePackagedSkillPath $skillName | Out-Null
+    foreach ($platform in $platforms) {
+      Assert-MnPSuiteManagedSkillTarget $platform.SkillsRoot $skillName
+    }
+  }
+  foreach ($platform in $platforms) {
+    Assert-MnPSuiteManagedBlockTarget $platform.Instructions
+  }
+}
+
+function Install-MnPSuiteAgentConfiguration {
+  param(
+    [string]$CodexHome,
+    [string]$ClaudeHome,
+    [bool]$IncludeUnityWork
+  )
+  Assert-MnPSuiteAgentConfigurationTargets $CodexHome $ClaudeHome $IncludeUnityWork
+  $skillNames = @('mnp-dooray')
+  if ($IncludeUnityWork) { $skillNames += 'unity-work' }
+  $platforms = @(
+    [pscustomobject]@{ Name = 'Codex'; SkillsRoot = (Join-Path $CodexHome 'skills'); Instructions = (Join-Path $CodexHome 'AGENTS.md') },
+    [pscustomobject]@{ Name = 'Claude Code'; SkillsRoot = (Join-Path $ClaudeHome 'skills'); Instructions = (Join-Path $ClaudeHome 'CLAUDE.md') }
+  )
+  $guidance = Get-MnPSuiteAgentGuidance $IncludeUnityWork
+  $platformResults = @()
+  foreach ($platform in $platforms) {
+    $installedSkills = @()
+    foreach ($skillName in $skillNames) {
+      $installedSkills += Install-MnPSuiteManagedSkill (Get-MnPSuitePackagedSkillPath $skillName) $platform.SkillsRoot $skillName
+    }
+    $instructionResult = Set-MnPSuiteManagedBlock $platform.Instructions $guidance
+    $platformResults += [pscustomobject]@{
+      Name = $platform.Name
+      SkillsRoot = $platform.SkillsRoot
+      Instructions = $instructionResult.Path
+      InstructionsBackup = $instructionResult.BackupPath
+      Skills = $installedSkills
+    }
+  }
+  return [pscustomobject]@{
+    Skills = $skillNames
+    Platforms = $platformResults
+  }
 }
 
 function Show-InstallerMessage {
@@ -81,6 +308,33 @@ function Read-YesNo {
   $answer = (Read-Host "$Question $hint").Trim()
   if (-not $answer) { return $Default }
   return $answer -match '^(?i:y|yes|예|네)$'
+}
+
+function Get-MnPSuiteAgentHomes {
+  $userProfileRoot = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+  if ([string]::IsNullOrWhiteSpace($userProfileRoot)) {
+    $userProfileRoot = $env:USERPROFILE
+  }
+  if ([string]::IsNullOrWhiteSpace($userProfileRoot)) {
+    throw '현재 사용자의 프로필 경로를 확인할 수 없습니다.'
+  }
+
+  $codexHome = if ([string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
+    Join-Path $userProfileRoot '.codex'
+  } else {
+    $env:CODEX_HOME
+  }
+  $claudeHome = if ([string]::IsNullOrWhiteSpace($env:CLAUDE_CONFIG_DIR)) {
+    Join-Path $userProfileRoot '.claude'
+  } else {
+    $env:CLAUDE_CONFIG_DIR
+  }
+
+  return [pscustomobject]@{
+    UserProfile = [IO.Path]::GetFullPath($userProfileRoot)
+    CodexHome = [IO.Path]::GetFullPath($codexHome)
+    ClaudeHome = [IO.Path]::GetFullPath($claudeHome)
+  }
 }
 
 function Resolve-InstallRoot {
@@ -807,6 +1061,17 @@ AionUi Dev 런처는 설치된 MCP 엔트리 경로를 전달합니다. AionUi�
 
 MnP의 `AI 대화 시작` 창을 다시 열면 `MindNProgress · 필수`로 표시됩니다. MCP 설정과 Assistant 기본값 변경은 새 대화부터 적용될 수 있으며 현재 열려 있는 대화에 소급 적용되지 않습니다.
 
+## Claude Code와 Codex 전역 스킬
+
+설치기는 현재 Windows 사용자에게 다음 구성을 적용합니다.
+
+- 필수: `mnp-dooray`
+- 선택: 설치 중 선택한 `unity-work`
+- Codex: `.codex\skills`와 `.codex\AGENTS.md`
+- Claude Code: `.claude\skills`와 `.claude\CLAUDE.md`
+
+Claude Code 또는 Codex의 전역 구성 폴더가 아직 없어도 필요한 폴더와 파일을 생성합니다. 기존 전역 지침은 유지하고 MnP Suite 표식 사이의 관리 블록만 추가·갱신합니다. 최초 변경 전 원문이 있으면 같은 위치에 `.mnp-suite.preinstall.bak` 백업을 한 번 만듭니다. 같은 이름의 사용자 소유 스킬이 있으면 덮어쓰지 않고 설치를 중단합니다. 실제 적용 경로와 선택 스킬은 `installation-manifest.json`에서 확인할 수 있습니다.
+
 ## Unity MCP와 Fork
 
 Unity 프로젝트 연결, 여러 Unity Editor의 안전한 구분, AionUi·AionCore 소스 fork와 Unity worker 작업공간의 차이는 `UNITY_MCP_AND_FORK_GUIDE.md`를 확인하세요.
@@ -928,8 +1193,107 @@ function Invoke-SelfTest {
     if ($overlayText -notmatch 'buildMindNProgressMcpServer' -or $overlayText -notmatch 'MINDNPROGRESS_MCP_ENTRY') {
       throw 'AionUi MindNProgress MCP bootstrap overlay 누락 또는 손상'
     }
-    $installedReadme = Get-Content -LiteralPath (Join-Path $temporaryRoot 'README_FIRST.md') -Raw
+    $installedReadme = Read-Utf8File (Join-Path $temporaryRoot 'README_FIRST.md')
     if ($installedReadme -notmatch 'UNITY_MCP_AND_FORK_GUIDE\.md') { throw '설치 안내의 추가 가이드 참조 누락' }
+    if ($installedReadme -notmatch 'mnp-dooray') { throw '설치 안내의 사용자 전역 스킬 설명 누락' }
+
+    $agentCases = @(
+      [pscustomobject]@{ Name = 'neither-exists'; CodexExists = $false; ClaudeExists = $false },
+      [pscustomobject]@{ Name = 'codex-only'; CodexExists = $true; ClaudeExists = $false },
+      [pscustomobject]@{ Name = 'claude-only'; CodexExists = $false; ClaudeExists = $true },
+      [pscustomobject]@{ Name = 'both-exist'; CodexExists = $true; ClaudeExists = $true }
+    )
+    foreach ($agentCase in $agentCases) {
+      $caseRoot = Join-Path $temporaryRoot ("agent-case-" + $agentCase.Name)
+      $testCodexHome = Join-Path $caseRoot '.codex'
+      $testClaudeHome = Join-Path $caseRoot '.claude'
+      $codexOriginal = "CODEX_EXISTING_GUIDANCE 한글 보존: $($agentCase.Name)"
+      $claudeOriginal = "CLAUDE_EXISTING_GUIDANCE 한글 보존: $($agentCase.Name)"
+      if ($agentCase.CodexExists) {
+        Write-Utf8File (Join-Path $testCodexHome 'AGENTS.md') $codexOriginal
+      }
+      if ($agentCase.ClaudeExists) {
+        Write-Utf8File (Join-Path $testClaudeHome 'CLAUDE.md') $claudeOriginal
+      }
+
+      $agentResult = Install-MnPSuiteAgentConfiguration $testCodexHome $testClaudeHome $true
+      foreach ($platform in $agentResult.Platforms) {
+        if (-not (Test-Path -LiteralPath $platform.Instructions -PathType Leaf)) {
+          throw "전역 지침 생성 실패 ($($agentCase.Name)): $($platform.Instructions)"
+        }
+        $instructionText = Read-Utf8File $platform.Instructions
+        if ([regex]::Matches($instructionText, [regex]::Escape($script:AgentGuidanceStartMarker)).Count -ne 1) {
+          throw "전역 지침 관리 블록 개수 오류 ($($agentCase.Name)): $($platform.Instructions)"
+        }
+        foreach ($skillName in @('mnp-dooray', 'unity-work')) {
+          if (-not (Test-MnPSuiteManagedSkill $platform.SkillsRoot $skillName)) {
+            throw "전역 스킬 설치 검증 실패 ($($agentCase.Name)): $($platform.Name) $skillName"
+          }
+        }
+      }
+      if ($agentCase.CodexExists) {
+        if ((Read-Utf8File (Join-Path $testCodexHome 'AGENTS.md')) -notmatch [regex]::Escape($codexOriginal)) {
+          throw "Codex 기존 지침 보존 실패: $($agentCase.Name)"
+        }
+        if ((Read-Utf8File (Join-Path $testCodexHome 'AGENTS.md.mnp-suite.preinstall.bak')) -ne $codexOriginal) {
+          throw "Codex 기존 지침 백업 검증 실패: $($agentCase.Name)"
+        }
+      }
+      if ($agentCase.ClaudeExists) {
+        if ((Read-Utf8File (Join-Path $testClaudeHome 'CLAUDE.md')) -notmatch [regex]::Escape($claudeOriginal)) {
+          throw "Claude 기존 지침 보존 실패: $($agentCase.Name)"
+        }
+        if ((Read-Utf8File (Join-Path $testClaudeHome 'CLAUDE.md.mnp-suite.preinstall.bak')) -ne $claudeOriginal) {
+          throw "Claude 기존 지침 백업 검증 실패: $($agentCase.Name)"
+        }
+      }
+
+      Install-MnPSuiteAgentConfiguration $testCodexHome $testClaudeHome $true | Out-Null
+      foreach ($instructionsPath in @((Join-Path $testCodexHome 'AGENTS.md'), (Join-Path $testClaudeHome 'CLAUDE.md'))) {
+        $instructionText = Read-Utf8File $instructionsPath
+        if ([regex]::Matches($instructionText, [regex]::Escape($script:AgentGuidanceStartMarker)).Count -ne 1) {
+          throw "전역 지침 재설치 멱등성 검증 실패 ($($agentCase.Name)): $instructionsPath"
+        }
+      }
+    }
+
+    $requiredOnlyRoot = Join-Path $temporaryRoot 'agent-case-required-only'
+    $requiredOnlyCodex = Join-Path $requiredOnlyRoot '.codex'
+    $requiredOnlyClaude = Join-Path $requiredOnlyRoot '.claude'
+    $requiredOnlyResult = Install-MnPSuiteAgentConfiguration $requiredOnlyCodex $requiredOnlyClaude $false
+    foreach ($platform in $requiredOnlyResult.Platforms) {
+      if (-not (Test-MnPSuiteManagedSkill $platform.SkillsRoot 'mnp-dooray')) { throw '필수 mnp-dooray 설치 실패' }
+      if (Test-Path -LiteralPath (Join-Path $platform.SkillsRoot 'unity-work')) { throw '선택하지 않은 unity-work가 설치됨' }
+      $instructionText = Read-Utf8File $platform.Instructions
+      if ($instructionText -match '## Unity 작업') { throw '선택하지 않은 unity-work 전역 지침이 추가됨' }
+      if ($instructionText -notmatch '## MindNProgress·Dooray 작업') { throw '필수 mnp-dooray 전역 지침이 누락됨' }
+    }
+
+    $conflictRoot = Join-Path $temporaryRoot 'agent-case-conflict'
+    $conflictCodex = Join-Path $conflictRoot '.codex'
+    $conflictSkill = Join-Path $conflictCodex 'skills\mnp-dooray'
+    Write-Utf8File (Join-Path $conflictSkill 'SKILL.md') 'USER_OWNED_SKILL'
+    $conflictDetected = $false
+    try {
+      Assert-MnPSuiteAgentConfigurationTargets $conflictCodex (Join-Path $conflictRoot '.claude') $false
+    } catch {
+      $conflictDetected = $true
+    }
+    if (-not $conflictDetected) { throw '사용자 소유 스킬 충돌을 감지하지 못함' }
+    if ((Read-Utf8File (Join-Path $conflictSkill 'SKILL.md')) -ne 'USER_OWNED_SKILL') {
+      throw '충돌한 사용자 소유 스킬이 변경됨'
+    }
+
+    $brokenGuidancePath = Join-Path $temporaryRoot 'agent-case-broken-markers\AGENTS.md'
+    Write-Utf8File $brokenGuidancePath ($script:AgentGuidanceEndMarker + "`n" + $script:AgentGuidanceStartMarker)
+    $brokenMarkersDetected = $false
+    try {
+      Assert-MnPSuiteManagedBlockTarget $brokenGuidancePath
+    } catch {
+      $brokenMarkersDetected = $true
+    }
+    if (-not $brokenMarkersDetected) { throw '손상된 전역 지침 관리 블록을 감지하지 못함' }
+
     $testDesktop = Join-Path $temporaryRoot 'Desktop'
     New-Item -ItemType Directory -Path $testDesktop -Force | Out-Null
     $shortcutPath = New-DesktopShortcut 'MnP-Suite-Dev-Start' (Join-Path $dev 'Start-All-Dev.bat') $temporaryRoot $testDesktop
@@ -958,6 +1322,17 @@ try {
   $resolvedRoot = Resolve-InstallRoot
   Assert-SafeInstallRoot $resolvedRoot
 
+  $agentHomes = Get-MnPSuiteAgentHomes
+  $codexSkillsRoot = Join-Path $agentHomes.CodexHome 'skills'
+  $claudeSkillsRoot = Join-Path $agentHomes.ClaudeHome 'skills'
+  $installUnityWork = [bool]$IncludeUnityWorkSkill -or
+    (Test-MnPSuiteManagedSkill $codexSkillsRoot 'unity-work') -or
+    (Test-MnPSuiteManagedSkill $claudeSkillsRoot 'unity-work')
+  if (-not $installUnityWork -and -not $NonInteractive) {
+    $installUnityWork = Read-YesNo 'Unity MCP를 사용하는 사용자를 위한 unity-work 스킬을 설치할까요?' $false
+  }
+  Assert-MnPSuiteAgentConfigurationTargets $agentHomes.CodexHome $agentHomes.ClaudeHome $installUnityWork
+
   Write-Host ''
   Write-Host '설치 계획' -ForegroundColor Cyan
   Write-Info "설치 루트    : $resolvedRoot"
@@ -966,8 +1341,12 @@ try {
   Write-Info "AionCore     : $AionCoreRepository ($AionCoreBranch)"
   Write-Info 'Dev 실행 파일: <설치 루트>\dev'
   Write-Info '작업공간 구성: <설치 루트>\workspace-pool\workspaces.json (초기 비활성)'
+  Write-Info '필수 전역 스킬: mnp-dooray (Claude Code + Codex)'
+  Write-Info "Unity 전역 스킬: $(if ($installUnityWork) { 'unity-work 설치' } else { '설치 안 함' })"
+  Write-Info "Codex 전역 구성: $($agentHomes.CodexHome)"
+  Write-Info "Claude 전역 구성: $($agentHomes.ClaudeHome)"
 
-  Write-Step 1 7 '필수 도구 확인'
+  Write-Step 1 8 '필수 도구 확인'
   $prerequisites = @(Get-PrerequisiteState)
   Show-PrerequisiteState $prerequisites
   $missing = @($prerequisites | Where-Object { -not $_.Ready })
@@ -1009,7 +1388,7 @@ try {
     }
   }
 
-  Write-Step 2 7 'Git 저장소 준비'
+  Write-Step 2 8 'Git 저장소 준비'
   $mindNProgressPath = Join-Path $resolvedRoot 'MindNProgress'
   $aionUiPath = Join-Path $resolvedRoot 'AionUi'
   $aionCorePath = Join-Path $resolvedRoot 'AionCore'
@@ -1023,7 +1402,7 @@ try {
   Install-GitRepository 'AionCore' $aionCorePath $AionCoreRepository 'https://github.com/iOfficeAI/AionCore.git' $AionCoreBranch
   $aionUiMcpBootstrap = Ensure-AionUiMindNProgressBootstrap $aionUiPath
 
-  Write-Step 3 7 'JavaScript 의존성 설치'
+  Write-Step 3 8 'JavaScript 의존성 설치'
   if ($SkipDependencyInstall) {
     Write-Warning 'SkipDependencyInstall이 지정되어 npm/bun 의존성 설치를 생략했습니다.'
   } else {
@@ -1031,14 +1410,14 @@ try {
     Invoke-NativeCommand 'bun' @('install', '--frozen-lockfile') $aionUiPath 'AionUi bun install --frozen-lockfile'
   }
 
-  Write-Step 4 7 'AionCore release 빌드'
+  Write-Step 4 8 'AionCore release 빌드'
   if ($SkipAionCoreBuild) {
     Write-Warning 'SkipAionCoreBuild가 지정되어 AionCore 빌드를 생략했습니다.'
   } else {
     Invoke-NativeCommand 'cargo' @('build', '--release', '--locked', '--bin', 'aioncore') $aionCorePath 'AionCore cargo release build'
   }
 
-  Write-Step 5 7 '작업공간 템플릿과 Dev 실행 배치 생성'
+  Write-Step 5 8 '작업공간 템플릿과 Dev 실행 배치 생성'
   $workspacePool = Write-WorkspacePoolScaffold $resolvedRoot
   $devDirectory = Write-DevLaunchers $resolvedRoot
   Write-InstalledReadme $resolvedRoot
@@ -1047,7 +1426,14 @@ try {
   Write-Success "작업공간 템플릿 생성: $($workspacePool.Registry)"
   Write-Success "Unity MCP 및 Fork 가이드 복사: $unityMcpGuidePath"
 
-  Write-Step 6 7 '설치 결과 검증'
+  Write-Step 6 8 'Claude Code와 Codex 사용자 전역 구성'
+  $agentConfiguration = Install-MnPSuiteAgentConfiguration $agentHomes.CodexHome $agentHomes.ClaudeHome $installUnityWork
+  foreach ($platform in $agentConfiguration.Platforms) {
+    Write-Success "$($platform.Name) 지침 병합: $($platform.Instructions)"
+    Write-Success "$($platform.Name) 스킬 설치: $($agentConfiguration.Skills -join ', ')"
+  }
+
+  Write-Step 7 8 '설치 결과 검증'
   $requiredFiles = @(
     (Join-Path $mindNProgressPath 'package.json'),
     (Join-Path $aionUiPath 'package.json'),
@@ -1062,6 +1448,13 @@ try {
     $workspacePool.Rules,
     $unityMcpGuidePath
   )
+  foreach ($platform in $agentConfiguration.Platforms) {
+    $requiredFiles += $platform.Instructions
+    foreach ($skill in $platform.Skills) {
+      $requiredFiles += Join-Path $skill.Path 'SKILL.md'
+      $requiredFiles += Get-MnPSuiteManagedSkillMarker $skill.Path
+    }
+  }
   if (-not $SkipAionCoreBuild) {
     $requiredFiles += Join-Path $aionCorePath 'target\release\aioncore.exe'
   }
@@ -1072,7 +1465,7 @@ try {
   }
 
   $manifest = [ordered]@{
-    schemaVersion = 1
+    schemaVersion = 2
     installedAt = (Get-Date).ToString('o')
     installRoot = $resolvedRoot
     repositories = @(
@@ -1106,13 +1499,27 @@ try {
       environmentVariable = 'MINDNPROGRESS_MCP_ENTRY'
       enabled = $true
     }
+    agentConfiguration = [ordered]@{
+      scope = 'user-global'
+      requiredSkills = @('mnp-dooray')
+      selectedOptionalSkills = @($agentConfiguration.Skills | Where-Object { $_ -ne 'mnp-dooray' })
+      platforms = @($agentConfiguration.Platforms | ForEach-Object {
+        [ordered]@{
+          name = $_.Name
+          instructions = $_.Instructions
+          instructionsBackup = $_.InstructionsBackup
+          skillsRoot = $_.SkillsRoot
+          skills = @($_.Skills | ForEach-Object { [ordered]@{ name = $_.Name; path = $_.Path } })
+        }
+      })
+    }
     dependencyInstallSkipped = [bool]$SkipDependencyInstall
     aionCoreBuildSkipped = [bool]$SkipAionCoreBuild
   }
   Write-Utf8File (Join-Path $resolvedRoot 'installation-manifest.json') ($manifest | ConvertTo-Json -Depth 6)
   Write-Success '저장소, 실행 배치와 설치 manifest 검증 완료'
 
-  Write-Step 7 7 '설치 완료'
+  Write-Step 8 8 '설치 완료'
   $createShortcutsNow = [bool]$CreateDesktopShortcuts
   if (-not $createShortcutsNow -and -not $NonInteractive) {
     $createShortcutsNow = Read-YesNo '바탕화면에 전체 Dev 실행과 MnP 중지 바로가기를 만들까요?' $true
@@ -1136,6 +1543,9 @@ MnP 주소: http://127.0.0.1:4175/
 안내 문서: $resolvedRoot\README_FIRST.md
 Unity 가이드: $unityMcpGuidePath
 작업공간 구성: $($workspacePool.Registry) (초기 비활성)
+전역 스킬: $($agentConfiguration.Skills -join ', ')
+Codex 지침: $($agentHomes.CodexHome)\AGENTS.md
+Claude 지침: $($agentHomes.ClaudeHome)\CLAUDE.md
 설치 기록: $script:InstallLogPath
 
 AionUi를 처음 열면 MindNProgress MCP가 자동 등록됩니다. MnP의 AI 대화 시작 창을 다시 열어 `MindNProgress · 필수` 표시를 확인하세요.
