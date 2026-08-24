@@ -292,6 +292,16 @@
 
 .canvas-wrap { position: relative; min-width: 0; background: #f8f7fb; touch-action: none; }
 .canvas-wrap .react-flow__node { -webkit-touch-callout: none; }
+/* Alt 격자는 기준선 역할만 하므로 점 격자보다 옅게 둔다.
+   껐다 켤 때마다 다시 마운트하면 새로 그린 SVG 패턴이 바로 칠해지지 않는 경우가 있어
+   항상 두고 표시만 전환한다. */
+.canvas-wrap .react-flow__background.grid-guide { opacity: 0; transition: opacity .12s ease-out; }
+.canvas-wrap .react-flow__background.grid-guide.visible { opacity: .5; }
+/* 선택 카드의 네 꼭짓점 기준선. 격자와 같은 색을 알파 없이 써서 격자 위에서 구분된다.
+   카드보다 아래에 깔리도록 배경과 같은 z-index를 쓰고 DOM 순서로 격자 위에 올린다. */
+.canvas-wrap .grid-guide-lines { width: 100%; height: 100%; position: absolute; inset: 0; z-index: -1; opacity: 0; transition: opacity .12s ease-out; pointer-events: none; }
+.canvas-wrap .grid-guide-lines.visible { opacity: 1; }
+.canvas-wrap .grid-guide-lines line { stroke: var(--theme-grid-guide); stroke-width: 1; }
 /* 캔버스 롱 프레스는 브라우저 기본 동작을 막지 않으므로(탭 선택 해제가 깨진다)
    OS가 근처 UI 문자를 대신 선택한다. 캔버스 위 UI는 선택 대상에서 빼고 입력 칸만 되돌린다. */
 .canvas-wrap .react-flow__panel,

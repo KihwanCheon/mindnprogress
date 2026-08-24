@@ -1885,6 +1885,16 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const [dropTargetId, setDropTargetId] = useState<string | null>(null)
   const [rightPanning, setRightPanning] = useState(false)
   const [touchPanning, setTouchPanning] = useState(false)
+  const [gridGuideVisible, setGridGuideVisible] = useState(false)
+  const gridGuideVisibleRef = useRef(false)
+  const gridGuideEnabled = mode === 'editor' && viewMode === 'mindmap'
+  // 브라우저가 Alt 키 이벤트를 가져가는 경우가 있어(창 메뉴 활성화 등) 마우스 이동으로도 상태를 맞춘다.
+  const applyGridGuide = useCallback((altPressed: boolean) => {
+    const next = altPressed && gridGuideEnabled
+    if (gridGuideVisibleRef.current === next) return
+    gridGuideVisibleRef.current = next
+    setGridGuideVisible(next)
+  }, [gridGuideEnabled])
   const [boxSelectionArmed, setBoxSelectionArmed] = useState(false)
   const [boxSelectionScreenRect, setBoxSelectionScreenRect] = useState<{ left: number; top: number; width: number; height: number } | null>(null)
   const [sidebarWidth, setSidebarWidth] = useState(() => {
@@ -2104,6 +2114,15 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
   const progressRollups = useMemo(() => new Map(computeProgressRollups(nodes, edges)
     .map((rollup) => [rollup.nodeId, rollup])), [edges, nodes])
   const selectedNode = nodes.find((node) => node.id === selectedId) ?? null
+  // Alt 격자에서 선택 카드의 좌상단 꼭짓점을 지나는 기준선. 격자보다 진하게 둔다.
+  // Alt를 떼는 동안에도 사라지는 모습이 보이도록 표시 여부와 무관하게 좌표를 유지한다.
+  const gridGuideAlignment = useMemo(() => {
+    if (!selectedNode) return null
+    return {
+      x: selectedNode.position.x * viewport.zoom + viewport.x,
+      y: selectedNode.position.y * viewport.zoom + viewport.y,
+    }
+  }, [selectedNode, viewport.x, viewport.y, viewport.zoom])
   const selectedProgressRollup = selectedNode ? progressRollups.get(selectedNode.id) : undefined
   const selectedProgress = selectedProgressRollup?.progress ?? selectedNode?.data.progress ?? 0
   const selectedStatus = selectedProgressRollup?.status ?? selectedNode?.data.status ?? 'planned'
@@ -3765,6 +3784,37 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     return () => window.removeEventListener('keydown', handleInsert)
   }, [addNode, mode, selectedId])
 
+  // Alt 드래그는 카드를 격자에 맞춰 옮기므로, Alt를 누르고 있는 동안 기준 격자를 보여준다.
+  useEffect(() => {
+    if (!gridGuideEnabled) {
+      applyGridGuide(false)
+      return
+    }
+    const trackAltKey = (event: KeyboardEvent) => {
+      applyGridGuide(event.altKey)
+      // Alt 단독 입력은 크롬 메뉴로 포커스를 넘겨서 다음 Alt 키 이벤트가 페이지에 오지 않는다.
+      // 조합 키는 key가 상대 키로 오므로(Alt+Left 등) 브라우저 단축키는 그대로 동작한다.
+      if (event.key !== 'Alt') return
+      const target = event.target as HTMLElement | null
+      if (target?.closest('input, textarea, select, [contenteditable="true"]')) return
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return
+      event.preventDefault()
+    }
+    // Alt+Tab처럼 창을 벗어나면 keyup이 오지 않아 격자가 그대로 남는다.
+    const clearGridGuide = () => applyGridGuide(false)
+
+    window.addEventListener('keydown', trackAltKey)
+    window.addEventListener('keyup', trackAltKey)
+    window.addEventListener('blur', clearGridGuide)
+    document.addEventListener('visibilitychange', clearGridGuide)
+    return () => {
+      window.removeEventListener('keydown', trackAltKey)
+      window.removeEventListener('keyup', trackAltKey)
+      window.removeEventListener('blur', clearGridGuide)
+      document.removeEventListener('visibilitychange', clearGridGuide)
+    }
+  }, [applyGridGuide, gridGuideEnabled])
+
   useEffect(() => {
     const handleViewportShortcut = (event: KeyboardEvent) => {
       const key = event.key.toLowerCase()
@@ -4884,8 +4934,9 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
 
   const trackCanvasPointer = useCallback((event: ReactPointerEvent<HTMLElement>) => {
     canvasPointerRef.current = { inside: true, x: event.clientX, y: event.clientY }
+    applyGridGuide(event.altKey)
     shareCursorPosition(event)
-  }, [shareCursorPosition])
+  }, [applyGridGuide, shareCursorPosition])
 
   const addImageFilesAtPoint = useCallback(async (files: File[], clientPoint: { x: number; y: number }) => {
     if (mode !== 'editor' || viewMode !== 'mindmap' || !activeMapId || loadedMapId !== activeMapId) return
@@ -6439,6 +6490,22 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
             proOptions={{ hideAttribution: true }}
           >
             <Background variant={BackgroundVariant.Dots} gap={MINDMAP_GRID_SIZE} size={1.2} color="var(--theme-grid)" />
+            <Background
+              id="grid-guide"
+              className={`grid-guide ${gridGuideVisible ? 'visible' : ''}`}
+              variant={BackgroundVariant.Lines}
+              gap={MINDMAP_GRID_SIZE}
+              lineWidth={1}
+              color="var(--theme-grid-guide)"
+            />
+            <svg className={`grid-guide-lines ${gridGuideVisible && gridGuideAlignment ? 'visible' : ''}`} aria-hidden="true">
+              {gridGuideAlignment && (
+                <>
+                  <line x1={gridGuideAlignment.x} y1="0" x2={gridGuideAlignment.x} y2="100%" />
+                  <line x1="0" y1={gridGuideAlignment.y} x2="100%" y2={gridGuideAlignment.y} />
+                </>
+              )}
+            </svg>
             {miniMapReadyMapId === activeMapId && (
               <MiniMap
                 className="mini-map"

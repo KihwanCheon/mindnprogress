@@ -1,6 +1,7 @@
 :root {
   --theme-canvas: #f8f7fb;
   --theme-grid: #d8d6df;
+  --theme-grid-guide: #e6e4ec;
   --theme-edge: #b8b5c7;
   --theme-node-planned: #b9b4ef;
   --theme-node-root: #6657d9;
@@ -42,6 +43,7 @@
   --theme-info: #79afea;
   --theme-shadow: rgba(0, 0, 0, .42);
   --theme-grid: #383c4b;
+  --theme-grid-guide: #2b2f3d;
   --theme-edge: #6b7084;
   --theme-node-planned: #77708f;
   --theme-node-root: #8b7cf6;
