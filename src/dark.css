@@ -1201,6 +1201,12 @@
   background: var(--theme-surface-soft);
 }
 
+[data-theme="dark"] .kanban-column.drop-target {
+  border-color: var(--theme-accent);
+  background: var(--theme-accent-soft);
+  box-shadow: inset 0 0 0 1px rgba(156, 141, 255, .22);
+}
+
 [data-theme="dark"] .timeline-item:hover,
 [data-theme="dark"] .timeline-item.selected,
 [data-theme="dark"] .upcoming-list button {

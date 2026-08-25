@@ -1,4 +1,11 @@
-import { useMemo, useState, type CSSProperties, type MouseEvent as ReactMouseEvent } from 'react'
+import {
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
+} from 'react'
 import type { Node } from '@xyflow/react'
 import type { MindNodeData, TeamMember } from '../types/mindMap'
 import { AiConversationRuntimeBadge } from './AiConversationRuntimeBadge'
@@ -10,6 +17,22 @@ type WorkNode = Node<MindNodeData, 'mind'>
 type AccessMode = 'editor' | 'viewer'
 type WorkStatus = MindNodeData['status']
 type DashboardMetric = 'all' | 'done' | 'in-progress' | 'overdue' | 'blocked' | 'waiting'
+type KanbanPointerDrag = {
+  pointerId: number
+  nodeId: string
+  startX: number
+  startY: number
+  offsetX: number
+  offsetY: number
+  width: number
+  height: number
+  active: boolean
+  targetStatus: WorkStatus | null
+}
+type KanbanDragPreview = Pick<KanbanPointerDrag, 'nodeId' | 'offsetX' | 'offsetY' | 'width' | 'height'> & {
+  clientX: number
+  clientY: number
+}
 
 type WorkViewProps = {
   nodes: WorkNode[]
@@ -31,6 +54,15 @@ const columns: { id: WorkStatus; title: string; description: string }[] = [
   { id: 'in-progress', title: '진행 중', description: '현재 실행 중인 업무' },
   { id: 'done', title: '완료', description: '마무리된 업무' },
 ]
+
+const kanbanDragThreshold = 6
+
+function kanbanStatusAtPoint(clientX: number, clientY: number): WorkStatus | null {
+  const status = document.elementFromPoint(clientX, clientY)
+    ?.closest<HTMLElement>('[data-kanban-status]')
+    ?.dataset.kanbanStatus
+  return columns.some((column) => column.id === status) ? status as WorkStatus : null
+}
 
 function effectiveStatus(node: WorkNode): WorkStatus {
   return node.data.progress >= 100 ? 'done' : node.data.status
@@ -78,7 +110,35 @@ function EmptyWorkView({ onOpenMindMap }: { onOpenMindMap: () => void }) {
   )
 }
 
-function WorkCard({ node, teamMembers, blockedCount, selected, draggable, onSelect, onContextMenu }: { node: WorkNode; teamMembers: TeamMember[]; blockedCount: number; selected: boolean; draggable: boolean; onSelect: () => void; onContextMenu: (event: ReactMouseEvent) => void }) {
+function WorkCard({
+  node,
+  teamMembers,
+  blockedCount,
+  selected,
+  movable,
+  dragging = false,
+  preview = false,
+  onSelect,
+  onContextMenu,
+  onPointerDown,
+  onPointerMove,
+  onPointerUp,
+  onPointerCancel,
+}: {
+  node: WorkNode
+  teamMembers: TeamMember[]
+  blockedCount: number
+  selected: boolean
+  movable: boolean
+  dragging?: boolean
+  preview?: boolean
+  onSelect: (event?: ReactMouseEvent) => void
+  onContextMenu: (event: ReactMouseEvent) => void
+  onPointerDown?: (event: ReactPointerEvent<HTMLElement>) => void
+  onPointerMove?: (event: ReactPointerEvent<HTMLElement>) => void
+  onPointerUp?: (event: ReactPointerEvent<HTMLElement>) => void
+  onPointerCancel?: (event: ReactPointerEvent<HTMLElement>) => void
+}) {
   const assignee = assigneeFor(node, teamMembers)
   const checklist = node.data.checklist ?? []
   const completed = checklist.filter((item) => item.done).length
@@ -86,13 +146,17 @@ function WorkCard({ node, teamMembers, blockedCount, selected, draggable, onSele
 
   return (
     <article
-      className={`work-card ${selected ? 'selected' : ''}`}
-      draggable={draggable}
+      className={`work-card ${selected ? 'selected' : ''} ${movable ? 'movable' : ''} ${dragging ? 'dragging' : ''}`}
       data-node-id={node.id}
       onClick={onSelect}
       onContextMenu={onContextMenu}
-      tabIndex={0}
-      onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') onSelect() }}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerCancel}
+      tabIndex={preview ? -1 : 0}
+      aria-grabbed={movable ? dragging : undefined}
+      onKeyDown={(event) => { if (!preview && (event.key === 'Enter' || event.key === ' ')) onSelect() }}
     >
       <div className="work-card-top">
         <span className="work-chip">업무</span>
@@ -117,7 +181,14 @@ function WorkCard({ node, teamMembers, blockedCount, selected, draggable, onSele
 export function KanbanView(props: WorkViewProps) {
   const { nodes, mode, selectedId, onSelect, onUpdate, onOpenMindMap, onContextMenu, teamMembers } = props
   const [draggingId, setDraggingId] = useState<string | null>(null)
+  const [dragTargetStatus, setDragTargetStatus] = useState<WorkStatus | null>(null)
+  const [dragPreview, setDragPreview] = useState<KanbanDragPreview | null>(null)
+  const pointerDragRef = useRef<KanbanPointerDrag | null>(null)
+  const suppressedClickNodeIdRef = useRef<string | null>(null)
   const workNodes = nodes.filter((node) => node.data.isWork)
+  const dragPreviewNode = dragPreview
+    ? workNodes.find((node) => node.id === dragPreview.nodeId) ?? null
+    : null
 
   if (workNodes.length === 0) return <EmptyWorkView onOpenMindMap={onOpenMindMap} />
 
@@ -147,8 +218,71 @@ export function KanbanView(props: WorkViewProps) {
     onUpdate(nodeId, { status, progress, checklist: nextChecklist })
   }
 
+  const beginPointerDrag = (event: ReactPointerEvent<HTMLElement>, node: WorkNode) => {
+    if (mode !== 'editor' || node.data.reference || !event.isPrimary || event.button !== 0) return
+    const cardRect = event.currentTarget.getBoundingClientRect()
+    pointerDragRef.current = {
+      pointerId: event.pointerId,
+      nodeId: node.id,
+      startX: event.clientX,
+      startY: event.clientY,
+      offsetX: event.clientX - cardRect.left,
+      offsetY: event.clientY - cardRect.top,
+      width: cardRect.width,
+      height: cardRect.height,
+      active: false,
+      targetStatus: null,
+    }
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+
+  const continuePointerDrag = (event: ReactPointerEvent<HTMLElement>) => {
+    const drag = pointerDragRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
+    if (!drag.active) {
+      const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY)
+      if (distance < kanbanDragThreshold) return
+      drag.active = true
+      setDraggingId(drag.nodeId)
+    }
+    event.preventDefault()
+    const targetStatus = kanbanStatusAtPoint(event.clientX, event.clientY)
+    drag.targetStatus = targetStatus
+    setDragTargetStatus(targetStatus)
+    setDragPreview({
+      nodeId: drag.nodeId,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      offsetX: drag.offsetX,
+      offsetY: drag.offsetY,
+      width: drag.width,
+      height: drag.height,
+    })
+  }
+
+  const finishPointerDrag = (event: ReactPointerEvent<HTMLElement>, shouldMove: boolean) => {
+    const drag = pointerDragRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+    if (drag.active) {
+      event.preventDefault()
+      const targetStatus = kanbanStatusAtPoint(event.clientX, event.clientY) ?? drag.targetStatus
+      if (shouldMove && targetStatus) moveNode(drag.nodeId, targetStatus)
+      suppressedClickNodeIdRef.current = drag.nodeId
+      window.setTimeout(() => {
+        if (suppressedClickNodeIdRef.current === drag.nodeId) suppressedClickNodeIdRef.current = null
+      }, 0)
+    }
+    pointerDragRef.current = null
+    setDraggingId(null)
+    setDragTargetStatus(null)
+    setDragPreview(null)
+  }
+
   return (
-    <div className="kanban-view">
+    <div className={`kanban-view ${draggingId ? 'dragging-card' : ''}`}>
       <header className="work-view-header">
         <div><span>Board</span><h2>업무 칸반</h2><p>카드를 이동해 업무 상태를 변경하세요.</p></div>
         <strong>{workNodes.length}개 업무</strong>
@@ -158,15 +292,9 @@ export function KanbanView(props: WorkViewProps) {
           const columnNodes = workNodes.filter((node) => effectiveStatus(node) === column.id)
           return (
             <section
-              className={`kanban-column ${column.id} ${draggingId ? 'drag-active' : ''}`}
+              className={`kanban-column ${column.id} ${draggingId ? 'drag-active' : ''} ${dragTargetStatus === column.id ? 'drop-target' : ''}`}
               key={column.id}
-              onDragOver={(event) => { if (mode === 'editor') event.preventDefault() }}
-              onDrop={(event) => {
-                event.preventDefault()
-                const nodeId = event.dataTransfer.getData('text/mind-node') || draggingId
-                if (nodeId) moveNode(nodeId, column.id)
-                setDraggingId(null)
-              }}
+              data-kanban-status={column.id}
             >
               <div className="kanban-column-heading">
                 <span className="status-pin" />
@@ -175,18 +303,28 @@ export function KanbanView(props: WorkViewProps) {
               </div>
               <div className="kanban-cards">
                 {columnNodes.map((node) => (
-                  <div
+                  <WorkCard
                     key={node.id}
-                    onDragStart={(event) => {
-                      if (mode !== 'editor' || node.data.reference) return
-                      event.dataTransfer.setData('text/mind-node', node.id)
-                      event.dataTransfer.effectAllowed = 'move'
-                      setDraggingId(node.id)
+                    node={node}
+                    teamMembers={teamMembers}
+                    blockedCount={blockingNodes(node, nodes).length}
+                    selected={selectedId === node.id}
+                    movable={mode === 'editor' && !node.data.reference}
+                    dragging={draggingId === node.id}
+                    onSelect={(event) => {
+                      if (event?.detail && suppressedClickNodeIdRef.current === node.id) {
+                        suppressedClickNodeIdRef.current = null
+                        event.preventDefault()
+                        return
+                      }
+                      onSelect(node.id)
                     }}
-                    onDragEnd={() => setDraggingId(null)}
-                  >
-                    <WorkCard node={node} teamMembers={teamMembers} blockedCount={blockingNodes(node, nodes).length} selected={selectedId === node.id} draggable={mode === 'editor' && !node.data.reference} onSelect={() => onSelect(node.id)} onContextMenu={(event) => onContextMenu(event, node.id)} />
-                  </div>
+                    onContextMenu={(event) => onContextMenu(event, node.id)}
+                    onPointerDown={(event) => beginPointerDrag(event, node)}
+                    onPointerMove={continuePointerDrag}
+                    onPointerUp={(event) => finishPointerDrag(event, true)}
+                    onPointerCancel={(event) => finishPointerDrag(event, false)}
+                  />
                 ))}
                 {columnNodes.length === 0 && <div className="empty-column">업무가 없습니다</div>}
               </div>
@@ -194,6 +332,28 @@ export function KanbanView(props: WorkViewProps) {
           )
         })}
       </div>
+      {dragPreview && dragPreviewNode && (
+        <div
+          className="kanban-drag-preview"
+          aria-hidden="true"
+          style={{
+            width: dragPreview.width,
+            height: dragPreview.height,
+            transform: `translate3d(${dragPreview.clientX - dragPreview.offsetX}px, ${dragPreview.clientY - dragPreview.offsetY}px, 0)`,
+          }}
+        >
+          <WorkCard
+            node={dragPreviewNode}
+            teamMembers={teamMembers}
+            blockedCount={blockingNodes(dragPreviewNode, nodes).length}
+            selected={selectedId === dragPreviewNode.id}
+            movable={false}
+            preview
+            onSelect={() => {}}
+            onContextMenu={(event) => event.preventDefault()}
+          />
+        </div>
+      )}
     </div>
   )
 }
@@ -365,7 +525,7 @@ export function DashboardView({ nodes, documentProgress, selectedId, onSelect, o
                   teamMembers={teamMembers}
                   blockedCount={blockingNodes(node, nodes).length}
                   selected={selectedId === node.id}
-                  draggable={false}
+                  movable={false}
                   onSelect={() => onSelect(node.id)}
                   onContextMenu={(event) => onContextMenu(event, node.id)}
                 />
