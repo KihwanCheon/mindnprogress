@@ -122,7 +122,7 @@ MindNProgress_Restore.bat "..\MindNProgress_Backup\2026-07-30\MindNProgress_2026
 
 ### Windows Git 개발 환경 일괄 설치
 
-MnP Suite Windows Git 설치 패키지는 업무 PC에 MindNProgress, AionUi와 AionCore 개발 환경을 한 번에 준비합니다. 배포 파일명은 `MnPSuite-Windows-Git-Installer-YYYYMMDD-vN.zip` 형식을 사용하며, 압축을 푼 뒤 루트의 `Install-MnPSuite.bat`을 실행합니다. 저장소에서 직접 사용할 때는 [`installer/windows`](installer/windows/README.md)의 같은 파일을 실행하면 됩니다.
+MnP Suite Windows Git 설치 패키지는 업무 PC에 MindNProgress, AionUi와 AionCore 개발 환경을 한 번에 준비합니다. 현재 검증된 배포본은 [`MnPSuite-Windows-Git-Installer-20260825-v12.zip`](https://github.com/mabobsa/MindNProgress/releases/download/mnp-suite-installer-20260825-v12/MnPSuite-Windows-Git-Installer-20260825-v12.zip)이며, SHA-256은 `87705AB34296E9616429EACE68A3B92D0B9724CD70354502CCBE463A0A236AE7`입니다. 배포 파일명은 `MnPSuite-Windows-Git-Installer-YYYYMMDD-vN.zip` 형식을 사용하며, 압축을 푼 뒤 루트의 `Install-MnPSuite.bat`을 실행합니다. 저장소에서 직접 사용할 때는 [`installer/windows`](installer/windows/README.md)의 같은 파일을 실행하면 됩니다.
 
 설치 패키지는 다음 작업을 순서대로 수행합니다.
 
