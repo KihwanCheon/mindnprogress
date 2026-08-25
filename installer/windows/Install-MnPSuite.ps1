@@ -809,9 +809,22 @@ function Invoke-NativeCommand {
   Write-Info $Description
   Push-Location $WorkingDirectory
   try {
-    & $Command @Arguments
-    if ($LASTEXITCODE -ne 0) {
-      throw "$Description 실패 (exit $LASTEXITCODE)"
+    # Windows PowerShell 5.1의 Start-Transcript는 네이티브 프로세스의
+    # stdout/stderr를 누락할 수 있다. Write-Host를 거쳐 콘솔과 설치 로그에
+    # 같은 내용을 남기되, stderr가 ErrorRecord로 승격되어 설치를 먼저
+    # 중단하지 않도록 이 호출 범위에서만 Continue로 처리한다.
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+      $ErrorActionPreference = 'Continue'
+      & $Command @Arguments 2>&1 | ForEach-Object {
+        Write-Host ([string]$_)
+      }
+      $exitCode = $LASTEXITCODE
+    } finally {
+      $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($exitCode -ne 0) {
+      throw "$Description 실패 (exit $exitCode)"
     }
   } finally {
     Pop-Location
@@ -1081,7 +1094,9 @@ function Install-PptxMcpRuntime {
   }
   $serverPath = Join-Path $RepositoryPath 'ppt_mcp_server.py'
   if (-not (Test-Path -LiteralPath $serverPath -PathType Leaf)) { throw "PowerPoint MCP 서버 파일이 없습니다: $serverPath" }
-  $importProbe = 'import mcp, pptx, pymupdf, fontTools, PIL, pythoncom, win32com.client, ppt_mcp_server; print("PPTX_MCP_IMPORT_OK")'
+  # Windows PowerShell 5.1은 네이티브 명령에 넘기는 -c 문자열 안의 큰따옴표를
+  # 제거할 수 있다. 성공은 종료 코드로 판단하므로 별도 출력문을 넣지 않는다.
+  $importProbe = 'import mcp, pptx, pymupdf, fontTools, PIL, pythoncom, win32com.client, ppt_mcp_server'
   Invoke-NativeCommand $venvPython @('-c', $importProbe) $RepositoryPath 'PowerPoint MCP Python·COM 모듈 검사'
   Write-Success 'PowerPoint MCP Windows 가상환경 준비'
   return [pscustomobject]@{

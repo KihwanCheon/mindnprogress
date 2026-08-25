@@ -135,6 +135,8 @@ CLAUDE.md.mnp-suite-backup-20260824-183015123.bak
 
 `pptx` 스킬은 `pptx-mcp`로 파일을 열고 모든 슬라이드를 PNG로 저장한 뒤 텍스트·표 구조와 함께 확인하도록 지시합니다. 스킬과 MCP는 별도 Y/N 항목이지만, 스킬을 선택하면 MCP 질문의 기본값도 `Y`입니다. `pptx-mcp`를 선택하면 Git 저장소, 전용 `.venv`, `pywin32`를 준비하고 AionUi 목록에 등록합니다. Microsoft PowerPoint가 없으면 python-pptx 기반 도구는 사용할 수 있지만 PowerPoint COM 기반 PNG 내보내기는 사용할 수 없습니다.
 
+PowerPoint MCP 설치 검사는 Windows PowerShell 5.1에서도 안전하도록 Python 모듈 import의 종료 코드만 사용합니다. Python `-c` 인수 안에 성공 문구를 출력하는 따옴표 표현을 넣지 않으므로 PowerShell 5.1의 네이티브 인수 변환에 영향을 받지 않습니다.
+
 ## 원격 저장소 또는 브랜치 변경
 
 ```powershell
@@ -214,6 +216,22 @@ Dev 배치 템플릿의 하드코딩 경로, 선택 MCP 네 조합, Dooray DPAPI
 ```powershell
 .\Install-MnPSuite.ps1 -SelfTest -NonInteractive
 ```
+
+## 설치 실패 후 재실행
+
+설치 실패 시 먼저 `<설치 루트>\install-logs\install-YYYYMMDD-HHmmss.log`의 마지막 단계와 실제 하위 명령 오류를 확인합니다. 설치기는 Windows PowerShell 5.1에서도 Git·npm·bun·cargo·Python 같은 네이티브 프로세스의 stdout과 stderr를 콘솔과 transcript 로그에 함께 기록합니다. 로그에는 사용자 이름과 로컬 경로가 포함될 수 있으므로 외부 공개 채널에는 그대로 올리지 않습니다.
+
+완료된 저장소와 빌드 결과를 삭제할 필요는 없습니다. 로그에서 JavaScript 의존성 설치와 AionCore release 빌드가 성공한 것이 확인된 경우 다음처럼 기존 결과를 재사용할 수 있습니다.
+
+```powershell
+.\Install-MnPSuite.ps1 `
+  -InstallRoot 'C:\Dev\MnPSuite' `
+  -ReuseExistingRepositories `
+  -SkipDependencyInstall `
+  -SkipAionCoreBuild
+```
+
+대화형 질문에서는 이전과 같은 스킬·MCP 구성을 선택합니다. `-SkipDependencyInstall`이나 `-SkipAionCoreBuild`는 해당 단계가 실제로 성공한 로그와 결과 파일을 확인한 경우에만 사용합니다. AionUi overlay로 생긴 의도된 로컬 변경이 있으므로 재실행에서는 저장소 업데이트가 아니라 재사용을 선택합니다.
 
 ## 안전 동작
 
