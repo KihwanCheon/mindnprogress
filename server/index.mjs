@@ -74,7 +74,8 @@ import {
   normalizeAionUiExternalLaunchPayload,
   parseMindNProgressCompletionToken,
 } from './lib/aionUiExternalLaunch.mjs'
-import { localLoopbackRedirectLocation } from './lib/localLoopbackRedirect.mjs'
+import { isLocalLoopbackRequest, localLoopbackRedirectLocation } from './lib/localLoopbackRedirect.mjs'
+import { listWorkspaceDirectory, listWorkspaceRoots } from './lib/workspaceBrowse.mjs'
 import { buildSharedKnowledgeAudit } from './lib/sharedKnowledgeAudit.mjs'
 import {
   SharedKnowledgeMaintenanceError,
@@ -6060,6 +6061,36 @@ const server = createServer(async (request, response) => {
       }
 
       return sendJson(response, 405, { error: '지원하지 않는 요청입니다.' })
+    }
+
+    if (request.method === 'GET' && url.pathname === '/api/integrations/aionui/directories') {
+      const user = requireSignedInUser(request, response)
+      if (!user) return
+      if (!canEdit(user)) return sendJson(response, 403, { error: '편집자만 작업공간을 탐색할 수 있습니다.' })
+      if (!isLocalLoopbackRequest(request)) {
+        return sendJson(response, 403, {
+          code: 'REMOTE_CLIENT',
+          error: '작업공간 탐색은 서버와 같은 PC에서만 할 수 있습니다. 경로를 직접 입력해 주세요.',
+        })
+      }
+
+      const requestedPath = (url.searchParams.get('path') ?? '').trim()
+      if (requestedPath.length > AI_WORKSPACE_MAX_LENGTH) {
+        return sendJson(response, 400, { error: '탐색할 경로가 너무 깁니다.' })
+      }
+      if (!requestedPath) return sendJson(response, 200, await listWorkspaceRoots())
+
+      try {
+        return sendJson(response, 200, await listWorkspaceDirectory(requestedPath))
+      } catch (error) {
+        if (error?.code === 'ENOENT') return sendJson(response, 404, { error: '폴더를 찾을 수 없습니다.' })
+        if (error?.code === 'ENOTDIR') return sendJson(response, 400, { error: '폴더가 아닙니다.' })
+        if (error?.code === 'EACCES' || error?.code === 'EPERM') {
+          return sendJson(response, 403, { error: '이 폴더를 읽을 권한이 없습니다.' })
+        }
+        console.error('[workspace browse]', error)
+        return sendJson(response, 500, { error: '폴더 목록을 불러오지 못했습니다.' })
+      }
     }
 
     if (request.method === 'GET' && url.pathname === '/api/integrations/aionui/options') {

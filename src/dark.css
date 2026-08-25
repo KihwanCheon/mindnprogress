@@ -848,9 +848,72 @@
   background: var(--theme-surface-soft);
 }
 
-[data-theme="dark"] .ai-workspace-history {
+[data-theme="dark"] .ai-workspace-browse,
+[data-theme="dark"] .ai-workspace-browser-up,
+[data-theme="dark"] .ai-workspace-browser-actions button {
+  color: var(--theme-text-secondary);
+  border-color: var(--theme-control-border);
+  background: var(--theme-surface-soft);
+}
+
+[data-theme="dark"] .ai-workspace-browse:hover {
+  color: #c3bcff;
+  border-color: var(--theme-accent-strong);
+  background: var(--theme-accent-soft);
+}
+
+[data-theme="dark"] .ai-workspace-browser-up:disabled,
+[data-theme="dark"] .ai-workspace-browser-actions button:disabled {
+  color: var(--theme-text-muted);
+  border-color: var(--theme-border);
+  background: var(--theme-surface);
+}
+
+[data-theme="dark"] .ai-workspace-browser-actions button.primary {
+  color: white;
+  border-color: var(--theme-accent-strong);
+  background: var(--theme-accent-strong);
+}
+
+[data-theme="dark"] .ai-workspace-history,
+[data-theme="dark"] .ai-workspace-browser {
   border-color: var(--theme-border-strong);
   background: var(--theme-surface-raised);
+}
+
+[data-theme="dark"] .ai-workspace-browser-bar,
+[data-theme="dark"] .ai-workspace-browser-actions {
+  border-color: var(--theme-border);
+  background: var(--theme-surface-soft);
+}
+
+[data-theme="dark"] .ai-workspace-browser-path,
+[data-theme="dark"] .ai-workspace-browser-entry {
+  color: var(--theme-text-secondary);
+}
+
+[data-theme="dark"] .ai-workspace-browser-entry:hover {
+  background: var(--theme-surface-hover);
+}
+
+[data-theme="dark"] .ai-workspace-browser-entry.selected {
+  color: #c3bcff;
+  background: var(--theme-accent-soft);
+}
+
+[data-theme="dark"] .ai-workspace-browser-git,
+[data-theme="dark"] .ai-workspace-browser-entry > b {
+  color: #8fd7bc;
+  background: var(--theme-success-soft);
+}
+
+[data-theme="dark"] .ai-workspace-browser-empty {
+  color: var(--theme-text-muted);
+}
+
+[data-theme="dark"] .ai-workspace-browser-error {
+  color: #ff9aa2;
+  background: var(--theme-danger-soft);
 }
 
 [data-theme="dark"] .ai-workspace-history-heading {

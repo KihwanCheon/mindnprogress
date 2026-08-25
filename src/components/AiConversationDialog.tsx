@@ -48,6 +48,33 @@ const runtimeSelectionsStorageKey = 'mindnprogress-ai-runtime-selections'
 const mcpSelectionsStorageKey = 'mindnprogress-ai-mcp-selections'
 const legacyWorkspaceHistoryStorageKey = 'mindnprogress-ai-workspace-history-v1'
 const workspaceHistoryApiPath = '/api/integrations/aionui/workspaces'
+const workspaceBrowseApiPath = '/api/integrations/aionui/directories'
+
+type WorkspaceDirectoryEntry = { name: string; path: string; git: boolean }
+type WorkspaceDirectory = {
+  path: string
+  parent: string | null
+  git?: boolean
+  entries: WorkspaceDirectoryEntry[]
+  truncated: boolean
+}
+
+async function requestWorkspaceDirectory(directoryPath: string) {
+  const query = directoryPath ? `?path=${encodeURIComponent(directoryPath)}` : ''
+  const response = await fetch(`${workspaceBrowseApiPath}${query}`, {
+    credentials: 'include',
+    signal: AbortSignal.timeout(10_000),
+  })
+  const result = await response.json().catch(() => ({})) as Partial<WorkspaceDirectory> & { error?: string }
+  if (!response.ok) throw new Error(result.error ?? '폴더 목록을 불러오지 못했습니다.')
+  return {
+    path: String(result.path ?? ''),
+    parent: typeof result.parent === 'string' ? result.parent : null,
+    git: result.git === true,
+    entries: Array.isArray(result.entries) ? result.entries : [],
+    truncated: result.truncated === true,
+  } satisfies WorkspaceDirectory
+}
 
 function workspaceStorageKey(userId: string, documentId: string) {
   return `mindnprogress-ai-workspace:${userId}:${documentId}`
@@ -190,6 +217,11 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
   const workspaceHistoryMutationRef = useRef(0)
   const workspaceHistoryRequestRef = useRef<Promise<void>>(Promise.resolve())
   const runtimeSelectionsRef = useRef(readRuntimeSelections())
+  const [browserOpen, setBrowserOpen] = useState(false)
+  const [browserDirectory, setBrowserDirectory] = useState<WorkspaceDirectory | null>(null)
+  const [browserLoading, setBrowserLoading] = useState(false)
+  const [browserError, setBrowserError] = useState('')
+  const browserRequestRef = useRef(0)
   const [selectedSkillIds, setSelectedSkillIds] = useState<Set<string>>(new Set())
   const [selectedMcpIds, setSelectedMcpIds] = useState<Set<string>>(new Set())
 
@@ -306,6 +338,26 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
     setWorkspace(value)
     storeDocumentWorkspace(userId, documentId, value)
   }
+
+  const openWorkspaceBrowser = useCallback((directoryPath: string) => {
+    setBrowserOpen(true)
+    setBrowserError('')
+    setBrowserLoading(true)
+    const requestVersion = ++browserRequestRef.current
+    void requestWorkspaceDirectory(directoryPath)
+      .then((directory) => {
+        if (browserRequestRef.current === requestVersion) setBrowserDirectory(directory)
+      })
+      .catch((requestError) => {
+        if (browserRequestRef.current !== requestVersion) return
+        setBrowserError(requestError instanceof Error ? requestError.message : '폴더 목록을 불러오지 못했습니다.')
+        // 입력한 경로가 없을 수도 있으므로 드라이브 목록으로 물러날 수 있게 현재 위치는 비운다.
+        setBrowserDirectory(null)
+      })
+      .finally(() => {
+        if (browserRequestRef.current === requestVersion) setBrowserLoading(false)
+      })
+  }, [])
 
   const rememberWorkspace = async (value: string) => {
     const normalizedWorkspace = value.trim()
@@ -462,7 +514,82 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
               {selectedAgent && selectedAgent.thoughtLevels.length > 0 && <label><span>사고 수준</span><select value={thoughtLevel} onChange={(event) => setThoughtLevel(event.target.value)}>{selectedAgent.thoughtLevels.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>}
             </div>
             <div className="ai-workspace-field">
-              <label><span>작업공간</span><input value={workspace} onChange={(event) => updateWorkspace(event.target.value)} placeholder="선택사항" maxLength={AI_WORKSPACE_MAX_LENGTH} /></label>
+              <label className="ai-workspace-input">
+                <span>작업공간</span>
+                <div className="ai-workspace-input-row">
+                  <input value={workspace} onChange={(event) => updateWorkspace(event.target.value)} placeholder="선택사항" maxLength={AI_WORKSPACE_MAX_LENGTH} />
+                  <button
+                    type="button"
+                    className="ai-workspace-browse"
+                    onClick={() => {
+                      if (browserOpen) {
+                        setBrowserOpen(false)
+                        return
+                      }
+                      openWorkspaceBrowser(workspace.trim())
+                    }}
+                    aria-expanded={browserOpen}
+                  >
+                    {browserOpen ? '닫기' : '탐색…'}
+                  </button>
+                </div>
+              </label>
+              {browserOpen && (
+                <div className="ai-workspace-browser">
+                  <div className="ai-workspace-browser-bar">
+                    <button
+                      type="button"
+                      className="ai-workspace-browser-up"
+                      onClick={() => openWorkspaceBrowser(browserDirectory?.parent ?? '')}
+                      disabled={browserLoading || browserDirectory?.parent === null}
+                      title="상위 폴더"
+                    >
+                      ↑
+                    </button>
+                    <span className="ai-workspace-browser-path" title={browserDirectory?.path || '드라이브 목록'}>
+                      {browserDirectory?.path || '드라이브 목록'}
+                    </span>
+                    {browserDirectory?.git && <span className="ai-workspace-browser-git">Git</span>}
+                  </div>
+                  {browserError && <p className="ai-workspace-browser-error" role="alert">{browserError}</p>}
+                  <div className="ai-workspace-browser-list" role="list">
+                    {browserLoading && <p className="ai-workspace-browser-empty">불러오는 중…</p>}
+                    {!browserLoading && !browserError && browserDirectory?.entries.length === 0 && (
+                      <p className="ai-workspace-browser-empty">하위 폴더가 없습니다.</p>
+                    )}
+                    {!browserLoading && browserDirectory?.entries.map((entry) => (
+                      <button
+                        type="button"
+                        role="listitem"
+                        key={entry.path}
+                        className={`ai-workspace-browser-entry ${workspace.trim() === entry.path ? 'selected' : ''}`}
+                        onClick={() => openWorkspaceBrowser(entry.path)}
+                        onDoubleClick={() => updateWorkspace(entry.path)}
+                        title={entry.path}
+                      >
+                        <span>{entry.name}</span>
+                        {entry.git && <b>Git</b>}
+                      </button>
+                    ))}
+                  </div>
+                  {browserDirectory?.truncated && (
+                    <p className="ai-workspace-browser-empty">폴더가 많아 일부만 표시했습니다. 경로를 직접 입력해 주세요.</p>
+                  )}
+                  <div className="ai-workspace-browser-actions">
+                    <button
+                      type="button"
+                      className="primary"
+                      onClick={() => {
+                        updateWorkspace(browserDirectory?.path ?? '')
+                        setBrowserOpen(false)
+                      }}
+                      disabled={!browserDirectory?.path}
+                    >
+                      이 폴더 사용
+                    </button>
+                  </div>
+                </div>
+              )}
               {workspaceHistory.length > 0 && (
                 <div className="ai-workspace-history">
                   <div className="ai-workspace-history-heading"><span>최근 작업공간</span><small>{workspaceHistory.length}개</small></div>

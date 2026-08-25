@@ -26,7 +26,8 @@ export default defineConfig({
     port: 4175,
     strictPort: true,
     proxy: {
-      '/api': 'http://127.0.0.1:4176',
+      // xfwd로 실제 접속 주소를 전달해야 서버가 같은 PC 요청인지 판별할 수 있다.
+      '/api': { target: 'http://127.0.0.1:4176', xfwd: true },
     },
   },
 })
