@@ -101,9 +101,42 @@ const cardTextSafetyRules = Object.freeze([
 ])
 const cardTextSafetyInstructions = cardTextSafetyRules.join(' ')
 
-const serverInstructions = `MindNProgress는 마인드맵과 업무 진행 관리를 결합한 웹 서비스입니다. MindNProgress 밖에서 시작해 문서 ID나 카드 ID가 없다면 mindnprogress_read_me_first를 먼저 호출하세요. 선택 문서와 카드가 있다면 mindnprogress_get_context로 제품 규칙과 최신 문서 구조를 먼저 확인하세요. MCP 도구에서 카드를 지정할 때는 cardId 계열 인자를 사용하세요. nodeId 계열 인자는 기존 대화 호환용이므로 새 호출에서는 사용하지 마세요. AionUi가 발급한 attributionToken이 없는 외부 MCP 세션은 자신이 현재 AI 종류와 모델을 정확히 알고 있을 때 get_context의 aiType과 aiModel에 함께 전달하고, 알지 못하면 추측하지 마세요. get_context의 selection.taskLinks.startupInspection을 따르세요. mode가 knowledge-guided이면 primary 선행 지식 중 kind=image인 항목은 imageAccess.localPath의 원본을 사용 가능한 로컬 이미지 열람 도구로 직접 확인하고 설명과 댓글을 함께 사용하며, 일반 카드는 sharedKnowledge를 먼저 재사용하고 설명과 댓글로 보완합니다. fallbackSources와 fallbackTargets는 정보가 부족할 때만 선택적으로 조사합니다. mode가 default이고 required가 true이면 targets의 업무 본문, 댓글, 첨부파일 목록과 관련 링크를 조사하세요. 진행 과정과 결과는 댓글에 기록하고, 다른 카드나 후속 세션이 재사용할 현재 유효한 사실·결정·제약·검증 결과만 sharedKnowledge에 남기세요. 진행 기록·도구 로그·중복·폐기 결론은 넣지 말고 같은 주제의 결론은 새 이력으로 덧붙이지 말고 기존 절을 안전하게 교체하세요. 실제로 실행할 카드에 독립적으로 완료 여부를 판정할 구현·검증 조건이 2개 이상이면 결과 중심 체크리스트로 작성하고 진행에 맞춰 갱신하세요. 별도 하위 카드로 추적할 작업은 체크리스트에 중복하지 마세요. AI 댓글은 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 충실히 담은 detail로 작성하며, 요약 때문에 상세를 축약하지 마세요. 외부 전달물이나 결정 대기는 waitingItems로 기록하고 제목에 대기 문구를 붙이지 마세요. 대기를 등록할 때는 [차단], 해제할 때는 [진행] 댓글로 이유와 재개 상태를 기록하세요. 카드 일부 필드만 변경할 때는 mindnprogress_update_card의 data에 변경할 필드만 보내고 현재 카드 전체 데이터를 재전송하지 마세요. 기존 description 또는 sharedKnowledge 내부의 일부만 고칠 때는 조회 결과의 textIntegrity SHA-256과 mindnprogress_patch_card_text를 사용하세요. ${cardTextSafetyInstructions} 과도한 sharedKnowledge를 정리할 때는 후보 목록과 전용 검토 문맥을 조회한 뒤 mindnprogress_apply_shared_knowledge_review로 현재 해시가 일치하는 결과만 원자적으로 저장하세요. 일반 카드에서 생략한 필드와 위치는 보존되지만 완료 상태 또는 진행률 100 적용 시 waitingItems는 자동으로 해제되며, Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 선택 카드 밖의 형제·하위·선행 카드를 함께 수정하기 전에는 mindnprogress_get_ai_work_states로 해당 카드에 다른 AI 작업이 진행 중인지 확인하세요. running 또는 waiting-confirmation인 카드는 사용자 지시 없이 동시에 수정하지 마세요. 등록된 AI 작업공간의 최신 목록·경로·상태가 필요하면 폴더명을 추측하지 말고 mindnprogress_get_ai_workspace_pool을 호출하세요. 작업공간 선택·점유·전환·해제는 MindNProgress만 수행하며 AI가 임의로 worker를 선택하지 않습니다. 사용자가 중지한 위임 대화를 같은 대화에서 직접 이어 실제 위임 작업을 완료했다면 카드 기록과 작업공간 체크포인트를 마친 뒤 최종 답변 직전에 mindnprogress_complete_ai_delegation을 호출하세요. 단순 질의 응답·중간 보고 또는 중단 없이 진행된 최초 위임에는 호출하지 마세요. 지식선만 변경할 때는 전체 문서를 다시 보내지 말고 지식선 전용 도구를 사용하세요. 조회 도구는 문서 버전을 변경하지 않지만 카드·관계 편집과 AI 대화 ID 연결은 버전을 증가시킬 수 있습니다. 특정 자료가 있다고 가정하지 마세요. 여러 카드로 구성된 새 문서는 mindnprogress_create_mindmap으로 한 번에 생성하고, 변경 후에는 최신 문서를 다시 조회해 결과를 검증하세요. 비밀번호 변경과 계정 관리 작업은 지원하지 않습니다.`
+const knowledgeLinePolicy = Object.freeze({
+  mode: 'actual-use-only',
+  evaluateAt: 'after-work',
+  discovery: '지식선을 만들기 위한 목적으로 다른 카드나 문서를 전수 검색하지 않음. 현재 작업 중 실제로 조회하고 근거로 사용한 MindNProgress 카드만 판단 대상임',
+  autoConnectWhenAll: Object.freeze([
+    'source 카드를 이번 작업에서 실제로 조회하고 내용을 사용함',
+    '사용한 내용이 source 카드의 현재 유효하고 검증된 sharedKnowledge에 기록되어 있음',
+    'source의 결론이 target 카드의 요구사항 판단, 구현 또는 검증에 직접 영향을 줌',
+    '후속 세션에서도 같은 결론을 다시 사용할 가능성이 높음',
+    'source와 target이 같은 문서에 있고 기존 동일 지식선이 없음',
+  ]),
+  proposeOnlyWhenAny: Object.freeze([
+    'source 지식이 아직 확정되지 않았거나 설명과 댓글이 서로 충돌함',
+    'source를 실제 근거로 사용하지 않고 관련 가능성만 확인함',
+    'source가 다른 문서에 있어 Ref 카드가 먼저 필요함',
+    '연결 필요성 또는 knowledgePolicy를 명확히 판단할 수 없음',
+  ]),
+  neverConnectFor: Object.freeze([
+    '같은 주제, 비슷한 제목 또는 계층상 인접하다는 이유만 있는 관계',
+    '한 번 확인하고 끝나는 일회성 참조',
+    '계층 관계, 업무 선행 관계 또는 외부 전달물·결정 대기 관계',
+  ]),
+  policySelection: Object.freeze({
+    'reuse-first': 'source의 확정 결론을 target 작업에서 우선 재사용해야 할 때 선택',
+    'inspect-if-insufficient': 'target의 현재 정보가 부족할 때만 source를 참고하면 될 때 선택',
+  }),
+  reporting: Object.freeze({
+    connected: '자동 연결한 source, target, policy와 실제 사용 근거를 최종 보고에 포함',
+    proposed: '자동 연결하지 않은 후보는 source, target, 제안 policy, 보류 이유를 최종 보고에 포함',
+    skipped: '이번 작업에서 다른 MindNProgress 카드를 실제 근거로 사용하지 않았다면 지식선 검색과 보고를 생략',
+  }),
+})
+
+const serverInstructions = `MindNProgress는 마인드맵과 업무 진행 관리를 결합한 웹 서비스입니다. MindNProgress 밖에서 시작해 문서 ID나 카드 ID가 없다면 mindnprogress_read_me_first를 먼저 호출하세요. 선택 문서와 카드가 있다면 mindnprogress_get_context로 제품 규칙과 최신 문서 구조를 먼저 확인하세요. MCP 도구에서 카드를 지정할 때는 cardId 계열 인자를 사용하세요. nodeId 계열 인자는 기존 대화 호환용이므로 새 호출에서는 사용하지 마세요. AionUi가 발급한 attributionToken이 없는 외부 MCP 세션은 자신이 현재 AI 종류와 모델을 정확히 알고 있을 때 get_context의 aiType과 aiModel에 함께 전달하고, 알지 못하면 추측하지 마세요. get_context의 selection.taskLinks.startupInspection을 따르세요. mode가 knowledge-guided이면 primary 선행 지식 중 kind=image인 항목은 imageAccess.localPath의 원본을 사용 가능한 로컬 이미지 열람 도구로 직접 확인하고 설명과 댓글을 함께 사용하며, 일반 카드는 sharedKnowledge를 먼저 재사용하고 설명과 댓글로 보완합니다. fallbackSources와 fallbackTargets는 정보가 부족할 때만 선택적으로 조사합니다. mode가 default이고 required가 true이면 targets의 업무 본문, 댓글, 첨부파일 목록과 관련 링크를 조사하세요. 지식선 생성과 제안은 get_context의 guide.knowledgeLinePolicy를 따르세요. 진행 과정과 결과는 댓글에 기록하고, 다른 카드나 후속 세션이 재사용할 현재 유효한 사실·결정·제약·검증 결과만 sharedKnowledge에 남기세요. 진행 기록·도구 로그·중복·폐기 결론은 넣지 말고 같은 주제의 결론은 새 이력으로 덧붙이지 말고 기존 절을 안전하게 교체하세요. 실제로 실행할 카드에 독립적으로 완료 여부를 판정할 구현·검증 조건이 2개 이상이면 결과 중심 체크리스트로 작성하고 진행에 맞춰 갱신하세요. 별도 하위 카드로 추적할 작업은 체크리스트에 중복하지 마세요. AI 댓글은 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 충실히 담은 detail로 작성하며, 요약 때문에 상세를 축약하지 마세요. 외부 전달물이나 결정 대기는 waitingItems로 기록하고 제목에 대기 문구를 붙이지 마세요. 대기를 등록할 때는 [차단], 해제할 때는 [진행] 댓글로 이유와 재개 상태를 기록하세요. 카드 일부 필드만 변경할 때는 mindnprogress_update_card의 data에 변경할 필드만 보내고 현재 카드 전체 데이터를 재전송하지 마세요. 기존 description 또는 sharedKnowledge 내부의 일부만 고칠 때는 조회 결과의 textIntegrity SHA-256과 mindnprogress_patch_card_text를 사용하세요. ${cardTextSafetyInstructions} 과도한 sharedKnowledge를 정리할 때는 후보 목록과 전용 검토 문맥을 조회한 뒤 mindnprogress_apply_shared_knowledge_review로 현재 해시가 일치하는 결과만 원자적으로 저장하세요. 일반 카드에서 생략한 필드와 위치는 보존되지만 완료 상태 또는 진행률 100 적용 시 waitingItems는 자동으로 해제되며, Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 선택 카드 밖의 형제·하위·선행 카드를 함께 수정하기 전에는 mindnprogress_get_ai_work_states로 해당 카드에 다른 AI 작업이 진행 중인지 확인하세요. running 또는 waiting-confirmation인 카드는 사용자 지시 없이 동시에 수정하지 마세요. 등록된 AI 작업공간의 최신 목록·경로·상태가 필요하면 폴더명을 추측하지 말고 mindnprogress_get_ai_workspace_pool을 호출하세요. 작업공간 선택·점유·전환·해제는 MindNProgress만 수행하며 AI가 임의로 worker를 선택하지 않습니다. 사용자가 중지한 위임 대화를 같은 대화에서 직접 이어 실제 위임 작업을 완료했다면 카드 기록과 작업공간 체크포인트를 마친 뒤 최종 답변 직전에 mindnprogress_complete_ai_delegation을 호출하세요. 단순 질의 응답·중간 보고 또는 중단 없이 진행된 최초 위임에는 호출하지 마세요. 지식선만 변경할 때는 전체 문서를 다시 보내지 말고 지식선 전용 도구를 사용하세요. 조회 도구는 문서 version을 변경하지 않지만 카드·관계 편집과 AI 대화 ID 연결은 version을 증가시킬 수 있습니다. 특정 자료가 있다고 가정하지 마세요. 여러 카드로 구성된 새 문서는 mindnprogress_create_mindmap으로 한 번에 생성하고, 변경 후에는 최신 문서를 다시 조회해 결과를 검증하세요. 비밀번호 변경과 계정 관리 작업은 지원하지 않습니다.`
 const productGuide = {
-  version: '4.7',
+  version: '4.8',
   product: {
     name: 'MindNProgress',
     purpose: '아이디어를 계층형 마인드맵으로 구조화하고 실행 업무의 진행 상황을 같은 문서에서 관리하는 웹 서비스',
@@ -141,6 +174,7 @@ const productGuide = {
       waitingItems: '서버·아트·기획 등 외부 전달물이나 결정 대기 목록. label은 자유 입력하며 note, resumeCondition, since를 함께 기록할 수 있음. 상태와 진행률에는 영향을 주지 않음',
     },
   },
+  knowledgeLinePolicy,
   views: {
     mindmap: '모든 카드의 계층과 연결 관계를 공간적으로 표시',
     kanban: 'isWork=true인 업무 카드를 상태별로 표시',
@@ -167,7 +201,6 @@ const productGuide = {
     '실제로 실행할 카드에 독립적으로 완료 여부를 판정할 구현·검증 조건이 2개 이상이면 결과 중심 체크리스트로 작성하고 진행에 맞춰 갱신함. 별도 하위 카드로 추적할 작업은 중복하지 않으며 단일 작업, 탐색 중인 아이디어 또는 아직 완료 조건을 확정할 수 없는 카드에는 억지로 만들지 않음',
     '다른 카드나 후속 세션이 재사용할 현재 유효한 사실·결정·제약·검증 결과와 적용 조건만 sharedKnowledge에 요약하고 진행 과정은 댓글에 기록',
     '새 재사용 정보나 기존 결론의 변경이 없으면 sharedKnowledge를 수정하지 않으며, 같은 주제의 결론이 바뀌면 이력을 덧붙이지 않고 기존 절만 안전하게 교체',
-    '하위 카드가 다른 카드의 확정된 결과를 직접 작업 근거로 사용하면 주요 지식선을 연결하고, 정보가 부족할 때만 볼 참고 자료는 보조 지식선으로 연결함. 단순 관련성이나 일회성 참조에는 연결하지 않음',
     'sharedKnowledge를 수정할 때 기존 description의 사용자 요청과 배경을 임의로 덮어쓰지 않음',
     '존재하지 않는 담당자, 불필요한 업무 링크와 임의의 선행 관계를 만들지 않음',
     '문서 내부 선행 업무는 blockedBy, 외부 전달물·결정 대기는 waitingItems로 구분하고 제목에 “(서버 대기)” 같은 문구를 붙이지 않음',
@@ -1269,7 +1302,7 @@ async function main() {
         ...(full ? {} : { commentsPage: focusedSelectedComments.commentsPage }),
       },
       teamMembers: full ? (usersResult.users ?? []) : (usersResult.users ?? []).map(compactTeamMember),
-      nextStep: '사용자 요청을 수행한 뒤 의미 있는 진행과 결과는 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 담은 detail 댓글로 기록하고, 재사용할 결론은 sharedKnowledge에 요약한 다음 mindnprogress_get_document로 결과를 다시 확인하세요. 외부 전달물이나 결정 때문에 멈추면 제목을 바꾸지 말고 waitingItems와 [차단] 댓글을 추가하며, 재개할 때 해당 항목을 제거하고 [진행] 댓글을 남기세요.',
+      nextStep: '사용자 요청을 수행한 뒤 의미 있는 진행과 결과는 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 담은 detail 댓글로 기록하고, 재사용할 결론은 sharedKnowledge에 요약한 다음 mindnprogress_get_document로 결과를 다시 확인하세요. 작업 중 선택 카드 이외의 MindNProgress 카드를 실제 근거로 사용했다면 guide.knowledgeLinePolicy에 따라 작업 종료 전에 연결 또는 제안 여부를 판단하세요. 외부 전달물이나 결정 때문에 멈추면 제목을 바꾸지 말고 waitingItems와 [차단] 댓글을 추가하며, 재개할 때 해당 항목을 제거하고 [진행] 댓글을 남기세요.',
     }
   })
 
@@ -1884,7 +1917,7 @@ async function main() {
     }
   })
 
-  registerTool(server, 'mindnprogress_add_knowledge_line', 'source 카드의 결과를 target 카드가 선행 지식으로 사용하도록 지식선을 추가합니다. 전체 문서를 전달하지 않고 최신 버전에 관계만 안전하게 반영하며 순환과 중복 연결을 거부합니다.', {
+  registerTool(server, 'mindnprogress_add_knowledge_line', 'source 카드의 결과를 target 카드가 선행 지식으로 사용하도록 지식선을 추가합니다. 호출 전 mindnprogress_get_context의 guide.knowledgeLinePolicy를 따르세요. 전체 문서를 전달하지 않고 최신 버전에 관계만 안전하게 반영하며 순환과 중복 연결을 거부합니다.', {
     mapId: z.string().min(1),
     sourceCardId: z.string().min(1).describe('선행 지식을 제공하는 카드 ID'),
     targetCardId: z.string().min(1).describe('선행 지식을 사용하는 카드 ID'),
