@@ -101,9 +101,9 @@ const cardTextSafetyRules = Object.freeze([
 ])
 const cardTextSafetyInstructions = cardTextSafetyRules.join(' ')
 
-const serverInstructions = `MindNProgress는 마인드맵과 업무 진행 관리를 결합한 웹 서비스입니다. MindNProgress 밖에서 시작해 문서 ID나 카드 ID가 없다면 mindnprogress_read_me_first를 먼저 호출하세요. 선택 문서와 카드가 있다면 mindnprogress_get_context로 제품 규칙과 최신 문서 구조를 먼저 확인하세요. MCP 도구에서 카드를 지정할 때는 cardId 계열 인자를 사용하세요. nodeId 계열 인자는 기존 대화 호환용이므로 새 호출에서는 사용하지 마세요. AionUi가 발급한 attributionToken이 없는 외부 MCP 세션은 자신이 현재 AI 종류와 모델을 정확히 알고 있을 때 get_context의 aiType과 aiModel에 함께 전달하고, 알지 못하면 추측하지 마세요. get_context의 selection.taskLinks.startupInspection을 따르세요. mode가 knowledge-guided이면 primary 선행 지식 중 kind=image인 항목은 imageAccess.localPath의 원본을 사용 가능한 로컬 이미지 열람 도구로 직접 확인하고 설명과 댓글을 함께 사용하며, 일반 카드는 sharedKnowledge를 먼저 재사용하고 설명과 댓글로 보완합니다. fallbackSources와 fallbackTargets는 정보가 부족할 때만 선택적으로 조사합니다. mode가 default이고 required가 true이면 targets의 업무 본문, 댓글, 첨부파일 목록과 관련 링크를 조사하세요. 진행 과정과 결과는 댓글에 기록하고, 다른 카드나 후속 세션이 재사용할 현재 유효한 사실·결정·제약·검증 결과만 sharedKnowledge에 남기세요. 진행 기록·도구 로그·중복·폐기 결론은 넣지 말고 같은 주제의 결론은 새 이력으로 덧붙이지 말고 기존 절을 안전하게 교체하세요. AI 댓글은 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 충실히 담은 detail로 작성하며, 요약 때문에 상세를 축약하지 마세요. 외부 전달물이나 결정 대기는 waitingItems로 기록하고 제목에 대기 문구를 붙이지 마세요. 대기를 등록할 때는 [차단], 해제할 때는 [진행] 댓글로 이유와 재개 상태를 기록하세요. 카드 일부 필드만 변경할 때는 mindnprogress_update_card의 data에 변경할 필드만 보내고 현재 카드 전체 데이터를 재전송하지 마세요. 기존 description 또는 sharedKnowledge 내부의 일부만 고칠 때는 조회 결과의 textIntegrity SHA-256과 mindnprogress_patch_card_text를 사용하세요. ${cardTextSafetyInstructions} 과도한 sharedKnowledge를 정리할 때는 후보 목록과 전용 검토 문맥을 조회한 뒤 mindnprogress_apply_shared_knowledge_review로 현재 해시가 일치하는 결과만 원자적으로 저장하세요. 일반 카드에서 생략한 필드와 위치는 보존되지만 완료 상태 또는 진행률 100 적용 시 waitingItems는 자동으로 해제되며, Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 선택 카드 밖의 형제·하위·선행 카드를 함께 수정하기 전에는 mindnprogress_get_ai_work_states로 해당 카드에 다른 AI 작업이 진행 중인지 확인하세요. running 또는 waiting-confirmation인 카드는 사용자 지시 없이 동시에 수정하지 마세요. 등록된 AI 작업공간의 최신 목록·경로·상태가 필요하면 폴더명을 추측하지 말고 mindnprogress_get_ai_workspace_pool을 호출하세요. 작업공간 선택·점유·전환·해제는 MindNProgress만 수행하며 AI가 임의로 worker를 선택하지 않습니다. 사용자가 중지한 위임 대화를 같은 대화에서 직접 이어 실제 위임 작업을 완료했다면 카드 기록과 작업공간 체크포인트를 마친 뒤 최종 답변 직전에 mindnprogress_complete_ai_delegation을 호출하세요. 단순 질의 응답·중간 보고 또는 중단 없이 진행된 최초 위임에는 호출하지 마세요. 지식선만 변경할 때는 전체 문서를 다시 보내지 말고 지식선 전용 도구를 사용하세요. 조회 도구는 문서 버전을 변경하지 않지만 카드·관계 편집과 AI 대화 ID 연결은 버전을 증가시킬 수 있습니다. 특정 자료가 있다고 가정하지 마세요. 여러 카드로 구성된 새 문서는 mindnprogress_create_mindmap으로 한 번에 생성하고, 변경 후에는 최신 문서를 다시 조회해 결과를 검증하세요. 비밀번호 변경과 계정 관리 작업은 지원하지 않습니다.`
+const serverInstructions = `MindNProgress는 마인드맵과 업무 진행 관리를 결합한 웹 서비스입니다. MindNProgress 밖에서 시작해 문서 ID나 카드 ID가 없다면 mindnprogress_read_me_first를 먼저 호출하세요. 선택 문서와 카드가 있다면 mindnprogress_get_context로 제품 규칙과 최신 문서 구조를 먼저 확인하세요. MCP 도구에서 카드를 지정할 때는 cardId 계열 인자를 사용하세요. nodeId 계열 인자는 기존 대화 호환용이므로 새 호출에서는 사용하지 마세요. AionUi가 발급한 attributionToken이 없는 외부 MCP 세션은 자신이 현재 AI 종류와 모델을 정확히 알고 있을 때 get_context의 aiType과 aiModel에 함께 전달하고, 알지 못하면 추측하지 마세요. get_context의 selection.taskLinks.startupInspection을 따르세요. mode가 knowledge-guided이면 primary 선행 지식 중 kind=image인 항목은 imageAccess.localPath의 원본을 사용 가능한 로컬 이미지 열람 도구로 직접 확인하고 설명과 댓글을 함께 사용하며, 일반 카드는 sharedKnowledge를 먼저 재사용하고 설명과 댓글로 보완합니다. fallbackSources와 fallbackTargets는 정보가 부족할 때만 선택적으로 조사합니다. mode가 default이고 required가 true이면 targets의 업무 본문, 댓글, 첨부파일 목록과 관련 링크를 조사하세요. 진행 과정과 결과는 댓글에 기록하고, 다른 카드나 후속 세션이 재사용할 현재 유효한 사실·결정·제약·검증 결과만 sharedKnowledge에 남기세요. 진행 기록·도구 로그·중복·폐기 결론은 넣지 말고 같은 주제의 결론은 새 이력으로 덧붙이지 말고 기존 절을 안전하게 교체하세요. 실제로 실행할 카드에 독립적으로 완료 여부를 판정할 구현·검증 조건이 2개 이상이면 결과 중심 체크리스트로 작성하고 진행에 맞춰 갱신하세요. 별도 하위 카드로 추적할 작업은 체크리스트에 중복하지 마세요. AI 댓글은 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 충실히 담은 detail로 작성하며, 요약 때문에 상세를 축약하지 마세요. 외부 전달물이나 결정 대기는 waitingItems로 기록하고 제목에 대기 문구를 붙이지 마세요. 대기를 등록할 때는 [차단], 해제할 때는 [진행] 댓글로 이유와 재개 상태를 기록하세요. 카드 일부 필드만 변경할 때는 mindnprogress_update_card의 data에 변경할 필드만 보내고 현재 카드 전체 데이터를 재전송하지 마세요. 기존 description 또는 sharedKnowledge 내부의 일부만 고칠 때는 조회 결과의 textIntegrity SHA-256과 mindnprogress_patch_card_text를 사용하세요. ${cardTextSafetyInstructions} 과도한 sharedKnowledge를 정리할 때는 후보 목록과 전용 검토 문맥을 조회한 뒤 mindnprogress_apply_shared_knowledge_review로 현재 해시가 일치하는 결과만 원자적으로 저장하세요. 일반 카드에서 생략한 필드와 위치는 보존되지만 완료 상태 또는 진행률 100 적용 시 waitingItems는 자동으로 해제되며, Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 선택 카드 밖의 형제·하위·선행 카드를 함께 수정하기 전에는 mindnprogress_get_ai_work_states로 해당 카드에 다른 AI 작업이 진행 중인지 확인하세요. running 또는 waiting-confirmation인 카드는 사용자 지시 없이 동시에 수정하지 마세요. 등록된 AI 작업공간의 최신 목록·경로·상태가 필요하면 폴더명을 추측하지 말고 mindnprogress_get_ai_workspace_pool을 호출하세요. 작업공간 선택·점유·전환·해제는 MindNProgress만 수행하며 AI가 임의로 worker를 선택하지 않습니다. 사용자가 중지한 위임 대화를 같은 대화에서 직접 이어 실제 위임 작업을 완료했다면 카드 기록과 작업공간 체크포인트를 마친 뒤 최종 답변 직전에 mindnprogress_complete_ai_delegation을 호출하세요. 단순 질의 응답·중간 보고 또는 중단 없이 진행된 최초 위임에는 호출하지 마세요. 지식선만 변경할 때는 전체 문서를 다시 보내지 말고 지식선 전용 도구를 사용하세요. 조회 도구는 문서 버전을 변경하지 않지만 카드·관계 편집과 AI 대화 ID 연결은 버전을 증가시킬 수 있습니다. 특정 자료가 있다고 가정하지 마세요. 여러 카드로 구성된 새 문서는 mindnprogress_create_mindmap으로 한 번에 생성하고, 변경 후에는 최신 문서를 다시 조회해 결과를 검증하세요. 비밀번호 변경과 계정 관리 작업은 지원하지 않습니다.`
 const productGuide = {
-  version: '4.6',
+  version: '4.7',
   product: {
     name: 'MindNProgress',
     purpose: '아이디어를 계층형 마인드맵으로 구조화하고 실행 업무의 진행 상황을 같은 문서에서 관리하는 웹 서비스',
@@ -136,7 +136,7 @@ const productGuide = {
       dueDate: '마감일. 없는 업무는 생략',
       taskUrl: '관련 업무나 외부 자료를 가리키는 범용 링크. Dooray 형식은 전용 카드 표현과 메타데이터를 사용하고 그 밖의 URL도 그대로 유지하며, 링크가 없는 경우 생략',
       taskUrlContext: 'AI 대화 문맥에서는 선택 카드와 해당 계층의 최상위 카드 링크를 별도로 제공하며, 하위 카드에 링크를 상속하거나 덮어쓰지 않음',
-      checklist: '세부 실행 항목. 체크 상태에 따라 진행률을 계산할 수 있음',
+      checklist: '해당 카드 안에서 완료할 결과 중심 구현·검증 항목. 비어 있지 않은 체크리스트를 저장하면 완료 비율로 진행률과 상태를 자동 계산하며, 별도 하위 카드로 추적할 작업은 중복하지 않음',
       blockedBy: '현재 업무보다 먼저 완료되어야 하는 카드 ID 목록. 계층 관계를 표현하는 용도로 사용하지 않음',
       waitingItems: '서버·아트·기획 등 외부 전달물이나 결정 대기 목록. label은 자유 입력하며 note, resumeCondition, since를 함께 기록할 수 있음. 상태와 진행률에는 영향을 주지 않음',
     },
@@ -164,6 +164,7 @@ const productGuide = {
     '실행 가능한 단위는 task로 만들고 실제 추적 대상이면 isWork=true로 지정',
     '계층 깊이는 보통 2~4단계로 유지하고 중복되는 카드는 합침',
     '제목은 짧고 명확하게, description에는 목적·범위·요구사항·완료 조건을 기록',
+    '실제로 실행할 카드에 독립적으로 완료 여부를 판정할 구현·검증 조건이 2개 이상이면 결과 중심 체크리스트로 작성하고 진행에 맞춰 갱신함. 별도 하위 카드로 추적할 작업은 중복하지 않으며 단일 작업, 탐색 중인 아이디어 또는 아직 완료 조건을 확정할 수 없는 카드에는 억지로 만들지 않음',
     '다른 카드나 후속 세션이 재사용할 현재 유효한 사실·결정·제약·검증 결과와 적용 조건만 sharedKnowledge에 요약하고 진행 과정은 댓글에 기록',
     '새 재사용 정보나 기존 결론의 변경이 없으면 sharedKnowledge를 수정하지 않으며, 같은 주제의 결론이 바뀌면 이력을 덧붙이지 않고 기존 절만 안전하게 교체',
     '하위 카드가 다른 카드의 확정된 결과를 직접 작업 근거로 사용하면 주요 지식선을 연결하고, 정보가 부족할 때만 볼 참고 자료는 보조 지식선으로 연결함. 단순 관련성이나 일회성 참조에는 연결하지 않음',
@@ -191,7 +192,7 @@ const productGuide = {
     '선택 카드 밖의 형제·하위·선행 카드를 함께 수정하기 전에는 mindnprogress_get_ai_work_states로 해당 카드의 AI 작업 상태를 확인하고, running 또는 waiting-confirmation인 카드는 사용자 지시 없이 동시에 수정하지 않음',
     '등록된 AI 작업공간의 최신 목록·경로·상태는 폴더명이나 과거 대화로 추측하지 않고 mindnprogress_get_ai_workspace_pool로 조회함. 작업공간 선택·점유·전환·해제는 MindNProgress만 수행하며 AI가 임의로 worker를 사용하지 않음',
     '하위 카드의 기존 AI 대화를 이어갈지 새로 시작할지 판단할 때는 mindnprogress_list_ai_conversations로 후보를 먼저 비교하고, 같은 업무 흐름이며 idle이고 실행 환경이 호환되는 대화를 우선 이어감. 목적·모델·작업공간이 다르거나 문맥이 독립되어야 할 때만 새 대화를 선택',
-    '복수의 독립적인 완료 조건이 있는 업무를 위임할 때 상위 AI가 위임 전에 필요한 최소한의 결과 중심 체크리스트를 작성함. 누락된 경우 하위 AI가 실제 작업 전에 작성하고 진행에 맞춰 갱신하며, 개수를 맞추기 위해 억지로 나누지 않고 단순 업무나 아직 위임하지 않은 계획 카드에는 생략 가능',
+    '복수의 독립적인 완료 조건이 있는 업무를 위임할 때 상위 AI가 위임 전에 필요한 최소한의 결과 중심 체크리스트를 확인함. 누락된 경우 하위 AI가 실제 작업 전에 작성하고 진행에 맞춰 갱신하며, 개수를 맞추기 위해 억지로 나누거나 별도 하위 카드의 작업을 중복하지 않음',
     'mindnprogress_delegate_ai_work의 위임 기준은 AionUi 대화 ID에 영속 기록된 시작 카드로 고정되며, MCP 재연결·프로세스 재생성이나 다른 카드의 get_context 추가 조회에도 바뀌지 않음. 직계 자식뿐 아니라 모든 깊이의 계층상 하위 카드에 위임 가능',
     'AI 위임이 recovery-required 또는 integration-recovery-required이면 AionCore 재시작, 재시도 가능한 연결 끊김 또는 필수 체크포인트·통합 실패로 이전 실행을 명시적으로 이어야 하는 상태임. 원 지시를 자동 반복하거나 새 위임을 만들지 말고 mindnprogress_recover_ai_delegation으로 기존 대화와 작업공간을 재개함',
     '사용자가 중지한 하위 위임을 같은 AI 대화에서 직접 이어 실제 작업을 완료했다면 카드 결과와 필요한 작업공간 체크포인트까지 마친 마지막 턴에서 최종 답변 직전에 mindnprogress_complete_ai_delegation을 호출함. 단순 질의 응답·중간 보고에는 호출하지 않으며, 중단 없이 끝난 최초 위임에는 필요하지 않음. mindnprogress_recover_ai_delegation으로 시작한 복구 operation도 다시 중지된 경우에만 같은 규칙을 적용함',
@@ -729,7 +730,11 @@ const nodeDataSchema = z.object({
   isWork: z.boolean().optional(),
   assigneeId: z.string().optional(),
   dueDate: z.string().optional(),
-  checklist: z.array(z.object({ id: z.string(), text: z.string(), done: z.boolean() })).optional(),
+  checklist: z.array(z.object({
+    id: z.string().describe('카드 안에서 유지할 고유한 체크리스트 항목 ID. 기존 항목을 갱신할 때는 조회한 ID를 보존'),
+    text: z.string().describe('완료 여부를 객관적으로 판정할 수 있는 결과 중심 구현·검증 항목'),
+    done: z.boolean().describe('항목 완료 여부'),
+  })).optional().describe('체크리스트 전체 배열. 이 필드를 보내면 기존 배열을 통째로 교체하며, 항목이 하나 이상이면 완료 비율로 progress와 status를 자동 계산'),
   blockedBy: z.array(z.string()).optional(),
   waitingItems: z.array(waitingItemSchema).max(20).optional(),
 }).passthrough()
@@ -782,6 +787,16 @@ function normalizeWaitingItems(items) {
     id: item.id || `wait-${randomBytes(8).toString('hex')}`,
     since: item.since || now,
   }))
+}
+
+function checklistProgressPatch(checklist) {
+  if (!Array.isArray(checklist) || checklist.length === 0) return {}
+  const completedCount = checklist.filter((item) => item.done).length
+  const progress = Math.round((completedCount / checklist.length) * 100)
+  return {
+    progress,
+    status: progress >= 100 ? 'done' : progress > 0 ? 'in-progress' : 'planned',
+  }
 }
 
 function buildMapFromOutline(cards) {
@@ -838,7 +853,9 @@ function buildMapFromOutline(cards) {
   const nodes = cards.map((card) => {
     const hasChildren = childrenByKey.get(card.key).length > 0
     const kind = card.parentKey ? (card.kind ?? (hasChildren ? 'branch' : 'task')) : 'root'
-    const status = card.status ?? (card.progress >= 100 ? 'done' : card.progress > 0 ? 'in-progress' : 'planned')
+    const checklistState = checklistProgressPatch(card.checklist)
+    const progress = checklistState.progress ?? card.progress
+    const status = checklistState.status ?? card.status ?? (progress >= 100 ? 'done' : progress > 0 ? 'in-progress' : 'planned')
     const position = positions.get(card.key)
     return {
       id: card.key,
@@ -848,7 +865,7 @@ function buildMapFromOutline(cards) {
         label: card.label,
         description: card.description,
         sharedKnowledge: card.sharedKnowledge,
-        progress: card.progress,
+        progress,
         status,
         kind,
         ...(card.taskUrl ? { taskUrl: card.taskUrl } : {}),
@@ -1484,7 +1501,7 @@ async function main() {
     return result.context
   })
 
-  registerTool(server, 'mindnprogress_create_mindmap', '새 문서와 완성된 계층형 마인드맵을 한 번에 원자적으로 생성합니다. 여러 카드를 만들 때는 create_document 후 save_document를 호출하지 말고 반드시 이 도구를 우선 사용하세요. 카드 위치와 연결선은 자동 배치됩니다.', {
+  registerTool(server, 'mindnprogress_create_mindmap', '새 문서와 완성된 계층형 마인드맵을 한 번에 원자적으로 생성합니다. 여러 카드를 만들 때는 create_document 후 save_document를 호출하지 말고 반드시 이 도구를 우선 사용하세요. 실제로 실행할 카드에 독립적으로 판정할 구현·검증 조건이 2개 이상이면 결과 중심 checklist를 작성하되 별도 하위 카드와 중복하지 마세요. 비어 있지 않은 checklist를 보내면 완료 비율로 progress와 status를 자동 계산합니다. 카드 위치와 연결선은 자동 배치됩니다.', {
     title: z.string().min(1).max(120),
     color: documentColor.default('violet'),
     cards: z.array(outlineCardSchema).min(1).max(300).describe('루트부터 하위 카드까지 포함한 전체 카드 목록'),
@@ -1540,7 +1557,7 @@ async function main() {
     body: JSON.stringify({ map: { nodes, edges }, baseVersion, force }),
   }))
 
-  registerTool(server, 'mindnprogress_add_card', '문서에 새 카드 또는 하위 카드를 추가합니다. 외부 전달물이나 결정 대기는 제목이 아니라 waitingItems로 기록합니다. 기본 affected 응답은 추가한 카드와 문서 요약만 반환하며, full은 변경 전과 같은 API 원본 전체 문서를 반환합니다.', {
+  registerTool(server, 'mindnprogress_add_card', '문서에 새 카드 또는 하위 카드를 추가합니다. 실제로 실행할 카드에 독립적으로 판정할 구현·검증 조건이 2개 이상이면 결과 중심 checklist를 작성하되 별도 하위 카드의 작업은 중복하지 마세요. 비어 있지 않은 checklist를 보내면 완료 비율로 progress와 status를 자동 계산합니다. 외부 전달물이나 결정 대기는 제목이 아니라 waitingItems로 기록합니다. 기본 affected 응답은 추가한 카드와 문서 요약만 반환하며, full은 변경 전과 같은 API 원본 전체 문서를 반환합니다.', {
     mapId: z.string().min(1),
     parentCardId: z.string().min(1).optional().describe('새 카드를 추가할 상위 카드 ID. 최상위 카드를 추가할 때는 생략'),
     parentId: z.string().min(1).optional().describe('기존 대화 호환용 상위 카드 ID. 새 호출에서는 parentCardId 사용'),
@@ -1562,6 +1579,8 @@ async function main() {
       : [])
     const siblingPositions = map.nodes.filter((node) => siblingIds.has(node.id)).map((node) => node.position)
     const nodeId = `node-${Date.now().toString(36)}-${randomBytes(3).toString('hex')}`
+    const checklistState = checklistProgressPatch(data.checklist)
+    const normalizedData = { ...data, ...checklistState }
     const node = {
       id: nodeId,
       type: 'mind',
@@ -1573,8 +1592,8 @@ async function main() {
         )
         : snapMindMapPosition({ x: 0, y: map.nodes.length * mindMapWorkNodeVerticalStep })),
       data: {
-        ...data,
-        waitingItems: data.status === 'done' || data.progress >= 100 ? [] : normalizeWaitingItems(data.waitingItems),
+        ...normalizedData,
+        waitingItems: normalizedData.status === 'done' || normalizedData.progress >= 100 ? [] : normalizeWaitingItems(normalizedData.waitingItems),
       },
     }
     map.nodes.push(node)
@@ -1613,11 +1632,11 @@ async function main() {
     }
   })
 
-  registerTool(server, 'mindnprogress_update_card', '카드의 일부 필드만 부분 병합 방식으로 변경합니다. data에 포함한 필드만 변경되고 일반 카드에서 생략한 필드와 position은 보존되므로 현재 카드 전체 데이터를 재전송하지 마세요. 기존 description 또는 sharedKnowledge 내부의 일부만 고칠 때는 이 도구로 필드 전체를 보내지 말고 mindnprogress_patch_card_text를 사용하세요. 빈 문자열과 빈 배열은 해당 필드를 명시적으로 초기화합니다. 단, status=done 또는 progress>=100이면 waitingItems가 자동으로 비워지며 Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 최상위 카드와 하위 업무가 있는 일반 isWork=false 묶음 카드의 progress·status는 서버가 다시 계산합니다. description은 업무 요청과 배경에 사용합니다. sharedKnowledge는 다른 카드가 재사용할 현재 유효한 결론에만 사용하고 진행 기록·도구 로그·중복·폐기 결론은 댓글로 분리하세요. responseMode는 full이 기본값이며 연속 작업용 전체 카드 본문과 관계를 반환합니다. 단일 카드와 서버가 함께 조정한 카드만 필요하면 affected를 사용하세요.', {
+  registerTool(server, 'mindnprogress_update_card', '카드의 일부 필드만 부분 병합 방식으로 변경합니다. data에 포함한 필드만 변경되고 일반 카드에서 생략한 필드와 position은 보존되므로 현재 카드 전체 데이터를 재전송하지 마세요. 실제로 실행할 카드에 독립적으로 판정할 구현·검증 조건이 2개 이상이면 결과 중심 checklist를 작성하되 별도 하위 카드의 작업은 중복하지 마세요. checklist는 기존 항목 ID를 보존한 전체 배열로 보내며, 항목이 하나 이상이면 완료 비율로 progress와 status를 자동 계산합니다. 기존 description 또는 sharedKnowledge 내부의 일부만 고칠 때는 이 도구로 필드 전체를 보내지 말고 mindnprogress_patch_card_text를 사용하세요. 빈 문자열과 빈 배열은 해당 필드를 명시적으로 초기화합니다. 단, status=done 또는 progress>=100이면 waitingItems가 자동으로 비워지며 Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 최상위 카드와 하위 업무가 있는 일반 isWork=false 묶음 카드의 progress·status는 서버가 다시 계산합니다. description은 업무 요청과 배경에 사용합니다. sharedKnowledge는 다른 카드가 재사용할 현재 유효한 결론에만 사용하고 진행 기록·도구 로그·중복·폐기 결론은 댓글로 분리하세요. responseMode는 full이 기본값이며 연속 작업용 전체 카드 본문과 관계를 반환합니다. 단일 카드와 서버가 함께 조정한 카드만 필요하면 affected를 사용하세요.', {
     mapId: z.string().min(1),
     cardId: z.string().min(1).optional().describe('수정할 카드 ID. 새 호출에서는 이 필드를 사용'),
     nodeId: z.string().min(1).optional().describe('기존 대화 호환용 카드 ID. 새 호출에서는 cardId 사용'),
-    data: nodeDataSchema.partial().describe('변경할 카드 필드만 포함하는 부분 병합 데이터. 일반 카드에서 생략한 필드는 보존되므로 현재 카드 전체 데이터를 재전송하지 않습니다. 빈 문자열과 빈 배열은 명시적 초기화이며, 완료 상태 또는 진행률 100 적용 시 waitingItems는 자동으로 비워지고 Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 자동 집계 대상 카드의 progress와 status는 저장 시 서버가 다시 계산합니다.'),
+    data: nodeDataSchema.partial().describe('변경할 카드 필드만 포함하는 부분 병합 데이터. 일반 카드에서 생략한 필드는 보존되므로 현재 카드 전체 데이터를 재전송하지 않습니다. checklist는 전체 배열을 교체하며 항목이 하나 이상이면 완료 비율로 progress와 status를 자동 계산합니다. 빈 문자열과 빈 배열은 명시적 초기화이며, 완료 상태 또는 진행률 100 적용 시 waitingItems는 자동으로 비워지고 Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 자동 집계 대상 카드의 progress와 status는 저장 시 서버가 다시 계산합니다.'),
     position: z.object({ x: z.number(), y: z.number() }).optional(),
     responseMode: z.enum(['full', 'affected']).default('full').describe('full은 저활용 필드를 제외한 최신 전체 문서를 반환하며 기본값입니다. affected는 직접 수정 카드와 서버가 함께 조정한 카드 및 문서·Root 요약만 반환합니다.'),
   }, async ({ mapId, cardId, nodeId, data, position, responseMode }) => {
@@ -1629,9 +1648,11 @@ async function main() {
     const node = map.nodes.find((item) => item.id === resolvedCardId)
     if (!node) throw new Error('카드를 찾을 수 없습니다.')
     const previousMap = responseMode === 'affected' ? structuredClone(map) : null
+    const checklistState = checklistProgressPatch(data.checklist)
     const nextData = {
       ...node.data,
       ...data,
+      ...checklistState,
       ...(data.waitingItems === undefined ? {} : { waitingItems: normalizeWaitingItems(data.waitingItems) }),
     }
     node.data = nextData.status === 'done' || nextData.progress >= 100
@@ -1642,7 +1663,7 @@ async function main() {
     const savedMap = saved.map
     const savedCard = savedMap.nodes.find((item) => item.id === resolvedCardId)
     if (!savedCard) throw new Error('저장 후 카드를 찾을 수 없습니다.')
-    const changedFields = [...Object.keys(data), ...(position ? ['position'] : [])]
+    const changedFields = [...new Set([...Object.keys(data), ...Object.keys(checklistState), ...(position ? ['position'] : [])])]
     if (responseMode === 'full') {
       return {
         responseMode,

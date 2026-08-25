@@ -402,7 +402,7 @@ async function main() {
 
     const guide = await invoke('mindnprogress_read_me_first')
     assert.equal(guide.guide.product.name, 'MindNProgress')
-    assert.equal(guide.guide.version, '4.6')
+    assert.equal(guide.guide.version, '4.7')
     assert.match(guide.guide.operationRules.join('\n'), /mindnprogress_complete_ai_delegation/)
     assert.match(guide.guide.operationRules.join('\n'), /중지된 위임을 resume하면 같은 AI 대화와 기존 worker lease/)
     assert.match(guide.guide.dataModel.cardContent.sharedKnowledge, /재사용/)
@@ -415,6 +415,7 @@ async function main() {
     assert.match(guide.guide.authoringRules.join('\n'), /모든 실제 isWork=true 후손.*동일 가중치.*중간 묶음의 요약값은 상위 집계에 다시 포함하지 않음/)
     assert.match(guide.guide.authoringRules.join('\n'), /이미지·Ref·Dooray 지식 카드.*자동 집계하지 않음/)
     assert.match(guide.guide.authoringRules.join('\n'), /확정된 결과를 직접 작업 근거.*주요 지식선.*단순 관련성이나 일회성 참조에는 연결하지 않음/)
+    assert.match(guide.guide.authoringRules.join('\n'), /실제로 실행할 카드.*구현·검증 조건이 2개 이상.*결과 중심 체크리스트.*별도 하위 카드.*중복하지 않/)
     assert.match(guide.guide.operationRules.join('\n'), /변경할 필드만 보내고/)
     assert.match(guide.guide.operationRules.join('\n'), /textIntegrity SHA-256.*mindnprogress_patch_card_text.*필드 전체를 다시 생성하지 않음/)
     assert.ok(guide.guide.operationRules.join('\n').includes('\\uXXXX'))
@@ -431,7 +432,9 @@ async function main() {
     assert.match(guide.guide.operationRules.join('\n'), /파일 변경이 없는 조사·검증 작업.*mindnprogress_confirm_ai_workspace_no_changes/)
     assert.match(guide.guide.operationRules.join('\n'), /commitMessage.*summary.*background.*cause.*changes/)
     assert.match(guide.guide.operationRules.join('\n'), /기존 AI 대화를 이어갈지 새로 시작할지.*mindnprogress_list_ai_conversations/)
-    assert.match(guide.guide.operationRules.join('\n'), /복수의 독립적인 완료 조건.*필요한 최소한의 결과 중심 체크리스트.*억지로 나누지 않고.*계획 카드에는 생략 가능/)
+    assert.match(guide.guide.operationRules.join('\n'), /복수의 독립적인 완료 조건.*필요한 최소한의 결과 중심 체크리스트.*억지로 나누거나.*별도 하위 카드.*중복하지 않/)
+    assert.match(toolDescription('mindnprogress_update_card'), /checklist.*완료 비율로 progress와 status를 자동 계산/)
+    assert.match(toolSchema('mindnprogress_update_card')?.properties?.data?.properties?.checklist?.description ?? '', /전체 배열.*완료 비율로 progress와 status를 자동 계산/)
     assert.match(guide.guide.operationRules.join('\n'), /위임 기준.*AionUi 대화 ID.*MCP 재연결.*모든 깊이/)
     assert.match(guide.guide.operationRules.join('\n'), /자동 재개된 턴.*mindnprogress_delegate_ai_work.*미래형 약속/)
     assert.match(guide.guide.operationRules.join('\n'), /recovery-required.*mindnprogress_recover_ai_delegation/)
@@ -1669,8 +1672,6 @@ async function main() {
         description: '부분 병합 보존 설명',
         kind: 'task',
         isWork: true,
-        status: 'in-progress',
-        progress: 40,
         taskUrl: 'https://example.com/partial-merge',
         assigneeId: attribution.editorId,
         dueDate: '2026-07-30',
@@ -1682,14 +1683,18 @@ async function main() {
     })
     const waitingCard = waitingCardResult.card
     assert.equal(waitingCard.data.label, '추가 카드')
+    assert.equal(waitingCard.data.progress, 0)
+    assert.equal(waitingCard.data.status, 'planned')
     assert.equal(waitingCard.data.waitingItems[0].label, '캐릭터 아트 전달')
     assert.ok(waitingCard.data.waitingItems[0].id)
     assert.ok(waitingCard.data.waitingItems[0].since)
-    assert.equal(waitingCardResult.document.rootProgress, 35)
+    assert.equal(waitingCardResult.document.rootProgress, 15)
     assert.equal(waitingCardResult.document.rootStatus, 'in-progress')
-    assert.equal(waitingCardResult.root.progress, 35)
+    assert.equal(waitingCardResult.root.progress, 15)
     assert.equal(waitingCardResult.root.status, 'in-progress')
     assert.equal(waitingCardResult.responseMode, 'affected')
+    assert.ok(waitingCardResult.changedFields.includes('progress'))
+    assert.ok(waitingCardResult.changedFields.includes('status'))
     assert.ok(waitingCardResult.affectedCards.some((item) => item.card.id === addedCard.id && item.reason === 'requested'))
     assert.ok(waitingCardResult.affectedCards.some((item) => item.card.id === 'root' && item.reason === 'root-rollup'))
 
