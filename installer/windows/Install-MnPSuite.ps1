@@ -14,6 +14,7 @@ param(
   [switch]$SkipDependencyInstall,
   [switch]$SkipAionCoreBuild,
   [switch]$IncludeUnityWorkSkill,
+  [switch]$IncludePptxSkill,
   [switch]$CreateDesktopShortcuts,
   [switch]$NoLaunchPrompt,
   [switch]$PlanOnly,
@@ -104,6 +105,73 @@ function Assert-MnPSuiteManagedSkillTarget {
   if ((Test-Path -LiteralPath $destination) -and -not (Test-MnPSuiteManagedSkill $SkillsRoot $Name)) {
     throw "사용자 소유 스킬과 이름이 충돌합니다. 기존 폴더를 보존하기 위해 설치를 중단합니다: $destination"
   }
+}
+
+function Assert-MnPSuiteManagedSkillRemoval {
+  param([string]$SkillsRoot, [string]$Name)
+  if (-not (Test-MnPSuiteManagedSkill $SkillsRoot $Name)) { return }
+
+  $destination = [IO.Path]::GetFullPath((Join-Path $SkillsRoot $Name)).TrimEnd([char[]]'\/')
+  $destinationPrefix = $destination + [IO.Path]::DirectorySeparatorChar
+  $markerPath = Get-MnPSuiteManagedSkillMarker $destination
+  $marker = Read-Utf8File $markerPath | ConvertFrom-Json
+  $trackedFiles = @{}
+  foreach ($file in @($marker.files)) {
+    $relativePath = [string]$file.path
+    if ([string]::IsNullOrWhiteSpace($relativePath) -or [IO.Path]::IsPathRooted($relativePath)) {
+      throw "패키지 관리 스킬 표식의 파일 경로가 안전하지 않습니다: $markerPath ($relativePath)"
+    }
+    $trackedPath = [IO.Path]::GetFullPath((Join-Path $destination $relativePath))
+    if (-not $trackedPath.StartsWith($destinationPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+      throw "패키지 관리 스킬 표식의 파일 경로가 스킬 폴더 밖을 가리킵니다: $markerPath ($relativePath)"
+    }
+    if ($trackedFiles.ContainsKey($trackedPath)) {
+      throw "패키지 관리 스킬 표식에 중복 파일 경로가 있습니다: $markerPath ($relativePath)"
+    }
+    $trackedFiles[$trackedPath] = ([string]$file.sha256).ToLowerInvariant()
+  }
+
+  foreach ($currentFile in Get-ChildItem -LiteralPath $destination -File -Recurse) {
+    if ($currentFile.FullName -eq $markerPath) { continue }
+    if (-not $trackedFiles.ContainsKey($currentFile.FullName)) {
+      throw "패키지 관리 스킬 폴더에 사용자 파일이 있어 자동 제거하지 않습니다: $($currentFile.FullName)"
+    }
+  }
+  foreach ($trackedPath in $trackedFiles.Keys) {
+    if (-not (Test-Path -LiteralPath $trackedPath -PathType Leaf)) {
+      throw "패키지 관리 스킬 파일이 설치 후 삭제되어 자동 제거하지 않습니다: $trackedPath"
+    }
+    $currentHash = (Get-FileHash -LiteralPath $trackedPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($currentHash -ne $trackedFiles[$trackedPath]) {
+      throw "패키지 관리 스킬 파일이 설치 후 수정되어 자동 제거하지 않습니다: $trackedPath"
+    }
+  }
+}
+
+function Remove-MnPSuiteManagedSkill {
+  param([string]$SkillsRoot, [string]$Name)
+  if (-not (Test-MnPSuiteManagedSkill $SkillsRoot $Name)) { return $false }
+
+  Assert-MnPSuiteManagedSkillRemoval $SkillsRoot $Name
+  $destination = [IO.Path]::GetFullPath((Join-Path $SkillsRoot $Name))
+  $markerPath = Get-MnPSuiteManagedSkillMarker $destination
+  foreach ($currentFile in Get-ChildItem -LiteralPath $destination -File -Recurse) {
+    if ($currentFile.FullName -ne $markerPath) {
+      Remove-Item -LiteralPath $currentFile.FullName -Force
+    }
+  }
+  Remove-Item -LiteralPath $markerPath -Force
+
+  $directories = @(Get-ChildItem -LiteralPath $destination -Directory -Recurse | Sort-Object { $_.FullName.Length } -Descending)
+  foreach ($directory in $directories) {
+    if (@([IO.Directory]::EnumerateFileSystemEntries($directory.FullName)).Count -eq 0) {
+      [IO.Directory]::Delete($directory.FullName, $false)
+    }
+  }
+  if (@([IO.Directory]::EnumerateFileSystemEntries($destination)).Count -eq 0) {
+    [IO.Directory]::Delete($destination, $false)
+  }
+  return $true
 }
 
 function Assert-MnPSuiteManagedBlockTarget {
@@ -214,7 +282,7 @@ function Set-MnPSuiteManagedBlock {
 }
 
 function Get-MnPSuiteAgentGuidance {
-  param([bool]$IncludeUnityWork)
+  param([bool]$IncludeUnityWork, [bool]$IncludePptx)
   $sections = @(@'
 ## MindNProgress·Dooray 작업
 
@@ -234,6 +302,16 @@ function Get-MnPSuiteAgentGuidance {
 '@.Trim()
   }
 
+  if ($IncludePptx) {
+    $sections += @'
+## PowerPoint 파일 확인
+
+- pptx·ppt·파워포인트·발표 자료·기획서 슬라이드 내용을 확인하기 전에 `pptx` 스킬을 읽고 따른다.
+- `pptx-mcp`로 모든 슬라이드의 PNG와 텍스트·표 구조를 함께 확인한다. 도구가 없으면 텍스트만으로 내용을 확정하지 말고 필요한 연결을 사용자에게 알린다.
+- 이미지와 추출 구조가 다르면 차이를 기록하고 PowerPoint에서 직접 확인할 필요가 있는지 명시한다.
+'@.Trim()
+  }
+
   return $sections -join "`n`n"
 }
 
@@ -241,10 +319,12 @@ function Assert-MnPSuiteAgentConfigurationTargets {
   param(
     [string]$CodexHome,
     [string]$ClaudeHome,
-    [bool]$IncludeUnityWork
+    [bool]$IncludeUnityWork,
+    [bool]$IncludePptx
   )
   $skillNames = @('mnp-dooray')
   if ($IncludeUnityWork) { $skillNames += 'unity-work' }
+  if ($IncludePptx) { $skillNames += 'pptx' }
   $platforms = @(
     [pscustomobject]@{ Name = 'Codex'; SkillsRoot = (Join-Path $CodexHome 'skills'); Instructions = (Join-Path $CodexHome 'AGENTS.md') },
     [pscustomobject]@{ Name = 'Claude Code'; SkillsRoot = (Join-Path $ClaudeHome 'skills'); Instructions = (Join-Path $ClaudeHome 'CLAUDE.md') }
@@ -256,6 +336,12 @@ function Assert-MnPSuiteAgentConfigurationTargets {
     }
   }
   foreach ($platform in $platforms) {
+    if (-not $IncludeUnityWork -and (Test-MnPSuiteManagedSkill $platform.SkillsRoot 'unity-work')) {
+      Assert-MnPSuiteManagedSkillRemoval $platform.SkillsRoot 'unity-work'
+    }
+    if (-not $IncludePptx -and (Test-MnPSuiteManagedSkill $platform.SkillsRoot 'pptx')) {
+      Assert-MnPSuiteManagedSkillRemoval $platform.SkillsRoot 'pptx'
+    }
     Assert-MnPSuiteManagedBlockTarget $platform.Instructions
   }
 }
@@ -264,16 +350,18 @@ function Install-MnPSuiteAgentConfiguration {
   param(
     [string]$CodexHome,
     [string]$ClaudeHome,
-    [bool]$IncludeUnityWork
+    [bool]$IncludeUnityWork,
+    [bool]$IncludePptx
   )
-  Assert-MnPSuiteAgentConfigurationTargets $CodexHome $ClaudeHome $IncludeUnityWork
+  Assert-MnPSuiteAgentConfigurationTargets $CodexHome $ClaudeHome $IncludeUnityWork $IncludePptx
   $skillNames = @('mnp-dooray')
   if ($IncludeUnityWork) { $skillNames += 'unity-work' }
+  if ($IncludePptx) { $skillNames += 'pptx' }
   $platforms = @(
     [pscustomobject]@{ Name = 'Codex'; SkillsRoot = (Join-Path $CodexHome 'skills'); Instructions = (Join-Path $CodexHome 'AGENTS.md') },
     [pscustomobject]@{ Name = 'Claude Code'; SkillsRoot = (Join-Path $ClaudeHome 'skills'); Instructions = (Join-Path $ClaudeHome 'CLAUDE.md') }
   )
-  $guidance = Get-MnPSuiteAgentGuidance $IncludeUnityWork
+  $guidance = Get-MnPSuiteAgentGuidance $IncludeUnityWork $IncludePptx
   $platformResults = @()
   foreach ($platform in $platforms) {
     $installedSkills = @()
@@ -281,12 +369,20 @@ function Install-MnPSuiteAgentConfiguration {
       $installedSkills += Install-MnPSuiteManagedSkill (Get-MnPSuitePackagedSkillPath $skillName) $platform.SkillsRoot $skillName
     }
     $instructionResult = Set-MnPSuiteManagedBlock $platform.Instructions $guidance
+    $removedSkills = @()
+    if (-not $IncludeUnityWork -and (Remove-MnPSuiteManagedSkill $platform.SkillsRoot 'unity-work')) {
+      $removedSkills += 'unity-work'
+    }
+    if (-not $IncludePptx -and (Remove-MnPSuiteManagedSkill $platform.SkillsRoot 'pptx')) {
+      $removedSkills += 'pptx'
+    }
     $platformResults += [pscustomobject]@{
       Name = $platform.Name
       SkillsRoot = $platform.SkillsRoot
       Instructions = $instructionResult.Path
       InstructionsBackup = $instructionResult.BackupPath
       Skills = $installedSkills
+      RemovedSkills = $removedSkills
     }
   }
   return [pscustomobject]@{
@@ -1082,13 +1178,17 @@ MnP의 `AI 대화 시작` 창을 다시 열면 `MindNProgress · 필수`로 표�
 설치기는 현재 Windows 사용자에게 다음 구성을 적용합니다.
 
 - 필수: `mnp-dooray`
-- 선택: 설치 중 선택한 `unity-work`
+- 선택: 설치 중 각각 선택한 `unity-work`, `pptx`
 - Codex: `.codex\skills`와 `.codex\AGENTS.md`
 - Claude Code: `.claude\skills`와 `.claude\CLAUDE.md`
 
 Claude Code 또는 Codex의 전역 구성 폴더가 아직 없어도 필요한 폴더와 파일을 생성합니다. 기존 전역 지침은 유지하고 MnP Suite 표식 사이의 관리 블록만 추가·갱신합니다. 기존 지침 파일을 실제로 변경하기 직전에 같은 폴더에 `<파일명>.mnp-suite-backup-YYYYMMDD-HHmmssfff.bak` 복사본을 매번 만듭니다. 같은 이름의 사용자 소유 스킬이 있으면 덮어쓰지 않고 설치를 중단합니다. 실제 적용 경로, 선택 스킬과 이번 설치에서 만든 백업 경로는 `installation-manifest.json`에서 확인할 수 있습니다.
 
 전역 지침에 문제가 생기면 Claude Code·Codex 세션을 닫고, 복원할 날짜의 `.bak` 파일을 원래 `AGENTS.md` 또는 `CLAUDE.md` 이름으로 복사한 뒤 새 세션을 시작하세요. `.bak` 원본은 이후 복원을 위해 남겨두는 것이 좋습니다.
+
+대화형 재설치에서도 `unity-work`와 `pptx`를 각각 다시 묻습니다. 이미 설치된 선택 스킬은 기본값이 `Y`이며, `N`을 선택하면 MnP Suite가 설치했고 이후 수정되지 않은 스킬과 해당 호출 지침만 제거합니다. 설치 후 파일이 수정·삭제되었거나 사용자 파일이 추가된 스킬은 자동 제거하지 않고 설치를 중단합니다.
+
+`pptx`를 선택하면 PowerPoint 파일 확인 절차가 설치됩니다. 이 스킬은 `pptx-mcp`로 슬라이드 PNG와 텍스트·표 구조를 함께 확인하는 지침이며, `pptx-mcp` 서버 자체는 이 패키지가 설치하지 않습니다. 조직에서 해당 MCP 연결을 별도로 제공해야 합니다.
 
 ## Unity MCP와 Fork
 
@@ -1234,7 +1334,7 @@ function Invoke-SelfTest {
         Write-Utf8File (Join-Path $testClaudeHome 'CLAUDE.md') $claudeOriginal
       }
 
-      $agentResult = Install-MnPSuiteAgentConfiguration $testCodexHome $testClaudeHome $true
+      $agentResult = Install-MnPSuiteAgentConfiguration $testCodexHome $testClaudeHome $true $true
       foreach ($platform in $agentResult.Platforms) {
         if (-not (Test-Path -LiteralPath $platform.Instructions -PathType Leaf)) {
           throw "전역 지침 생성 실패 ($($agentCase.Name)): $($platform.Instructions)"
@@ -1243,7 +1343,7 @@ function Invoke-SelfTest {
         if ([regex]::Matches($instructionText, [regex]::Escape($script:AgentGuidanceStartMarker)).Count -ne 1) {
           throw "전역 지침 관리 블록 개수 오류 ($($agentCase.Name)): $($platform.Instructions)"
         }
-        foreach ($skillName in @('mnp-dooray', 'unity-work')) {
+        foreach ($skillName in @('mnp-dooray', 'unity-work', 'pptx')) {
           if (-not (Test-MnPSuiteManagedSkill $platform.SkillsRoot $skillName)) {
             throw "전역 스킬 설치 검증 실패 ($($agentCase.Name)): $($platform.Name) $skillName"
           }
@@ -1278,7 +1378,7 @@ function Invoke-SelfTest {
       foreach ($instructionsPath in @((Join-Path $testCodexHome 'AGENTS.md'), (Join-Path $testClaudeHome 'CLAUDE.md'))) {
         $backupCountsBeforeRerun[$instructionsPath] = @(Get-ChildItem -LiteralPath (Split-Path -Parent $instructionsPath) -File -Filter ((Split-Path -Leaf $instructionsPath) + '.mnp-suite-backup-*.bak')).Count
       }
-      Install-MnPSuiteAgentConfiguration $testCodexHome $testClaudeHome $true | Out-Null
+      Install-MnPSuiteAgentConfiguration $testCodexHome $testClaudeHome $true $true | Out-Null
       foreach ($instructionsPath in @((Join-Path $testCodexHome 'AGENTS.md'), (Join-Path $testClaudeHome 'CLAUDE.md'))) {
         $instructionText = Read-Utf8File $instructionsPath
         if ([regex]::Matches($instructionText, [regex]::Escape($script:AgentGuidanceStartMarker)).Count -ne 1) {
@@ -1296,10 +1396,10 @@ function Invoke-SelfTest {
     $changedGuidanceClaude = Join-Path $changedGuidanceRoot '.claude'
     Write-Utf8File (Join-Path $changedGuidanceCodex 'AGENTS.md') 'CODEX_BEFORE_FIRST_CHANGE'
     Write-Utf8File (Join-Path $changedGuidanceClaude 'CLAUDE.md') 'CLAUDE_BEFORE_FIRST_CHANGE'
-    Install-MnPSuiteAgentConfiguration $changedGuidanceCodex $changedGuidanceClaude $false | Out-Null
+    Install-MnPSuiteAgentConfiguration $changedGuidanceCodex $changedGuidanceClaude $false $false | Out-Null
     $codexAfterFirstChange = Read-Utf8File (Join-Path $changedGuidanceCodex 'AGENTS.md')
     $claudeAfterFirstChange = Read-Utf8File (Join-Path $changedGuidanceClaude 'CLAUDE.md')
-    Install-MnPSuiteAgentConfiguration $changedGuidanceCodex $changedGuidanceClaude $true | Out-Null
+    Install-MnPSuiteAgentConfiguration $changedGuidanceCodex $changedGuidanceClaude $true $true | Out-Null
     $changedGuidanceChecks = @(
       [pscustomobject]@{ Home = $changedGuidanceCodex; File = 'AGENTS.md'; Original = 'CODEX_BEFORE_FIRST_CHANGE'; AfterFirst = $codexAfterFirstChange },
       [pscustomobject]@{ Home = $changedGuidanceClaude; File = 'CLAUDE.md'; Original = 'CLAUDE_BEFORE_FIRST_CHANGE'; AfterFirst = $claudeAfterFirstChange }
@@ -1318,7 +1418,7 @@ function Invoke-SelfTest {
     $emptyGuidanceClaude = Join-Path $emptyGuidanceRoot '.claude'
     Write-Utf8File (Join-Path $emptyGuidanceCodex 'AGENTS.md') ''
     Write-Utf8File (Join-Path $emptyGuidanceClaude 'CLAUDE.md') ''
-    Install-MnPSuiteAgentConfiguration $emptyGuidanceCodex $emptyGuidanceClaude $false | Out-Null
+    Install-MnPSuiteAgentConfiguration $emptyGuidanceCodex $emptyGuidanceClaude $false $false | Out-Null
     foreach ($emptyInstructions in @((Join-Path $emptyGuidanceCodex 'AGENTS.md'), (Join-Path $emptyGuidanceClaude 'CLAUDE.md'))) {
       $emptyBackups = @(Get-ChildItem -LiteralPath (Split-Path -Parent $emptyInstructions) -File -Filter ((Split-Path -Leaf $emptyInstructions) + '.mnp-suite-backup-*.bak'))
       if ($emptyBackups.Count -ne 1 -or $emptyBackups[0].Length -ne 0) {
@@ -1329,13 +1429,82 @@ function Invoke-SelfTest {
     $requiredOnlyRoot = Join-Path $temporaryRoot 'agent-case-required-only'
     $requiredOnlyCodex = Join-Path $requiredOnlyRoot '.codex'
     $requiredOnlyClaude = Join-Path $requiredOnlyRoot '.claude'
-    $requiredOnlyResult = Install-MnPSuiteAgentConfiguration $requiredOnlyCodex $requiredOnlyClaude $false
+    $requiredOnlyResult = Install-MnPSuiteAgentConfiguration $requiredOnlyCodex $requiredOnlyClaude $false $false
     foreach ($platform in $requiredOnlyResult.Platforms) {
       if (-not (Test-MnPSuiteManagedSkill $platform.SkillsRoot 'mnp-dooray')) { throw '필수 mnp-dooray 설치 실패' }
       if (Test-Path -LiteralPath (Join-Path $platform.SkillsRoot 'unity-work')) { throw '선택하지 않은 unity-work가 설치됨' }
+      if (Test-Path -LiteralPath (Join-Path $platform.SkillsRoot 'pptx')) { throw '선택하지 않은 pptx가 설치됨' }
       $instructionText = Read-Utf8File $platform.Instructions
       if ($instructionText -match '## Unity 작업') { throw '선택하지 않은 unity-work 전역 지침이 추가됨' }
+      if ($instructionText -match '## PowerPoint 파일 확인') { throw '선택하지 않은 pptx 전역 지침이 추가됨' }
       if ($instructionText -notmatch '## MindNProgress·Dooray 작업') { throw '필수 mnp-dooray 전역 지침이 누락됨' }
+    }
+
+    $optionalSkillCases = @(
+      [pscustomobject]@{ Name = 'unity-only'; IncludeUnity = $true; IncludePptx = $false },
+      [pscustomobject]@{ Name = 'pptx-only'; IncludeUnity = $false; IncludePptx = $true }
+    )
+    foreach ($optionalCase in $optionalSkillCases) {
+      $optionalRoot = Join-Path $temporaryRoot ("agent-case-" + $optionalCase.Name)
+      $optionalResult = Install-MnPSuiteAgentConfiguration (Join-Path $optionalRoot '.codex') (Join-Path $optionalRoot '.claude') $optionalCase.IncludeUnity $optionalCase.IncludePptx
+      foreach ($platform in $optionalResult.Platforms) {
+        if (-not (Test-MnPSuiteManagedSkill $platform.SkillsRoot 'mnp-dooray')) { throw "선택 조합의 필수 mnp-dooray 누락: $($optionalCase.Name)" }
+        if ((Test-MnPSuiteManagedSkill $platform.SkillsRoot 'unity-work') -ne $optionalCase.IncludeUnity) { throw "unity-work 선택 조합 오류: $($optionalCase.Name)" }
+        if ((Test-MnPSuiteManagedSkill $platform.SkillsRoot 'pptx') -ne $optionalCase.IncludePptx) { throw "pptx 선택 조합 오류: $($optionalCase.Name)" }
+        $instructionText = Read-Utf8File $platform.Instructions
+        if (($instructionText -match '## Unity 작업') -ne $optionalCase.IncludeUnity) { throw "Unity 전역 지침 선택 조합 오류: $($optionalCase.Name)" }
+        if (($instructionText -match '## PowerPoint 파일 확인') -ne $optionalCase.IncludePptx) { throw "PowerPoint 전역 지침 선택 조합 오류: $($optionalCase.Name)" }
+      }
+    }
+
+    $removalRoot = Join-Path $temporaryRoot 'agent-case-option-removal'
+    $removalCodex = Join-Path $removalRoot '.codex'
+    $removalClaude = Join-Path $removalRoot '.claude'
+    Install-MnPSuiteAgentConfiguration $removalCodex $removalClaude $true $true | Out-Null
+    $removalResult = Install-MnPSuiteAgentConfiguration $removalCodex $removalClaude $false $false
+    foreach ($platform in $removalResult.Platforms) {
+      if (@($platform.RemovedSkills).Count -ne 2 -or
+          $platform.RemovedSkills -notcontains 'unity-work' -or
+          $platform.RemovedSkills -notcontains 'pptx') {
+        throw "선택 해제 스킬 제거 결과 오류: $($platform.Name)"
+      }
+      foreach ($removedSkill in @('unity-work', 'pptx')) {
+        if (Test-Path -LiteralPath (Join-Path $platform.SkillsRoot $removedSkill)) {
+          throw "선택 해제한 패키지 관리 스킬 폴더가 남음: $($platform.Name) $removedSkill"
+        }
+      }
+      if (-not (Test-MnPSuiteManagedSkill $platform.SkillsRoot 'mnp-dooray')) {
+        throw "선택 해제 중 필수 mnp-dooray가 제거됨: $($platform.Name)"
+      }
+      $instructionText = Read-Utf8File $platform.Instructions
+      if ($instructionText -match '## Unity 작업' -or $instructionText -match '## PowerPoint 파일 확인') {
+        throw "선택 해제한 스킬의 전역 호출 지침이 남음: $($platform.Name)"
+      }
+      $instructionBackups = @(Get-ChildItem -LiteralPath (Split-Path -Parent $platform.Instructions) -File -Filter ((Split-Path -Leaf $platform.Instructions) + '.mnp-suite-backup-*.bak'))
+      if ($instructionBackups.Count -ne 1) {
+        throw "선택 해제 전 전역 지침 백업 개수 오류: $($platform.Name)"
+      }
+    }
+
+    $modifiedRemovalRoot = Join-Path $temporaryRoot 'agent-case-modified-option-removal'
+    $modifiedRemovalCodex = Join-Path $modifiedRemovalRoot '.codex'
+    $modifiedRemovalClaude = Join-Path $modifiedRemovalRoot '.claude'
+    Install-MnPSuiteAgentConfiguration $modifiedRemovalCodex $modifiedRemovalClaude $true $false | Out-Null
+    $modifiedSkillPath = Join-Path $modifiedRemovalCodex 'skills\unity-work\SKILL.md'
+    $modifiedSkillContent = (Read-Utf8File $modifiedSkillPath) + "`n사용자 수정 보존 검사"
+    Write-Utf8File $modifiedSkillPath $modifiedSkillContent
+    $modifiedRemovalBlocked = $false
+    try {
+      Install-MnPSuiteAgentConfiguration $modifiedRemovalCodex $modifiedRemovalClaude $false $false | Out-Null
+    } catch {
+      $modifiedRemovalBlocked = $true
+    }
+    if (-not $modifiedRemovalBlocked) { throw '설치 후 수정된 선택 스킬의 자동 제거를 차단하지 못함' }
+    if ((Read-Utf8File $modifiedSkillPath) -ne $modifiedSkillContent) {
+      throw '자동 제거가 차단된 선택 스킬의 사용자 수정 내용이 변경됨'
+    }
+    if (-not (Test-MnPSuiteManagedSkill (Join-Path $modifiedRemovalClaude 'skills') 'unity-work')) {
+      throw '사전 검증 실패 전에 다른 플랫폼의 선택 스킬이 변경됨'
     }
 
     $conflictRoot = Join-Path $temporaryRoot 'agent-case-conflict'
@@ -1344,7 +1513,7 @@ function Invoke-SelfTest {
     Write-Utf8File (Join-Path $conflictSkill 'SKILL.md') 'USER_OWNED_SKILL'
     $conflictDetected = $false
     try {
-      Assert-MnPSuiteAgentConfigurationTargets $conflictCodex (Join-Path $conflictRoot '.claude') $false
+      Assert-MnPSuiteAgentConfigurationTargets $conflictCodex (Join-Path $conflictRoot '.claude') $false $false
     } catch {
       $conflictDetected = $true
     }
@@ -1394,13 +1563,25 @@ try {
   $agentHomes = Get-MnPSuiteAgentHomes
   $codexSkillsRoot = Join-Path $agentHomes.CodexHome 'skills'
   $claudeSkillsRoot = Join-Path $agentHomes.ClaudeHome 'skills'
-  $installUnityWork = [bool]$IncludeUnityWorkSkill -or
-    (Test-MnPSuiteManagedSkill $codexSkillsRoot 'unity-work') -or
+  $existingUnityWork = (Test-MnPSuiteManagedSkill $codexSkillsRoot 'unity-work') -or
     (Test-MnPSuiteManagedSkill $claudeSkillsRoot 'unity-work')
-  if (-not $installUnityWork -and -not $NonInteractive) {
-    $installUnityWork = Read-YesNo 'Unity MCP를 사용하는 사용자를 위한 unity-work 스킬을 설치할까요?' $false
+  if ($NonInteractive) {
+    $installUnityWork = [bool]$IncludeUnityWorkSkill -or $existingUnityWork
+  } elseif ($existingUnityWork) {
+    $installUnityWork = Read-YesNo 'unity-work 스킬이 이미 설치되어 있습니다. 계속 유지할까요?' $true
+  } else {
+    $installUnityWork = Read-YesNo 'Unity MCP를 사용하는 사용자를 위한 unity-work 스킬을 설치할까요?' ([bool]$IncludeUnityWorkSkill)
   }
-  Assert-MnPSuiteAgentConfigurationTargets $agentHomes.CodexHome $agentHomes.ClaudeHome $installUnityWork
+  $existingPptx = (Test-MnPSuiteManagedSkill $codexSkillsRoot 'pptx') -or
+    (Test-MnPSuiteManagedSkill $claudeSkillsRoot 'pptx')
+  if ($NonInteractive) {
+    $installPptx = [bool]$IncludePptxSkill -or $existingPptx
+  } elseif ($existingPptx) {
+    $installPptx = Read-YesNo 'pptx 스킬이 이미 설치되어 있습니다. 계속 유지할까요?' $true
+  } else {
+    $installPptx = Read-YesNo 'PowerPoint 파일 검토 사용자를 위한 pptx 스킬을 설치할까요?' ([bool]$IncludePptxSkill)
+  }
+  Assert-MnPSuiteAgentConfigurationTargets $agentHomes.CodexHome $agentHomes.ClaudeHome $installUnityWork $installPptx
 
   Write-Host ''
   Write-Host '설치 계획' -ForegroundColor Cyan
@@ -1412,6 +1593,7 @@ try {
   Write-Info '작업공간 구성: <설치 루트>\workspace-pool\workspaces.json (초기 비활성)'
   Write-Info '필수 전역 스킬: mnp-dooray (Claude Code + Codex)'
   Write-Info "Unity 전역 스킬: $(if ($installUnityWork) { 'unity-work 설치' } else { '설치 안 함' })"
+  Write-Info "PowerPoint 전역 스킬: $(if ($installPptx) { 'pptx 설치' } else { '설치 안 함' })"
   Write-Info "Codex 전역 구성: $($agentHomes.CodexHome)"
   Write-Info "Claude 전역 구성: $($agentHomes.ClaudeHome)"
 
@@ -1496,10 +1678,13 @@ try {
   Write-Success "Unity MCP 및 Fork 가이드 복사: $unityMcpGuidePath"
 
   Write-Step 6 8 'Claude Code와 Codex 사용자 전역 구성'
-  $agentConfiguration = Install-MnPSuiteAgentConfiguration $agentHomes.CodexHome $agentHomes.ClaudeHome $installUnityWork
+  $agentConfiguration = Install-MnPSuiteAgentConfiguration $agentHomes.CodexHome $agentHomes.ClaudeHome $installUnityWork $installPptx
   foreach ($platform in $agentConfiguration.Platforms) {
     Write-Success "$($platform.Name) 지침 병합: $($platform.Instructions)"
     Write-Success "$($platform.Name) 스킬 설치: $($agentConfiguration.Skills -join ', ')"
+    if ($platform.RemovedSkills.Count -gt 0) {
+      Write-Success "$($platform.Name) 선택 해제 스킬 제거: $($platform.RemovedSkills -join ', ')"
+    }
   }
 
   Write-Step 7 8 '설치 결과 검증'
@@ -1579,6 +1764,7 @@ try {
           instructionsBackup = $_.InstructionsBackup
           skillsRoot = $_.SkillsRoot
           skills = @($_.Skills | ForEach-Object { [ordered]@{ name = $_.Name; path = $_.Path } })
+          removedSkills = @($_.RemovedSkills)
         }
       })
     }

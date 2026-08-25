@@ -51,11 +51,12 @@ Install-MnPSuite.bat
 
 1. 최종 설치 루트
 2. 선택 스킬 `unity-work` 설치 여부
-3. 설치 계획
-4. 누락 필수 도구의 winget 설치 여부
-5. 기존 저장소가 있을 때 재사용 또는 fast-forward 업데이트
-6. 바탕화면 바로가기 생성
-7. 설치 직후 Dev 환경 실행
+3. 선택 스킬 `pptx` 설치 여부
+4. 설치 계획
+5. 누락 필수 도구의 winget 설치 여부
+6. 기존 저장소가 있을 때 재사용 또는 fast-forward 업데이트
+7. 바탕화면 바로가기 생성
+8. 설치 직후 Dev 환경 실행
 
 ## 무인 설치 예시
 
@@ -65,11 +66,12 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\Install-MnPSui
   -NonInteractive `
   -InstallMissingPrerequisites `
   -IncludeUnityWorkSkill `
+  -IncludePptxSkill `
   -CreateDesktopShortcuts `
   -NoLaunchPrompt
 ```
 
-`mnp-dooray`는 항상 Claude Code와 Codex 양쪽에 설치됩니다. `unity-work`는 위 스위치를 지정할 때 설치되며 대화형 설치에서는 선택 여부를 질문합니다. 패키지가 이전에 설치한 `unity-work`를 한쪽 전역 구성에서라도 발견하면 재설치 때도 양쪽 구성을 유지합니다.
+`mnp-dooray`는 항상 Claude Code와 Codex 양쪽에 설치됩니다. `unity-work`와 `pptx`는 각 스위치를 지정할 때 설치되며 대화형 설치에서는 신규·재설치 여부와 관계없이 두 항목을 Y/N으로 각각 질문합니다. 패키지가 이전에 설치한 선택 스킬을 한쪽 전역 구성에서라도 발견하면 기본값은 `Y`이며, 사용자가 그대로 확인하면 양쪽 구성을 유지합니다. 무인 재설치는 기존 패키지 관리 선택을 유지하고, 각 스위치로 새 선택 항목을 추가할 수 있습니다.
 
 기존의 올바른 저장소를 그대로 사용할 때는 `-ReuseExistingRepositories`, 깨끗한 현재 `main`을 `origin/main`으로 fast-forward할 때는 `-UpdateExistingRepositories`를 지정합니다. 원격 주소가 다르거나 업데이트 대상에 커밋되지 않은 변경이 있으면 중단합니다.
 
@@ -81,6 +83,7 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\Install-MnPSui
 | --- | --- | --- |
 | `mnp-dooray` | 필수 | MnP 장문 안전 편집·복구, 기록 역할, 상태·진행률, Dooray 권한과 AI 작성 표기 |
 | `unity-work` | 선택 | Unity 인스턴스 오수정 방지, `execute_code` 경로 가드, UI 레이아웃 책임 분리 |
+| `pptx` | 선택 | PPTX의 모든 슬라이드를 PNG와 텍스트·표 구조로 함께 확인하고 렌더링 차이 기록 |
 
 같은 스킬 원본을 Claude Code와 Codex의 각 사용자 전역 `skills` 폴더에 복사합니다. AI가 관련 작업 전에 스킬을 실제로 읽도록 Codex의 `AGENTS.md`와 Claude Code의 `CLAUDE.md`에도 짧은 불변 규칙과 스킬 호출 조건을 관리 블록으로 추가합니다. AionUi Assistant의 스킬 목록이나 시스템 프롬프트를 변경하는 방식은 아닙니다.
 
@@ -92,7 +95,8 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\Install-MnPSui
 - 내용이 동일한 재실행에서는 전역 지침을 다시 쓰거나 불필요한 백업을 만들지 않습니다.
 - 설치된 스킬 폴더에는 `.mnp-suite-managed.json`을 기록해 후속 설치가 패키지 소유 항목만 갱신하게 합니다.
 - 같은 이름의 사용자 소유 스킬 폴더가 있으면 덮어쓰지 않고 실제 설치를 시작하기 전에 중단합니다.
-- `unity-work`를 선택하지 않은 경우 Unity 전역 규칙도 추가하지 않습니다.
+- 대화형 재설치에서 기존 `unity-work` 또는 `pptx`에 `N`을 선택하면 패키지가 설치했고 이후 수정되지 않은 스킬과 해당 전역 호출 규칙만 제거합니다.
+- 설치 후 스킬 파일이 수정·삭제되었거나 사용자 파일이 추가된 경우에는 자동 제거하지 않고 실제 설치를 시작하기 전에 중단합니다.
 
 적용된 절대 경로와 선택 스킬은 설치 루트의 `installation-manifest.json` 안 `agentConfiguration`에서 확인합니다. 새 전역 지침과 스킬은 일반적으로 새 AI 세션부터 적용됩니다.
 
@@ -113,6 +117,10 @@ CLAUDE.md.mnp-suite-backup-20260824-183015123.bak
 4. AI를 새 세션으로 시작해 지침이 정상 적용되는지 확인합니다.
 
 이번 설치에서 새로 만든 백업의 절대 경로는 `installation-manifest.json`의 각 `agentConfiguration.platforms[].instructionsBackup`에도 기록됩니다. 원본 지침 파일이 존재하지 않아 새로 만든 경우에는 백업할 이전 파일이 없으므로 이 값이 비어 있습니다.
+
+### PPTX 스킬의 MCP 전제 조건
+
+`pptx` 스킬은 `pptx-mcp`로 파일을 열고 모든 슬라이드를 PNG로 저장한 뒤 텍스트·표 구조와 함께 확인하도록 지시합니다. 이 설치 패키지는 지침 스킬만 Claude Code와 Codex에 추가하며 `pptx-mcp` 서버 자체를 설치하거나 등록하지 않습니다. 조직의 AionUi·Claude Code·Codex 환경에서 해당 MCP를 별도로 연결해야 실제 PowerPoint 파일 검토에 사용할 수 있습니다.
 
 ## 원격 저장소 또는 브랜치 변경
 

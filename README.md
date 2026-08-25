@@ -139,10 +139,11 @@ MnP Suite Windows Git 설치 패키지는 업무 PC에 MindNProgress, AionUi와 
 | --- | --- | --- |
 | `mnp-dooray` | 필수 | MnP 장문 안전 편집·복구, 업무 설명·공유 지식·댓글 역할, 상태·진행률, Dooray 기록 |
 | `unity-work` | 선택 | Unity 인스턴스 오수정 방지, `execute_code` 경로 검증, Unity UI 레이아웃 책임 분리 |
+| `pptx` | 선택 | PPTX 슬라이드의 PNG 렌더링과 텍스트·표 구조를 함께 확인하고 차이 기록 |
 
 스킬은 Codex의 `.codex\skills`와 Claude Code의 `.claude\skills`에 각각 설치합니다. 두 전역 폴더가 모두 없거나 하나만 있어도 필요한 폴더를 생성합니다. 기존 `AGENTS.md`와 `CLAUDE.md`는 덮어쓰지 않고 MnP Suite 관리 블록만 병합하며, 실제 수정 직전에 같은 폴더에 날짜가 포함된 `<파일명>.mnp-suite-backup-YYYYMMDD-HHmmssfff.bak` 복사본을 매번 만듭니다. 문제가 생기면 AI 세션을 닫고 원하는 날짜의 복사본을 원래 지침 파일명으로 복사해 복원할 수 있습니다. 같은 이름의 사용자 소유 스킬이 있으면 덮어쓰지 않고 설치를 중단합니다. AionUi Assistant의 스킬이나 시스템 프롬프트는 변경하지 않습니다.
 
-대화형 설치는 설치 위치 선택, `unity-work` 포함 여부, 설치 계획 확인, 누락 도구 설치, 저장소 준비, 빌드·검증과 완료 안내로 이어집니다. 무인 설치 옵션, 기존 저장소 재사용·업데이트 조건, 전역 설정 경로와 문제 해결 방법은 [Windows 설치 패키지 상세 안내](installer/windows/README.md)를 확인하세요.
+대화형 설치는 설치 위치 선택 후 신규 설치와 재설치 모두 `unity-work`와 `pptx` 포함 여부를 Y/N으로 각각 확인하고, 설치 계획 확인, 누락 도구 설치, 저장소 준비, 빌드·검증과 완료 안내로 이어집니다. 재설치에서 기존 패키지 관리 선택은 기본값이 `Y`이고, `N`을 선택하면 설치 후 수정되지 않은 해당 스킬과 호출 지침만 안전하게 제거합니다. `pptx` 선택 항목은 지침만 설치하며 실제 파일 확인에 필요한 `pptx-mcp` 연결은 조직 환경에서 별도로 제공해야 합니다. 무인 설치 옵션, 기존 저장소 재사용·업데이트 조건, 전역 설정 경로와 문제 해결 방법은 [Windows 설치 패키지 상세 안내](installer/windows/README.md)를 확인하세요.
 
 클라이언트 개발자가 Unity MCP를 연결하고 AionUi·AionCore 소스 fork와 Unity worker 작업공간을 구분해 운영하는 방법은 [`클라이언트 사용자용 Unity MCP 및 Fork 운영 가이드`](installer/windows/UNITY_MCP_AND_FORK_GUIDE.md)를 참고합니다.
 
