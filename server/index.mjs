@@ -6504,36 +6504,22 @@ const server = createServer(async (request, response) => {
       }
       const map = await readMap(mapId)
       if (!map || map.trashedAt) return sendJson(response, 404, { error: '이미지가 속한 문서를 찾을 수 없습니다.' })
-      const assetFile = imageAssetFile(mapId, assetId)
-      const pendingDeleteFile = `${assetFile}.deleting-${randomBytes(6).toString('hex')}`
-      let assetMoved = false
-      try {
-        await rename(assetFile, pendingDeleteFile)
-        assetMoved = true
-      } catch (error) {
-        if (error?.code !== 'ENOENT') throw error
-      }
-
       const deletedNodeIds = map.nodes
         .filter((node) => node.data?.kind === 'image' && node.data?.image?.assetId === assetId)
         .map((node) => node.id)
       const deletedNodeIdSet = new Set(deletedNodeIds)
       let updatedMap = map
-      try {
-        if (deletedNodeIds.length > 0) {
-          updatedMap = await saveMap(mapId, {
-            nodes: map.nodes.filter((node) => !deletedNodeIdSet.has(node.id)),
-            edges: map.edges.filter((edge) => !deletedNodeIdSet.has(edge.source) && !deletedNodeIdSet.has(edge.target)),
-          }, user, undefined, undefined, 'content')
-        }
-      } catch (error) {
-        if (assetMoved) await rename(pendingDeleteFile, assetFile).catch(() => undefined)
-        throw error
+      if (deletedNodeIds.length > 0) {
+        updatedMap = await saveMap(mapId, {
+          nodes: map.nodes.filter((node) => !deletedNodeIdSet.has(node.id)),
+          edges: map.edges.filter((edge) => !deletedNodeIdSet.has(edge.source) && !deletedNodeIdSet.has(edge.target)),
+        }, user, undefined, undefined, 'content')
       }
-      if (assetMoved) await rm(pendingDeleteFile, { force: true })
       if (deletedNodeIds.length > 0) broadcastMapChange(request, mapId, 'content', user)
       return sendJson(response, 200, {
-        deletedAssetId: assetId,
+        deletedAssetId: null,
+        retainedAssetId: assetId,
+        assetDeletionDeferred: true,
         deletedNodeIds,
         map: updatedMap,
         summary: mapSummary(updatedMap),

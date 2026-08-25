@@ -21,7 +21,7 @@ async function waitForServer(baseUrl, timeoutMs = 15_000) {
   throw new Error('이미지 API 검증 서버가 제한 시간 안에 시작되지 않았습니다.')
 }
 
-test('이미지 업로드, 원본 조회와 이미지 노드 저장이 연결된다', { timeout: 30_000 }, async () => {
+test('이미지 업로드와 원본 조회 및 이미지 노드 삭제 후 자산 보존이 연결된다', { timeout: 30_000 }, async () => {
   const dataDirectory = await mkdtemp(path.join(tmpdir(), 'mindnprogress-image-api-'))
   const port = 30_000 + Math.floor(Math.random() * 10_000)
   const baseUrl = `http://127.0.0.1:${port}`
@@ -127,8 +127,15 @@ test('이미지 업로드, 원본 조회와 이미지 노드 저장이 연결된
     assert.equal(deleteResponse.status, 200)
     const deleted = await deleteResponse.json()
     assert.deepEqual(deleted.deletedNodeIds, ['image-api-test'])
+    assert.equal(deleted.deletedAssetId, null)
+    assert.equal(deleted.retainedAssetId, uploaded.image.assetId)
+    assert.equal(deleted.assetDeletionDeferred, true)
     assert.equal(deleted.map.nodes.some((node) => node.id === 'image-api-test'), false)
-    await assert.rejects(access(assetPath))
+    await access(assetPath)
+
+    const retainedImageResponse = await fetch(`${baseUrl}/api/maps/${created.map.id}/images/${uploaded.image.assetId}`, { headers })
+    assert.equal(retainedImageResponse.status, 200)
+    assert.deepEqual(Buffer.from(await retainedImageResponse.arrayBuffer()), sourceImage)
   } finally {
     if (server.exitCode === null) {
       server.kill()

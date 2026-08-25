@@ -3879,27 +3879,14 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     setSelectedId((current) => current === nodeId ? null : current)
   }, [mode, setEdges, setNodes])
 
-  const deleteImageNodeById = useCallback(async (nodeId: string) => {
-    if (mode !== 'editor' || !activeMapId) return
+  const deleteImageNodeById = useCallback((nodeId: string) => {
+    if (mode !== 'editor') return
     const image = nodes.find((node) => node.id === nodeId)?.data.image
     if (!image) return
-    const targetMapId = activeMapId
     setNodeContextMenu(null)
-    setSaveError('')
-    setSavedAt('이미지 삭제 중…')
-    try {
-      await apiRequest(`/api/maps/${encodeURIComponent(targetMapId)}/images/${encodeURIComponent(image.assetId)}`, {
-        method: 'DELETE',
-      })
-      if (activeMapIdRef.current === targetMapId) {
-        deleteNodeById(nodeId)
-        setSavedAt('이미지 삭제됨')
-      }
-    } catch (error) {
-      setSaveError(error instanceof Error ? error.message : '이미지를 삭제하지 못했습니다.')
-      setSavedAt('이미지 삭제 실패')
-    }
-  }, [activeMapId, deleteNodeById, mode, nodes])
+    deleteNodeById(nodeId)
+    setSavedAt('이미지 삭제됨 · 원본 정리는 백업 시 검사')
+  }, [deleteNodeById, mode, nodes])
 
   const deleteSelected = useCallback(() => {
     if (selectedId && selectedNode?.data.kind !== 'image') deleteNodeById(selectedId)
@@ -7739,7 +7726,7 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
           )}
           {contextMenuNode?.data.kind === 'image' ? (
             <>
-              <button className="danger" role="menuitem" onClick={() => { void deleteImageNodeById(nodeContextMenu.nodeId) }}>
+              <button className="danger" role="menuitem" onClick={() => deleteImageNodeById(nodeContextMenu.nodeId)}>
                 <span className="context-icon"><Icon name="trash" size={15} /></span>
                 <span><strong>이미지 삭제</strong><small>마인드맵과 디스크에서 즉시 제거</small></span>
               </button>

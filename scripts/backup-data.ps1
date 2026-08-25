@@ -173,11 +173,15 @@ $resolvedProject = if ($ProjectPath) {
 $workspaceRoot = [System.IO.Path]::GetFullPath((Join-Path $resolvedProject '..'))
 $dataSourceValue = if ($env:MNP_DATA_DIR) { $env:MNP_DATA_DIR } else { 'server\data' }
 $dataSource = Get-FullPath $dataSourceValue $resolvedProject
+$imageAssetCleanupScript = Join-Path $resolvedProject 'scripts\cleanup-image-assets.mjs'
 $backupRootValue = if ($Destination) { $Destination } else { Join-Path $workspaceRoot 'MindNProgress_Backup' }
 $backupRoot = Get-FullPath $backupRootValue $resolvedProject
 
 if (-not (Test-Path -LiteralPath $dataSource -PathType Container)) {
   throw "백업할 MindNProgress 데이터 폴더를 찾지 못했습니다: $dataSource"
+}
+if (-not (Test-Path -LiteralPath $imageAssetCleanupScript -PathType Leaf)) {
+  throw "이미지 자산 정리 스크립트를 찾지 못했습니다: $imageAssetCleanupScript"
 }
 $backupDrive = [System.IO.Path]::GetPathRoot($backupRoot)
 if (-not $backupDrive -or -not (Test-Path -LiteralPath $backupDrive -PathType Container)) {
@@ -312,6 +316,25 @@ Git 커밋: $commit
   Test-BackupPayload $verificationDirectory
   Move-Item -LiteralPath $partialArchive -Destination $archivePath
   $backupCompleted = $true
+
+  if ($wasRunning) {
+    Write-Output '[MindNProgress] 미참조 이미지 자산 정리를 위해 서버를 잠시 중지합니다.'
+    $serverRestored = $false
+    Stop-MindNProgress $workspaceRoot
+  }
+  try {
+    & node.exe $imageAssetCleanupScript --data-dir $dataSource
+    if ($LASTEXITCODE -ne 0) {
+      throw "미참조 이미지 자산을 정리하지 못했습니다."
+    }
+  } finally {
+    if ($wasRunning -and -not $serverRestored) {
+      Write-Output '[MindNProgress] 이미지 자산 정리가 끝나 서버를 다시 시작합니다.'
+      Start-MindNProgress $workspaceRoot
+      Wait-MindNProgress
+      $serverRestored = $true
+    }
+  }
 
   $archive = Get-Item -LiteralPath $archivePath
   Write-Output "[MindNProgress] 백업 완료: $archivePath"
