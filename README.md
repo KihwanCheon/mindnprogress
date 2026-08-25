@@ -127,9 +127,10 @@ MnP Suite Windows Git 설치 패키지는 업무 PC에 MindNProgress, AionUi와 
 설치 패키지는 다음 작업을 순서대로 수행합니다.
 
 - 사용자가 선택한 설치 루트 아래에 MindNProgress, AionUi와 AionCore를 독립 Git 저장소로 설치
+- 설치 중 각각 선택한 Dooray MCP와 PowerPoint MCP를 Git 저장소로 추가하고 Windows 네이티브 런타임 준비
 - Node.js·Bun·Rust·Python·Visual Studio C++ Build Tools 등 필수 도구 확인과 선택적 자동 설치
 - JavaScript 의존성 설치, 로컬 AionCore release 빌드와 전체 Dev 실행·중지·백업·복원 배치 생성
-- AionUi 최초 실행 시 `MindNProgress · 필수` MCP를 자동 등록하고 현재 설치 경로로 동기화
+- AionUi 최초 실행 시 `MindNProgress · 필수`와 선택한 `dooray-mcp`·`pptx-mcp`를 자동 등록하고 현재 설치 경로로 동기화
 - 비활성 상태의 Unity 멀티 작업공간 템플릿과 Unity MCP·Fork 운영 가이드 설치
 - 현재 Windows 사용자의 Claude Code와 Codex에 팀 공통 전역 스킬과 호출 지침 설치
 
@@ -143,11 +144,11 @@ MnP Suite Windows Git 설치 패키지는 업무 PC에 MindNProgress, AionUi와 
 
 스킬은 Codex의 `.codex\skills`와 Claude Code의 `.claude\skills`에 각각 설치합니다. 두 전역 폴더가 모두 없거나 하나만 있어도 필요한 폴더를 생성합니다. 기존 `AGENTS.md`와 `CLAUDE.md`는 덮어쓰지 않고 MnP Suite 관리 블록만 병합하며, 실제 수정 직전에 같은 폴더에 날짜가 포함된 `<파일명>.mnp-suite-backup-YYYYMMDD-HHmmssfff.bak` 복사본을 매번 만듭니다. 문제가 생기면 AI 세션을 닫고 원하는 날짜의 복사본을 원래 지침 파일명으로 복사해 복원할 수 있습니다. 같은 이름의 사용자 소유 스킬이 있으면 덮어쓰지 않고 설치를 중단합니다. AionUi Assistant의 스킬이나 시스템 프롬프트는 변경하지 않습니다.
 
-대화형 설치는 설치 위치 선택 후 신규 설치와 재설치 모두 `unity-work`와 `pptx` 포함 여부를 Y/N으로 각각 확인하고, 설치 계획 확인, 누락 도구 설치, 저장소 준비, 빌드·검증과 완료 안내로 이어집니다. 재설치에서 기존 패키지 관리 선택은 기본값이 `Y`이고, `N`을 선택하면 설치 후 수정되지 않은 해당 스킬과 호출 지침만 안전하게 제거합니다. `pptx` 선택 항목은 지침만 설치하며 실제 파일 확인에 필요한 `pptx-mcp` 연결은 조직 환경에서 별도로 제공해야 합니다. 무인 설치 옵션, 기존 저장소 재사용·업데이트 조건, 전역 설정 경로와 문제 해결 방법은 [Windows 설치 패키지 상세 안내](installer/windows/README.md)를 확인하세요.
+대화형 설치는 설치 위치 선택 후 신규 설치와 재설치 모두 `unity-work`, `pptx` 스킬과 `dooray-mcp`, `pptx-mcp` 설치 여부를 Y/N으로 각각 확인하고, 설치 계획 확인, 누락 도구 설치, 저장소 준비, 빌드·검증과 완료 안내로 이어집니다. 재설치에서 기존 패키지 관리 선택은 기본값이 `Y`입니다. 선택 스킬을 `N`으로 바꾸면 설치 후 수정되지 않은 스킬과 호출 지침만 안전하게 제거하고, 선택 MCP를 `N`으로 바꾸면 MnP Suite가 등록한 항목만 다음 AionUi 실행 때 제거합니다. Dooray API 키는 로그·manifest에 넣지 않고 현재 Windows 사용자 DPAPI로 암호화하며, PowerPoint MCP는 전용 Python 가상환경과 Windows COM 의존성을 사용합니다. 무인 설치 옵션, 기존 저장소 재사용·업데이트 조건, 전역 설정 경로와 문제 해결 방법은 [Windows 설치 패키지 상세 안내](installer/windows/README.md)를 확인하세요.
 
 클라이언트 개발자가 Unity MCP를 연결하고 AionUi·AionCore 소스 fork와 Unity worker 작업공간을 구분해 운영하는 방법은 [`클라이언트 사용자용 Unity MCP 및 Fork 운영 가이드`](installer/windows/UNITY_MCP_AND_FORK_GUIDE.md)를 참고합니다.
 
-설치 후 `dev\Start-All-Dev.bat`을 실행하고, AionUi가 열린 다음 MnP의 `AI 대화 시작`에서 `MindNProgress · 필수`가 표시되는지 확인합니다. 실제 적용된 저장소 버전, 스킬과 전역 설정 경로는 설치 루트의 `installation-manifest.json`에 기록됩니다.
+설치 후 `dev\Start-All-Dev.bat`을 실행하고, AionUi가 열린 다음 MnP의 `AI 대화 시작`에서 `MindNProgress · 필수`와 설치 중 선택한 MCP가 표시되는지 확인합니다. 실제 적용된 저장소 버전, 선택 MCP, 스킬과 전역 설정 경로는 설치 루트의 `installation-manifest.json`에 기록됩니다.
 
 PC마다 이렇게 설치한 MindNProgress의 `server/data`는 서로 독립되며 자동 동기화되지 않습니다. 설치 패키지 재실행이나 Git 업데이트가 운영 데이터를 동기화하지 않으므로, 공동 문서가 필요하면 별도의 팀 호스트 구성을 사용해야 합니다.
 

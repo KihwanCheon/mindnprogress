@@ -1,6 +1,6 @@
 # MnP Suite Windows Git 설치 패키지
 
-`Install-MnPSuite.bat`을 실행하면 설치 위치 선택부터 필수 도구 확인, 세 Git 저장소 설치, AionUi의 MindNProgress MCP bootstrap 준비, 의존성 설치, AionCore 빌드, Dev 실행 배치 생성, Claude Code·Codex 사용자 전역 스킬 구성과 완료 안내까지 순서대로 진행합니다.
+`Install-MnPSuite.bat`을 실행하면 설치 위치 선택부터 필수 도구 확인, 세 필수 Git 저장소와 선택 MCP 저장소 설치, AionUi MCP bootstrap 준비, 의존성 설치, AionCore 빌드, Dev 실행 배치 생성, Claude Code·Codex 사용자 전역 스킬 구성과 완료 안내까지 순서대로 진행합니다.
 
 ## 기본 설치 구성
 
@@ -9,6 +9,11 @@
   ├─ MindNProgress/  origin: https://github.com/mabobsa/MindNProgress.git
   ├─ AionUi/         origin: https://github.com/mabobsa/AionUi.git
   ├─ AionCore/       origin: https://github.com/mabobsa/AionCore.git
+  ├─ dooray-mcp-server/                Dooray MCP 선택 시
+  ├─ Office-PowerPoint-MCP-Server/     PowerPoint MCP 선택 시
+  ├─ tools/jdk-21/                     Dooray 선택 시, 기존 Java 21이 없을 때
+  ├─ mcp/mnp-suite-mcp-bootstrap.json  선택 MCP의 AionUi 등록 정보, 비밀값 없음
+  ├─ secrets/dooray-api-key.dpapi      Dooray 선택 시, 현재 사용자 DPAPI 암호화
   ├─ workspace-pool/ Unity 작업공간 구성·공통 규칙·지식 제출 폴더
   ├─ dev/            Dev 실행·중지·AionCore 재빌드 배치
   ├─ MindNProgress_Launcher.cjs  백업·복원 후 MnP 재시작 호환 실행 파일
@@ -19,7 +24,7 @@
   └─ installation-manifest.json
 ```
 
-AionUi와 AionCore에는 개인 fork를 `origin`, 공식 저장소를 `upstream`으로 등록합니다. 세 저장소의 기본 브랜치는 `main`입니다.
+AionUi와 AionCore에는 개인 fork를 `origin`, 공식 저장소를 `upstream`으로 등록합니다. 필수 저장소와 선택 MCP 저장소의 기본 브랜치는 `main`입니다.
 
 설치 루트 밖의 현재 Windows 사용자 프로필에는 다음 구성이 추가됩니다.
 
@@ -37,7 +42,7 @@ Codex는 `CODEX_HOME`, Claude Code는 `CLAUDE_CONFIG_DIR` 환경변수가 있으
 
 `workspace-pool\workspaces.json`에는 integration과 worker 예시가 `enabled=false`로 생성됩니다. 따라서 실제 Unity 프로젝트 경로를 설정하기 전에는 어떤 작업공간도 점유하지 않습니다.
 
-현재 AionUi fork에 MindNProgress MCP bootstrap이 아직 포함되지 않은 경우 설치기는 `overlays\AionUi-MindNProgress-Mcp.patch`를 사전 검사한 뒤 AionUi 작업 트리에 적용합니다. fork가 같은 기능을 포함하면 overlay는 자동으로 생략됩니다. overlay가 적용된 AionUi 저장소에는 의도된 로컬 변경이 남으므로, 원격 업데이트 전에는 아래의 업데이트 주의사항을 확인하세요.
+현재 AionUi fork에 bootstrap이 아직 포함되지 않은 경우 설치기는 `overlays\AionUi-MindNProgress-Mcp.patch`와 `overlays\AionUi-MnPSuite-Optional-Mcp.patch`를 순서대로 사전 검사한 뒤 AionUi 작업 트리에 적용합니다. 첫 overlay는 필수 MindNProgress MCP, 두 번째 overlay는 설치 중 선택한 Dooray·PowerPoint MCP를 처리합니다. fork가 같은 기능을 포함하면 해당 overlay는 자동으로 생략됩니다. overlay가 적용된 AionUi 저장소에는 의도된 로컬 변경이 남으므로, 원격 업데이트 전에는 아래의 업데이트 주의사항을 확인하세요.
 
 ## 대화형 설치
 
@@ -52,11 +57,13 @@ Install-MnPSuite.bat
 1. 최종 설치 루트
 2. 선택 스킬 `unity-work` 설치 여부
 3. 선택 스킬 `pptx` 설치 여부
-4. 설치 계획
-5. 누락 필수 도구의 winget 설치 여부
-6. 기존 저장소가 있을 때 재사용 또는 fast-forward 업데이트
-7. 바탕화면 바로가기 생성
-8. 설치 직후 Dev 환경 실행
+4. `dooray-mcp` Git 설치와 AionUi 등록 여부
+5. `pptx-mcp` Git 설치와 AionUi 등록 여부
+6. Dooray 선택 시 API 키 보안 입력 또는 기존 DPAPI 키 재사용
+7. 설치 계획
+8. 누락 필수 도구 준비 여부
+9. 기존 저장소가 있을 때 재사용 또는 fast-forward 업데이트
+10. 바탕화면 바로가기 생성과 설치 직후 Dev 환경 실행
 
 ## 무인 설치 예시
 
@@ -67,11 +74,17 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\Install-MnPSui
   -InstallMissingPrerequisites `
   -IncludeUnityWorkSkill `
   -IncludePptxSkill `
+  -IncludeDoorayMcp `
+  -IncludePptxMcp `
   -CreateDesktopShortcuts `
   -NoLaunchPrompt
 ```
 
 `mnp-dooray`는 항상 Claude Code와 Codex 양쪽에 설치됩니다. `unity-work`와 `pptx`는 각 스위치를 지정할 때 설치되며 대화형 설치에서는 신규·재설치 여부와 관계없이 두 항목을 Y/N으로 각각 질문합니다. 패키지가 이전에 설치한 선택 스킬을 한쪽 전역 구성에서라도 발견하면 기본값은 `Y`이며, 사용자가 그대로 확인하면 양쪽 구성을 유지합니다. 무인 재설치는 기존 패키지 관리 선택을 유지하고, 각 스위치로 새 선택 항목을 추가할 수 있습니다.
+
+`-IncludeDoorayMcp`와 `-IncludePptxMcp`는 Git 저장소·Windows 런타임·AionUi 등록을 함께 선택합니다. Dooray 무인 설치에서는 API 키를 명령행에 넣지 말고 설치 프로세스를 시작하기 직전에 `DOORAY_API_KEY` 환경값으로 제공해야 합니다. 기존 DPAPI 파일을 현재 사용자가 복호화할 수 있으면 환경값 없이 재사용합니다. PowerPoint가 없는 PC에서 무인 `pptx-mcp` 설치를 허용하려면 기능 제한을 확인한 뒤 `-AllowPptxWithoutPowerPoint`를 함께 지정합니다.
+
+Dooray DPAPI 파일은 같은 Windows 사용자와 PC에서만 재사용할 수 있습니다. 다른 사용자 계정이나 새 PC로 Suite를 복사하면 복호화되지 않으므로 설치기를 다시 실행해 API 키를 입력해야 합니다. 일반 MnP 데이터 백업 ZIP에는 이 파일이 포함되지 않습니다.
 
 기존의 올바른 저장소를 그대로 사용할 때는 `-ReuseExistingRepositories`, 깨끗한 현재 `main`을 `origin/main`으로 fast-forward할 때는 `-UpdateExistingRepositories`를 지정합니다. 원격 주소가 다르거나 업데이트 대상에 커밋되지 않은 변경이 있으면 중단합니다.
 
@@ -118,9 +131,9 @@ CLAUDE.md.mnp-suite-backup-20260824-183015123.bak
 
 이번 설치에서 새로 만든 백업의 절대 경로는 `installation-manifest.json`의 각 `agentConfiguration.platforms[].instructionsBackup`에도 기록됩니다. 원본 지침 파일이 존재하지 않아 새로 만든 경우에는 백업할 이전 파일이 없으므로 이 값이 비어 있습니다.
 
-### PPTX 스킬의 MCP 전제 조건
+### PPTX 스킬과 MCP
 
-`pptx` 스킬은 `pptx-mcp`로 파일을 열고 모든 슬라이드를 PNG로 저장한 뒤 텍스트·표 구조와 함께 확인하도록 지시합니다. 이 설치 패키지는 지침 스킬만 Claude Code와 Codex에 추가하며 `pptx-mcp` 서버 자체를 설치하거나 등록하지 않습니다. 조직의 AionUi·Claude Code·Codex 환경에서 해당 MCP를 별도로 연결해야 실제 PowerPoint 파일 검토에 사용할 수 있습니다.
+`pptx` 스킬은 `pptx-mcp`로 파일을 열고 모든 슬라이드를 PNG로 저장한 뒤 텍스트·표 구조와 함께 확인하도록 지시합니다. 스킬과 MCP는 별도 Y/N 항목이지만, 스킬을 선택하면 MCP 질문의 기본값도 `Y`입니다. `pptx-mcp`를 선택하면 Git 저장소, 전용 `.venv`, `pywin32`를 준비하고 AionUi 목록에 등록합니다. Microsoft PowerPoint가 없으면 python-pptx 기반 도구는 사용할 수 있지만 PowerPoint COM 기반 PNG 내보내기는 사용할 수 없습니다.
 
 ## 원격 저장소 또는 브랜치 변경
 
@@ -130,9 +143,13 @@ CLAUDE.md.mnp-suite-backup-20260824-183015123.bak
   -MindNProgressRepository 'https://github.com/example/MindNProgress.git' `
   -AionUiRepository 'https://github.com/example/AionUi.git' `
   -AionCoreRepository 'https://github.com/example/AionCore.git' `
+  -DoorayMcpRepository 'https://github.com/example/dooray-mcp-server.git' `
+  -PptxMcpRepository 'https://github.com/example/Office-PowerPoint-MCP-Server.git' `
   -MindNProgressBranch 'main' `
   -AionUiBranch 'main' `
-  -AionCoreBranch 'main'
+  -AionCoreBranch 'main' `
+  -DoorayMcpBranch 'main' `
+  -PptxMcpBranch 'main'
 ```
 
 ## 필수 도구
@@ -143,6 +160,8 @@ CLAUDE.md.mnp-suite-backup-20260824-183015123.bak
 - Rustup과 Cargo
 - Python 3.11 이상
 - Visual Studio 2022 C++ Build Tools
+- Dooray MCP 선택 시 Java 21. 기존 Java 21이 없으면 설치 루트에 portable Temurin 21을 내려받으며 시스템 `PATH`·`JAVA_HOME`은 변경하지 않음
+- PowerPoint MCP 선택 시 Microsoft PowerPoint 권장. 미설치 상태에서는 PNG 내보내기 제한
 
 누락 도구 자동 설치를 승인하면 스크립트는 먼저 `winget search`로 커뮤니티 소스가 실제 동작하는지 확인한 뒤 패키지를 설치합니다. `--source winget`을 명시하므로 Microsoft Store 소스의 인증서나 연결 오류가 필수 개발 도구 설치를 막지 않습니다. 상태 확인이 비정상 종료되면 Microsoft Store 또는 사내 배포 도구에서 **앱 설치 관리자(Desktop App Installer)**를 업데이트하거나, IT 담당자가 필수 도구를 먼저 설치해야 합니다.
 
@@ -162,7 +181,7 @@ CLAUDE.md.mnp-suite-backup-20260824-183015123.bak
 
 AionUi Dev 실행 배치는 Sentry DSN을 비워 이 실행에 한해 원격 오류 전송을 사용하지 않습니다. AionCore를 별도 서버로 직접 실행하지 않으며 AionUi가 로컬 바이너리를 시작합니다.
 
-이 배치는 `MINDNPROGRESS_MCP_ENTRY`에 현재 설치 루트의 `MindNProgress\mcp\server.mjs`를 지정합니다. AionUi는 최초 실행 bootstrap에서 이름이 `MindNProgress`인 stdio MCP를 자동 등록·활성화합니다. 이미 등록된 항목이 비활성 상태이거나 설치 위치가 바뀌었으면 다음 AionUi 시작 때 활성 상태와 경로를 다시 맞춥니다.
+이 배치는 `MINDNPROGRESS_MCP_ENTRY`에 현재 설치 루트의 `MindNProgress\mcp\server.mjs`, `MNP_SUITE_MCP_CONFIG`에 선택 MCP descriptor를 지정합니다. AionUi는 최초 실행 bootstrap에서 필수 `MindNProgress`와 선택한 `dooray-mcp`·`pptx-mcp`를 자동 등록합니다. 이미 등록된 패키지 관리 항목이 비활성 상태이거나 설치 위치가 바뀌었으면 다음 AionUi 시작 때 활성 상태와 경로를 맞춥니다. 같은 이름의 사용자 소유 MCP는 덮어쓰지 않으며, 재설치에서 선택을 해제하면 MnP Suite 표식이 있는 항목만 제거합니다.
 
 MnP의 `AI 대화 시작` 작업공간 기본값도 서버가 현재 설치된 `MindNProgress` 저장소 경로를 동적으로 제공하므로 특정 PC의 Git 경로를 전제로 하지 않습니다.
 
@@ -190,7 +209,7 @@ workspace-pool/
 .\Install-MnPSuite.ps1 -InstallRoot 'C:\Dev\MnPSuite' -NonInteractive -PlanOnly
 ```
 
-Dev 배치 템플릿의 하드코딩 경로와 Claude Code·Codex 전역 구성의 네 가지 사전 상태(둘 다 없음, Codex만 있음, Claude만 있음, 둘 다 있음)를 임시 사용자 프로필에서 자체 검증합니다. 이 검증은 실제 사용자 전역 설정을 변경하지 않습니다.
+Dev 배치 템플릿의 하드코딩 경로, 선택 MCP 네 조합, Dooray DPAPI 암호화, bootstrap 비밀값 제외와 Claude Code·Codex 전역 구성의 네 가지 사전 상태를 임시 사용자 프로필에서 자체 검증합니다. 이 검증은 실제 사용자 전역 설정을 변경하지 않습니다.
 
 ```powershell
 .\Install-MnPSuite.ps1 -SelfTest -NonInteractive
@@ -202,29 +221,39 @@ Dev 배치 템플릿의 하드코딩 경로와 Claude Code·Codex 전역 구성�
 - 기존 비-Git 폴더를 덮어쓰지 않습니다.
 - 기존 Git 저장소의 `origin`이 예상 주소와 다르면 중단합니다.
 - 업데이트는 깨끗한 현재 브랜치에서 `git pull --ff-only`만 사용합니다.
-- 업데이트 전 세 저장소를 먼저 검사하므로 뒤쪽 저장소의 로컬 변경 때문에 앞쪽 저장소만 갱신되는 부분 업데이트를 하지 않습니다.
+- 업데이트 전 필수 저장소와 선택한 MCP 저장소를 모두 먼저 검사하므로 뒤쪽 저장소의 로컬 변경 때문에 앞쪽 저장소만 갱신되는 부분 업데이트를 하지 않습니다.
 - 다른 브랜치로 자동 전환하거나 로컬 변경을 초기화하지 않습니다.
 - `server/data`의 운영 데이터를 Git 업데이트 대상으로 취급하지 않습니다.
 - 작업공간 템플릿과 공통 규칙은 기존 파일이 있으면 덮어쓰지 않습니다.
 - Claude Code·Codex 전역 지침은 관리 표식 사이만 갱신하며 기존 원문을 보존합니다.
 - 같은 이름의 사용자 소유 스킬은 덮어쓰지 않습니다.
+- 같은 이름의 사용자 소유 AionUi MCP는 덮어쓰거나 삭제하지 않습니다.
+- Dooray API 키 원문은 설치 로그·bootstrap JSON·manifest·실행 인자에 기록하지 않고 Windows DPAPI CurrentUser로 암호화합니다.
 - 바탕화면 바로가기는 영문 파일명으로 만들며, Windows 정책 때문에 생성이 실패해도 설치 결과는 유지하고 경고만 표시합니다.
 
 ## 설치 후 MCP 확인
 
-AionUi를 한 번 실행하면 다음 stdio MCP 서버가 자동 등록되고 활성화됩니다.
+AionUi를 한 번 실행하면 필수 서버와 설치 중 선택한 서버가 자동 등록되고 활성화됩니다.
 
 ```text
 이름: MindNProgress
 명령: node
 인수: <설치 루트>\MindNProgress\mcp\server.mjs
+
+이름: dooray-mcp             선택 시
+명령: powershell.exe
+인수: <설치 루트>\mcp\Start-Dooray-Mcp.ps1
+
+이름: pptx-mcp               선택 시
+명령: <설치 루트>\Office-PowerPoint-MCP-Server\.venv\Scripts\python.exe
+인수: <설치 루트>\Office-PowerPoint-MCP-Server\ppt_mcp_server.py
 ```
 
-MnP의 `AI 대화 시작` 창을 다시 열어 `MindNProgress · 필수`가 보이고 체크 해제가 불가능한지 확인합니다. 보이지 않으면 AionUi 콘솔에서 `updated MindNProgress server`가 포함된 MCP bootstrap 완료 로그와 MCP 엔트리 파일 존재 여부를 확인합니다. AionUi의 MCP와 Assistant 기본값 변경은 새 대화에 적용되며 이미 열려 있는 대화 런타임에는 소급 적용되지 않습니다.
+MnP의 `AI 대화 시작` 창을 다시 열어 `MindNProgress · 필수`가 보이고 체크 해제가 불가능한지 확인합니다. 선택 MCP는 체크 가능한 목록 항목입니다. 보이지 않으면 AionUi 콘솔의 MCP bootstrap 완료 로그, `mcp\mnp-suite-mcp-bootstrap.json`, 해당 실행 파일을 확인합니다. 이름 충돌 로그가 있으면 기존 사용자 소유 서버 이름을 먼저 정리해야 합니다. AionUi의 MCP와 Assistant 기본값 변경은 새 대화에 적용되며 이미 열려 있는 대화 런타임에는 소급 적용되지 않습니다.
 
 ## AionUi overlay 적용 상태와 업데이트
 
-`installation-manifest.json`의 `aionUiMindNProgressMcpBootstrap`에서 fork 내장 기능을 사용했는지, 설치기 overlay가 적용됐는지 확인할 수 있습니다.
+`installation-manifest.json`의 `aionUiMindNProgressMcpBootstrap`과 `optionalMcpBootstrap`에서 fork 내장 기능을 사용했는지, 설치기 overlay가 적용됐는지, 어떤 선택 MCP가 다음 실행에 등록되는지 확인할 수 있습니다.
 
 - `source=repository`: fork 자체에 기능이 있어 AionUi 작업 트리가 깨끗하게 유지됩니다.
 - `source=installer-overlay`: 설치기가 호환 overlay를 적용했으며 AionUi 작업 트리에 세 개 파일의 변경이 남습니다. 설치기를 재실행해도 이 상태를 `repository`로 잘못 기록하지 않습니다.

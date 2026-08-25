@@ -1,0 +1,330 @@
+diff --git a/packages/desktop/src/process/utils/mindNProgressMcpBootstrap.ts b/packages/desktop/src/process/utils/mindNProgressMcpBootstrap.ts
+index 717e9c1..a5a68a6 100644
+--- a/packages/desktop/src/process/utils/mindNProgressMcpBootstrap.ts
++++ b/packages/desktop/src/process/utils/mindNProgressMcpBootstrap.ts
+@@ -4,14 +4,32 @@
+  * SPDX-License-Identifier: Apache-2.0
+  */
+ 
+-import { statSync } from 'node:fs';
++import { readFileSync, statSync } from 'node:fs';
+ import path from 'node:path';
+ import type { IMcpServer } from '@/common/config/storage';
+ 
+ export const MINDNPROGRESS_MCP_NAME = 'MindNProgress';
+ export const MINDNPROGRESS_MCP_ENTRY_ENV = 'MINDNPROGRESS_MCP_ENTRY';
++export const MNP_SUITE_MCP_CONFIG_ENV = 'MNP_SUITE_MCP_CONFIG';
++export const MNP_SUITE_MANAGED_BY = 'MnPSuite';
++export const MNP_SUITE_OPTIONAL_MCP_NAMES = ['dooray-mcp', 'pptx-mcp'] as const;
+ 
+ type MindNProgressMcpServer = Partial<IMcpServer> & Pick<IMcpServer, 'name' | 'transport'>;
++type MnPSuiteMcpDescriptor = {
++  schemaVersion?: unknown;
++  servers?: unknown;
++};
++type MnPSuiteMcpServerDescriptor = {
++  name?: unknown;
++  description?: unknown;
++  command?: unknown;
++  args?: unknown;
++};
++
++export type MnPSuiteMcpBootstrap = {
++  servers: MindNProgressMcpServer[];
++  managedNames: string[];
++};
+ 
+ function isExistingFile(filePath: string): boolean {
+   try {
+@@ -47,3 +65,88 @@ export function buildMindNProgressMcpServer(
+     original_json: JSON.stringify({ mcpServers: { [MINDNPROGRESS_MCP_NAME]: serverConfig } }, null, 2),
+   };
+ }
++
++function isSupportedOptionalServerName(name: string): boolean {
++  return MNP_SUITE_OPTIONAL_MCP_NAMES.some((candidate) => candidate === name);
++}
++
++function buildMnPSuiteOptionalServer(descriptor: MnPSuiteMcpServerDescriptor): MindNProgressMcpServer | null {
++  const name = typeof descriptor.name === 'string' ? descriptor.name.trim() : '';
++  const command = typeof descriptor.command === 'string' ? descriptor.command.trim() : '';
++  const args = Array.isArray(descriptor.args) ? descriptor.args : [];
++  if (
++    !isSupportedOptionalServerName(name) ||
++    !command ||
++    !path.isAbsolute(command) ||
++    !isExistingFile(command) ||
++    !args.every((argument) => typeof argument === 'string')
++  ) {
++    return null;
++  }
++
++  const description = typeof descriptor.description === 'string' ? descriptor.description.trim() : '';
++  const serverConfig = { command, args };
++  return {
++    name,
++    description: description || `MnP Suite managed optional MCP server: ${name}`,
++    enabled: true,
++    builtin: false,
++    transport: {
++      type: 'stdio',
++      command,
++      args,
++    },
++    original_json: JSON.stringify(
++      {
++        mcpServers: { [name]: serverConfig },
++        mnpSuite: { managedBy: MNP_SUITE_MANAGED_BY, schemaVersion: 1 },
++      },
++      null,
++      2
++    ),
++  };
++}
++
++export function buildMnPSuiteOptionalMcpBootstrap(
++  configPath = process.env[MNP_SUITE_MCP_CONFIG_ENV]
++): MnPSuiteMcpBootstrap | null {
++  const normalizedConfigPath = configPath?.trim();
++  if (!normalizedConfigPath || !path.isAbsolute(normalizedConfigPath) || !isExistingFile(normalizedConfigPath)) {
++    return null;
++  }
++
++  try {
++    const descriptor = JSON.parse(readFileSync(normalizedConfigPath, 'utf8')) as MnPSuiteMcpDescriptor;
++    if (descriptor.schemaVersion !== 1 || !Array.isArray(descriptor.servers)) {
++      return null;
++    }
++
++    const servers: MindNProgressMcpServer[] = [];
++    const seen = new Set<string>();
++    for (const value of descriptor.servers) {
++      if (!value || typeof value !== 'object' || Array.isArray(value)) {
++        return null;
++      }
++      const server = buildMnPSuiteOptionalServer(value as MnPSuiteMcpServerDescriptor);
++      if (!server || seen.has(server.name)) {
++        return null;
++      }
++      seen.add(server.name);
++      servers.push(server);
++    }
++    return { servers, managedNames: [...MNP_SUITE_OPTIONAL_MCP_NAMES] };
++  } catch {
++    return null;
++  }
++}
++
++export function isMnPSuiteManagedMcpServer(server: Pick<IMcpServer, 'original_json'>): boolean {
++  try {
++    const parsed = JSON.parse(server.original_json || '{}') as {
++      mnpSuite?: { managedBy?: unknown };
++    };
++    return parsed.mnpSuite?.managedBy === MNP_SUITE_MANAGED_BY;
++  } catch {
++    return false;
++  }
++}
+diff --git a/packages/desktop/src/process/utils/runBackendMigrations.ts b/packages/desktop/src/process/utils/runBackendMigrations.ts
+index f613b6b..da42369 100644
+--- a/packages/desktop/src/process/utils/runBackendMigrations.ts
++++ b/packages/desktop/src/process/utils/runBackendMigrations.ts
+@@ -18,7 +18,12 @@ import {
+ import { BUILTIN_IMAGE_GEN_NAME, type IMcpServer, type IProvider } from '@/common/config/storage';
+ import { getBuiltinMcpScriptPath, type ProcessConfig as ProcessConfigType } from './initStorage';
+ import { migrateAssistantsToBackend } from './migrateAssistants';
+-import { buildMindNProgressMcpServer, MINDNPROGRESS_MCP_NAME } from './mindNProgressMcpBootstrap';
++import {
++  buildMindNProgressMcpServer,
++  buildMnPSuiteOptionalMcpBootstrap,
++  isMnPSuiteManagedMcpServer,
++  MINDNPROGRESS_MCP_NAME,
++} from './mindNProgressMcpBootstrap';
+ 
+ type ConfigFile = typeof ProcessConfigType;
+ type MigrationStepResult = boolean;
+@@ -311,6 +316,7 @@ async function ensureBootstrapMcpServersInDb(configFile: ConfigFile): Promise<vo
+   const imageServer = buildBuiltinImageGenerationServer(imageEnvResolution, imageConfig);
+   const defaultServers = buildDefaultMcpServers();
+   const mindNProgressServer = buildMindNProgressMcpServer();
++  const mnPSuiteOptionalBootstrap = buildMnPSuiteOptionalMcpBootstrap();
+   const existingMindNProgressServer = existing.find(
+     (server) => server.name.trim().toLowerCase() === MINDNPROGRESS_MCP_NAME.toLowerCase()
+   );
+@@ -318,9 +324,21 @@ async function ensureBootstrapMcpServersInDb(configFile: ConfigFile): Promise<vo
+   if (mindNProgressServer && !existingMindNProgressServer) {
+     bootstrapServers.push(mindNProgressServer);
+   }
+-  const missing = bootstrapServers.filter((server) => !existingByName.has(server.name));
++  const optionalExistingByName = new Map(
++    (existing ?? []).map((server) => [server.name.trim().toLowerCase(), server])
++  );
++  const optionalMissing = (mnPSuiteOptionalBootstrap?.servers ?? []).filter(
++    (server) => !optionalExistingByName.has(server.name.toLowerCase())
++  );
++  const missing = [
++    ...bootstrapServers.filter((server) => !existingByName.has(server.name)),
++    ...optionalMissing,
++  ];
+   let imageServerUpdated = false;
+   let mindNProgressServerUpdated = false;
++  let mnPSuiteOptionalServersUpdated = 0;
++  let mnPSuiteOptionalServersRemoved = 0;
++  let mnPSuiteOptionalServerConflicts = 0;
+ 
+   if (missing.length > 0) {
+     await mcpService.batchImportServers.invoke({ servers: missing });
+@@ -356,6 +374,57 @@ async function ensureBootstrapMcpServersInDb(configFile: ConfigFile): Promise<vo
+     }
+   }
+ 
++  if (mnPSuiteOptionalBootstrap) {
++    const desiredNames = new Set(mnPSuiteOptionalBootstrap.servers.map((server) => server.name.toLowerCase()));
++    for (const desiredServer of mnPSuiteOptionalBootstrap.servers) {
++      const existingServer = optionalExistingByName.get(desiredServer.name.toLowerCase());
++      if (!existingServer) {
++        continue;
++      }
++      if (!isMnPSuiteManagedMcpServer(existingServer)) {
++        mnPSuiteOptionalServerConflicts += 1;
++        console.warn('[Migration] skipped MnP Suite MCP name conflict: %s', desiredServer.name);
++        continue;
++      }
++
++      const transportChanged = !isSameStdioTransport(existingServer.transport, desiredServer.transport);
++      const metadataChanged =
++        existingServer.name !== desiredServer.name ||
++        existingServer.description !== desiredServer.description ||
++        existingServer.original_json !== desiredServer.original_json ||
++        existingServer.builtin !== false;
++      if (transportChanged || metadataChanged) {
++        await mcpService.updateServer.invoke({
++          id: existingServer.id,
++          data: {
++            name: desiredServer.name,
++            description: desiredServer.description,
++            transport: desiredServer.transport,
++            original_json: desiredServer.original_json,
++            builtin: false,
++          },
++        });
++        mnPSuiteOptionalServersUpdated += 1;
++      }
++      if (existingServer.enabled === false) {
++        await mcpService.toggleServer.invoke({ id: existingServer.id });
++        mnPSuiteOptionalServersUpdated += 1;
++      }
++    }
++
++    for (const existingServer of existing ?? []) {
++      const normalizedName = existingServer.name.trim().toLowerCase();
++      if (
++        mnPSuiteOptionalBootstrap.managedNames.includes(normalizedName) &&
++        !desiredNames.has(normalizedName) &&
++        isMnPSuiteManagedMcpServer(existingServer)
++      ) {
++        await mcpService.deleteServer.invoke({ id: existingServer.id });
++        mnPSuiteOptionalServersRemoved += 1;
++      }
++    }
++  }
++
+   const existingChromeDevtools = existingByName.get(BUILTIN_CHROME_DEVTOOLS_NAME);
+   if (
+     existingChromeDevtools &&
+@@ -475,11 +544,14 @@ async function ensureBootstrapMcpServersInDb(configFile: ConfigFile): Promise<vo
+   }
+ 
+   console.info(
+-    '[Migration] MCP bootstrap completed, imported %d missing defaults, updated image server: %s, updated browser server: %s, updated MindNProgress server: %s, image config source: %s, image enabled: %s',
++    '[Migration] MCP bootstrap completed, imported %d missing defaults, updated image server: %s, updated browser server: %s, updated MindNProgress server: %s, updated MnP Suite optional servers: %d, removed MnP Suite optional servers: %d, MnP Suite name conflicts: %d, image config source: %s, image enabled: %s',
+     missing.length,
+     imageServerUpdated ? 'yes' : 'no',
+     browserServerUpdated ? 'yes' : 'no',
+     mindNProgressServerUpdated ? 'yes' : 'no',
++    mnPSuiteOptionalServersUpdated,
++    mnPSuiteOptionalServersRemoved,
++    mnPSuiteOptionalServerConflicts,
+     imageConfigSource,
+     imageConfig?.switch === true ? 'yes' : 'no'
+   );
+diff --git a/tests/unit/mindNProgressMcpBootstrap.test.ts b/tests/unit/mindNProgressMcpBootstrap.test.ts
+index 6ca2908..a5b5505 100644
+--- a/tests/unit/mindNProgressMcpBootstrap.test.ts
++++ b/tests/unit/mindNProgressMcpBootstrap.test.ts
+@@ -7,7 +7,11 @@
+ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+ import { tmpdir } from 'node:os';
+ import path from 'node:path';
+-import { buildMindNProgressMcpServer } from '@/process/utils/mindNProgressMcpBootstrap';
++import {
++  buildMindNProgressMcpServer,
++  buildMnPSuiteOptionalMcpBootstrap,
++  isMnPSuiteManagedMcpServer,
++} from '@/process/utils/mindNProgressMcpBootstrap';
+ import { afterEach, describe, expect, it } from 'vitest';
+ 
+ const temporaryDirectories: string[] = [];
+@@ -47,3 +51,62 @@ describe('buildMindNProgressMcpServer', () => {
+     expect(server?.original_json).toContain(entryPath.replaceAll('\\', '\\\\'));
+   });
+ });
++
++describe('buildMnPSuiteOptionalMcpBootstrap', () => {
++  it('builds only allowlisted package-managed stdio servers', () => {
++    const directory = mkdtempSync(path.join(tmpdir(), 'aionui-mnp-suite-mcp-'));
++    temporaryDirectories.push(directory);
++    const configPath = path.join(directory, 'mcp-bootstrap.json');
++    writeFileSync(
++      configPath,
++      JSON.stringify({
++        schemaVersion: 1,
++        servers: [
++          {
++            name: 'pptx-mcp',
++            description: 'PowerPoint MCP installed by MnP Suite',
++            command: process.execPath,
++            args: ['server.js'],
++          },
++        ],
++      })
++    );
++
++    const bootstrap = buildMnPSuiteOptionalMcpBootstrap(configPath);
++
++    expect(bootstrap?.managedNames).toEqual(['dooray-mcp', 'pptx-mcp']);
++    expect(bootstrap?.servers).toHaveLength(1);
++    expect(bootstrap?.servers[0]).toMatchObject({
++      name: 'pptx-mcp',
++      enabled: true,
++      builtin: false,
++      transport: { type: 'stdio', command: process.execPath, args: ['server.js'] },
++    });
++    expect(isMnPSuiteManagedMcpServer(bootstrap!.servers[0] as never)).toBe(true);
++  });
++
++  it('rejects invalid, duplicate, and non-allowlisted descriptors', () => {
++    const directory = mkdtempSync(path.join(tmpdir(), 'aionui-mnp-suite-invalid-'));
++    temporaryDirectories.push(directory);
++    const configPath = path.join(directory, 'mcp-bootstrap.json');
++    writeFileSync(configPath, JSON.stringify({ schemaVersion: 1, servers: [{ name: 'other', command: process.execPath }] }));
++    expect(buildMnPSuiteOptionalMcpBootstrap(configPath)).toBeNull();
++
++    writeFileSync(
++      configPath,
++      JSON.stringify({
++        schemaVersion: 1,
++        servers: [
++          { name: 'pptx-mcp', command: process.execPath },
++          { name: 'pptx-mcp', command: process.execPath },
++        ],
++      })
++    );
++    expect(buildMnPSuiteOptionalMcpBootstrap(configPath)).toBeNull();
++  });
++
++  it('does not classify user-owned original JSON as package-managed', () => {
++    expect(isMnPSuiteManagedMcpServer({ original_json: '{"mcpServers":{}}' })).toBe(false);
++    expect(isMnPSuiteManagedMcpServer({ original_json: 'invalid' })).toBe(false);
++  });
++});

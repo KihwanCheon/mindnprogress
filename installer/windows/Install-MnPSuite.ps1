@@ -4,9 +4,13 @@ param(
   [string]$MindNProgressRepository = 'https://github.com/mabobsa/MindNProgress.git',
   [string]$AionUiRepository = 'https://github.com/mabobsa/AionUi.git',
   [string]$AionCoreRepository = 'https://github.com/mabobsa/AionCore.git',
+  [string]$DoorayMcpRepository = 'https://github.com/mabobsa/dooray-mcp-server.git',
+  [string]$PptxMcpRepository = 'https://github.com/mabobsa/Office-PowerPoint-MCP-Server.git',
   [string]$MindNProgressBranch = 'main',
   [string]$AionUiBranch = 'main',
   [string]$AionCoreBranch = 'main',
+  [string]$DoorayMcpBranch = 'main',
+  [string]$PptxMcpBranch = 'main',
   [switch]$NonInteractive,
   [switch]$InstallMissingPrerequisites,
   [switch]$ReuseExistingRepositories,
@@ -15,6 +19,9 @@ param(
   [switch]$SkipAionCoreBuild,
   [switch]$IncludeUnityWorkSkill,
   [switch]$IncludePptxSkill,
+  [switch]$IncludeDoorayMcp,
+  [switch]$IncludePptxMcp,
+  [switch]$AllowPptxWithoutPowerPoint,
   [switch]$CreateDesktopShortcuts,
   [switch]$NoLaunchPrompt,
   [switch]$PlanOnly,
@@ -31,6 +38,8 @@ $script:InstallLogPath = ''
 $script:AgentGuidanceStartMarker = '<!-- BEGIN MnP Suite managed agent guidance -->'
 $script:AgentGuidanceEndMarker = '<!-- END MnP Suite managed agent guidance -->'
 $script:ManagedSkillMarkerName = '.mnp-suite-managed.json'
+$script:OptionalMcpConfigRelativePath = 'mcp\mnp-suite-mcp-bootstrap.json'
+$script:DooraySecretRelativePath = 'secrets\dooray-api-key.dpapi'
 
 function Write-Step {
   param([int]$Number, [int]$Total, [string]$Message)
@@ -556,17 +565,135 @@ function ConvertTo-Version {
 }
 
 function Get-PythonVersion {
+  $launcher = Get-PythonLauncher
+  if ($launcher) { return $launcher.VersionText }
+  return $null
+}
+
+function Get-PythonLauncher {
   $candidates = @(
-    @{ Command = 'py'; Arguments = @('-3.12', '--version') },
-    @{ Command = 'py'; Arguments = @('-3.11', '--version') },
-    @{ Command = 'python'; Arguments = @('--version') }
+    @{ Command = 'py'; PrefixArguments = @('-3.14') },
+    @{ Command = 'py'; PrefixArguments = @('-3.13') },
+    @{ Command = 'py'; PrefixArguments = @('-3.12') },
+    @{ Command = 'py'; PrefixArguments = @('-3.11') },
+    @{ Command = 'python'; PrefixArguments = @() }
   )
   foreach ($candidate in $candidates) {
-    $version = Get-CommandVersion $candidate.Command $candidate.Arguments
+    $versionArguments = @($candidate.PrefixArguments) + '--version'
+    $version = Get-CommandVersion $candidate.Command $versionArguments
     $parsed = ConvertTo-Version $version
-    if ($parsed -and $parsed -ge [Version]'3.11.0') { return $version }
+    if ($parsed -and $parsed -ge [Version]'3.11.0') {
+      return [pscustomobject]@{
+        Command = $candidate.Command
+        PrefixArguments = @($candidate.PrefixArguments)
+        Version = $parsed
+        VersionText = $version
+      }
+    }
   }
   return $null
+}
+
+function Get-JavaMajorVersion {
+  param([string]$JavaPath)
+  if (-not $JavaPath -or -not (Test-Path -LiteralPath $JavaPath -PathType Leaf)) { return $null }
+  $previousPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = 'Continue'
+    $output = (& $JavaPath -version 2>&1 | Select-Object -First 1) -join ''
+    if ($output -match 'version\s+"(\d+)') { return [int]$matches[1] }
+    if ($output -match 'openjdk\s+(\d+)') { return [int]$matches[1] }
+    return $null
+  } catch {
+    return $null
+  } finally {
+    $ErrorActionPreference = $previousPreference
+  }
+}
+
+function Get-Java21Path {
+  param([string]$RootPath = '')
+  $candidates = @()
+  if ($RootPath) { $candidates += Join-Path $RootPath 'tools\jdk-21\bin\java.exe' }
+  if ($env:JAVA_HOME) { $candidates += Join-Path $env:JAVA_HOME 'bin\java.exe' }
+  $javaCommand = Get-Command java.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($javaCommand) { $candidates += $javaCommand.Source }
+  $candidates += 'C:\tools\jdk-21\bin\java.exe'
+  if ($env:ProgramFiles) {
+    $adoptiumRoot = Join-Path $env:ProgramFiles 'Eclipse Adoptium'
+    if (Test-Path -LiteralPath $adoptiumRoot -PathType Container) {
+      $candidates += @(Get-ChildItem -LiteralPath $adoptiumRoot -Directory -Filter 'jdk-21*' -ErrorAction SilentlyContinue |
+        ForEach-Object { Join-Path $_.FullName 'bin\java.exe' })
+    }
+  }
+  foreach ($candidate in @($candidates | Where-Object { $_ } | Select-Object -Unique)) {
+    if ((Get-JavaMajorVersion $candidate) -eq 21) { return [IO.Path]::GetFullPath($candidate) }
+  }
+  return $null
+}
+
+function Install-PortableJdk21 {
+  param([string]$RootPath)
+  $existing = Get-Java21Path $RootPath
+  if ($existing) { return $existing }
+
+  $architecture = switch ($env:PROCESSOR_ARCHITECTURE.ToUpperInvariant()) {
+    'AMD64' { 'x64' }
+    'ARM64' { 'aarch64' }
+    default { throw "portable JDK 21 자동 설치를 지원하지 않는 아키텍처입니다: $env:PROCESSOR_ARCHITECTURE" }
+  }
+  $toolsRoot = Join-Path $RootPath 'tools'
+  $targetRoot = Join-Path $toolsRoot 'jdk-21'
+  if (Test-Path -LiteralPath $targetRoot) {
+    throw "기존 JDK 대상이 Java 21이 아니어서 덮어쓰지 않았습니다: $targetRoot"
+  }
+  New-Item -ItemType Directory -Path $toolsRoot -Force | Out-Null
+  $stageRoot = Join-Path $toolsRoot ('.jdk-21-stage-' + [Guid]::NewGuid().ToString('N'))
+  $archivePath = Join-Path $stageRoot 'jdk.zip'
+  try {
+    New-Item -ItemType Directory -Path $stageRoot -Force | Out-Null
+    Write-Info 'Eclipse Adoptium에서 portable Temurin JDK 21 정보를 확인합니다.'
+    $assetUri = "https://api.adoptium.net/v3/assets/latest/21/hotspot?architecture=$architecture&heap_size=normal&image_type=jdk&jvm_impl=hotspot&os=windows&vendor=eclipse"
+    $assets = @(Invoke-RestMethod -Uri $assetUri -Method Get)
+    $package = $assets | ForEach-Object { $_.binary.package } | Where-Object { $_.link -and $_.checksum } | Select-Object -First 1
+    if (-not $package) { throw 'Temurin JDK 21 다운로드 정보를 확인할 수 없습니다.' }
+    Invoke-WebRequest -Uri ([string]$package.link) -OutFile $archivePath -UseBasicParsing
+    $actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualHash -ne ([string]$package.checksum).ToLowerInvariant()) {
+      throw 'Temurin JDK 21 다운로드 SHA-256 검증에 실패했습니다.'
+    }
+    $expandedRoot = Join-Path $stageRoot 'expanded'
+    Expand-Archive -LiteralPath $archivePath -DestinationPath $expandedRoot
+    $java = Get-ChildItem -LiteralPath $expandedRoot -File -Recurse -Filter 'java.exe' |
+      Where-Object { $_.FullName -match '\\bin\\java\.exe$' } | Select-Object -First 1
+    if (-not $java -or (Get-JavaMajorVersion $java.FullName) -ne 21) {
+      throw '압축을 푼 Temurin JDK가 Java 21인지 확인할 수 없습니다.'
+    }
+    $jdkHome = Split-Path -Parent (Split-Path -Parent $java.FullName)
+    Move-Item -LiteralPath $jdkHome -Destination $targetRoot
+  } finally {
+    if (Test-Path -LiteralPath $stageRoot) {
+      $stageFull = [IO.Path]::GetFullPath($stageRoot).TrimEnd([char[]]'\/')
+      $toolsFull = [IO.Path]::GetFullPath($toolsRoot).TrimEnd([char[]]'\/') + [IO.Path]::DirectorySeparatorChar
+      if (-not $stageFull.StartsWith($toolsFull, [StringComparison]::OrdinalIgnoreCase) -or
+          (Split-Path -Leaf $stageFull) -notlike '.jdk-21-stage-*') {
+        throw "임시 JDK 폴더 정리 대상이 안전하지 않습니다: $stageFull"
+      }
+      Remove-Item -LiteralPath $stageFull -Recurse -Force
+    }
+  }
+  $installed = Get-Java21Path $RootPath
+  if (-not $installed) { throw 'portable Temurin JDK 21 설치 결과를 확인할 수 없습니다.' }
+  Write-Success "portable Temurin JDK 21 준비: $installed"
+  return $installed
+}
+
+function Test-PowerPointInstalled {
+  try {
+    return $null -ne [Type]::GetTypeFromProgID('PowerPoint.Application')
+  } catch {
+    return $false
+  }
 }
 
 function Get-MsvcBuildToolsPath {
@@ -582,6 +709,7 @@ function Get-MsvcBuildToolsPath {
 }
 
 function Get-PrerequisiteState {
+  param([bool]$IncludeDooray = $false, [string]$RootPath = '')
   Refresh-ProcessPath
   $gitVersion = Get-CommandVersion 'git'
   $gitReady = $gitVersion -match '^git version\s+\d'
@@ -600,13 +728,17 @@ function Get-PrerequisiteState {
   $cargoDisplay = ("$cargoVersion / $rustupVersion").Trim()
 
   return @(
-    [pscustomobject]@{ Key = 'Git'; Ready = [bool]$gitReady; Version = $gitVersion; WingetId = 'Git.Git'; Description = 'Git 저장소 clone과 업데이트' }
-    [pscustomobject]@{ Key = 'Node'; Ready = [bool]$nodeSupported; Version = $nodeText; WingetId = 'OpenJS.NodeJS.LTS'; Description = 'AionUi는 Node.js 22 이상 25 미만 필요' }
-    [pscustomobject]@{ Key = 'npm'; Ready = [bool]$npmReady; Version = $npmVersion; WingetId = 'OpenJS.NodeJS.LTS'; Description = 'MindNProgress 의존성 설치' }
-    [pscustomobject]@{ Key = 'Bun'; Ready = [bool]$bunReady; Version = $bunVersion; WingetId = 'Oven-sh.Bun'; Description = 'AionUi 의존성 설치와 Dev 실행' }
-    [pscustomobject]@{ Key = 'Cargo'; Ready = [bool]$cargoReady; Version = $cargoDisplay; WingetId = 'Rustlang.Rustup'; Description = 'AionCore 빌드와 고정 Rust toolchain 관리' }
-    [pscustomobject]@{ Key = 'Python'; Ready = [bool]$pythonVersion; Version = $pythonVersion; WingetId = 'Python.Python.3.12'; Description = 'AionUi 네이티브 모듈 빌드' }
-    [pscustomobject]@{ Key = 'MSVC'; Ready = [bool]$buildToolsPath; Version = $buildToolsPath; WingetId = 'Microsoft.VisualStudio.2022.BuildTools'; Description = 'Windows Rust MSVC와 네이티브 모듈 빌드' }
+    [pscustomobject]@{ Key = 'Git'; Ready = [bool]$gitReady; Version = $gitVersion; WingetId = 'Git.Git'; InstallKind = 'winget'; Description = 'Git 저장소 clone과 업데이트' }
+    [pscustomobject]@{ Key = 'Node'; Ready = [bool]$nodeSupported; Version = $nodeText; WingetId = 'OpenJS.NodeJS.LTS'; InstallKind = 'winget'; Description = 'AionUi는 Node.js 22 이상 25 미만 필요' }
+    [pscustomobject]@{ Key = 'npm'; Ready = [bool]$npmReady; Version = $npmVersion; WingetId = 'OpenJS.NodeJS.LTS'; InstallKind = 'winget'; Description = 'MindNProgress 의존성 설치' }
+    [pscustomobject]@{ Key = 'Bun'; Ready = [bool]$bunReady; Version = $bunVersion; WingetId = 'Oven-sh.Bun'; InstallKind = 'winget'; Description = 'AionUi 의존성 설치와 Dev 실행' }
+    [pscustomobject]@{ Key = 'Cargo'; Ready = [bool]$cargoReady; Version = $cargoDisplay; WingetId = 'Rustlang.Rustup'; InstallKind = 'winget'; Description = 'AionCore 빌드와 고정 Rust toolchain 관리' }
+    [pscustomobject]@{ Key = 'Python'; Ready = [bool]$pythonVersion; Version = $pythonVersion; WingetId = 'Python.Python.3.12'; InstallKind = 'winget'; Description = 'AionUi 네이티브 모듈과 PowerPoint MCP 가상환경' }
+    [pscustomobject]@{ Key = 'MSVC'; Ready = [bool]$buildToolsPath; Version = $buildToolsPath; WingetId = 'Microsoft.VisualStudio.2022.BuildTools'; InstallKind = 'winget'; Description = 'Windows Rust MSVC와 네이티브 모듈 빌드' }
+    if ($IncludeDooray) {
+      $java21Path = Get-Java21Path $RootPath
+      [pscustomobject]@{ Key = 'Java21'; Ready = [bool]$java21Path; Version = $java21Path; WingetId = ''; InstallKind = 'portable-jdk'; Description = 'Dooray MCP 빌드와 실행용 portable JDK 21' }
+    }
   )
 }
 
@@ -637,9 +769,10 @@ function Assert-WingetReady {
 }
 
 function Install-PrerequisitePackages {
-  param([object[]]$Missing)
-  Assert-WingetReady
-  $packageIds = $Missing | Select-Object -ExpandProperty WingetId -Unique
+  param([object[]]$Missing, [string]$RootPath)
+  $wingetMissing = @($Missing | Where-Object { $_.InstallKind -eq 'winget' })
+  if ($wingetMissing.Count -gt 0) { Assert-WingetReady }
+  $packageIds = $wingetMissing | Select-Object -ExpandProperty WingetId -Unique
   foreach ($packageId in $packageIds) {
     Write-Info "winget 설치: $packageId (source: winget)"
     $arguments = @(
@@ -660,6 +793,9 @@ function Install-PrerequisitePackages {
       throw "winget 설치에 실패했습니다: $packageId (exit $LASTEXITCODE)"
     }
     Refresh-ProcessPath
+  }
+  if (@($Missing | Where-Object { $_.InstallKind -eq 'portable-jdk' }).Count -gt 0) {
+    Install-PortableJdk21 $RootPath | Out-Null
   }
 }
 
@@ -790,6 +926,210 @@ function Install-GitRepository {
   Write-Success "$Name 준비됨"
 }
 
+function ConvertTo-PowerShellSingleQuotedLiteral {
+  param([string]$Value)
+  return "'" + $Value.Replace("'", "''") + "'"
+}
+
+function Protect-MnPSuiteSecretFile {
+  param([string]$Path)
+  $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+  if (-not $currentIdentity.User) { throw '현재 Windows 사용자 SID를 확인할 수 없습니다.' }
+  $acl = [Security.AccessControl.FileSecurity]::new()
+  $acl.SetOwner($currentIdentity.User)
+  $acl.SetAccessRuleProtection($true, $false)
+  $identities = @(
+    $currentIdentity.User,
+    [Security.Principal.SecurityIdentifier]::new('S-1-5-18'),
+    [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+  )
+  foreach ($identity in $identities) {
+    $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+      $identity,
+      [Security.AccessControl.FileSystemRights]::FullControl,
+      [Security.AccessControl.AccessControlType]::Allow
+    )
+    $acl.AddAccessRule($rule)
+  }
+  Set-Acl -LiteralPath $Path -AclObject $acl
+}
+
+function Test-DooraySecretFile {
+  param([string]$Path)
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+  try {
+    $protected = Read-Utf8File $Path
+    $secure = ConvertTo-SecureString $protected
+    return $secure.Length -gt 0
+  } catch {
+    return $false
+  }
+}
+
+function Write-DooraySecretFile {
+  param([string]$Path, [Security.SecureString]$SecureApiKey)
+  if (-not $SecureApiKey -or $SecureApiKey.Length -eq 0) { throw 'Dooray API 키가 비어 있습니다.' }
+  $protected = ConvertFrom-SecureString $SecureApiKey
+  Write-Utf8File $Path $protected
+  Protect-MnPSuiteSecretFile $Path
+}
+
+function Get-DoorayApiKeyForInstall {
+  param([string]$SecretPath)
+  $hasReusableSecret = Test-DooraySecretFile $SecretPath
+  if ($NonInteractive) {
+    if (-not [string]::IsNullOrWhiteSpace($env:DOORAY_API_KEY)) {
+      return ConvertTo-SecureString $env:DOORAY_API_KEY -AsPlainText -Force
+    }
+    if ($hasReusableSecret) { return $null }
+    throw '비대화식 Dooray MCP 설치에는 현재 프로세스의 DOORAY_API_KEY 환경값이 필요합니다. 키를 명령행 인자로 전달하지 마세요.'
+  }
+  if ($hasReusableSecret -and (Read-YesNo '기존에 암호화해 저장한 Dooray API 키를 계속 사용할까요?' $true)) {
+    return $null
+  }
+  $secure = Read-Host 'Dooray API 키를 입력하세요. 입력 내용은 화면과 설치 로그에 표시되지 않습니다' -AsSecureString
+  if (-not $secure -or $secure.Length -eq 0) { throw 'Dooray API 키가 입력되지 않았습니다.' }
+  return $secure
+}
+
+function Write-DoorayMcpLauncher {
+  param(
+    [string]$RootPath,
+    [string]$JavaPath,
+    [string]$JarPath,
+    [string]$SecretPath
+  )
+  $launcherPath = Join-Path $RootPath 'mcp\Start-Dooray-Mcp.ps1'
+  $javaLiteral = ConvertTo-PowerShellSingleQuotedLiteral ([IO.Path]::GetFullPath($JavaPath))
+  $jarLiteral = ConvertTo-PowerShellSingleQuotedLiteral ([IO.Path]::GetFullPath($JarPath))
+  $secretLiteral = ConvertTo-PowerShellSingleQuotedLiteral ([IO.Path]::GetFullPath($SecretPath))
+  $content = @"
+`$ErrorActionPreference = 'Stop'
+`$secretPath = $secretLiteral
+`$protectedSecret = [IO.File]::ReadAllText(`$secretPath, [Text.UTF8Encoding]::new(`$false, `$true))
+`$secureSecret = ConvertTo-SecureString `$protectedSecret
+`$secretPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR(`$secureSecret)
+`$exitCode = 1
+try {
+  `$env:DOORAY_API_KEY = [Runtime.InteropServices.Marshal]::PtrToStringBSTR(`$secretPointer)
+  `$env:DOORAY_BASE_URL = 'https://api.dooray.com'
+  & $javaLiteral '-jar' $jarLiteral
+  `$exitCode = `$LASTEXITCODE
+} finally {
+  Remove-Item Env:DOORAY_API_KEY -ErrorAction SilentlyContinue
+  Remove-Item Env:DOORAY_BASE_URL -ErrorAction SilentlyContinue
+  if (`$secretPointer -ne [IntPtr]::Zero) {
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR(`$secretPointer)
+  }
+}
+exit `$exitCode
+"@
+  Write-Utf8File $launcherPath $content
+  return $launcherPath
+}
+
+function Install-DoorayMcpRuntime {
+  param([string]$RootPath, [string]$RepositoryPath, [bool]$SkipInstall)
+  $javaPath = Get-Java21Path $RootPath
+  if (-not $javaPath) { throw 'Dooray MCP에 필요한 Java 21을 찾을 수 없습니다.' }
+  $gradleWrapper = Join-Path $RepositoryPath 'gradlew.bat'
+  if (-not (Test-Path -LiteralPath $gradleWrapper -PathType Leaf)) {
+    throw "Dooray MCP Gradle Wrapper가 없습니다: $gradleWrapper"
+  }
+  if (-not $SkipInstall) {
+    $previousJavaHome = $env:JAVA_HOME
+    try {
+      $env:JAVA_HOME = Split-Path -Parent (Split-Path -Parent $javaPath)
+      Invoke-NativeCommand $gradleWrapper @('clean', 'testMcpIntegration', '--no-daemon') $RepositoryPath 'Dooray MCP fat JAR 빌드와 stdio 도구 검사'
+    } finally {
+      if ($null -eq $previousJavaHome) { Remove-Item Env:JAVA_HOME -ErrorAction SilentlyContinue }
+      else { $env:JAVA_HOME = $previousJavaHome }
+    }
+  }
+  $jars = @(Get-ChildItem -LiteralPath (Join-Path $RepositoryPath 'build\libs') -File -Filter '*-all.jar' -ErrorAction SilentlyContinue)
+  if ($jars.Count -ne 1) { throw "Dooray MCP fat JAR를 하나로 확정할 수 없습니다: $RepositoryPath\build\libs" }
+
+  $secretPath = Join-Path $RootPath $script:DooraySecretRelativePath
+  $secureApiKey = Get-DoorayApiKeyForInstall $secretPath
+  if ($secureApiKey) { Write-DooraySecretFile $secretPath $secureApiKey }
+  if (-not (Test-DooraySecretFile $secretPath)) { throw 'Dooray API 키 암호화 파일을 현재 사용자로 읽을 수 없습니다.' }
+  $launcherPath = Write-DoorayMcpLauncher $RootPath $javaPath $jars[0].FullName $secretPath
+  Write-Success 'Dooray MCP Windows 런타임과 사용자별 DPAPI 비밀 저장 준비'
+  return [pscustomobject]@{
+    Name = 'dooray-mcp'
+    RepositoryPath = $RepositoryPath
+    JavaPath = $javaPath
+    JarPath = $jars[0].FullName
+    LauncherPath = $launcherPath
+    SecretPath = $secretPath
+  }
+}
+
+function Install-PptxMcpRuntime {
+  param([string]$RepositoryPath, [bool]$SkipInstall)
+  $launcher = Get-PythonLauncher
+  if (-not $launcher) { throw 'PowerPoint MCP에 사용할 Python 3.11 이상을 찾을 수 없습니다.' }
+  $venvPython = Join-Path $RepositoryPath '.venv\Scripts\python.exe'
+  if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
+    if ($SkipInstall) { throw "의존성 설치를 생략했지만 PowerPoint MCP 가상환경이 없습니다: $venvPython" }
+    $venvArguments = @($launcher.PrefixArguments) + @('-m', 'venv', '.venv')
+    Invoke-NativeCommand $launcher.Command $venvArguments $RepositoryPath 'PowerPoint MCP 전용 Python 가상환경 생성'
+  }
+  if (-not $SkipInstall) {
+    Invoke-NativeCommand $venvPython @('-m', 'pip', 'install', '--disable-pip-version-check', '--upgrade', 'pip') $RepositoryPath 'PowerPoint MCP pip 갱신'
+    Invoke-NativeCommand $venvPython @('-m', 'pip', 'install', '--disable-pip-version-check', '--only-binary=:all:', '-r', 'requirements.txt', 'pywin32') $RepositoryPath 'PowerPoint MCP Windows 의존성 설치'
+  }
+  $serverPath = Join-Path $RepositoryPath 'ppt_mcp_server.py'
+  if (-not (Test-Path -LiteralPath $serverPath -PathType Leaf)) { throw "PowerPoint MCP 서버 파일이 없습니다: $serverPath" }
+  $importProbe = 'import mcp, pptx, pymupdf, fontTools, PIL, pythoncom, win32com.client, ppt_mcp_server; print("PPTX_MCP_IMPORT_OK")'
+  Invoke-NativeCommand $venvPython @('-c', $importProbe) $RepositoryPath 'PowerPoint MCP Python·COM 모듈 검사'
+  Write-Success 'PowerPoint MCP Windows 가상환경 준비'
+  return [pscustomobject]@{
+    Name = 'pptx-mcp'
+    RepositoryPath = $RepositoryPath
+    PythonPath = $venvPython
+    ServerPath = $serverPath
+    PowerPointInstalled = [bool](Test-PowerPointInstalled)
+  }
+}
+
+function Write-MnPSuiteMcpBootstrapConfig {
+  param([string]$RootPath, [object]$DoorayRuntime, [object]$PptxRuntime)
+  $servers = @()
+  if ($DoorayRuntime) {
+    $powershellCommand = Get-Command powershell.exe -ErrorAction Stop | Select-Object -First 1
+    $servers += [ordered]@{
+      name = 'dooray-mcp'
+      description = 'Dooray MCP installed and managed by MnP Suite'
+      command = [IO.Path]::GetFullPath($powershellCommand.Source)
+      args = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $DoorayRuntime.LauncherPath)
+    }
+  }
+  if ($PptxRuntime) {
+    $servers += [ordered]@{
+      name = 'pptx-mcp'
+      description = 'PowerPoint MCP installed and managed by MnP Suite'
+      command = [IO.Path]::GetFullPath($PptxRuntime.PythonPath)
+      args = @([IO.Path]::GetFullPath($PptxRuntime.ServerPath))
+    }
+  }
+  $descriptor = [ordered]@{
+    schemaVersion = 1
+    managedBy = 'MnPSuite'
+    servers = $servers
+  }
+  $configPath = Join-Path $RootPath $script:OptionalMcpConfigRelativePath
+  $json = $descriptor | ConvertTo-Json -Depth 6
+  if ($json -match 'DOORAY_API_KEY' -or $json -match 'dooray-api-key\.dpapi') {
+    throw 'MCP bootstrap 구성에 Dooray 비밀 경로 또는 키 이름이 포함되었습니다.'
+  }
+  Write-Utf8File $configPath $json
+  return [pscustomobject]@{
+    Path = $configPath
+    SelectedServers = @($servers | ForEach-Object { $_.name })
+  }
+}
+
 function Ensure-AionUiMindNProgressBootstrap {
   param([string]$RepositoryPath)
 
@@ -800,37 +1140,50 @@ function Ensure-AionUiMindNProgressBootstrap {
   $migrationSource = Join-Path $RepositoryPath $migrationRelativePath
   $bootstrapMarker = 'MINDNPROGRESS_MCP_ENTRY'
   $migrationMarker = 'buildMindNProgressMcpServer'
-  if ((Test-Path -LiteralPath $bootstrapSource -PathType Leaf) -and
+  $optionalBootstrapMarker = 'MNP_SUITE_MCP_CONFIG'
+  $optionalMigrationMarker = 'buildMnPSuiteOptionalMcpBootstrap'
+
+  $baseReady = (Test-Path -LiteralPath $bootstrapSource -PathType Leaf) -and
     (Test-Path -LiteralPath $migrationSource -PathType Leaf) -and
     ((Get-Content -LiteralPath $bootstrapSource -Raw) -match $bootstrapMarker) -and
-    ((Get-Content -LiteralPath $migrationSource -Raw) -match $migrationMarker)) {
-    $bootstrapChanges = @(& git -C $RepositoryPath status --porcelain -- $bootstrapRelativePath $migrationRelativePath $testRelativePath)
-    if ($LASTEXITCODE -ne 0) { throw 'AionUi MindNProgress MCP bootstrap 변경 상태를 확인할 수 없습니다.' }
-    if ($bootstrapChanges.Count -gt 0) {
-      Write-Info 'AionUi에 설치기 MindNProgress MCP bootstrap overlay가 이미 적용되어 있습니다.'
-      return [pscustomobject]@{ Applied = $true; Source = 'installer-overlay' }
+    ((Get-Content -LiteralPath $migrationSource -Raw) -match $migrationMarker)
+  if (-not $baseReady) {
+    $overlayPath = Join-Path $PSScriptRoot 'overlays\AionUi-MindNProgress-Mcp.patch'
+    if (-not (Test-Path -LiteralPath $overlayPath -PathType Leaf)) {
+      throw "MindNProgress MCP 자동 등록용 AionUi overlay가 없습니다: $overlayPath"
     }
-    Write-Info 'AionUi 저장소에 MindNProgress MCP bootstrap이 이미 포함되어 있습니다.'
-    return [pscustomobject]@{ Applied = $false; Source = 'repository' }
+    Invoke-NativeCommand 'git' @('apply', '--check', '--whitespace=error-all', $overlayPath) $RepositoryPath 'AionUi MindNProgress MCP overlay 사전 검사'
+    Invoke-NativeCommand 'git' @('apply', '--whitespace=error-all', $overlayPath) $RepositoryPath 'AionUi MindNProgress MCP overlay 적용'
   }
 
-  $overlayPath = Join-Path $PSScriptRoot 'overlays\AionUi-MindNProgress-Mcp.patch'
-  if (-not (Test-Path -LiteralPath $overlayPath -PathType Leaf)) {
-    throw "MindNProgress MCP 자동 등록용 AionUi overlay가 없습니다: $overlayPath"
+  $optionalReady = (Test-Path -LiteralPath $bootstrapSource -PathType Leaf) -and
+    (Test-Path -LiteralPath $migrationSource -PathType Leaf) -and
+    ((Get-Content -LiteralPath $bootstrapSource -Raw) -match $optionalBootstrapMarker) -and
+    ((Get-Content -LiteralPath $migrationSource -Raw) -match $optionalMigrationMarker)
+  if (-not $optionalReady) {
+    $optionalOverlayPath = Join-Path $PSScriptRoot 'overlays\AionUi-MnPSuite-Optional-Mcp.patch'
+    if (-not (Test-Path -LiteralPath $optionalOverlayPath -PathType Leaf)) {
+      throw "선택 MCP 자동 등록용 AionUi overlay가 없습니다: $optionalOverlayPath"
+    }
+    Invoke-NativeCommand 'git' @('apply', '--check', '--whitespace=error-all', $optionalOverlayPath) $RepositoryPath 'AionUi 선택 MCP overlay 사전 검사'
+    Invoke-NativeCommand 'git' @('apply', '--whitespace=error-all', $optionalOverlayPath) $RepositoryPath 'AionUi 선택 MCP overlay 적용'
   }
-
-  Invoke-NativeCommand 'git' @('apply', '--check', '--whitespace=error-all', $overlayPath) $RepositoryPath 'AionUi MindNProgress MCP overlay 사전 검사'
-  Invoke-NativeCommand 'git' @('apply', '--whitespace=error-all', $overlayPath) $RepositoryPath 'AionUi MindNProgress MCP overlay 적용'
 
   if (-not (Test-Path -LiteralPath $bootstrapSource -PathType Leaf) -or
     -not (Test-Path -LiteralPath $migrationSource -PathType Leaf) -or
     ((Get-Content -LiteralPath $bootstrapSource -Raw) -notmatch $bootstrapMarker) -or
-    ((Get-Content -LiteralPath $migrationSource -Raw) -notmatch $migrationMarker)) {
-    throw 'AionUi MindNProgress MCP bootstrap overlay 적용 결과를 확인할 수 없습니다.'
+    ((Get-Content -LiteralPath $migrationSource -Raw) -notmatch $migrationMarker) -or
+    ((Get-Content -LiteralPath $bootstrapSource -Raw) -notmatch $optionalBootstrapMarker) -or
+    ((Get-Content -LiteralPath $migrationSource -Raw) -notmatch $optionalMigrationMarker)) {
+    throw 'AionUi MCP bootstrap overlay 적용 결과를 확인할 수 없습니다.'
   }
 
-  Write-Success 'AionUi에 MindNProgress MCP 최초 실행 bootstrap 적용'
-  return [pscustomobject]@{ Applied = $true; Source = 'installer-overlay' }
+  $bootstrapChanges = @(& git -C $RepositoryPath status --porcelain -- $bootstrapRelativePath $migrationRelativePath $testRelativePath)
+  if ($LASTEXITCODE -ne 0) { throw 'AionUi MCP bootstrap 변경 상태를 확인할 수 없습니다.' }
+  $source = if ($bootstrapChanges.Count -gt 0) { 'installer-overlay' } else { 'repository' }
+  if ($source -eq 'installer-overlay') { Write-Success 'AionUi에 MindNProgress와 선택 MCP 최초 실행 bootstrap overlay 적용' }
+  else { Write-Info 'AionUi 저장소에 MindNProgress와 선택 MCP bootstrap이 이미 포함되어 있습니다.' }
+  return [pscustomobject]@{ Applied = $bootstrapChanges.Count -gt 0; Source = $source; OptionalMcpManaged = $true }
 }
 
 function Write-WorkspacePoolScaffold {
@@ -1037,6 +1390,7 @@ set "SUITE_ROOT=%~dp0.."
 set "AION_UI_DIR=%SUITE_ROOT%\AionUi"
 set "AION_CORE_BIN=%SUITE_ROOT%\AionCore\target\release"
 set "MINDNPROGRESS_MCP_ENTRY=%SUITE_ROOT%\MindNProgress\mcp\server.mjs"
+set "MNP_SUITE_MCP_CONFIG=%SUITE_ROOT%\mcp\mnp-suite-mcp-bootstrap.json"
 
 if not exist "%AION_UI_DIR%\package.json" (
   echo [ERROR] AionUi repository was not found: %AION_UI_DIR%
@@ -1051,6 +1405,11 @@ if not exist "%AION_CORE_BIN%\aioncore.exe" (
 )
 if not exist "%MINDNPROGRESS_MCP_ENTRY%" (
   echo [ERROR] MindNProgress MCP entry was not found: %MINDNPROGRESS_MCP_ENTRY%
+  pause
+  exit /b 1
+)
+if not exist "%MNP_SUITE_MCP_CONFIG%" (
+  echo [ERROR] MnP Suite MCP bootstrap config was not found: %MNP_SUITE_MCP_CONFIG%
   pause
   exit /b 1
 )
@@ -1069,6 +1428,7 @@ echo ============================================================
 echo  AionUi development mode
 echo   AionCore: %AION_CORE_BIN%\aioncore.exe
 echo   MnP MCP : %MINDNPROGRESS_MCP_ENTRY%
+echo   MCP list: %MNP_SUITE_MCP_CONFIG%
 echo   Telemetry: disabled for this launcher
 echo   Stop     : close AionUi or press Ctrl+C in this window
 echo ============================================================
@@ -1131,12 +1491,19 @@ function Write-InstalledReadme {
   $content = @'
 # MnP Suite 개발 환경
 
-이 폴더에는 Git 저장소 세 개가 서로 독립된 형제 폴더로 설치되어 있습니다.
+이 폴더에는 필수 Git 저장소 세 개와 설치 중 선택한 MCP 저장소가 서로 독립된 형제 폴더로 설치되어 있습니다.
 
 ```text
 MindNProgress/
 AionUi/
 AionCore/
+dooray-mcp-server/                 Dooray MCP 선택 시
+Office-PowerPoint-MCP-Server/      PowerPoint MCP 선택 시
+mcp/
+  mnp-suite-mcp-bootstrap.json
+  Start-Dooray-Mcp.ps1             Dooray MCP 선택 시
+secrets/
+  dooray-api-key.dpapi             Dooray MCP 선택 시, 현재 사용자 DPAPI 암호화
 workspace-pool/
   common/MULTI_WORKSPACE.md
   knowledge-inbox/
@@ -1160,7 +1527,7 @@ UNITY_MCP_AND_FORK_GUIDE.md
 
 MindNProgress 주소는 `http://127.0.0.1:4175/`입니다. AionUi는 Electron 창으로 열리며 로컬 `AionCore\target\release\aioncore.exe`를 사용합니다.
 
-## AionUi의 MindNProgress MCP
+## AionUi의 MCP 자동 등록
 
 AionUi Dev 런처는 설치된 MCP 엔트리 경로를 전달합니다. AionUi는 백엔드가 준비되면 다음 서버를 자동 등록하고 활성 상태 및 경로를 현재 설치 위치에 맞춥니다.
 
@@ -1171,7 +1538,11 @@ AionUi Dev 런처는 설치된 MCP 엔트리 경로를 전달합니다. AionUi�
 인수: <이 설치 루트>\MindNProgress\mcp\server.mjs
 ```
 
-MnP의 `AI 대화 시작` 창을 다시 열면 `MindNProgress · 필수`로 표시됩니다. MCP 설정과 Assistant 기본값 변경은 새 대화부터 적용될 수 있으며 현재 열려 있는 대화에 소급 적용되지 않습니다.
+`mcp\mnp-suite-mcp-bootstrap.json`에는 설치 중 선택한 `dooray-mcp`와 `pptx-mcp` 실행 경로가 기록됩니다. AionUi Dev 런처가 이 파일을 전달하면 최초 실행 bootstrap이 선택 서버를 목록에 추가하고, 재설치로 경로가 바뀌면 MnP Suite가 만든 항목만 갱신합니다. 같은 이름의 사용자 소유 서버는 덮어쓰지 않습니다. 선택을 해제한 뒤 재설치하면 MnP Suite 관리 표식이 있는 항목만 다음 AionUi 시작 때 제거합니다.
+
+Dooray API 키는 bootstrap JSON이나 설치 manifest에 기록하지 않습니다. 현재 Windows 사용자만 복호화할 수 있는 DPAPI 파일로 저장하고, `Start-Dooray-Mcp.ps1`이 서버 프로세스를 시작할 때만 환경값으로 전달합니다.
+
+MnP의 `AI 대화 시작` 창을 다시 열면 `MindNProgress · 필수`가 표시되고, 설치한 선택 MCP는 체크 가능한 목록 항목으로 표시됩니다. MCP 설정과 Assistant 기본값 변경은 새 대화부터 적용될 수 있으며 현재 열려 있는 대화에 소급 적용되지 않습니다.
 
 ## Claude Code와 Codex 전역 스킬
 
@@ -1188,7 +1559,9 @@ Claude Code 또는 Codex의 전역 구성 폴더가 아직 없어도 필요한 �
 
 대화형 재설치에서도 `unity-work`와 `pptx`를 각각 다시 묻습니다. 이미 설치된 선택 스킬은 기본값이 `Y`이며, `N`을 선택하면 MnP Suite가 설치했고 이후 수정되지 않은 스킬과 해당 호출 지침만 제거합니다. 설치 후 파일이 수정·삭제되었거나 사용자 파일이 추가된 스킬은 자동 제거하지 않고 설치를 중단합니다.
 
-`pptx`를 선택하면 PowerPoint 파일 확인 절차가 설치됩니다. 이 스킬은 `pptx-mcp`로 슬라이드 PNG와 텍스트·표 구조를 함께 확인하는 지침이며, `pptx-mcp` 서버 자체는 이 패키지가 설치하지 않습니다. 조직에서 해당 MCP 연결을 별도로 제공해야 합니다.
+`pptx`를 선택하면 PowerPoint 파일 확인 절차가 설치됩니다. PowerPoint MCP도 선택하면 Git 저장소와 전용 Python 가상환경을 준비하고 AionUi에 `pptx-mcp`로 등록합니다. Windows에서 슬라이드를 PNG로 내보내려면 Microsoft PowerPoint와 `pywin32`가 필요하며, PowerPoint가 없으면 나머지 python-pptx 기능만 사용할 수 있습니다.
+
+Dooray MCP를 선택하면 Java 21 fat JAR를 빌드해 AionUi에 `dooray-mcp`로 등록합니다. 기존 Unity Java 환경과 충돌하지 않도록 시스템 `PATH`와 `JAVA_HOME`은 바꾸지 않고, 필요한 경우 설치 루트의 `tools\jdk-21`에 portable Temurin을 준비합니다.
 
 ## Unity MCP와 Fork
 
@@ -1261,11 +1634,25 @@ function Get-RepositoryManifest {
   }
 }
 
+function Get-ExistingOptionalMcpSelections {
+  param([string]$RootPath)
+  $configPath = Join-Path $RootPath $script:OptionalMcpConfigRelativePath
+  if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { return @() }
+  try {
+    $config = Read-Utf8File $configPath | ConvertFrom-Json
+    if ($config.schemaVersion -ne 1 -or -not $config.servers) { return @() }
+    return @($config.servers | ForEach-Object { [string]$_.name } | Where-Object { $_ })
+  } catch {
+    throw "기존 선택 MCP bootstrap 구성을 읽을 수 없습니다: $configPath ($($_.Exception.Message))"
+  }
+}
+
 function Invoke-SelfTest {
   $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ("mnp suite installer test " + [Guid]::NewGuid().ToString('N'))
   try {
     New-Item -ItemType Directory -Path $temporaryRoot -Force | Out-Null
     $workspacePool = Write-WorkspacePoolScaffold $temporaryRoot
+    $mcpBootstrap = Write-MnPSuiteMcpBootstrapConfig $temporaryRoot $null $null
     $dev = Write-DevLaunchers $temporaryRoot
     Write-InstalledReadme $temporaryRoot
     $guide = Copy-UserGuides $temporaryRoot
@@ -1306,10 +1693,61 @@ function Invoke-SelfTest {
     if ($aionUiLauncher -notmatch 'MINDNPROGRESS_MCP_ENTRY=%SUITE_ROOT%\\MindNProgress\\mcp\\server\.mjs') {
       throw 'AionUi 런처의 MindNProgress MCP bootstrap 경로 누락'
     }
+    if ($aionUiLauncher -notmatch 'MNP_SUITE_MCP_CONFIG=%SUITE_ROOT%\\mcp\\mnp-suite-mcp-bootstrap\.json') {
+      throw 'AionUi 런처의 선택 MCP bootstrap 구성 경로 누락'
+    }
     $overlayPath = Join-Path $PSScriptRoot 'overlays\AionUi-MindNProgress-Mcp.patch'
     $overlayText = Get-Content -LiteralPath $overlayPath -Raw
     if ($overlayText -notmatch 'buildMindNProgressMcpServer' -or $overlayText -notmatch 'MINDNPROGRESS_MCP_ENTRY') {
       throw 'AionUi MindNProgress MCP bootstrap overlay 누락 또는 손상'
+    }
+    $optionalOverlayPath = Join-Path $PSScriptRoot 'overlays\AionUi-MnPSuite-Optional-Mcp.patch'
+    $optionalOverlayText = Get-Content -LiteralPath $optionalOverlayPath -Raw
+    if ($optionalOverlayText -notmatch 'buildMnPSuiteOptionalMcpBootstrap' -or
+        $optionalOverlayText -notmatch 'MNP_SUITE_MCP_CONFIG' -or
+        $optionalOverlayText -notmatch 'mnpSuite') {
+      throw 'AionUi 선택 MCP bootstrap overlay 누락 또는 손상'
+    }
+    $mcpBootstrapText = Read-Utf8File $mcpBootstrap.Path
+    $mcpBootstrapJson = $mcpBootstrapText | ConvertFrom-Json
+    if ($mcpBootstrapJson.schemaVersion -ne 1 -or @($mcpBootstrapJson.servers).Count -ne 0) {
+      throw '선택하지 않은 MCP bootstrap 구성의 기본 상태 오류'
+    }
+    if ($mcpBootstrapText -match 'DOORAY_API_KEY' -or $mcpBootstrapText -match 'dooray-api-key\.dpapi') {
+      throw 'MCP bootstrap 구성에 Dooray 비밀 정보가 포함됨'
+    }
+    $secretTestPath = Join-Path $temporaryRoot 'secret-test\dooray-api-key.dpapi'
+    $secretTestValue = 'SELFTEST_DOORAY_SECRET_' + [Guid]::NewGuid().ToString('N')
+    Write-DooraySecretFile $secretTestPath (ConvertTo-SecureString $secretTestValue -AsPlainText -Force)
+    if (-not (Test-DooraySecretFile $secretTestPath)) { throw 'Dooray DPAPI 비밀 파일 재사용 검사 실패' }
+    if ((Read-Utf8File $secretTestPath) -match [regex]::Escape($secretTestValue)) { throw 'Dooray API 키가 암호화되지 않고 저장됨' }
+
+    $mcpCases = @(
+      [pscustomobject]@{ Name = 'none'; Dooray = $false; Pptx = $false },
+      [pscustomobject]@{ Name = 'dooray-only'; Dooray = $true; Pptx = $false },
+      [pscustomobject]@{ Name = 'pptx-only'; Dooray = $false; Pptx = $true },
+      [pscustomobject]@{ Name = 'both'; Dooray = $true; Pptx = $true }
+    )
+    foreach ($mcpCase in $mcpCases) {
+      $caseRoot = Join-Path $temporaryRoot ('mcp-case-' + $mcpCase.Name)
+      $fakeDooray = if ($mcpCase.Dooray) { [pscustomobject]@{ LauncherPath = (Join-Path $caseRoot 'Start-Dooray-Mcp.ps1') } } else { $null }
+      $fakePptx = if ($mcpCase.Pptx) { [pscustomobject]@{ PythonPath = (Join-Path $caseRoot 'python.exe'); ServerPath = (Join-Path $caseRoot 'ppt_mcp_server.py') } } else { $null }
+      if ($fakeDooray) { Write-Utf8File $fakeDooray.LauncherPath '# selftest launcher' }
+      if ($fakePptx) {
+        Write-Utf8File $fakePptx.PythonPath ''
+        Write-Utf8File $fakePptx.ServerPath ''
+      }
+      $caseConfig = Write-MnPSuiteMcpBootstrapConfig $caseRoot $fakeDooray $fakePptx
+      $caseJsonText = Read-Utf8File $caseConfig.Path
+      $caseJson = $caseJsonText | ConvertFrom-Json
+      $expectedNames = @()
+      if ($mcpCase.Dooray) { $expectedNames += 'dooray-mcp' }
+      if ($mcpCase.Pptx) { $expectedNames += 'pptx-mcp' }
+      $actualNames = @($caseJson.servers | ForEach-Object { [string]$_.name })
+      if (@(Compare-Object $expectedNames $actualNames).Count -ne 0) { throw "MCP 선택 조합 오류: $($mcpCase.Name)" }
+      if ($caseJsonText -match [regex]::Escape($secretTestValue) -or $caseJsonText -match 'dooray-api-key\.dpapi') {
+        throw "MCP 선택 구성에 비밀 정보가 포함됨: $($mcpCase.Name)"
+      }
     }
     $installedReadme = Read-Utf8File (Join-Path $temporaryRoot 'README_FIRST.md')
     if ($installedReadme -notmatch 'UNITY_MCP_AND_FORK_GUIDE\.md') { throw '설치 안내의 추가 가이드 참조 누락' }
@@ -1581,6 +2019,30 @@ try {
   } else {
     $installPptx = Read-YesNo 'PowerPoint 파일 검토 사용자를 위한 pptx 스킬을 설치할까요?' ([bool]$IncludePptxSkill)
   }
+  $existingOptionalMcps = @(Get-ExistingOptionalMcpSelections $resolvedRoot)
+  $existingDoorayMcp = $existingOptionalMcps -contains 'dooray-mcp'
+  $existingPptxMcp = $existingOptionalMcps -contains 'pptx-mcp'
+  if ($NonInteractive) {
+    $installDoorayMcp = [bool]$IncludeDoorayMcp -or $existingDoorayMcp
+    $installPptxMcp = [bool]$IncludePptxMcp -or $existingPptxMcp
+  } else {
+    $doorayDefault = [bool]$IncludeDoorayMcp -or $existingDoorayMcp
+    $pptxMcpDefault = [bool]$IncludePptxMcp -or $existingPptxMcp -or $installPptx
+    $doorayQuestion = if ($existingDoorayMcp) { 'dooray-mcp가 이미 설치되어 있습니다. 계속 유지하고 갱신할까요?' } else { 'Dooray MCP를 Git 기반으로 설치하고 AionUi에 등록할까요?' }
+    $pptxMcpQuestion = if ($existingPptxMcp) { 'pptx-mcp가 이미 설치되어 있습니다. 계속 유지하고 갱신할까요?' } else { 'PowerPoint MCP를 Git 기반으로 설치하고 AionUi에 등록할까요?' }
+    $installDoorayMcp = Read-YesNo $doorayQuestion $doorayDefault
+    $installPptxMcp = Read-YesNo $pptxMcpQuestion $pptxMcpDefault
+  }
+  $powerPointInstalled = [bool](Test-PowerPointInstalled)
+  if ($installPptxMcp -and -not $powerPointInstalled) {
+    Write-Warning 'Microsoft PowerPoint가 없어 pptx-mcp의 슬라이드 PNG 내보내기는 사용할 수 없습니다.'
+    if (-not $PlanOnly -and $NonInteractive -and -not $AllowPptxWithoutPowerPoint) {
+      throw 'PowerPoint가 없는 비대화식 설치에서 pptx-mcp를 계속하려면 -AllowPptxWithoutPowerPoint를 지정하세요.'
+    }
+    if (-not $PlanOnly -and -not $NonInteractive -and -not (Read-YesNo 'PNG 내보내기 제한을 확인하고 pptx-mcp 설치를 계속할까요?' $false)) {
+      $installPptxMcp = $false
+    }
+  }
   Assert-MnPSuiteAgentConfigurationTargets $agentHomes.CodexHome $agentHomes.ClaudeHome $installUnityWork $installPptx
 
   Write-Host ''
@@ -1589,6 +2051,8 @@ try {
   Write-Info "MindNProgress: $MindNProgressRepository ($MindNProgressBranch)"
   Write-Info "AionUi       : $AionUiRepository ($AionUiBranch)"
   Write-Info "AionCore     : $AionCoreRepository ($AionCoreBranch)"
+  Write-Info "Dooray MCP   : $(if ($installDoorayMcp) { "$DoorayMcpRepository ($DoorayMcpBranch) 설치·AionUi 등록" } else { '설치 안 함' })"
+  Write-Info "PowerPoint MCP: $(if ($installPptxMcp) { "$PptxMcpRepository ($PptxMcpBranch) 설치·AionUi 등록" } else { '설치 안 함' })"
   Write-Info 'Dev 실행 파일: <설치 루트>\dev'
   Write-Info '작업공간 구성: <설치 루트>\workspace-pool\workspaces.json (초기 비활성)'
   Write-Info '필수 전역 스킬: mnp-dooray (Claude Code + Codex)'
@@ -1597,8 +2061,8 @@ try {
   Write-Info "Codex 전역 구성: $($agentHomes.CodexHome)"
   Write-Info "Claude 전역 구성: $($agentHomes.ClaudeHome)"
 
-  Write-Step 1 8 '필수 도구 확인'
-  $prerequisites = @(Get-PrerequisiteState)
+  Write-Step 1 10 '필수 도구 확인'
+  $prerequisites = @(Get-PrerequisiteState $installDoorayMcp $resolvedRoot)
   Show-PrerequisiteState $prerequisites
   $missing = @($prerequisites | Where-Object { -not $_.Ready })
 
@@ -1625,13 +2089,13 @@ try {
   if ($missing.Count -gt 0) {
     $autoInstall = [bool]$InstallMissingPrerequisites
     if (-not $autoInstall -and -not $NonInteractive) {
-      $autoInstall = Read-YesNo '누락 도구를 winget으로 설치할까요? 설치 프로그램이나 관리자 승인 창이 열릴 수 있습니다.' $true
+      $autoInstall = Read-YesNo '누락 도구를 준비할까요? 일반 도구는 winget, Dooray용 Java 21은 설치 루트의 portable JDK로 설치합니다.' $true
     }
     if (-not $autoInstall) {
       throw "필수 도구가 준비되지 않았습니다: $($missing.Key -join ', ')"
     }
-    Install-PrerequisitePackages $missing
-    $prerequisites = @(Get-PrerequisiteState)
+    Install-PrerequisitePackages $missing $resolvedRoot
+    $prerequisites = @(Get-PrerequisiteState $installDoorayMcp $resolvedRoot)
     Show-PrerequisiteState $prerequisites
     $missing = @($prerequisites | Where-Object { -not $_.Ready })
     if ($missing.Count -gt 0) {
@@ -1639,21 +2103,28 @@ try {
     }
   }
 
-  Write-Step 2 8 'Git 저장소 준비'
+  Write-Step 2 10 'Git 저장소 준비'
   $mindNProgressPath = Join-Path $resolvedRoot 'MindNProgress'
   $aionUiPath = Join-Path $resolvedRoot 'AionUi'
   $aionCorePath = Join-Path $resolvedRoot 'AionCore'
-  Assert-RepositoryUpdateSet @(
+  $doorayMcpPath = Join-Path $resolvedRoot 'dooray-mcp-server'
+  $pptxMcpPath = Join-Path $resolvedRoot 'Office-PowerPoint-MCP-Server'
+  $repositorySet = @(
     [pscustomobject]@{ Name = 'MindNProgress'; Path = $mindNProgressPath; Origin = $MindNProgressRepository; Branch = $MindNProgressBranch },
     [pscustomobject]@{ Name = 'AionUi'; Path = $aionUiPath; Origin = $AionUiRepository; Branch = $AionUiBranch },
     [pscustomobject]@{ Name = 'AionCore'; Path = $aionCorePath; Origin = $AionCoreRepository; Branch = $AionCoreBranch }
   )
+  if ($installDoorayMcp) { $repositorySet += [pscustomobject]@{ Name = 'dooray-mcp'; Path = $doorayMcpPath; Origin = $DoorayMcpRepository; Branch = $DoorayMcpBranch } }
+  if ($installPptxMcp) { $repositorySet += [pscustomobject]@{ Name = 'pptx-mcp'; Path = $pptxMcpPath; Origin = $PptxMcpRepository; Branch = $PptxMcpBranch } }
+  Assert-RepositoryUpdateSet $repositorySet
   Install-GitRepository 'MindNProgress' $mindNProgressPath $MindNProgressRepository '' $MindNProgressBranch
   Install-GitRepository 'AionUi' $aionUiPath $AionUiRepository 'https://github.com/iOfficeAI/AionUi.git' $AionUiBranch
   Install-GitRepository 'AionCore' $aionCorePath $AionCoreRepository 'https://github.com/iOfficeAI/AionCore.git' $AionCoreBranch
+  if ($installDoorayMcp) { Install-GitRepository 'dooray-mcp' $doorayMcpPath $DoorayMcpRepository '' $DoorayMcpBranch }
+  if ($installPptxMcp) { Install-GitRepository 'pptx-mcp' $pptxMcpPath $PptxMcpRepository '' $PptxMcpBranch }
   $aionUiMcpBootstrap = Ensure-AionUiMindNProgressBootstrap $aionUiPath
 
-  Write-Step 3 8 'JavaScript 의존성 설치'
+  Write-Step 3 10 'JavaScript 의존성 설치'
   if ($SkipDependencyInstall) {
     Write-Warning 'SkipDependencyInstall이 지정되어 npm/bun 의존성 설치를 생략했습니다.'
   } else {
@@ -1661,14 +2132,22 @@ try {
     Invoke-NativeCommand 'bun' @('install', '--frozen-lockfile') $aionUiPath 'AionUi bun install --frozen-lockfile'
   }
 
-  Write-Step 4 8 'AionCore release 빌드'
+  Write-Step 4 10 'AionCore release 빌드'
   if ($SkipAionCoreBuild) {
     Write-Warning 'SkipAionCoreBuild가 지정되어 AionCore 빌드를 생략했습니다.'
   } else {
     Invoke-NativeCommand 'cargo' @('build', '--release', '--locked', '--bin', 'aioncore') $aionCorePath 'AionCore cargo release build'
   }
 
-  Write-Step 5 8 '작업공간 템플릿과 Dev 실행 배치 생성'
+  Write-Step 5 10 '선택 MCP Windows 런타임과 AionUi bootstrap 구성'
+  $doorayRuntime = $null
+  $pptxRuntime = $null
+  if ($installDoorayMcp) { $doorayRuntime = Install-DoorayMcpRuntime $resolvedRoot $doorayMcpPath ([bool]$SkipDependencyInstall) }
+  if ($installPptxMcp) { $pptxRuntime = Install-PptxMcpRuntime $pptxMcpPath ([bool]$SkipDependencyInstall) }
+  $mcpBootstrap = Write-MnPSuiteMcpBootstrapConfig $resolvedRoot $doorayRuntime $pptxRuntime
+  Write-Success "AionUi 선택 MCP bootstrap 구성: $($mcpBootstrap.Path)"
+
+  Write-Step 6 10 '작업공간 템플릿과 Dev 실행 배치 생성'
   $workspacePool = Write-WorkspacePoolScaffold $resolvedRoot
   $devDirectory = Write-DevLaunchers $resolvedRoot
   Write-InstalledReadme $resolvedRoot
@@ -1677,7 +2156,7 @@ try {
   Write-Success "작업공간 템플릿 생성: $($workspacePool.Registry)"
   Write-Success "Unity MCP 및 Fork 가이드 복사: $unityMcpGuidePath"
 
-  Write-Step 6 8 'Claude Code와 Codex 사용자 전역 구성'
+  Write-Step 7 10 'Claude Code와 Codex 사용자 전역 구성'
   $agentConfiguration = Install-MnPSuiteAgentConfiguration $agentHomes.CodexHome $agentHomes.ClaudeHome $installUnityWork $installPptx
   foreach ($platform in $agentConfiguration.Platforms) {
     Write-Success "$($platform.Name) 지침 병합: $($platform.Instructions)"
@@ -1687,7 +2166,7 @@ try {
     }
   }
 
-  Write-Step 7 8 '설치 결과 검증'
+  Write-Step 8 10 '설치 결과 검증'
   $requiredFiles = @(
     (Join-Path $mindNProgressPath 'package.json'),
     (Join-Path $aionUiPath 'package.json'),
@@ -1698,6 +2177,7 @@ try {
     (Join-Path $resolvedRoot 'MindNProgress_Stop.bat'),
     (Join-Path $resolvedRoot 'MindNProgress_Launcher.cjs'),
     (Join-Path $resolvedRoot 'README_FIRST.md'),
+    $mcpBootstrap.Path,
     $workspacePool.Registry,
     $workspacePool.Rules,
     $unityMcpGuidePath
@@ -1712,21 +2192,47 @@ try {
   if (-not $SkipAionCoreBuild) {
     $requiredFiles += Join-Path $aionCorePath 'target\release\aioncore.exe'
   }
+  if ($doorayRuntime) {
+    $requiredFiles += $doorayRuntime.JavaPath
+    $requiredFiles += $doorayRuntime.JarPath
+    $requiredFiles += $doorayRuntime.LauncherPath
+    $requiredFiles += $doorayRuntime.SecretPath
+  }
+  if ($pptxRuntime) {
+    $requiredFiles += $pptxRuntime.PythonPath
+    $requiredFiles += $pptxRuntime.ServerPath
+  }
   foreach ($requiredFile in $requiredFiles) {
     if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
       throw "설치 검증 파일이 없습니다: $requiredFile"
     }
   }
+  $expectedMcpNames = @()
+  if ($installDoorayMcp) { $expectedMcpNames += 'dooray-mcp' }
+  if ($installPptxMcp) { $expectedMcpNames += 'pptx-mcp' }
+  $mcpBootstrapJsonText = Read-Utf8File $mcpBootstrap.Path
+  $mcpBootstrapJson = $mcpBootstrapJsonText | ConvertFrom-Json
+  $actualMcpNames = @($mcpBootstrapJson.servers | ForEach-Object { [string]$_.name })
+  if (@(Compare-Object $expectedMcpNames $actualMcpNames).Count -ne 0) {
+    throw "AionUi 선택 MCP bootstrap 목록이 설치 선택과 다릅니다: $($actualMcpNames -join ', ')"
+  }
+  if ($mcpBootstrapJsonText -match 'DOORAY_API_KEY' -or $mcpBootstrapJsonText -match 'dooray-api-key\.dpapi') {
+    throw 'AionUi 선택 MCP bootstrap에 Dooray 비밀 정보가 포함되었습니다.'
+  }
+
+  $repositoryManifest = @(
+    (Get-RepositoryManifest 'MindNProgress' $mindNProgressPath $MindNProgressBranch $MindNProgressRepository),
+    (Get-RepositoryManifest 'AionUi' $aionUiPath $AionUiBranch $AionUiRepository),
+    (Get-RepositoryManifest 'AionCore' $aionCorePath $AionCoreBranch $AionCoreRepository)
+  )
+  if ($installDoorayMcp) { $repositoryManifest += Get-RepositoryManifest 'dooray-mcp' $doorayMcpPath $DoorayMcpBranch $DoorayMcpRepository }
+  if ($installPptxMcp) { $repositoryManifest += Get-RepositoryManifest 'pptx-mcp' $pptxMcpPath $PptxMcpBranch $PptxMcpRepository }
 
   $manifest = [ordered]@{
-    schemaVersion = 2
+    schemaVersion = 3
     installedAt = (Get-Date).ToString('o')
     installRoot = $resolvedRoot
-    repositories = @(
-      (Get-RepositoryManifest 'MindNProgress' $mindNProgressPath $MindNProgressBranch $MindNProgressRepository),
-      (Get-RepositoryManifest 'AionUi' $aionUiPath $AionUiBranch $AionUiRepository),
-      (Get-RepositoryManifest 'AionCore' $aionCorePath $AionCoreBranch $AionCoreRepository)
-    )
+    repositories = $repositoryManifest
     launchers = @(
       'dev\Start-All-Dev.bat',
       'dev\Start-MindNProgress-Dev.bat',
@@ -1753,6 +2259,16 @@ try {
       environmentVariable = 'MINDNPROGRESS_MCP_ENTRY'
       enabled = $true
     }
+    optionalMcpBootstrap = [ordered]@{
+      source = $aionUiMcpBootstrap.Source
+      overlayApplied = [bool]$aionUiMcpBootstrap.Applied
+      environmentVariable = 'MNP_SUITE_MCP_CONFIG'
+      configPath = $mcpBootstrap.Path
+      selectedServers = $expectedMcpNames
+      registrationTiming = 'next-aionui-start'
+      dooraySecretStorage = if ($installDoorayMcp) { 'Windows DPAPI CurrentUser' } else { $null }
+      powerPointInstalled = $powerPointInstalled
+    }
     agentConfiguration = [ordered]@{
       scope = 'user-global'
       requiredSkills = @('mnp-dooray')
@@ -1774,7 +2290,7 @@ try {
   Write-Utf8File (Join-Path $resolvedRoot 'installation-manifest.json') ($manifest | ConvertTo-Json -Depth 6)
   Write-Success '저장소, 실행 배치와 설치 manifest 검증 완료'
 
-  Write-Step 8 8 '설치 완료'
+  Write-Step 9 10 '바탕화면 바로가기'
   $createShortcutsNow = [bool]$CreateDesktopShortcuts
   if (-not $createShortcutsNow -and -not $NonInteractive) {
     $createShortcutsNow = Read-YesNo '바탕화면에 전체 Dev 실행과 MnP 중지 바로가기를 만들까요?' $true
@@ -1789,6 +2305,8 @@ try {
     }
   }
 
+  Write-Step 10 10 '설치 완료'
+  $selectedMcpSummary = if ($expectedMcpNames.Count -gt 0) { $expectedMcpNames -join ', ' } else { '없음' }
   $summary = @"
 설치가 완료되었습니다.
 
@@ -1799,11 +2317,12 @@ MnP 주소: http://127.0.0.1:4175/
 Unity 가이드: $unityMcpGuidePath
 작업공간 구성: $($workspacePool.Registry) (초기 비활성)
 전역 스킬: $($agentConfiguration.Skills -join ', ')
+선택 MCP: $selectedMcpSummary
 Codex 지침: $($agentHomes.CodexHome)\AGENTS.md
 Claude 지침: $($agentHomes.ClaudeHome)\CLAUDE.md
 설치 기록: $script:InstallLogPath
 
-AionUi를 처음 열면 MindNProgress MCP가 자동 등록됩니다. MnP의 AI 대화 시작 창을 다시 열어 `MindNProgress · 필수` 표시를 확인하세요.
+AionUi를 처음 열면 MindNProgress MCP와 선택한 MCP가 자동 등록됩니다. MnP의 AI 대화 시작 창을 다시 열어 `MindNProgress · 필수`와 선택 MCP 목록을 확인하세요.
 "@
   Write-Host ''
   Write-Host $summary -ForegroundColor Green
