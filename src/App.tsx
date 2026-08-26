@@ -41,6 +41,7 @@ import { DashboardView, KanbanView, TimelineView } from './components/WorkViews'
 import type { AiConversationLink, AiConversationRuntime, ChecklistItem, KnowledgePolicy, MindDoorayLinkData, MindDoorayTaskData, MindDoorayWikiData, MindImageData, MindMapEdgeData, MindNodeData, TeamMember, WaitingItem } from './types/mindMap'
 import { resolveAiConversationTarget, type AiConversationExplicitTarget } from './utils/aiConversationLaunch.mjs'
 import { applyBoxSelection, boxSelectionNodeIds, boxSelectionRect, isBoxSelectionDrag } from './utils/boxSelection.mjs'
+import { collectDragDescendantIds, dragRootIds } from './utils/hierarchyDrag.mjs'
 import { blockingNodes, createsDependencyCycle, dependentNodes, prerequisiteNodes } from './utils/dependencies'
 import { collapsedDocumentGroupsStorageKey, initialCollapsedDocumentGroupIds, normalizeCollapsedDocumentGroupIds } from './utils/documentGroupCollapse.mjs'
 import { createsKnowledgeCycle, isHierarchyEdge, isKnowledgeEdge, knowledgePolicyOf } from './utils/knowledgeEdges'
@@ -5309,24 +5310,16 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
     beginHistoryTransaction()
     dropTargetIdRef.current = null
     setDropTargetId(null)
-    const descendantIds = new Set<string>()
-    const pendingIds = [draggedNode.id]
-
-    while (pendingIds.length > 0) {
-      const parentId = pendingIds.shift()
-      if (!parentId) continue
-
-      for (const edge of hierarchyEdges) {
-        if (edge.source !== parentId || descendantIds.has(edge.target) || edge.target === draggedNode.id) continue
-        descendantIds.add(edge.target)
-        pendingIds.push(edge.target)
-      }
-    }
+    const draggedNodeIsSelected = draggedNode.selected
+      || nodes.some((node) => node.id === draggedNode.id && node.selected)
+    // 여러 카드를 선택해 끌면 선택한 카드 각각의 하위가 모두 따라와야 한다.
+    const selectedNodeIds = draggedNodeIsSelected
+      ? [draggedNode.id, ...nodes.filter((node) => node.selected).map((node) => node.id)]
+      : []
+    const descendantIds = collectDragDescendantIds(dragRootIds(draggedNode.id, selectedNodeIds), hierarchyEdges)
 
     const descendantPositions = new Map<string, { x: number; y: number }>()
     const selectedPositions = new Map<string, { x: number; y: number }>()
-    const draggedNodeIsSelected = draggedNode.selected
-      || nodes.some((node) => node.id === draggedNode.id && node.selected)
 
     for (const node of nodes) {
       if (descendantIds.has(node.id)) {

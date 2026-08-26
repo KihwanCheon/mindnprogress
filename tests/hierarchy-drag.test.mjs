@@ -1,0 +1,65 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { collectDragDescendantIds, dragRootIds } from '../src/utils/hierarchyDrag.mjs'
+
+// root ─┬─ mid-a ─┬─ leaf-a1
+//       │         └─ leaf-a2 ── leaf-a2-child
+//       ├─ mid-b ─── leaf-b1
+//       └─ mid-c ─── leaf-c1
+const edges = [
+  { source: 'root', target: 'mid-a' },
+  { source: 'root', target: 'mid-b' },
+  { source: 'root', target: 'mid-c' },
+  { source: 'mid-a', target: 'leaf-a1' },
+  { source: 'mid-a', target: 'leaf-a2' },
+  { source: 'leaf-a2', target: 'leaf-a2-child' },
+  { source: 'mid-b', target: 'leaf-b1' },
+  { source: 'mid-c', target: 'leaf-c1' },
+]
+
+test('중간 계층 카드 하나를 끌면 그 아래만 따라온다', () => {
+  const roots = dragRootIds('mid-a', [])
+  assert.deepEqual([...roots], ['mid-a'])
+  assert.deepEqual([...collectDragDescendantIds(roots, edges)].sort(), ['leaf-a1', 'leaf-a2', 'leaf-a2-child'])
+})
+
+test('선택한 카드 2개를 함께 끌면 각각의 하위가 모두 따라온다', () => {
+  const roots = dragRootIds('mid-a', ['mid-a', 'mid-b'])
+  assert.deepEqual([...roots].sort(), ['mid-a', 'mid-b'])
+  assert.deepEqual([...collectDragDescendantIds(roots, edges)].sort(), [
+    'leaf-a1',
+    'leaf-a2',
+    'leaf-a2-child',
+    'leaf-b1',
+  ])
+})
+
+test('선택하지 않은 카드를 끌면 선택 상태를 무시하고 그 카드만 기준으로 삼는다', () => {
+  const roots = dragRootIds('mid-c', ['mid-a', 'mid-b'])
+  assert.deepEqual([...roots], ['mid-c'])
+  assert.deepEqual([...collectDragDescendantIds(roots, edges)], ['leaf-c1'])
+})
+
+test('함께 끄는 카드는 다른 카드의 하위로 잡지 않는다', () => {
+  // mid-a와 그 자식 leaf-a2를 같이 선택한 경우 leaf-a2는 자기 위치로 움직인다.
+  const roots = dragRootIds('mid-a', ['mid-a', 'leaf-a2'])
+  const descendants = collectDragDescendantIds(roots, edges)
+  assert.equal(descendants.has('leaf-a2'), false)
+  // 선택한 카드의 하위는 그대로 따라온다.
+  assert.equal(descendants.has('leaf-a2-child'), true)
+  assert.deepEqual([...descendants].sort(), ['leaf-a1', 'leaf-a2-child'])
+})
+
+test('순환 연결이 있어도 무한히 돌지 않는다', () => {
+  const cyclicEdges = [
+    { source: 'a', target: 'b' },
+    { source: 'b', target: 'c' },
+    { source: 'c', target: 'a' },
+  ]
+  assert.deepEqual([...collectDragDescendantIds(new Set(['a']), cyclicEdges)].sort(), ['b', 'c'])
+})
+
+test('연결선이 없으면 하위가 없다', () => {
+  assert.deepEqual([...collectDragDescendantIds(new Set(['mid-a']), [])], [])
+  assert.deepEqual([...collectDragDescendantIds(new Set(['mid-a']), undefined)], [])
+})
