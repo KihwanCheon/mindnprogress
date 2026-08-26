@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 
 export const AI_DELEGATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_:-]{0,127}$/
+export const AI_DELEGATION_WAIT_POLL_DELAYS_MS = Object.freeze([3_000, 5_000, 10_000, 30_000])
 
 export const ACTIVE_AI_DELEGATION_STATES = new Set([
   'waiting-workspace',
@@ -34,6 +35,25 @@ const EXPLICIT_COMPLETION_CANDIDATE_STATES = new Set([
   'running',
   'waiting-child-resume',
 ])
+
+export function aiDelegationWaitPollDue(entry, delegation, now = Date.now()) {
+  if (!entry || entry.state !== delegation?.state) return true
+  return Number(entry.nextAt ?? 0) <= now
+}
+
+export function nextAiDelegationWaitPoll(entry, delegation, now = Date.now()) {
+  const state = String(delegation?.state ?? '')
+  const attempt = entry?.state === state ? Math.max(0, Number(entry.attempt) || 0) : 0
+  const delayMs = AI_DELEGATION_WAIT_POLL_DELAYS_MS[
+    Math.min(attempt, AI_DELEGATION_WAIT_POLL_DELAYS_MS.length - 1)
+  ]
+  return {
+    state,
+    attempt: attempt + 1,
+    delayMs,
+    nextAt: now + delayMs,
+  }
+}
 
 export function shouldReconcileAiDelegationChildWorkspace(delegation) {
   return CHILD_WORKSPACE_RECONCILIATION_STATES.has(delegation?.state)

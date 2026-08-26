@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  AI_DELEGATION_WAIT_POLL_DELAYS_MS,
   activeAiDelegationsForConversation,
+  aiDelegationWaitPollDue,
   aiDelegationBlocksResume,
   aiDelegationStateAfterParentWake,
   aiDelegationSucceeded,
@@ -13,8 +15,31 @@ import {
   formatAiConversationTitle,
   initialAiDelegationRuntime,
   isValidAiDelegationId,
+  nextAiDelegationWaitPoll,
   shouldReconcileAiDelegationChildWorkspace,
 } from '../server/lib/aiDelegations.mjs'
+
+test('AI 위임 대기 폴링은 상태별로 3초에서 30초까지 백오프하고 상태 변경 시 초기화한다', () => {
+  const delegation = { state: 'waiting-workspace' }
+  let entry = null
+  let now = 1_000
+  const delays = []
+  for (let index = 0; index < 6; index += 1) {
+    assert.equal(aiDelegationWaitPollDue(entry, delegation, now), true)
+    entry = nextAiDelegationWaitPoll(entry, delegation, now)
+    delays.push(entry.delayMs)
+    assert.equal(aiDelegationWaitPollDue(entry, delegation, now), false)
+    now = entry.nextAt
+  }
+  assert.deepEqual(delays, [3_000, 5_000, 10_000, 30_000, 30_000, 30_000])
+  assert.deepEqual(AI_DELEGATION_WAIT_POLL_DELAYS_MS, [3_000, 5_000, 10_000, 30_000])
+
+  const changed = { state: 'waiting-integration-clean' }
+  const reset = nextAiDelegationWaitPoll(entry, changed, now)
+  assert.equal(reset.attempt, 1)
+  assert.equal(reset.delayMs, 3_000)
+  assert.equal(aiDelegationWaitPollDue(entry, changed, now), true)
+})
 
 test('같은 위임 ID의 새 대화 실행 설정이 달라지면 다른 요청으로 판정한다', () => {
   const base = {

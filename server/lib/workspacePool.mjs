@@ -8,8 +8,13 @@ import { promisify } from 'node:util'
 const execFileAsync = promisify(execFile)
 const idleDriftReason = '작업공간에 소유자를 확정할 수 없는 변경이 있습니다.'
 const workspacePreparationFailedReasonCode = 'WORKSPACE_PREPARATION_FAILED'
+const integrationGitProbeTimeoutMs = Math.max(
+  1_000,
+  Number(process.env.MNP_INTEGRATION_GIT_STATUS_TIMEOUT_MS) || 15_000,
+)
 export const integrationWorktreeDirtyMessage = '통합 작업공간에 커밋되지 않은 추적 파일 변경이 있습니다.'
 export const integrationWorktreeDirtyReasonCode = 'integration-worktree-dirty'
+export const integrationStatusRetryReasonCode = 'INTEGRATION_STATUS_RETRY'
 const conversationBindableLeaseStatuses = new Set(['leased', 'checkpoint-required'])
 const conversationReusableLeaseStatuses = new Set(['leased', 'checkpoint-required', 'finalizing'])
 const conversationRebindOnlyLeaseStatuses = new Set([
@@ -174,13 +179,22 @@ async function exists(file) {
   }
 }
 
-async function defaultGitRunner(cwd, args) {
-  const result = await execFileAsync('git', args, {
-    cwd,
-    windowsHide: true,
-    maxBuffer: 256 * 1024 * 1024,
-  })
-  return String(result.stdout ?? '').trim()
+async function defaultGitRunner(cwd, args, { timeoutMs = 0 } = {}) {
+  try {
+    const result = await execFileAsync('git', args, {
+      cwd,
+      windowsHide: true,
+      maxBuffer: 256 * 1024 * 1024,
+      ...(timeoutMs > 0 ? { timeout: timeoutMs } : {}),
+    })
+    return String(result.stdout ?? '').trim()
+  } catch (error) {
+    if (timeoutMs <= 0 || (error?.killed !== true && error?.code !== 'ETIMEDOUT')) throw error
+    const timeoutError = new Error(`Git 읽기 명령이 ${timeoutMs}ms 안에 끝나지 않았습니다.`)
+    timeoutError.code = 'GIT_COMMAND_TIMEOUT'
+    timeoutError.cause = error
+    throw timeoutError
+  }
 }
 
 function normalizeRegistry(raw, registryFile) {
@@ -1105,11 +1119,29 @@ export class WorkspacePoolManager {
 
   async integrationTrackedChanges(integration = this.registry?.integration) {
     if (!integration) return { dirty: false, paths: [] }
-    const status = await this.git(integration.root, ['status', '--porcelain=v1', '--untracked-files=no'])
-    const paths = status
-      ? (await this.git(integration.root, ['diff', '--name-only', 'HEAD']))
-          .split(/\r?\n/).map((item) => item.trim()).filter(Boolean).sort()
-      : []
+    let status
+    let paths
+    try {
+      status = await this.git(
+        integration.root,
+        ['status', '--porcelain=v1', '--untracked-files=no'],
+        { timeoutMs: integrationGitProbeTimeoutMs },
+      )
+      paths = status
+        ? (await this.git(
+            integration.root,
+            ['diff', '--name-only', 'HEAD'],
+            { timeoutMs: integrationGitProbeTimeoutMs },
+          )).split(/\r?\n/).map((item) => item.trim()).filter(Boolean).sort()
+        : []
+    } catch (error) {
+      if (error?.code !== 'GIT_COMMAND_TIMEOUT') throw error
+      throw new WorkspacePoolUnavailableError(
+        '통합 작업공간의 Git 상태 확인이 지연되어 다음 폴링에서 다시 시도합니다.',
+        [],
+        integrationStatusRetryReasonCode,
+      )
+    }
     return { dirty: Boolean(status), paths }
   }
 
@@ -1398,6 +1430,19 @@ export class WorkspacePoolManager {
           completedAt: new Date().toISOString(),
         })
       } catch (error) {
+        if (error instanceof WorkspacePoolUnavailableError
+          && error.reasonCode === integrationStatusRetryReasonCode) {
+          return await this.waitForIntegration(lease, workspace, {
+            childStatus: childStatus ?? null,
+            childError: childError ?? null,
+            headCommit,
+            reasonCode: error.reasonCode,
+            waitingReason: error.message,
+            trackedChanges: [],
+            keepIntegrationLock: Boolean(lease.integrationBranch),
+            recoveredFromQuarantine: lease.result?.recoveredFromQuarantine === true,
+          })
+        }
         if (error instanceof IntegrationWorkspaceBusyError) {
           return await this.waitForIntegration(lease, workspace, {
             childStatus: childStatus ?? null,

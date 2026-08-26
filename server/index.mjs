@@ -16,6 +16,7 @@ import {
 } from './lib/aionUiConversationRuntimes.mjs'
 import {
   activeAiDelegationsForConversation,
+  aiDelegationWaitPollDue,
   aiDelegationBlocksResume,
   aiDelegationStateAfterParentWake,
   aiDelegationSucceeded,
@@ -28,6 +29,7 @@ import {
   initialAiDelegationRuntime,
   isValidAiDelegationId,
   mergeAiDelegationSelections,
+  nextAiDelegationWaitPoll,
   shouldReconcileAiDelegationChildWorkspace,
 } from './lib/aiDelegations.mjs'
 import {
@@ -94,6 +96,7 @@ import {
   WorkspacePoolUnavailableError,
   buildWorkspaceInstruction,
   checkpointCommitMessageExample,
+  integrationStatusRetryReasonCode,
   integrationWorktreeDirtyMessage,
   integrationWorktreeDirtyReasonCode,
 } from './lib/workspacePool.mjs'
@@ -158,6 +161,7 @@ const aiConversationRuntimeSummaries = new Map()
 const aiDelegations = new Map()
 let aiDelegationWriteQueue = Promise.resolve()
 let aiDelegationPollRunning = false
+const aiDelegationWaitPolls = new Map()
 const workspacePoolManager = new WorkspacePoolManager({
   registryFile: workspacePoolRegistryFile,
   stateFile: workspacePoolStateFile,
@@ -167,6 +171,13 @@ let aiConversationRuntimeSnapshotRequest = null
 let aiConversationRuntimeSnapshotCache = null
 let aiConversationRuntimeSnapshotCachedAt = 0
 let aiConversationRuntimeSnapshotLastSuccessAt = 0
+let aionCoreDispatchCapabilitiesCache = null
+let aionCoreDispatchCapabilitiesCachedAt = 0
+let aionCoreDispatchCapabilitiesRequest = null
+const aionCoreDispatchCapabilitiesCacheMs = Math.max(
+  500,
+  Number(process.env.MNP_AIONCORE_CAPABILITIES_CACHE_MS) || 3_000,
+)
 const aiConversationRuntimePollIntervalMs = Math.max(2_000, Number(process.env.MNP_AI_RUNTIME_POLL_INTERVAL_MS) || 4_000)
 const aiConversationRuntimeFailureGraceMs = Math.max(
   aiConversationRuntimePollIntervalMs * 2,
@@ -1454,11 +1465,35 @@ async function fetchAionUi(pathname, { timeoutMs = 8_000, method = 'GET', body }
   throw lastError ?? new Error('AIONUI_REQUEST_FAILED')
 }
 
+function fetchAionCoreDispatchCapabilities() {
+  if (aionCoreDispatchCapabilitiesRequest) return aionCoreDispatchCapabilitiesRequest
+  if (aionCoreDispatchCapabilitiesCache
+    && Date.now() - aionCoreDispatchCapabilitiesCachedAt < aionCoreDispatchCapabilitiesCacheMs) {
+    return Promise.resolve(aionCoreDispatchCapabilitiesCache)
+  }
+  const request = fetchAionUi('/api/internal/external-conversation-dispatches/capabilities', {
+    timeoutMs: 3_000,
+  })
+    .then((capabilities) => {
+      aionCoreDispatchCapabilitiesCache = capabilities
+      aionCoreDispatchCapabilitiesCachedAt = Date.now()
+      return capabilities
+    })
+    .catch((error) => {
+      aionCoreDispatchCapabilitiesCache = null
+      aionCoreDispatchCapabilitiesCachedAt = 0
+      throw error
+    })
+    .finally(() => {
+      aionCoreDispatchCapabilitiesRequest = null
+    })
+  aionCoreDispatchCapabilitiesRequest = request
+  return request
+}
+
 async function aionCoreSupportsWorkspaceLease() {
   try {
-    const capabilities = await fetchAionUi('/api/internal/external-conversation-dispatches/capabilities', {
-      timeoutMs: 3_000,
-    })
+    const capabilities = await fetchAionCoreDispatchCapabilities()
     return capabilities?.workspaceLeaseVersion >= 2
       && capabilities?.atomicWorkspaceRebind === true
       && capabilities?.releasesRuntimeOnTerminal === true
@@ -1469,9 +1504,7 @@ async function aionCoreSupportsWorkspaceLease() {
 
 async function aionCoreSupportsExplicitCompletionAfterInterruption() {
   try {
-    const capabilities = await fetchAionUi('/api/internal/external-conversation-dispatches/capabilities', {
-      timeoutMs: 3_000,
-    })
+    const capabilities = await fetchAionCoreDispatchCapabilities()
     return capabilities?.schemaVersion >= 3
       && capabilities?.explicitCompletionAfterInterruption === true
   } catch {
@@ -2815,18 +2848,21 @@ async function startWorkspaceConflictResolution(delegation, workspaceResult) {
 
 async function advanceWorkspaceIntegration(delegation, workspace) {
   if (workspace.result?.status === 'waiting-integration') {
-    await updateAiDelegation(delegation.id, {
+    const waiting = await updateAiDelegation(delegation.id, {
       state: 'waiting-integration',
       workspaceResult: workspace.result,
       workspaceError: null,
     })
+    scheduleAiDelegationWaitPoll(waiting)
     return true
   }
   if (workspace.result?.status === 'awaiting-conflict-resolution') {
+    clearAiDelegationWaitPoll(delegation.id)
     await startWorkspaceConflictResolution(delegation, workspace.result)
     return true
   }
   if (workspace.result?.status === 'checkpoint-required') {
+    clearAiDelegationWaitPoll(delegation.id)
     let notifiedDelegation = delegation
     try {
       notifiedDelegation = await ensureCheckpointRequiredNotification(delegation, workspace.result)
@@ -2836,14 +2872,56 @@ async function advanceWorkspaceIntegration(delegation, workspace) {
     await startWorkspaceCheckpointResolution(notifiedDelegation, workspace.result)
     return true
   }
+  clearAiDelegationWaitPoll(delegation.id)
   return false
+}
+
+function clearAiDelegationWaitPoll(delegationId) {
+  aiDelegationWaitPolls.delete(String(delegationId ?? ''))
+}
+
+function scheduleAiDelegationWaitPoll(delegation, now = Date.now()) {
+  if (!delegation?.id) return
+  aiDelegationWaitPolls.set(
+    delegation.id,
+    nextAiDelegationWaitPoll(aiDelegationWaitPolls.get(delegation.id), delegation, now),
+  )
 }
 
 async function drainWaitingWorkspaceDelegations() {
   const waiting = [...aiDelegations.values()]
     .filter((delegation) => ['waiting-workspace', 'waiting-integration-clean'].includes(delegation.state))
     .sort((first, second) => String(first.createdAt).localeCompare(String(second.createdAt)))
+  const waitingIds = new Set([...aiDelegations.values()]
+    .filter((delegation) => [
+      'waiting-workspace',
+      'waiting-integration-clean',
+      'waiting-integration',
+    ].includes(delegation.state))
+    .map((delegation) => delegation.id))
+  for (const delegationId of aiDelegationWaitPolls.keys()) {
+    if (!waitingIds.has(delegationId)) aiDelegationWaitPolls.delete(delegationId)
+  }
+  let integrationDirtyThisTick = null
   for (const queued of waiting) {
+    if (!aiDelegationWaitPollDue(aiDelegationWaitPolls.get(queued.id), queued)) continue
+    if (integrationDirtyThisTick) {
+      const blocked = await updateAiDelegation(queued.id, {
+        state: 'waiting-integration-clean',
+        childStatus: null,
+        childError: null,
+        workspaceWaitError: integrationDirtyThisTick.message,
+        integrationCleanTrackedChanges: integrationDirtyThisTick.trackedChanges,
+        integrationCleanWaitStartedAt: queued.integrationCleanWaitStartedAt ?? new Date().toISOString(),
+        resource: {
+          kind: 'integration_workspace',
+          key: workspacePoolManager.publicSnapshot().integrationWorkspaceId,
+          projectRoot: queued.pendingWorkspaceHint,
+        },
+      })
+      scheduleAiDelegationWaitPoll(blocked)
+      continue
+    }
     const map = await readMap(queued.mapId)
     const parentCard = map?.nodes.find((node) => node.id === queued.parentCardId)
     const targetCard = map?.nodes.find((node) => node.id === queued.targetCardId)
@@ -2857,6 +2935,7 @@ async function drainWaitingWorkspaceDelegations() {
         childError: '대기 중 상위 카드, 대상 카드, 편집자 또는 카드 계층이 변경되어 위임을 시작하지 않았습니다.',
         resource: null,
       })
+      clearAiDelegationWaitPoll(queued.id)
       continue
     }
 
@@ -2871,21 +2950,18 @@ async function drainWaitingWorkspaceDelegations() {
           childError: '대기 중 대상 카드와 이어갈 AI 대화의 연결이 사라졌습니다.',
           resource: null,
         })
+        clearAiDelegationWaitPoll(queued.id)
         continue
       }
-      try {
-        const conversation = await fetchAiConversationRuntime(queued.targetConversationId)
-        const runtime = normalizeAiConversationRuntime(queued.targetConversationId, conversation)
-        if (runtime.state !== 'idle') {
-          await updateAiDelegation(queued.id, {
-            workspaceWaitError: `대상 대화가 ${runtime.state} 상태이므로 유휴 상태를 기다리고 있습니다.`,
-          })
-          continue
-        }
-      } catch (error) {
-        await updateAiDelegation(queued.id, {
-          workspaceWaitError: `대상 AionUi 대화 상태를 확인하지 못했습니다: ${error?.message ?? String(error)}`,
+      const runtimeSnapshot = await fetchAiConversationRuntimeSnapshot()
+      const activeRuntime = runtimeSnapshot.available
+        ? runtimeSnapshot.runtimes.get(queued.targetConversationId) ?? null
+        : null
+      if (activeRuntime && activeRuntime.state !== 'idle') {
+        const blocked = await updateAiDelegation(queued.id, {
+          workspaceWaitError: `대상 대화가 ${activeRuntime.state} 상태이므로 유휴 상태를 기다리고 있습니다.`,
         })
+        scheduleAiDelegationWaitPoll(blocked)
         continue
       }
       if (resumedDelegation && resumedDelegation.state !== 'waiting-child-resume') {
@@ -2895,6 +2971,7 @@ async function drainWaitingWorkspaceDelegations() {
           childError: '이어받을 이전 위임이 더 이상 재개 대기 상태가 아닙니다.',
           resource: null,
         })
+        clearAiDelegationWaitPoll(queued.id)
         continue
       }
     } else {
@@ -2902,16 +2979,38 @@ async function drainWaitingWorkspaceDelegations() {
     }
 
     if (!await aionCoreSupportsWorkspaceLease()) {
-      await updateAiDelegation(queued.id, {
+      const blocked = await updateAiDelegation(queued.id, {
         workspaceWaitError: '현재 AionCore가 작업공간 lease를 지원하지 않아 재기동을 기다리고 있습니다.',
       })
+      scheduleAiDelegationWaitPoll(blocked)
       break
     }
     if (!await aionCoreSupportsExplicitCompletionAfterInterruption()) {
-      await updateAiDelegation(queued.id, {
+      const blocked = await updateAiDelegation(queued.id, {
         workspaceWaitError: '현재 AionCore가 중단 후 명시적 완료 신호를 지원하지 않아 재기동을 기다리고 있습니다.',
       })
+      scheduleAiDelegationWaitPoll(blocked)
       break
+    }
+
+    if (queued.strategy === 'resume') {
+      try {
+        const conversation = await fetchAiConversationRuntime(queued.targetConversationId)
+        const runtime = normalizeAiConversationRuntime(queued.targetConversationId, conversation)
+        if (runtime.state !== 'idle') {
+          const blocked = await updateAiDelegation(queued.id, {
+            workspaceWaitError: `대상 대화가 ${runtime.state} 상태이므로 유휴 상태를 기다리고 있습니다.`,
+          })
+          scheduleAiDelegationWaitPoll(blocked)
+          continue
+        }
+      } catch (error) {
+        const blocked = await updateAiDelegation(queued.id, {
+          workspaceWaitError: `대상 AionUi 대화 상태를 확인하지 못했습니다: ${error?.message ?? String(error)}`,
+        })
+        scheduleAiDelegationWaitPoll(blocked)
+        continue
+      }
     }
 
     const selection = structuredClone(queued.pendingSelection)
@@ -2931,13 +3030,33 @@ async function drainWaitingWorkspaceDelegations() {
             cardLabel: targetCard.data?.label ?? targetCard.id,
           })
     } catch (error) {
-      if (error instanceof WorkspacePoolUnavailableError && error.reasonCode === 'CAPACITY_EXHAUSTED') break
+      if (error instanceof WorkspacePoolUnavailableError && error.reasonCode === 'CAPACITY_EXHAUSTED') {
+        const blocked = queued.state === 'waiting-integration-clean'
+          ? await updateAiDelegation(queued.id, {
+              state: 'waiting-workspace',
+              workspaceWaitError: '사용 가능한 AI 작업공간을 기다리고 있습니다.',
+              integrationCleanResolvedAt: new Date().toISOString(),
+              resource: { kind: 'workspace_pool', key: workspacePoolManager.publicSnapshot().poolId },
+            })
+          : queued
+        scheduleAiDelegationWaitPoll(blocked)
+        break
+      }
+      if (error instanceof WorkspacePoolUnavailableError
+        && error.reasonCode === integrationStatusRetryReasonCode) {
+        const blocked = await updateAiDelegation(queued.id, {
+          workspaceWaitError: error.message,
+        })
+        scheduleAiDelegationWaitPoll(blocked)
+        break
+      }
       if (error instanceof WorkspacePoolUnavailableError
         && error.reasonCode === integrationWorktreeDirtyReasonCode) {
         const trackedChanges = Array.isArray(error.details)
           ? error.details.map((item) => String(item ?? '').trim()).filter(Boolean)
           : []
-        await updateAiDelegation(queued.id, {
+        integrationDirtyThisTick = { message: error.message, trackedChanges }
+        const blocked = await updateAiDelegation(queued.id, {
           state: 'waiting-integration-clean',
           childStatus: null,
           childError: null,
@@ -2950,6 +3069,7 @@ async function drainWaitingWorkspaceDelegations() {
             projectRoot: queued.pendingWorkspaceHint,
           },
         })
+        scheduleAiDelegationWaitPoll(blocked)
         continue
       }
       await updateAiDelegation(queued.id, {
@@ -2959,6 +3079,7 @@ async function drainWaitingWorkspaceDelegations() {
         workspaceWaitError: error?.message ?? String(error),
         resource: null,
       })
+      clearAiDelegationWaitPoll(queued.id)
       continue
     }
     if (!workspaceLease) {
@@ -2968,6 +3089,7 @@ async function drainWaitingWorkspaceDelegations() {
         childError: '등록된 AI 작업공간 풀의 lease를 확보하지 못했습니다.',
         resource: null,
       })
+      clearAiDelegationWaitPoll(queued.id)
       continue
     }
     selection.workspace = workspaceLease.projectRoot
@@ -2980,6 +3102,7 @@ async function drainWaitingWorkspaceDelegations() {
         ? { integrationCleanResolvedAt: new Date().toISOString() }
         : {}),
     })
+    clearAiDelegationWaitPoll(queued.id)
     try {
       await dispatchPreparedAiDelegation({
         queuedDelegation: starting,
@@ -3012,6 +3135,7 @@ async function drainWaitingWorkspaceDelegations() {
         ...(needsRecovery ? { recoveryRequiredAt: new Date().toISOString(), recoveryDetails: error?.details ?? null } : {}),
         resource: null,
       })
+      clearAiDelegationWaitPoll(queued.id)
     }
   }
 }
@@ -3110,6 +3234,7 @@ async function pollAiDelegations() {
       }
 
       if (delegation.state === 'waiting-integration') {
+        if (!aiDelegationWaitPollDue(aiDelegationWaitPolls.get(delegation.id), delegation)) continue
         const workspace = await finalizeDelegationWorkspace(
           delegation,
           delegation.childStatus ?? 'completed',

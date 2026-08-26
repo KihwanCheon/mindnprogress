@@ -9,6 +9,7 @@ import {
   WorkspacePoolManager,
   WorkspacePoolUnavailableError,
   buildWorkspaceInstruction,
+  integrationStatusRetryReasonCode,
   normalizeCheckpointCommitMessage,
 } from '../server/lib/workspacePool.mjs'
 
@@ -363,6 +364,54 @@ test('위임 시작 전 통합 작업공간 변경은 차단 파일을 포함한
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+test('통합 작업공간 Git 상태 확인 timeout은 격리가 아닌 재시도 대기로 분류한다', async () => {
+  const integrationRoot = path.join(tmpdir(), 'mnp-integration-status-timeout')
+  const manager = new WorkspacePoolManager({
+    registryFile: path.join(tmpdir(), 'mnp-integration-status-timeout-workspaces.json'),
+    stateFile: path.join(tmpdir(), 'mnp-integration-status-timeout-state.json'),
+    gitRunner: async (cwd, args, options) => {
+      assert.equal(cwd, integrationRoot)
+      assert.deepEqual(args, ['status', '--porcelain=v1', '--untracked-files=no'])
+      assert.equal(options.timeoutMs >= 1_000, true)
+      const error = new Error('timed out')
+      error.code = 'GIT_COMMAND_TIMEOUT'
+      throw error
+    },
+  })
+  manager.registry = { integration: { root: integrationRoot } }
+
+  await assert.rejects(
+    () => manager.integrationTrackedChanges(),
+    (error) => error instanceof WorkspacePoolUnavailableError
+      && error.reasonCode === integrationStatusRetryReasonCode
+      && /다음 폴링/.test(error.message),
+  )
+})
+
+test('통합 작업공간 변경 경로 확인 timeout도 재시도 대기로 분류한다', async () => {
+  const integrationRoot = path.join(tmpdir(), 'mnp-integration-diff-timeout')
+  const manager = new WorkspacePoolManager({
+    registryFile: path.join(tmpdir(), 'mnp-integration-diff-timeout-workspaces.json'),
+    stateFile: path.join(tmpdir(), 'mnp-integration-diff-timeout-state.json'),
+    gitRunner: async (cwd, args, options) => {
+      assert.equal(cwd, integrationRoot)
+      assert.equal(options.timeoutMs >= 1_000, true)
+      if (args[0] === 'status') return ' M changed.txt'
+      assert.deepEqual(args, ['diff', '--name-only', 'HEAD'])
+      const error = new Error('timed out')
+      error.code = 'GIT_COMMAND_TIMEOUT'
+      throw error
+    },
+  })
+  manager.registry = { integration: { root: integrationRoot } }
+
+  await assert.rejects(
+    () => manager.integrationTrackedChanges(),
+    (error) => error instanceof WorkspacePoolUnavailableError
+      && error.reasonCode === integrationStatusRetryReasonCode,
+  )
 })
 
 test('lease 발급 전 준비 실패는 가짜 lease 없이 격리하고 재시작 시 깨끗한 기준선만 자동 회수한다', async () => {
