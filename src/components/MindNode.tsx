@@ -30,6 +30,9 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
   }
 
   const hasProgressRollup = data.progressRollupTargetCount !== undefined
+  const progressRollupScope = data.kind === 'root' ? '전체' : '하위'
+  const progressRollupDescription = `${progressRollupScope} 업무 ${data.progressRollupTargetCount ?? 0}개 진행률 평균 · 자동 계산`
+  const progressRollupAriaLabel = `${progressRollupScope} 업무 ${data.progressRollupTargetCount ?? 0}개 진행률 평균 ${data.progress}% · 자동 계산`
   const showsProgress = Boolean(data.isWork || hasProgressRollup)
   const isCompleted = showsProgress && data.progress >= 100
   const displayStatus = isCompleted ? 'done' : data.status
@@ -122,8 +125,8 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
           </span>
         )}
         {showsProgress && (
-          <strong title={hasProgressRollup ? `하위 업무 ${data.progressRollupTargetCount}개 평균 · 자동 계산` : undefined}>
-            {hasProgressRollup ? `${data.kind === 'root' ? '전체' : '요약'} ${data.progress}%` : `${data.progress}%`}
+          <strong title={hasProgressRollup ? progressRollupDescription : undefined}>
+            {hasProgressRollup ? `${progressRollupScope} ${data.progress}%` : `${data.progress}%`}
           </strong>
         )}
       </div>
@@ -161,7 +164,7 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
       ) : <h3>{data.label}</h3>}
       <p>{data.description}</p>
       {showsProgress && (
-        <div className="node-progress" aria-label={`${hasProgressRollup ? '자동 요약 진행률' : '진행률'} ${data.progress}%`}>
+        <div className="node-progress" aria-label={hasProgressRollup ? progressRollupAriaLabel : `진행률 ${data.progress}%`}>
           <span style={{ width: `${data.progress}%` }} />
         </div>
       )}
