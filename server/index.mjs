@@ -94,6 +94,8 @@ import {
   WorkspacePoolUnavailableError,
   buildWorkspaceInstruction,
   checkpointCommitMessageExample,
+  integrationWorktreeDirtyMessage,
+  integrationWorktreeDirtyReasonCode,
 } from './lib/workspacePool.mjs'
 
 const serverDirectory = path.dirname(fileURLToPath(import.meta.url))
@@ -2078,6 +2080,43 @@ async function dispatchPreparedAiDelegation({
 }
 
 async function reconcileAiDelegationWorkspaceLeases() {
+  const legacyIntegrationDirtyFailures = [...aiDelegations.values()].filter((delegation) =>
+    delegation.state === 'failed'
+    && delegation.childStatus === 'rejected'
+    && !delegation.workspaceLease?.leaseId
+    && delegation.childError === integrationWorktreeDirtyMessage
+    && delegation.workspaceWaitError === integrationWorktreeDirtyMessage
+    && typeof delegation.pendingInstruction === 'string'
+    && delegation.pendingInstruction.trim()
+    && delegation.pendingSelection
+    && typeof delegation.pendingSelection === 'object')
+  if (legacyIntegrationDirtyFailures.length > 0) {
+    try {
+      const integrationChanges = await workspacePoolManager.integrationTrackedChanges()
+      const snapshot = workspacePoolManager.publicSnapshot()
+      for (const delegation of legacyIntegrationDirtyFailures) {
+        const now = new Date().toISOString()
+        await updateAiDelegation(delegation.id, {
+          state: integrationChanges.dirty ? 'waiting-integration-clean' : 'waiting-workspace',
+          childStatus: null,
+          childError: null,
+          workspaceWaitError: integrationChanges.dirty ? integrationWorktreeDirtyMessage : null,
+          integrationCleanTrackedChanges: integrationChanges.paths,
+          integrationCleanWaitStartedAt: delegation.integrationCleanWaitStartedAt ?? now,
+          legacyIntegrationCleanRecoveredAt: now,
+          resource: {
+            kind: integrationChanges.dirty ? 'integration_workspace' : 'workspace_pool',
+            key: integrationChanges.dirty ? snapshot.integrationWorkspaceId : snapshot.poolId,
+            projectRoot: delegation.pendingWorkspaceHint,
+          },
+          completedAt: null,
+        })
+      }
+    } catch (error) {
+      console.warn('[AI delegation integration clean startup recovery]', error)
+    }
+  }
+
   for (const delegation of aiDelegations.values()) {
     if (delegation.state !== 'resuming') continue
     await updateAiDelegation(delegation.id, {
@@ -2351,7 +2390,7 @@ ${result ? `## 보존된 하위 AI의 마지막 응답\n\n${result}\n\n` : ''}�
 }
 
 async function ensureAiDelegationNotification(delegation, { kind, message, dedupeKey }) {
-  const notificationKey = kind === 'checkpoint' ? 'checkpointNotificationKey' : 'recoveryNotificationKey'
+  const notificationKey = `${kind}NotificationKey`
   if (delegation?.[notificationKey] === dedupeKey) return delegation
   const recipient = users.find((candidate) => candidate.id === delegation?.startedBy
     && candidate.role === 'editor' && candidate.active !== false)
@@ -2381,6 +2420,125 @@ async function ensureCheckpointRequiredNotification(delegation, workspaceResult)
     kind: 'checkpoint',
     dedupeKey: `ai-delegation-checkpoint:${delegation.id}:${round}`,
     message: `하위 AI 작업은 종료됐지만 명시적 체크포인트가 없어 자동 보완을 요청했습니다. (회차 ${round || '미확인'})`,
+  })
+}
+
+function integrationCleanWaitKey(delegation) {
+  return createHash('sha256').update(JSON.stringify({
+    id: delegation?.id,
+    startedAt: delegation?.integrationCleanWaitStartedAt,
+  })).digest('hex').slice(0, 16)
+}
+
+function integrationCleanWaitMessage(delegation) {
+  const paths = Array.isArray(delegation?.integrationCleanTrackedChanges)
+    ? delegation.integrationCleanTrackedChanges
+    : []
+  const pathSummary = paths.length > 0
+    ? ` 차단 파일: ${paths.slice(0, 3).join(', ')}${paths.length > 3 ? ` 외 ${paths.length - 3}건` : ''}`
+    : ''
+  return `통합 작업공간의 커밋되지 않은 추적 변경 때문에 하위 AI 전문을 아직 전달하지 않았습니다. 변경이 정리되면 같은 위임을 자동 시작합니다.${pathSummary}`
+}
+
+function parentIntegrationCleanWaitInstruction(delegation) {
+  const paths = Array.isArray(delegation?.integrationCleanTrackedChanges)
+    ? delegation.integrationCleanTrackedChanges
+    : []
+  const pathList = paths.length > 0
+    ? paths.map((item) => `- ${item}`).join('\n')
+    : '- 파일 목록을 확인하지 못했습니다.'
+  return `# MindNProgress 하위 AI 위임 시작 대기
+
+하위 카드 위임은 접수됐지만 통합 작업공간에 커밋되지 않은 추적 변경이 있어 하위 AI 대화에는 아직 전문을 전달하지 않았습니다.
+
+- 위임 ID: ${delegation.id}
+- 하위 카드: ${delegation.targetCardLabel} (${delegation.targetCardId})
+- 대상 대화: ${delegation.targetConversationId}
+- 상태: waiting-integration-clean
+
+## 차단 중인 추적 파일
+
+${pathList}
+
+이 상태는 실패나 완료가 아니며 같은 위임이 유지됩니다. 같은 작업을 다시 위임하지 마세요. 사용자가 변경을 커밋하거나 안전하게 정리해 통합 작업공간이 깨끗해지면 MindNProgress가 같은 위임을 자동 시작합니다. 현재 상태가 이미 달라졌을 수 있으므로 필요하면 mindnprogress_list_ai_delegations로 다시 확인하고, 사용자에게는 하위 AI에 전문이 아직 전달되지 않았다는 사실과 필요한 조치만 알리세요.`
+}
+
+async function processAiDelegationIntegrationCleanWaitNotice(originalDelegation) {
+  let delegation = originalDelegation
+  const waitKey = integrationCleanWaitKey(delegation)
+  try {
+    delegation = await ensureAiDelegationNotification(delegation, {
+      kind: 'integrationCleanWait',
+      dedupeKey: `ai-delegation-integration-clean:${delegation.id}:${waitKey}`,
+      message: integrationCleanWaitMessage(delegation),
+    })
+  } catch (error) {
+    console.warn('[AI delegation integration clean editor notification]', error)
+  }
+
+  if (delegation.integrationCleanWakeKey === waitKey
+    && delegation.integrationCleanWakeDeliveredAt) return
+  if (delegation.integrationCleanWakeKey === waitKey && delegation.integrationCleanWakeOperationId) {
+    try {
+      const status = await fetchAionUi(`/api/internal/external-conversation-dispatches/${encodeURIComponent(delegation.integrationCleanWakeOperationId)}`)
+      if (['starting', 'waiting_resource', 'running', 'waiting_resume'].includes(status.state)) {
+        await updateAiDelegation(delegation.id, {
+          integrationCleanWakeState: status.state,
+          integrationCleanWakeTurnId: status.turnId ?? delegation.integrationCleanWakeTurnId ?? null,
+          integrationCleanWakeError: status.errorMessage ?? null,
+        })
+        return
+      }
+      await updateAiDelegation(delegation.id, {
+        integrationCleanWakeState: status.state,
+        integrationCleanWakeTurnId: status.turnId ?? delegation.integrationCleanWakeTurnId ?? null,
+        integrationCleanWakeError: status.errorMessage ?? null,
+        integrationCleanWakeDeliveredAt: status.state === 'completed' ? new Date().toISOString() : null,
+        integrationCleanWakeFailedAt: status.state === 'completed' ? null : new Date().toISOString(),
+      })
+    } catch (error) {
+      await updateAiDelegation(delegation.id, {
+        integrationCleanWakeState: 'unavailable',
+        integrationCleanWakeError: error?.message ?? String(error),
+        integrationCleanWakeFailedAt: new Date().toISOString(),
+      })
+    }
+    return
+  }
+
+  const anotherParentWakeInProgress = [...aiDelegations.values()].some((candidate) =>
+    candidate.id !== delegation.id
+    && candidate.parentConversationId === delegation.parentConversationId
+    && (candidate.state === 'waking-parent'
+      || ['starting', 'waiting_resource', 'running', 'waiting_resume'].includes(candidate.recoveryWakeState)
+      || ['starting', 'waiting_resource', 'running', 'waiting_resume'].includes(candidate.integrationCleanWakeState)))
+  if (anotherParentWakeInProgress) return
+  const parent = await fetchAiConversationRuntime(delegation.parentConversationId)
+  const runtime = normalizeAiConversationRuntime(delegation.parentConversationId, parent)
+  if (runtime.state !== 'idle') return
+
+  const attempt = Number(delegation.integrationCleanWakeAttempt ?? 0) + 1
+  const operationId = boundedAionOperationId(delegation.id, `integration-clean-notice-${attempt}`)
+  const response = await fetchAionUi('/api/internal/external-conversation-dispatches', {
+    method: 'POST',
+    body: {
+      operationId,
+      actorConversationId: delegation.parentConversationId,
+      strategy: 'resume',
+      targetConversationId: delegation.parentConversationId,
+      instruction: parentIntegrationCleanWaitInstruction(delegation),
+    },
+  })
+  await updateAiDelegation(delegation.id, {
+    integrationCleanWakeKey: waitKey,
+    integrationCleanWakeOperationId: operationId,
+    integrationCleanWakeAttempt: attempt,
+    integrationCleanWakeState: response.state,
+    integrationCleanWakeTurnId: response.turnId ?? null,
+    integrationCleanWakeError: null,
+    integrationCleanWakeStartedAt: new Date().toISOString(),
+    integrationCleanWakeDeliveredAt: null,
+    integrationCleanWakeFailedAt: null,
   })
 }
 
@@ -2683,7 +2841,7 @@ async function advanceWorkspaceIntegration(delegation, workspace) {
 
 async function drainWaitingWorkspaceDelegations() {
   const waiting = [...aiDelegations.values()]
-    .filter((delegation) => delegation.state === 'waiting-workspace')
+    .filter((delegation) => ['waiting-workspace', 'waiting-integration-clean'].includes(delegation.state))
     .sort((first, second) => String(first.createdAt).localeCompare(String(second.createdAt)))
   for (const queued of waiting) {
     const map = await readMap(queued.mapId)
@@ -2774,6 +2932,26 @@ async function drainWaitingWorkspaceDelegations() {
           })
     } catch (error) {
       if (error instanceof WorkspacePoolUnavailableError && error.reasonCode === 'CAPACITY_EXHAUSTED') break
+      if (error instanceof WorkspacePoolUnavailableError
+        && error.reasonCode === integrationWorktreeDirtyReasonCode) {
+        const trackedChanges = Array.isArray(error.details)
+          ? error.details.map((item) => String(item ?? '').trim()).filter(Boolean)
+          : []
+        await updateAiDelegation(queued.id, {
+          state: 'waiting-integration-clean',
+          childStatus: null,
+          childError: null,
+          workspaceWaitError: error.message,
+          integrationCleanTrackedChanges: trackedChanges,
+          integrationCleanWaitStartedAt: queued.integrationCleanWaitStartedAt ?? new Date().toISOString(),
+          resource: {
+            kind: 'integration_workspace',
+            key: workspacePoolManager.publicSnapshot().integrationWorkspaceId,
+            projectRoot: queued.pendingWorkspaceHint,
+          },
+        })
+        continue
+      }
       await updateAiDelegation(queued.id, {
         state: 'failed',
         childStatus: 'rejected',
@@ -2798,6 +2976,9 @@ async function drainWaitingWorkspaceDelegations() {
       workspaceLease,
       resource: null,
       workspaceWaitError: null,
+      ...(queued.state === 'waiting-integration-clean'
+        ? { integrationCleanResolvedAt: new Date().toISOString() }
+        : {}),
     })
     try {
       await dispatchPreparedAiDelegation({
@@ -2842,6 +3023,7 @@ async function pollAiDelegations() {
     await drainWaitingWorkspaceDelegations()
     const active = [...aiDelegations.values()].filter((delegation) =>
       [
+        'waiting-integration-clean',
         'starting', 'waiting-resource', 'running', 'waiting-child-resume',
         'recovery-required',
         'waiting-integration', 'integration-starting', 'integration-waiting-resource',
@@ -2849,6 +3031,14 @@ async function pollAiDelegations() {
         'waiting-parent', 'waking-parent',
       ].includes(delegation.state))
     for (const delegation of active) {
+      if (delegation.state === 'waiting-integration-clean') {
+        try {
+          await processAiDelegationIntegrationCleanWaitNotice(delegation)
+        } catch (error) {
+          console.warn('[AI delegation integration clean notification]', error)
+        }
+        continue
+      }
       if (['recovery-required', 'integration-recovery-required'].includes(delegation.state)) {
         try {
           await processAiDelegationRecoveryNotice(delegation)
@@ -5431,6 +5621,14 @@ const server = createServer(async (request, response) => {
         || resumedDelegation?.workspaceLease?.leaseId)
       if (expectsWorkspacePool) {
         const now = new Date().toISOString()
+        let integrationChanges = { dirty: false, paths: [] }
+        try {
+          integrationChanges = await workspacePoolManager.integrationTrackedChanges()
+        } catch (error) {
+          console.warn('[AI delegation integration workspace preflight]', error)
+        }
+        const waitingForIntegrationClean = integrationChanges.dirty === true
+        const workspacePoolSnapshot = workspacePoolManager.publicSnapshot()
         const waitingDelegation = {
           id,
           requestSignature,
@@ -5447,10 +5645,12 @@ const server = createServer(async (request, response) => {
           sourceRevision,
           instructionPreview: instruction.replace(/\s+/g, ' ').slice(0, 240),
           instructionHash: createHash('sha256').update(instruction).digest('hex'),
-          state: 'waiting-workspace',
+          state: waitingForIntegrationClean ? 'waiting-integration-clean' : 'waiting-workspace',
           resource: {
-            kind: 'workspace_pool',
-            key: workspacePoolManager.publicSnapshot().poolId,
+            kind: waitingForIntegrationClean ? 'integration_workspace' : 'workspace_pool',
+            key: waitingForIntegrationClean
+              ? workspacePoolSnapshot.integrationWorkspaceId
+              : workspacePoolSnapshot.poolId,
             projectRoot: workspacePoolHint,
           },
           startedBy: parentAttribution.startedBy ?? user.id,
@@ -5459,6 +5659,11 @@ const server = createServer(async (request, response) => {
           pendingWorkspaceHint: workspacePoolHint,
           ...(resumedDelegation ? { resumesDelegationId: resumedDelegation.id } : {}),
           workspaceWaitStartedAt: now,
+          ...(waitingForIntegrationClean ? {
+            workspaceWaitError: integrationWorktreeDirtyMessage,
+            integrationCleanTrackedChanges: integrationChanges.paths,
+            integrationCleanWaitStartedAt: now,
+          } : {}),
           createdAt: now,
           updatedAt: now,
         }

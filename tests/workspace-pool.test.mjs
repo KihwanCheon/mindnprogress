@@ -311,6 +311,179 @@ test('registry 작업공간만 풀로 인식하고 유휴 worker에 원자적 le
   }
 })
 
+test('위임 시작 전 통합 작업공간 변경은 차단 파일을 포함한 대기 사유로 반환한다', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'mnp-integration-clean-wait-'))
+  try {
+    const integrationRoot = path.join(root, 'main')
+    const workerRoot = path.join(root, 'fork1')
+    const sharedRoot = path.join(root, 'shared')
+    await Promise.all([mkdir(integrationRoot), mkdir(workerRoot), mkdir(sharedRoot)])
+    const registryFile = path.join(sharedRoot, 'workspaces.json')
+    const stateFile = path.join(root, 'state.json')
+    await writeFile(registryFile, JSON.stringify({
+      schemaVersion: 1,
+      poolId: 'holdem',
+      sharedRoot,
+      originUrl: 'https://example.invalid/holdem.git',
+      workspaces: [
+        { id: 'main', root: integrationRoot, role: 'integration', enabled: true },
+        { id: 'fork1', root: workerRoot, role: 'worker', enabled: true },
+      ],
+    }), 'utf8')
+
+    let integrationDirty = false
+    const manager = new WorkspacePoolManager({
+      registryFile,
+      stateFile,
+      gitRunner: async (cwd, args) => {
+        if (args[0] === 'status') return cwd === integrationRoot && integrationDirty ? ' M main.txt' : ''
+        if (args[0] === 'diff') return cwd === integrationRoot && integrationDirty ? 'main.txt\nsecond.txt' : ''
+        if (args[0] === 'rev-parse') return 'base123'
+        if (args[0] === 'branch' && args[1] === '--show-current') return 'japan-master'
+        if (args[0] === 'remote') return 'https://example.invalid/holdem.git'
+        return ''
+      },
+    })
+    assert.equal(await manager.initialize(), true)
+    integrationDirty = true
+    await assert.rejects(
+      () => manager.acquire({
+        workspaceHint: integrationRoot,
+        mapId: 'map-a',
+        cardId: 'card-a',
+        conversationId: 'conversation-a',
+        cardLabel: '통합 정리 대기',
+      }),
+      (error) => error instanceof WorkspacePoolUnavailableError
+        && error.reasonCode === 'integration-worktree-dirty'
+        && error.message === '통합 작업공간에 커밋되지 않은 추적 파일 변경이 있습니다.'
+        && JSON.stringify(error.details) === JSON.stringify(['main.txt', 'second.txt']),
+    )
+    assert.equal(Object.keys(manager.state.leases).length, 0)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('lease 발급 전 준비 실패는 가짜 lease 없이 격리하고 재시작 시 깨끗한 기준선만 자동 회수한다', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'mnp-workspace-preparation-recovery-'))
+  try {
+    const integrationRoot = path.join(root, 'main')
+    const workerRoot = path.join(root, 'fork1')
+    const sharedRoot = path.join(root, 'shared')
+    await Promise.all([mkdir(integrationRoot), mkdir(workerRoot), mkdir(sharedRoot)])
+    const registryFile = path.join(sharedRoot, 'workspaces.json')
+    const stateFile = path.join(root, 'state.json')
+    await writeFile(registryFile, JSON.stringify({
+      schemaVersion: 1,
+      poolId: 'holdem',
+      sharedRoot,
+      originUrl: 'https://example.invalid/holdem.git',
+      workspaces: [
+        { id: 'main', root: integrationRoot, role: 'integration', enabled: true },
+        { id: 'fork1', root: workerRoot, role: 'worker', enabled: true },
+      ],
+    }), 'utf8')
+
+    let workerBranch = 'mnp/idle/fork1'
+    let failSwitch = true
+    const gitRunner = async (cwd, args) => {
+      if (args[0] === 'status') return ''
+      if (args[0] === 'rev-parse') return cwd === workerRoot ? 'idle123' : 'base123'
+      if (args[0] === 'branch' && args[1] === '--show-current') {
+        return cwd === workerRoot ? workerBranch : 'japan-master'
+      }
+      if (args[0] === 'remote') return 'https://example.invalid/holdem.git'
+      if (args[0] === 'switch') {
+        if (failSwitch) throw new Error('작업공간 전환 실패')
+        workerBranch = args[1]
+      }
+      return ''
+    }
+    const manager = new WorkspacePoolManager({ registryFile, stateFile, gitRunner })
+    assert.equal(await manager.initialize(), true)
+    await assert.rejects(
+      () => manager.acquire({ workspaceHint: integrationRoot, cardLabel: '준비 실패 작업' }),
+      (error) => error instanceof WorkspacePoolUnavailableError
+        && error.reasonCode === 'WORKSPACE_PREPARATION_FAILED',
+    )
+    const failed = manager.state.workspaces.fork1
+    assert.equal(failed.status, 'quarantined')
+    assert.equal(failed.leaseId, undefined)
+    assert.match(failed.preparationId, /^lease-/)
+    assert.equal(failed.idleCommit, 'idle123')
+    assert.equal(failed.idleBranch, 'mnp/idle/fork1')
+    assert.equal(Object.keys(manager.state.leases).length, 0)
+
+    failSwitch = false
+    const restarted = new WorkspacePoolManager({ registryFile, stateFile, gitRunner })
+    assert.equal(await restarted.initialize(), true)
+    assert.equal(restarted.state.workspaces.fork1.status, 'idle')
+    assert.equal(restarted.state.workspaces.fork1.lastPreparationFailure.preparationId, failed.preparationId)
+    const lease = await restarted.acquire({ workspaceHint: integrationRoot, cardLabel: '복구 후 작업' })
+    assert.equal(lease.workspaceId, 'fork1')
+    assert.equal(lease.baseCommit, 'base123')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('lease 발급 전 준비 실패에 세션 파일이 남아 있으면 자동 회수하지 않는다', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'mnp-workspace-preparation-session-guard-'))
+  try {
+    const integrationRoot = path.join(root, 'main')
+    const workerRoot = path.join(root, 'fork2')
+    const sharedRoot = path.join(root, 'shared')
+    await Promise.all([mkdir(integrationRoot), mkdir(workerRoot), mkdir(sharedRoot)])
+    const registryFile = path.join(sharedRoot, 'workspaces.json')
+    const stateFile = path.join(root, 'state.json')
+    await writeFile(registryFile, JSON.stringify({
+      schemaVersion: 1,
+      poolId: 'holdem',
+      sharedRoot,
+      workspaces: [
+        { id: 'main', root: integrationRoot, role: 'integration', enabled: true },
+        { id: 'fork2', root: workerRoot, role: 'worker', enabled: true },
+      ],
+    }), 'utf8')
+    await writeFile(stateFile, JSON.stringify({
+      schemaVersion: 1,
+      poolId: 'holdem',
+      integrationLeaseId: null,
+      workspaces: {
+        main: { status: 'integration' },
+        fork2: {
+          status: 'quarantined',
+          reasonCode: 'WORKSPACE_PREPARATION_FAILED',
+          reason: '준비 실패',
+          jobId: 'job-failed',
+          preparationId: 'lease-never-issued',
+          idleCommit: 'idle456',
+          idleBranch: 'mnp/idle/fork2',
+        },
+      },
+      leases: {},
+    }), 'utf8')
+    await writeFile(path.join(workerRoot, '.ai-session.json'), '{}', 'utf8')
+
+    const manager = new WorkspacePoolManager({
+      registryFile,
+      stateFile,
+      gitRunner: async (_cwd, args) => {
+        if (args[0] === 'status') return ''
+        if (args[0] === 'rev-parse') return 'idle456'
+        if (args[0] === 'branch') return 'mnp/idle/fork2'
+        return ''
+      },
+    })
+    assert.equal(await manager.initialize(), true)
+    assert.equal(manager.state.workspaces.fork2.status, 'quarantined')
+    assert.match(manager.state.workspaces.fork2.recoveryError, /AI 세션 파일/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('같은 AI 대화를 서로 다른 활성 작업공간 lease에 중복 연결하지 않는다', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'mnp-workspace-conversation-lease-'))
   try {

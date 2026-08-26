@@ -275,6 +275,10 @@ test('같은 카드와 대화에서 아직 끝나지 않은 위임만 최신순�
       state: 'waiting-workspace', createdAt: '2026-08-15T10:45:00.000Z',
     },
     {
+      id: 'integration-clean-wait', mapId: 'map-a', targetCardId: 'card-a', targetConversationId: 'conversation-a',
+      state: 'waiting-integration-clean', createdAt: '2026-08-15T10:50:00.000Z',
+    },
+    {
       id: 'completed', mapId: 'map-a', targetCardId: 'card-a', targetConversationId: 'conversation-a',
       state: 'completed', createdAt: '2026-08-15T11:00:00.000Z',
     },
@@ -289,14 +293,14 @@ test('같은 카드와 대화에서 아직 끝나지 않은 위임만 최신순�
   })
 
   assert.deepEqual(matches.map((delegation) => delegation.id), [
-    'workspace-queued', 'newest-recovery', 'new-running', 'old-waiting',
+    'integration-clean-wait', 'workspace-queued', 'newest-recovery', 'new-running', 'old-waiting',
   ])
   assert.equal(activeAiDelegationsForConversation(matches, {
     mapId: 'map-a',
     targetCardId: 'card-a',
     targetConversationId: 'conversation-a',
     excludeId: 'new-running',
-  }).at(0)?.id, 'workspace-queued')
+  }).at(0)?.id, 'integration-clean-wait')
 })
 
 test('완료 결과를 전달받은 동일 상위 turn은 waking-parent 중에도 같은 하위 대화를 다시 위임할 수 있다', () => {
