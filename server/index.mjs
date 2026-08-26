@@ -61,6 +61,9 @@ import {
   removeAiWorkspace,
 } from '../src/utils/aiWorkspaceHistory.mjs'
 import {
+  isAiConversationPurpose,
+} from '../src/utils/aiConversationLaunch.mjs'
+import {
   aiConversationIdsFromData,
   aiConversationLinkFromAionUiConversation,
   aiConversationLinksFromData,
@@ -4880,12 +4883,24 @@ const server = createServer(async (request, response) => {
       const providerId = String(body.providerId ?? '').trim().slice(0, 120)
       const mapId = String(body.mapId ?? '').trim().slice(0, 120)
       const cardId = String(body.cardId ?? '').trim().slice(0, 120)
+      const purpose = body.purpose === undefined ? 'card' : String(body.purpose).trim()
       if (!agentId || !modelId || !isValidMapId(mapId) || !cardId) {
         return sendJson(response, 400, { error: 'AI 종류, 모델, 문서와 카드를 모두 지정해 주세요.' })
+      }
+      if (!isAiConversationPurpose(purpose)) {
+        return sendJson(response, 400, { error: 'AI 대화 용도가 올바르지 않습니다.' })
       }
       const map = await readMap(mapId)
       if (!map || map.trashedAt || !map.nodes.some((node) => node.id === cardId)) {
         return sendJson(response, 404, { error: 'AI 대화를 시작할 문서 또는 카드를 찾을 수 없습니다.' })
+      }
+      if (purpose === 'shared-knowledge-review') {
+        try {
+          buildSharedKnowledgeReviewContext(map, cardId)
+        } catch (error) {
+          if (sendSharedKnowledgeMaintenanceError(response, error)) return
+          throw error
+        }
       }
 
       try {
@@ -4935,6 +4950,7 @@ const server = createServer(async (request, response) => {
           attributionKey: sessionTokenKey(attributionToken),
           mapId,
           cardId,
+          purpose,
           startedBy: user.id,
           expiresAt,
         })
@@ -5024,8 +5040,21 @@ const server = createServer(async (request, response) => {
           aiConversationLaunches.delete(tokenKey)
           return sendJson(response, 404, { error: 'AI 대화를 연결할 문서 또는 카드를 찾을 수 없습니다.' })
         }
-        const actor = users.find((candidate) => candidate.id === launch.startedBy) ?? integrationUser
         const attribution = aiAttributions.get(launch.attributionKey)
+        if (attribution) {
+          attribution.conversationId = conversationId
+          await persistAiAttributions()
+        }
+        if (launch.purpose === 'shared-knowledge-review') {
+          aiConversationLaunches.delete(tokenKey)
+          return sendJson(response, 200, {
+            conversationId,
+            linked: false,
+            purpose: launch.purpose,
+          })
+        }
+
+        const actor = users.find((candidate) => candidate.id === launch.startedBy) ?? integrationUser
         const selection = attribution?.selection ?? {
           agent: attribution?.agentId ? { id: attribution.agentId, label: attribution.agentName ?? attribution.agentId } : null,
           model: attribution?.modelId ? { id: attribution.modelId, label: attribution.modelName ?? attribution.modelId } : null,
@@ -5064,8 +5093,6 @@ const server = createServer(async (request, response) => {
         })
         await persistAiConversationOrigins()
         if (attribution) {
-          attribution.conversationId = conversationId
-          await persistAiAttributions()
           try {
             await refreshConversationAttribution(launch.mapId, launch.cardId, conversationId, launch.startedBy, attribution)
           } catch (error) {

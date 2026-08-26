@@ -2,10 +2,12 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   AI_EDITOR_REQUEST_MAX_LENGTH,
+  aiConversationTitle,
   buildAiConversationPrompt,
   buildSharedKnowledgeCleanupLaunch,
   buildSharedKnowledgeCleanupRequest,
   DEFAULT_AI_EDITOR_REQUEST,
+  isAiConversationPurpose,
   normalizeAiCardTitle,
   normalizeAiEditorRequest,
   resolveAiConversationTarget,
@@ -36,6 +38,7 @@ test('선택 카드가 없어도 바로 지정한 카드로 대화 대상을 만
   })
   assert.deepEqual(target, {
     source: 'explicit',
+    purpose: 'card',
     mapId: 'map-other',
     cardId: 'node-candidate',
     cardTitle: '정리 후보 카드',
@@ -61,6 +64,7 @@ test('선택 카드 경로는 기존 대상 계산을 유지한다', () => {
   const target = resolveAiConversationTarget({ explicitTarget: null, selection })
   assert.deepEqual(target, {
     source: 'selection',
+    purpose: 'card',
     mapId: 'map-current',
     cardId: 'node-selected',
     cardTitle: '선택한 카드',
@@ -89,6 +93,25 @@ test('카드 제목의 ref 접미사만 정리한다', () => {
   assert.equal(normalizeAiCardTitle('카드 (REF) '), '카드')
   assert.equal(normalizeAiCardTitle('참조(reference) 카드'), '참조(reference) 카드')
   assert.equal(normalizeAiCardTitle(undefined), '')
+})
+
+test('대화 용도에 따라 제목을 만들고 접두사를 보존한 채 120자로 제한한다', () => {
+  assert.equal(aiConversationTitle({ documentTitle: '문서', cardTitle: '카드' }), '문서: 카드')
+  assert.equal(aiConversationTitle({
+    purpose: 'shared-knowledge-review',
+    documentTitle: '문서\n제목',
+    cardTitle: '카드   제목',
+  }), '[지식정리] 문서 제목: 카드 제목')
+  const longTitle = aiConversationTitle({
+    purpose: 'shared-knowledge-review',
+    documentTitle: '문서',
+    cardTitle: '카드'.repeat(100),
+  })
+  assert.equal(longTitle.length, 120)
+  assert.ok(longTitle.startsWith('[지식정리] '))
+  assert.equal(isAiConversationPurpose('card'), true)
+  assert.equal(isAiConversationPurpose('shared-knowledge-review'), true)
+  assert.equal(isAiConversationPurpose('unknown'), false)
 })
 
 test('전문은 대상 식별자와 편집자 요청을 그대로 담는다', () => {
@@ -142,6 +165,7 @@ test('지표가 없어도 정리 제안 전문을 만든다', () => {
 
 test('검토 문맥에서 정리 제안 대상과 전문을 함께 만든다', () => {
   const launch = buildSharedKnowledgeCleanupLaunch(reviewContext)
+  assert.equal(launch.purpose, 'shared-knowledge-review')
   assert.equal(launch.mapId, 'map-other')
   assert.equal(launch.cardId, 'node-candidate')
   assert.equal(launch.cardTitle, '정리 후보 카드')
@@ -151,6 +175,7 @@ test('검토 문맥에서 정리 제안 대상과 전문을 함께 만든다', (
   const target = resolveAiConversationTarget({ explicitTarget: launch, selection })
   assert.equal(target.mapId, 'map-other')
   assert.equal(target.cardId, 'node-candidate')
+  assert.equal(target.purpose, 'shared-knowledge-review')
   assert.equal(target.initialRequest, launch.initialRequest)
 })
 

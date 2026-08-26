@@ -14,9 +14,11 @@ import {
 } from '../utils/aiRuntimeSelections.mjs'
 import {
   AI_EDITOR_REQUEST_MAX_LENGTH,
+  aiConversationTitle,
   buildAiConversationPrompt,
   DEFAULT_AI_EDITOR_REQUEST,
   normalizeAiEditorRequest,
+  type AiConversationPurpose,
 } from '../utils/aiConversationLaunch.mjs'
 import './AiConversationDialog.css'
 
@@ -190,12 +192,13 @@ function encodeBase64Json(value: unknown) {
   return btoa(binary)
 }
 
-export function AiConversationDialog({ userId, documentId, documentTitle, cardId, cardTitle, knowledgeSources, initialRequest, launchInWebUi, onClose }: {
+export function AiConversationDialog({ userId, documentId, documentTitle, cardId, cardTitle, purpose, knowledgeSources, initialRequest, launchInWebUi, onClose }: {
   userId: string
   documentId: string
   documentTitle: string
   cardId: string
   cardTitle: string
+  purpose: AiConversationPurpose
   knowledgeSources: { id: string; label: string; policy: KnowledgePolicy }[]
   initialRequest?: string
   launchInWebUi: boolean
@@ -421,6 +424,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
           providerId: selectedModel?.providerId,
           mapId: documentId,
           cardId,
+          purpose,
           mode: mode || undefined,
           thoughtLevel: thoughtLevel || undefined,
           enabledSkillIds,
@@ -444,7 +448,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
       const launchPayload = {
         agentId: selectedAgent.id,
         completionUrl: attribution.completionUrl,
-        title: `${documentTitle}: ${cardTitle}`.replace(/\s+/g, ' ').trim().slice(0, 120),
+        title: aiConversationTitle({ purpose, documentTitle, cardTitle }),
         prompt,
         modelId,
         providerId: selectedModel?.providerId,

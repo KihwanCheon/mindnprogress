@@ -1,6 +1,10 @@
 export type AiConversationKnowledgeSource = { id: string; label: string; policy: string }
+export type AiConversationPurpose = 'card' | 'shared-knowledge-review'
+
+export const AI_CONVERSATION_PURPOSES: readonly AiConversationPurpose[]
 
 export type AiConversationExplicitTarget = {
+  purpose?: AiConversationPurpose
   mapId: string
   cardId: string
   cardTitle?: string
@@ -10,6 +14,7 @@ export type AiConversationExplicitTarget = {
 
 export type AiConversationTarget<TSource = AiConversationKnowledgeSource> = {
   source: 'explicit' | 'selection'
+  purpose: AiConversationPurpose
   mapId: string
   cardId: string
   cardTitle: string
@@ -49,6 +54,13 @@ export const DEFAULT_AI_EDITOR_REQUEST: string
 
 export function normalizeAiCardTitle(value: unknown): string
 export function normalizeAiEditorRequest(value: unknown): string
+export function isAiConversationPurpose(value: unknown): value is AiConversationPurpose
+export function normalizeAiConversationPurpose(value: unknown): AiConversationPurpose
+export function aiConversationTitle(input?: {
+  purpose?: AiConversationPurpose
+  documentTitle?: unknown
+  cardTitle?: unknown
+}): string
 
 export function resolveAiConversationTarget<TSource = AiConversationKnowledgeSource>(input: {
   explicitTarget?: AiConversationExplicitTarget | null

@@ -1,5 +1,10 @@
 const REFERENCE_SUFFIX_PATTERN = /\s*\(ref\)\s*$/i
 
+export const AI_CONVERSATION_PURPOSES = Object.freeze([
+  'card',
+  'shared-knowledge-review',
+])
+
 export const AI_EDITOR_REQUEST_MAX_LENGTH = 4_000
 
 export const DEFAULT_AI_EDITOR_REQUEST = `이 카드의 최신 내용을 검토하세요.
@@ -41,6 +46,19 @@ function isRecord(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
+export function isAiConversationPurpose(value) {
+  return AI_CONVERSATION_PURPOSES.includes(value)
+}
+
+export function normalizeAiConversationPurpose(value) {
+  return isAiConversationPurpose(value) ? value : 'card'
+}
+
+export function aiConversationTitle({ purpose, documentTitle, cardTitle } = {}) {
+  const prefix = normalizeAiConversationPurpose(purpose) === 'shared-knowledge-review' ? '[지식정리] ' : ''
+  return `${prefix}${text(documentTitle)}: ${text(cardTitle)}`.replace(/\s+/g, ' ').trim().slice(0, 120)
+}
+
 export function normalizeAiCardTitle(value) {
   return text(value).replace(REFERENCE_SUFFIX_PATTERN, '').trim()
 }
@@ -57,6 +75,7 @@ function explicitTarget(value) {
   const initialRequest = normalizeAiEditorRequest(value.initialRequest)
   return {
     source: 'explicit',
+    purpose: normalizeAiConversationPurpose(value.purpose),
     mapId,
     cardId,
     cardTitle: normalizeAiCardTitle(value.cardTitle) || cardId,
@@ -78,6 +97,7 @@ function selectionTarget(value) {
     : value.knowledgeSources
   return {
     source: 'selection',
+    purpose: 'card',
     mapId,
     cardId,
     cardTitle: normalizeAiCardTitle(value.cardLabel) || cardId,
@@ -150,6 +170,7 @@ export function buildSharedKnowledgeCleanupLaunch(context) {
   const cardId = text(context?.card?.id)
   if (!mapId || !cardId) return null
   return {
+    purpose: 'shared-knowledge-review',
     mapId,
     cardId,
     cardTitle: normalizeAiCardTitle(context?.card?.label) || cardId,

@@ -7636,12 +7636,13 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       )}
       {aiConversationTarget && (
         <AiConversationDialog
-          key={`${aiConversationTarget.mapId}:${aiConversationTarget.cardId}`}
+          key={`${aiConversationTarget.mapId}:${aiConversationTarget.cardId}:${aiConversationTarget.purpose}`}
           userId={user.id}
           documentId={aiConversationTarget.mapId}
           documentTitle={aiConversationTarget.documentTitle}
           cardId={aiConversationTarget.cardId}
           cardTitle={aiConversationTarget.cardTitle}
+          purpose={aiConversationTarget.purpose}
           knowledgeSources={aiConversationTarget.knowledgeSources}
           initialRequest={aiConversationTarget.initialRequest}
           launchInWebUi={aionUiWebNavigation.configured || !isLoopbackHostname(window.location.hostname)}
