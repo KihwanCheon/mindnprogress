@@ -110,10 +110,17 @@ description: >
 
 ### 모델·사고 강도 확인 방법
 
-- AionUi 연동 세션은 Dooray 기록 직전에 다음 순서로 조회한다.
-  1. `conversationId`: MindNProgress `get_context`의 `selection.card.data.aiConversationId`
+- AionUi 연동 세션은 MindNProgress에서 시작됐는지와 관계없이 **현재 실행 중인 AionUi 대화**를 우선 조회한다. 카드에 연결된 대표 대화는 현재 작성 중인 AI 대화와 다를 수 있으므로 1차 출처로 사용하지 않는다.
+- `AIONUI_HELPER_BIN`과 `AIONUI_CONVERSATION_ID`가 있으면 다음 절차를 사용한다.
+  1. 현재 대화 ID는 `AIONUI_CONVERSATION_ID`를 사용한다.
+  2. `{"path":"/api/conversations/{현재 대화 ID}/runtime-config","reason":"Dooray AI 작성 표기용 현재 모델과 사고 강도 확인"}` JSON을 `AIONUI_HELPER_BIN diagnose http get`의 표준 입력으로 전달한다.
+  3. `AIONUI_RUNTIME_TOKEN`을 명령이나 출력에 직접 넣지 않는다. helper가 주입된 인증 정보를 사용한다.
+- 위 런타임 환경이 없거나 helper 조회가 실패하고, 현재 작업에 MindNProgress `get_context` 결과가 이미 있다면 그때만 보조 경로를 사용한다.
+  1. `conversationId`: `selection.card.data.aiConversationId`
   2. AionUi 주소: MindNProgress `/api/health`의 `aionUiWebBaseUrl`
   3. `GET {AionUi 주소}/api/conversations/{conversationId}/runtime-config`
+- 일반 대화에서 런타임 환경을 찾지 못했다는 이유로 MindNProgress 문서나 카드를 새로 탐색하지 않는다. 런타임 1회와 이미 확보된 MindNProgress 보조 경로로도 확인할 수 없으면 탐색을 중단하고 확인된 항목만 사용한다.
 - 모델은 `data.model.value`, 사고 강도는 `data.thought_level.value`를 사용한다.
 - 각 필드의 `source`가 `runtime` 또는 `snapshot`이면 유효하며, `has_active_runtime: false`여도 스냅샷은 사용할 수 있다.
-- 값이 없거나 조회로 확인할 수 없으면 해당 항목을 생략하고 추측하지 않는다.
+- AionUi 밖에서 실행된 세션은 시스템이나 런타임이 명시적으로 제공한 값만 사용한다. CLI 이름이나 일반 지식만으로 모델과 사고 강도를 추정하지 않는다.
+- 값이 없거나 조회로 확인할 수 없으면 해당 항목을 생략하고 추측하지 않는다. 표기 괄호에는 확인된 항목만 `/`로 연결하며, AI 종류만 확인됐다면 `(AI: {AI 종류})`로 기록한다.
