@@ -5997,7 +5997,11 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
         <aside className="sidebar">
           <div className="sidebar-header">
             <span>{trashOpen ? '휴지통' : '마인드맵'} <small>{trashOpen ? trashedDocuments.length : documents.length}</small></span>
-            {mode === 'editor' && !trashOpen && (
+            {trashOpen ? (
+              <button type="button" aria-label="휴지통 닫기" title="휴지통 닫기" onClick={() => setTrashOpen(false)}>
+                <Icon name="close" size={14} />
+              </button>
+            ) : mode === 'editor' && (
               <div className="sidebar-create-actions">
                 <button
                   aria-label="새 문서 그룹"
