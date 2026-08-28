@@ -212,6 +212,17 @@ async function startMockAionUi({
           response.end(JSON.stringify({ success: false, error: { code: 'EXTERNAL_DISPATCH_NOT_FOUND' } }))
           return
         }
+        if (dispatch.state !== 'waiting_resume') {
+          response.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' })
+          response.end(JSON.stringify({
+            success: false,
+            error: {
+              code: 'EXTERNAL_DISPATCH_COMPLETION_NOT_ALLOWED',
+              message: 'The dispatch is not waiting for explicit completion.',
+            },
+          }))
+          return
+        }
         const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
         send({
           operationId,
@@ -402,7 +413,7 @@ async function main() {
 
     const guide = await invoke('mindnprogress_read_me_first')
     assert.equal(guide.guide.product.name, 'MindNProgress')
-    assert.equal(guide.guide.version, '4.11')
+    assert.equal(guide.guide.version, '4.12')
     assert.match(guide.guide.operationRules.join('\n'), /응답을 받지 못한 시도는 횟수에 포함하지 않고/)
     assert.match(guide.guide.operationRules.join('\n'), /mindnprogress_complete_ai_delegation/)
     assert.match(guide.guide.operationRules.join('\n'), /중지된 위임을 resume하면 같은 AI 대화와 기존 worker lease/)
@@ -1073,6 +1084,25 @@ async function main() {
     assert.match(mockAionUi.dispatchRequests[0].instruction, /mindnprogress_complete_ai_delegation/)
     assert.equal(mockAionUi.dispatchRequests[0].explicitCompletionAfterInterruption, true)
 
+    const childCompletionTransport = new StdioClientTransport({
+      command: process.execPath,
+      args: ['mcp/server.mjs'],
+      cwd: projectDirectory,
+      env: { ...environment, AIONUI_CONVERSATION_ID: 'conversation-delegated' },
+      stderr: 'pipe',
+    })
+    const childCompletionClient = new Client({ name: 'mindnprogress-explicit-completion', version: '1.0.0' })
+    await childCompletionClient.connect(childCompletionTransport)
+    const unnecessaryCompletion = parseToolResult('mindnprogress_complete_ai_delegation',
+      await childCompletionClient.callTool({
+        name: 'mindnprogress_complete_ai_delegation',
+        arguments: { mapId },
+      }))
+    assert.equal(unnecessaryCompletion.accepted, false)
+    assert.equal(unnecessaryCompletion.required, false)
+    assert.equal(unnecessaryCompletion.state, 'running')
+    assert.match(unnecessaryCompletion.instruction, /자동으로 완료를 확정하고 상위 AI에 보고/)
+
     mockAionUi.setDispatchState(delegationArguments.idempotencyKey, 'waiting_resume')
     let interruptedDelegation = null
     const resumeWaitStartedAt = Date.now()
@@ -1090,15 +1120,6 @@ async function main() {
     assert.equal(interruptedDelegation?.childStatus, 'interrupted')
     assert.equal(mockAionUi.dispatchRequests.length, 1, '중지된 하위 턴을 완료로 오인해 상위 대화를 재개했습니다.')
 
-    const childCompletionTransport = new StdioClientTransport({
-      command: process.execPath,
-      args: ['mcp/server.mjs'],
-      cwd: projectDirectory,
-      env: { ...environment, AIONUI_CONVERSATION_ID: 'conversation-delegated' },
-      stderr: 'pipe',
-    })
-    const childCompletionClient = new Client({ name: 'mindnprogress-explicit-completion', version: '1.0.0' })
-    await childCompletionClient.connect(childCompletionTransport)
     try {
       const explicitCompletion = parseToolResult('mindnprogress_complete_ai_delegation',
         await childCompletionClient.callTool({
@@ -1107,6 +1128,7 @@ async function main() {
         }))
       calledTools.set('mindnprogress_complete_ai_delegation', 1)
       assert.equal(explicitCompletion.accepted, true)
+      assert.equal(explicitCompletion.required, true)
       assert.equal(explicitCompletion.turnId, 'turn-explicit-completion')
       assert.equal(explicitCompletion.delegation.id, delegationArguments.idempotencyKey)
     } finally {

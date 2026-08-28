@@ -5290,9 +5290,11 @@ const server = createServer(async (request, response) => {
         targetConversationId: scope.conversationId,
       })
       if (candidates.length === 0) {
-        return sendJson(response, 409, {
-          error: '사용자 중지 후 명시적 완료를 기다리는 현재 카드의 AI 위임이 없습니다.',
-          code: 'AI_DELEGATION_EXPLICIT_COMPLETION_NOT_REQUIRED',
+        return sendJson(response, 200, {
+          accepted: false,
+          required: false,
+          state: 'not-required',
+          instruction: '현재 카드와 AI 대화에는 명시적 완료 신호가 필요한 위임이 없습니다. 중단 없이 진행된 위임은 최종 답변을 마치면 자동으로 상위 AI에 보고됩니다.',
         })
       }
       if (candidates.length > 1) {
@@ -5303,9 +5305,44 @@ const server = createServer(async (request, response) => {
         })
       }
       const delegation = candidates[0]
+      const dispatchPath = `/api/internal/external-conversation-dispatches/${encodeURIComponent(delegation.childOperationId)}`
       try {
+        const dispatch = await fetchAionUi(dispatchPath)
+        const dispatchState = String(dispatch?.state ?? '').trim()
+        if (dispatchState !== 'waiting_resume') {
+          if (dispatchState === 'failed' || dispatchState === 'recovery_required') {
+            const code = dispatchState === 'failed'
+              ? 'AI_DELEGATION_CHILD_ALREADY_FAILED'
+              : 'AI_DELEGATION_CHILD_RECOVERY_REQUIRED'
+            return sendJson(response, 409, {
+              error: dispatchState === 'failed'
+                ? `현재 AI 위임은 이미 실패 상태라 완료 신호를 받을 수 없습니다. (${code})`
+                : `현재 AI 위임은 복구가 필요한 상태라 완료 신호보다 위임 복구가 먼저 필요합니다. (${code})`,
+              code,
+              state: dispatchState,
+              delegation: delegationPublicView(delegation),
+            })
+          }
+          if (['starting', 'waiting_resource', 'running', 'completed'].includes(dispatchState)) {
+            return sendJson(response, 200, {
+              accepted: false,
+              required: false,
+              state: dispatchState,
+              delegation: delegationPublicView(delegation),
+              instruction: dispatchState === 'completed'
+                ? '현재 위임은 이미 완료됐습니다. MindNProgress가 상위 AI 재개 상태를 동기화합니다.'
+                : '현재 위임은 사용자 중지 후 재개를 기다리는 상태가 아니므로 별도 완료 신호가 필요하지 않습니다. 실제 작업의 최종 답변을 마치면 AionCore가 자동으로 완료를 확정하고 상위 AI에 보고합니다.',
+            })
+          }
+          return sendJson(response, 409, {
+            error: `AionCore가 알 수 없는 AI 위임 상태를 반환했습니다. (AI_DELEGATION_EXPLICIT_COMPLETION_STATE_UNKNOWN: ${dispatchState || 'empty'})`,
+            code: 'AI_DELEGATION_EXPLICIT_COMPLETION_STATE_UNKNOWN',
+            state: dispatchState || null,
+            delegation: delegationPublicView(delegation),
+          })
+        }
         const confirmation = await fetchAionUi(
-          `/api/internal/external-conversation-dispatches/${encodeURIComponent(delegation.childOperationId)}/complete`,
+          `${dispatchPath}/complete`,
           {
             method: 'POST',
             body: { conversationId: scope.conversationId },
@@ -5319,6 +5356,7 @@ const server = createServer(async (request, response) => {
         })
         return sendJson(response, 202, {
           accepted: confirmation.accepted === true,
+          required: true,
           turnId: confirmation.turnId ?? null,
           delegation: delegationPublicView(updated),
           instruction: '현재 턴의 최종 답변을 마치면 AionCore가 위임 완료를 확정하고 상위 AI 재개 절차를 진행합니다.',
@@ -5328,8 +5366,8 @@ const server = createServer(async (request, response) => {
         const turnNotActive = code === 'EXTERNAL_DISPATCH_COMPLETION_TURN_NOT_ACTIVE'
         return sendJson(response, error?.status === 404 ? 404 : 409, {
           error: turnNotActive
-            ? '현재 AI 대화에 진행 중인 턴이 없어 완료 신호를 연결할 수 없습니다. 실제 작업 턴의 최종 답변 전에 호출하세요.'
-            : 'AionCore가 현재 AI 위임의 명시적 완료 신호를 받지 못했습니다.',
+            ? `현재 AI 대화에 진행 중인 턴이 없어 완료 신호를 연결할 수 없습니다. 실제 작업 턴의 최종 답변 전에 호출하세요. (${code})`
+            : `AionCore가 현재 AI 위임의 명시적 완료 신호를 받지 못했습니다. (${code})`,
           code,
         })
       }
