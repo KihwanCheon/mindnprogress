@@ -1292,10 +1292,16 @@ setlocal EnableExtensions
 chcp 65001 >nul
 set "SUITE_ROOT=%~dp0.."
 set "PROJECT=%SUITE_ROOT%\MindNProgress"
+set "MNP_POWERSHELL_LAUNCHER=%~dp0Start-MindNProgress-Dev.ps1"
 set "MNP_WORKSPACE_POOL_REGISTRY=%SUITE_ROOT%\workspace-pool\workspaces.json"
 
 if not exist "%PROJECT%\package.json" (
   echo [ERROR] MindNProgress repository was not found: %PROJECT%
+  pause
+  exit /b 1
+)
+if not exist "%MNP_POWERSHELL_LAUNCHER%" (
+  echo [ERROR] MindNProgress PowerShell launcher was not found: %MNP_POWERSHELL_LAUNCHER%
   pause
   exit /b 1
 )
@@ -1320,10 +1326,55 @@ echo   API : http://127.0.0.1:4176/api/health
 echo   Pool: %MNP_WORKSPACE_POOL_REGISTRY%
 echo   Stop: Ctrl+C in this window
 echo ============================================================
-call npm run dev
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%MNP_POWERSHELL_LAUNCHER%"
 set "EXIT_CODE=%ERRORLEVEL%"
 if not "%EXIT_CODE%"=="0" pause
 exit /b %EXIT_CODE%
+'@
+
+  $startMindNProgressPowerShell = @'
+$ErrorActionPreference = 'Stop'
+$suiteRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$projectPath = Join-Path $suiteRoot 'MindNProgress'
+$bootstrapPath = Join-Path $suiteRoot 'mcp\mnp-suite-mcp-bootstrap.json'
+$secretPath = Join-Path $suiteRoot 'secrets\dooray-api-key.dpapi'
+$secretPointer = [IntPtr]::Zero
+$exitCode = 1
+
+try {
+  if (-not (Test-Path -LiteralPath $bootstrapPath -PathType Leaf)) {
+    throw "MnP Suite MCP bootstrap config was not found: $bootstrapPath"
+  }
+  try {
+    $bootstrap = [IO.File]::ReadAllText($bootstrapPath, [Text.UTF8Encoding]::new($false, $true)) | ConvertFrom-Json
+  } catch {
+    throw "MnP Suite MCP bootstrap config could not be read: $bootstrapPath ($($_.Exception.Message))"
+  }
+  $dooraySelected = @($bootstrap.servers | Where-Object { [string]$_.name -eq 'dooray-mcp' }).Count -gt 0
+  if ($dooraySelected) {
+    if (-not (Test-Path -LiteralPath $secretPath -PathType Leaf)) {
+      throw "Dooray DPAPI secret was not found: $secretPath"
+    }
+    $protectedSecret = [IO.File]::ReadAllText($secretPath, [Text.UTF8Encoding]::new($false, $true))
+    $secureSecret = ConvertTo-SecureString $protectedSecret
+    $secretPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureSecret)
+    $env:MNP_DOORAY_API_KEY = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($secretPointer)
+    $env:MNP_DOORAY_BASE_URL = 'https://api.dooray.com'
+    Write-Host ' Dooray: Suite DPAPI credential enabled for MindNProgress'
+  }
+
+  $npm = Get-Command npm.cmd -ErrorAction Stop | Select-Object -First 1
+  Set-Location -LiteralPath $projectPath
+  & $npm.Source 'run' 'dev'
+  $exitCode = $LASTEXITCODE
+} finally {
+  Remove-Item Env:MNP_DOORAY_API_KEY -ErrorAction SilentlyContinue
+  Remove-Item Env:MNP_DOORAY_BASE_URL -ErrorAction SilentlyContinue
+  if ($secretPointer -ne [IntPtr]::Zero) {
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($secretPointer)
+  }
+}
+exit $exitCode
 '@
 
   $stopMindNProgress = @'
@@ -1490,6 +1541,7 @@ child.unref()
 '@
 
   Write-Utf8File (Join-Path $devDirectory 'Start-MindNProgress-Dev.bat') $startMindNProgress
+  Write-Utf8File (Join-Path $devDirectory 'Start-MindNProgress-Dev.ps1') $startMindNProgressPowerShell
   Write-Utf8File (Join-Path $devDirectory 'Stop-MindNProgress-Dev.bat') $stopMindNProgress
   Write-Utf8File (Join-Path $devDirectory 'Rebuild-AionCore-Release.bat') $rebuildAionCore
   Write-Utf8File (Join-Path $devDirectory 'Backup-MindNProgress-Data.bat') $backupMindNProgress
@@ -1525,6 +1577,7 @@ workspace-pool/
   knowledge-applied/
   workspaces.json
 dev/
+  Start-MindNProgress-Dev.ps1      Dooray 선택 시 DPAPI 키를 MnP 프로세스에 전달
 UNITY_MCP_AND_FORK_GUIDE.md
 ```
 
@@ -1555,7 +1608,7 @@ AionUi Dev 런처는 설치된 MCP 엔트리 경로를 전달합니다. AionUi�
 
 `mcp\mnp-suite-mcp-bootstrap.json`에는 설치 중 선택한 `dooray-mcp`와 `pptx-mcp` 실행 경로가 기록됩니다. AionUi Dev 런처가 이 파일을 전달하면 최초 실행 bootstrap이 선택 서버를 목록에 추가하고, 재설치로 경로가 바뀌면 MnP Suite가 만든 항목만 갱신합니다. 같은 이름의 사용자 소유 서버는 덮어쓰지 않습니다. 선택을 해제한 뒤 재설치하면 MnP Suite 관리 표식이 있는 항목만 다음 AionUi 시작 때 제거합니다.
 
-Dooray API 키는 bootstrap JSON이나 설치 manifest에 기록하지 않습니다. 현재 Windows 사용자만 복호화할 수 있는 DPAPI 파일로 저장하고, `Start-Dooray-Mcp.ps1`이 서버 프로세스를 시작할 때만 환경값으로 전달합니다.
+Dooray API 키는 bootstrap JSON이나 설치 manifest에 기록하지 않습니다. 현재 Windows 사용자만 복호화할 수 있는 DPAPI 파일로 저장합니다. `Start-Dooray-Mcp.ps1`은 Dooray MCP 프로세스에 전달하고, `dev\Start-MindNProgress-Dev.ps1`은 bootstrap에서 Dooray MCP 선택 상태를 확인한 뒤 MnP 프로세스에 `MNP_DOORAY_API_KEY`로 전달합니다. 선택을 해제하면 암호 파일이 남아 있어도 MnP에 전달하지 않습니다.
 
 MnP의 `AI 대화 시작` 창을 다시 열면 `MindNProgress · 필수`가 표시되고, 설치한 선택 MCP는 체크 가능한 목록 항목으로 표시됩니다. MCP 설정과 Assistant 기본값 변경은 새 대화부터 적용될 수 있으며 현재 열려 있는 대화에 소급 적용되지 않습니다.
 
@@ -1704,6 +1757,31 @@ function Invoke-SelfTest {
     if ($mindNProgressLauncher -notmatch 'MNP_WORKSPACE_POOL_REGISTRY=%SUITE_ROOT%\\workspace-pool\\workspaces\.json') {
       throw 'MindNProgress 런처의 작업공간 구성 연결 누락'
     }
+    if ($mindNProgressLauncher -notmatch 'Start-MindNProgress-Dev\.ps1') {
+      throw 'MindNProgress 배치의 PowerShell 보안 런처 연결 누락'
+    }
+    $mindNProgressPowerShellPath = Join-Path $dev 'Start-MindNProgress-Dev.ps1'
+    if (-not (Test-Path -LiteralPath $mindNProgressPowerShellPath -PathType Leaf)) {
+      throw 'MindNProgress PowerShell 보안 런처 누락'
+    }
+    $mindNProgressPowerShell = Get-Content -LiteralPath $mindNProgressPowerShellPath -Raw
+    if ($mindNProgressPowerShell -notmatch 'mnp-suite-mcp-bootstrap\.json' -or
+        $mindNProgressPowerShell -notmatch "name -eq 'dooray-mcp'" -or
+        $mindNProgressPowerShell -notmatch 'dooray-api-key\.dpapi' -or
+        $mindNProgressPowerShell -notmatch 'MNP_DOORAY_API_KEY' -or
+        $mindNProgressPowerShell -notmatch 'MNP_DOORAY_BASE_URL') {
+      throw 'MindNProgress PowerShell 런처의 Dooray DPAPI 연결 누락'
+    }
+    $launcherTokens = $null
+    $launcherErrors = $null
+    [void][Management.Automation.Language.Parser]::ParseFile(
+      $mindNProgressPowerShellPath,
+      [ref]$launcherTokens,
+      [ref]$launcherErrors
+    )
+    if ($launcherErrors.Count -gt 0) {
+      throw "MindNProgress PowerShell 보안 런처 구문 오류: $($launcherErrors[0].Message)"
+    }
     $aionUiLauncher = Get-Content -LiteralPath (Join-Path $dev 'Start-AionUi-Dev.bat') -Raw
     if ($aionUiLauncher -notmatch 'MINDNPROGRESS_MCP_ENTRY=%SUITE_ROOT%\\MindNProgress\\mcp\\server\.mjs') {
       throw 'AionUi 런처의 MindNProgress MCP bootstrap 경로 누락'
@@ -1731,11 +1809,85 @@ function Invoke-SelfTest {
     if ($mcpBootstrapText -match 'DOORAY_API_KEY' -or $mcpBootstrapText -match 'dooray-api-key\.dpapi') {
       throw 'MCP bootstrap 구성에 Dooray 비밀 정보가 포함됨'
     }
-    $secretTestPath = Join-Path $temporaryRoot 'secret-test\dooray-api-key.dpapi'
+    $secretTestPath = Join-Path $temporaryRoot $script:DooraySecretRelativePath
     $secretTestValue = 'SELFTEST_DOORAY_SECRET_' + [Guid]::NewGuid().ToString('N')
     Write-DooraySecretFile $secretTestPath (ConvertTo-SecureString $secretTestValue -AsPlainText -Force)
     if (-not (Test-DooraySecretFile $secretTestPath)) { throw 'Dooray DPAPI 비밀 파일 재사용 검사 실패' }
     if ((Read-Utf8File $secretTestPath) -match [regex]::Escape($secretTestValue)) { throw 'Dooray API 키가 암호화되지 않고 저장됨' }
+
+    $fakeProject = Join-Path $temporaryRoot 'MindNProgress'
+    Write-Utf8File (Join-Path $fakeProject 'package.json') '{}'
+    $fakeBin = Join-Path $temporaryRoot 'selftest-bin'
+    $captureScriptPath = Join-Path $fakeBin 'Capture-Mnp-Dooray.ps1'
+    $captureResultPath = Join-Path $fakeBin 'capture-result.json'
+    $captureScript = @'
+$apiKey = [string]$env:MNP_DOORAY_API_KEY
+$apiKeyHash = ''
+if (-not [string]::IsNullOrEmpty($apiKey)) {
+  $sha = [Security.Cryptography.SHA256]::Create()
+  try {
+    $apiKeyHash = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($apiKey)))).Replace('-', '')
+  } finally {
+    $sha.Dispose()
+  }
+}
+$result = [ordered]@{
+  hasApiKey = -not [string]::IsNullOrEmpty($apiKey)
+  apiKeySha256 = $apiKeyHash
+  baseUrl = [string]$env:MNP_DOORAY_BASE_URL
+}
+[IO.File]::WriteAllText(
+  (Join-Path $PSScriptRoot 'capture-result.json'),
+  ($result | ConvertTo-Json -Compress),
+  [Text.UTF8Encoding]::new($false)
+)
+'@
+    Write-Utf8File $captureScriptPath $captureScript
+    $fakeNpm = @'
+@echo off
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0Capture-Mnp-Dooray.ps1"
+exit /b %ERRORLEVEL%
+'@
+    Write-Utf8File (Join-Path $fakeBin 'npm.cmd') $fakeNpm
+    $fakeDoorayLauncher = Join-Path $temporaryRoot 'mcp\selftest-dooray.ps1'
+    Write-Utf8File $fakeDoorayLauncher '# selftest Dooray MCP launcher'
+    Write-MnPSuiteMcpBootstrapConfig $temporaryRoot ([pscustomobject]@{ LauncherPath = $fakeDoorayLauncher }) $null | Out-Null
+
+    $originalPath = $env:PATH
+    $originalMnpDoorayApiKey = [Environment]::GetEnvironmentVariable('MNP_DOORAY_API_KEY', 'Process')
+    $originalMnpDoorayBaseUrl = [Environment]::GetEnvironmentVariable('MNP_DOORAY_BASE_URL', 'Process')
+    try {
+      $env:PATH = "$fakeBin;$originalPath"
+      Remove-Item Env:MNP_DOORAY_API_KEY -ErrorAction SilentlyContinue
+      Remove-Item Env:MNP_DOORAY_BASE_URL -ErrorAction SilentlyContinue
+      & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $mindNProgressPowerShellPath
+      if ($LASTEXITCODE -ne 0) { throw "MindNProgress DPAPI 전달 실행 검사 실패: exit $LASTEXITCODE" }
+      $captureResult = Read-Utf8File $captureResultPath | ConvertFrom-Json
+      $sha = [Security.Cryptography.SHA256]::Create()
+      try {
+        $expectedSecretHash = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($secretTestValue)))).Replace('-', '')
+      } finally {
+        $sha.Dispose()
+      }
+      if (-not $captureResult.hasApiKey -or
+          $captureResult.apiKeySha256 -ne $expectedSecretHash -or
+          $captureResult.baseUrl -ne 'https://api.dooray.com') {
+        throw 'MindNProgress 프로세스의 Dooray DPAPI 환경 전달 결과 오류'
+      }
+
+      Write-MnPSuiteMcpBootstrapConfig $temporaryRoot $null $null | Out-Null
+      Remove-Item -LiteralPath $captureResultPath -Force
+      & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $mindNProgressPowerShellPath
+      if ($LASTEXITCODE -ne 0) { throw "MindNProgress Dooray 선택 해제 실행 검사 실패: exit $LASTEXITCODE" }
+      $deselectedCapture = Read-Utf8File $captureResultPath | ConvertFrom-Json
+      if ($deselectedCapture.hasApiKey -or -not [string]::IsNullOrEmpty([string]$deselectedCapture.baseUrl)) {
+        throw 'Dooray 선택 해제 상태에서 MnP 프로세스에 DPAPI 환경이 전달됨'
+      }
+    } finally {
+      $env:PATH = $originalPath
+      [Environment]::SetEnvironmentVariable('MNP_DOORAY_API_KEY', $originalMnpDoorayApiKey, 'Process')
+      [Environment]::SetEnvironmentVariable('MNP_DOORAY_BASE_URL', $originalMnpDoorayBaseUrl, 'Process')
+    }
 
     $mcpCases = @(
       [pscustomobject]@{ Name = 'none'; Dooray = $false; Pptx = $false },
@@ -2187,6 +2339,7 @@ try {
     (Join-Path $aionUiPath 'package.json'),
     (Join-Path $aionCorePath 'Cargo.toml'),
     (Join-Path $devDirectory 'Start-All-Dev.bat'),
+    (Join-Path $devDirectory 'Start-MindNProgress-Dev.ps1'),
     (Join-Path $devDirectory 'Backup-MindNProgress-Data.bat'),
     (Join-Path $devDirectory 'Restore-MindNProgress-Data.bat'),
     (Join-Path $resolvedRoot 'MindNProgress_Stop.bat'),
@@ -2251,6 +2404,7 @@ try {
     launchers = @(
       'dev\Start-All-Dev.bat',
       'dev\Start-MindNProgress-Dev.bat',
+      'dev\Start-MindNProgress-Dev.ps1',
       'dev\Stop-MindNProgress-Dev.bat',
       'dev\Start-AionUi-Dev.bat',
       'dev\Rebuild-AionCore-Release.bat',

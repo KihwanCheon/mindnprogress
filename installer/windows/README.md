@@ -172,7 +172,8 @@ PowerPoint MCP 설치 검사는 Windows PowerShell 5.1에서도 안전하도록 
 | 파일 | 역할 |
 | --- | --- |
 | `dev\Start-All-Dev.bat` | MindNProgress와 AionUi를 각각 새 콘솔에서 실행 |
-| `dev\Start-MindNProgress-Dev.bat` | `npm run dev`로 MnP Web·API 실행 |
+| `dev\Start-MindNProgress-Dev.bat` | 사전 검사를 마친 뒤 PowerShell 보안 런처로 MnP Web·API 실행 |
+| `dev\Start-MindNProgress-Dev.ps1` | Dooray 선택 상태를 확인하고 DPAPI 키를 MnP 프로세스에만 전달한 뒤 `npm run dev` 실행 |
 | `dev\Stop-MindNProgress-Dev.bat` | 설치 경로와 일치하는 4175·4176 프로세스만 종료 |
 | `dev\Start-AionUi-Dev.bat` | 로컬 release AionCore를 PATH 앞에 두고 `bun run dev` 실행 |
 | `dev\Rebuild-AionCore-Release.bat` | `cargo build --release --locked --bin aioncore` 실행 |
@@ -202,6 +203,8 @@ workspace-pool/
 `workspaces.json`에서 `originUrl`과 각 항목의 `root`, `assetsPath`, `unityInstanceHash`를 실제 값으로 바꿉니다. 같은 Git 저장소의 독립 clone 중 하나를 `role=integration`, 하나 이상을 `role=worker`로 등록한 뒤 사용할 항목만 `enabled=true`로 설정합니다. 최소한 활성 integration 한 개와 활성 worker 한 개가 있어야 풀이 초기화됩니다. 수정 후 MindNProgress를 다시 시작하세요.
 
 `dev\Start-MindNProgress-Dev.bat`은 이 파일을 `MNP_WORKSPACE_POOL_REGISTRY`로 지정합니다. 다른 중앙 구성 파일을 사용하려면 해당 런처의 환경변수 값을 조직에서 관리하는 절대 경로로 바꿀 수 있습니다.
+
+Dooray MCP를 선택한 설치에서는 `dev\Start-MindNProgress-Dev.ps1`이 `mcp\mnp-suite-mcp-bootstrap.json`의 선택 상태를 확인하고, 현재 사용자의 `secrets\dooray-api-key.dpapi`를 시작 시점에만 복호화합니다. 키와 `https://api.dooray.com`을 각각 `MNP_DOORAY_API_KEY`, `MNP_DOORAY_BASE_URL`로 MnP 자식 프로세스에 전달하므로 `.env.local`이나 `.claude.json`에 키를 평문으로 복사할 필요가 없습니다. MnP를 종료하면 런처 환경에서도 값을 제거하며, 재설치에서 Dooray MCP를 선택 해제하면 암호 파일이 남아 있어도 전달하지 않습니다.
 
 ## 계획 확인과 자체 검증
 
@@ -247,6 +250,7 @@ Dev 배치 템플릿의 하드코딩 경로, 선택 MCP 네 조합, Dooray DPAPI
 - 같은 이름의 사용자 소유 스킬은 덮어쓰지 않습니다.
 - 같은 이름의 사용자 소유 AionUi MCP는 덮어쓰거나 삭제하지 않습니다.
 - Dooray API 키 원문은 설치 로그·bootstrap JSON·manifest·실행 인자에 기록하지 않고 Windows DPAPI CurrentUser로 암호화합니다.
+- Suite 런처는 Dooray 선택 시 같은 DPAPI 키를 Dooray MCP와 MnP 프로세스에 각각 환경값으로 전달하고, 평문 설정 파일을 만들지 않습니다.
 - 바탕화면 바로가기는 영문 파일명으로 만들며, Windows 정책 때문에 생성이 실패해도 설치 결과는 유지하고 경고만 표시합니다.
 
 ## 설치 후 MCP 확인

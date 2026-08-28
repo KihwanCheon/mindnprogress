@@ -122,7 +122,7 @@ MindNProgress_Restore.bat "..\MindNProgress_Backup\2026-07-30\MindNProgress_2026
 
 ### Windows Git 개발 환경 일괄 설치
 
-MnP Suite Windows Git 설치 패키지는 업무 PC에 MindNProgress, AionUi와 AionCore 개발 환경을 한 번에 준비합니다. 현재 검증된 배포본은 [`MnPSuite-Windows-Git-Installer-20260827-v13.zip`](https://github.com/mabobsa/MindNProgress/releases/download/mnp-suite-installer-20260827-v13/MnPSuite-Windows-Git-Installer-20260827-v13.zip)이며, SHA-256은 `DDBF2425BF950D4008BB868745A42214E3BA19D201C5ABAF50D14ADBC5A2CB67`입니다. 배포 파일명은 `MnPSuite-Windows-Git-Installer-YYYYMMDD-vN.zip` 형식을 사용하며, 압축을 푼 뒤 루트의 `Install-MnPSuite.bat`을 실행합니다. 저장소에서 직접 사용할 때는 [`installer/windows`](installer/windows/README.md)의 같은 파일을 실행하면 됩니다.
+MnP Suite Windows Git 설치 패키지는 업무 PC에 MindNProgress, AionUi와 AionCore 개발 환경을 한 번에 준비합니다. 현재 검증된 배포본은 [`MnPSuite-Windows-Git-Installer-20260828-v14.zip`](https://github.com/mabobsa/MindNProgress/releases/download/mnp-suite-installer-20260828-v14/MnPSuite-Windows-Git-Installer-20260828-v14.zip)이며, SHA-256은 `DF05252BE295C33377FF38C1B1ABE00414FD02F9AA8D334F9A5EC0C2A2AD4936`입니다. 배포 파일명은 `MnPSuite-Windows-Git-Installer-YYYYMMDD-vN.zip` 형식을 사용하며, 압축을 푼 뒤 루트의 `Install-MnPSuite.bat`을 실행합니다. 저장소에서 직접 사용할 때는 [`installer/windows`](installer/windows/README.md)의 같은 파일을 실행하면 됩니다.
 
 설치 패키지는 다음 작업을 순서대로 수행합니다.
 
@@ -214,7 +214,7 @@ npm run dev
 | `MNP_WORKSPACE_POOL_REGISTRY` | 저장소의 `workspaces.json` | Unity integration·worker 작업공간 풀 구성 파일 |
 | `MNP_AI_DELEGATION_POLL_INTERVAL_MS` | `3000` | 하위 AI 턴과 상위 대화 재개 상태 확인 간격. 최소 100ms |
 | `MNP_AI_ATTRIBUTION_DURATION_MS` | 8시간 | AI 종류·모델 작성자 귀속 정보의 유지 시간(ms) |
-| `MNP_DOORAY_API_KEY` | Claude 설정에서 조회 | Dooray API 키 환경변수 우선 지정 |
+| `MNP_DOORAY_API_KEY` | Suite 설치본은 DPAPI 키를 시작 시 전달, 그 외 환경은 Claude 설정에서 조회 | Dooray API 키 환경변수 우선 지정 |
 | `MNP_DOORAY_BASE_URL` | Dooray MCP 설정 또는 `https://api.dooray.com` | Dooray API 기준 주소 |
 | `MNP_DOORAY_CONFIG_FILE` | 사용자 홈의 `.claude.json` | Dooray MCP 설정을 읽을 Claude 설정 파일 |
 | `MNP_DOORAY_MCP_SERVER_NAME` | `docker-dooray-mcp` | Claude 설정에서 조회할 Dooray MCP 서버 이름 |
@@ -226,7 +226,7 @@ npm run dev
 
 저장소에서 `npm run dev`, `npm run dev:server` 또는 `npm start`로 실행할 때는 Git에서 제외되는 루트 `.env.local`에 PC별 값을 둘 수 있습니다. 테스트가 서버 엔트리를 직접 실행할 때는 이 파일을 읽지 않으므로 개인 작업공간과 격리됩니다. 이미 OS나 실행 배치에서 지정한 환경변수가 있으면 그 값이 우선합니다. 설치본의 Dev 배치는 작업공간 구성 경로를 직접 전달하므로 `.env.local`이 없어도 됩니다.
 
-카드의 `taskUrl`은 Dooray를 포함한 범용 업무 링크로 유지합니다. 일반 카드에 Dooray 업무 URL을 설정하면 카드 형태와 업무 문맥은 그대로 유지하고 제목 왼쪽에 Dooray 아이콘, 오른쪽에 원본 열기 아이콘을 표시합니다. 다른 웹 URL이면 일반 카드 표현을 그대로 유지합니다. 마인드맵 캔버스에 Dooray 업무 URL을 직접 붙여넣으면 MNP 서버가 업무 제목과 상태를 조회해 크기 조절 가능한 전용 Dooray 지식 카드로 추가합니다. 전용 카드의 Dooray 제목과 원본 정보는 저장된 값을 즉시 표시하며 제목은 편집할 수 없습니다. 원본 URL은 변경할 수 있고, 새 URL 확인에 성공하면 URL·제목·상태를 한 번에 교체합니다. 편집자가 문서를 열거나 카드 상세 보기를 열면 원본을 비동기로 다시 조회하고, 실제 변경이 있을 때만 저장 값을 갱신합니다. 조회에 실패하면 기존 저장 값을 유지합니다. 사용자는 AI가 지식으로 활용할 보충 설명을 입력하고 주요·보조 지식선으로 일반 카드에 연결합니다. 서버는 `MNP_DOORAY_API_KEY` 또는 `DOORAY_API_KEY`를 우선 사용하고, 값이 없으면 `MNP_DOORAY_CONFIG_FILE`의 `mcpServers.{MNP_DOORAY_MCP_SERVER_NAME}.env.DOORAY_API_KEY`를 읽습니다. API 키는 브라우저, 문서 데이터와 API 응답에 포함되지 않습니다. 사용자 홈의 `.claude.json`은 저장소 밖에 있으므로 Git 커밋이나 MindNProgress 백업에 포함되지 않습니다.
+카드의 `taskUrl`은 Dooray를 포함한 범용 업무 링크로 유지합니다. 일반 카드에 Dooray 업무 URL을 설정하면 카드 형태와 업무 문맥은 그대로 유지하고 제목 왼쪽에 Dooray 아이콘, 오른쪽에 원본 열기 아이콘을 표시합니다. 다른 웹 URL이면 일반 카드 표현을 그대로 유지합니다. 마인드맵 캔버스에 Dooray 업무 URL을 직접 붙여넣으면 MNP 서버가 업무 제목과 상태를 조회해 크기 조절 가능한 전용 Dooray 지식 카드로 추가합니다. 전용 카드의 Dooray 제목과 원본 정보는 저장된 값을 즉시 표시하며 제목은 편집할 수 없습니다. 원본 URL은 변경할 수 있고, 새 URL 확인에 성공하면 URL·제목·상태를 한 번에 교체합니다. 편집자가 문서를 열거나 카드 상세 보기를 열면 원본을 비동기로 다시 조회하고, 실제 변경이 있을 때만 저장 값을 갱신합니다. 조회에 실패하면 기존 저장 값을 유지합니다. 사용자는 AI가 지식으로 활용할 보충 설명을 입력하고 주요·보조 지식선으로 일반 카드에 연결합니다. 서버는 `MNP_DOORAY_API_KEY` 또는 `DOORAY_API_KEY`를 우선 사용하고, 값이 없으면 `MNP_DOORAY_CONFIG_FILE`의 `mcpServers.{MNP_DOORAY_MCP_SERVER_NAME}.env.DOORAY_API_KEY`를 읽습니다. Suite 설치본에서 Dooray MCP를 선택하면 Dev 런처가 사용자별 DPAPI 파일을 복호화해 `MNP_DOORAY_API_KEY`로 MnP 프로세스에 전달하므로 별도 평문 설정이 필요하지 않습니다. API 키는 브라우저, 문서 데이터와 API 응답에 포함되지 않습니다. 사용자 홈의 `.claude.json`은 저장소 밖에 있으므로 Git 커밋이나 MindNProgress 백업에 포함되지 않습니다.
 
 ## 접속과 공유 경로
 
