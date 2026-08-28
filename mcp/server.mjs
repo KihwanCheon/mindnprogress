@@ -1874,7 +1874,7 @@ async function main() {
     }
   })
 
-  registerTool(server, 'mindnprogress_delete_card', '카드를 삭제합니다. 기본적으로 모든 하위 카드도 함께 삭제합니다. 기본 affected 응답은 삭제한 카드 ID와 끊어진 계층·지식선 관계 및 함께 조정된 카드만 반환하며, full은 변경 전과 같은 API 원본 전체 문서를 반환합니다.', {
+  registerTool(server, 'mindnprogress_delete_card', '카드를 삭제합니다. 일반 카드는 기본적으로 모든 하위 카드도 함께 삭제합니다. 최상위 카드는 직계 자식이 정확히 하나일 때만 삭제할 수 있고 해당 자식이 새 최상위 카드로 승격되며, 직계 자식이 없거나 여러 개면 삭제하지 않습니다. 기본 affected 응답은 삭제한 카드 ID와 끊어진 계층·지식선 관계 및 함께 조정된 카드만 반환하며, full은 변경 전과 같은 API 원본 전체 문서를 반환합니다.', {
     mapId: z.string().min(1),
     cardId: z.string().min(1).optional().describe('삭제할 카드 ID. 새 호출에서는 이 필드를 사용'),
     nodeId: z.string().min(1).optional().describe('기존 대화 호환용 카드 ID. 새 호출에서는 cardId 사용'),
@@ -1888,13 +1888,30 @@ async function main() {
     const map = await getDocument(mapId)
     const target = map.nodes.find((node) => node.id === resolvedCardId)
     if (!target) throw new Error('카드를 찾을 수 없습니다.')
-    if (target.data?.kind === 'root') throw new Error('루트 카드는 삭제할 수 없습니다.')
+    const rootChildIds = target.data?.kind === 'root'
+      ? [...new Set(map.edges
+          .filter((edge) => isHierarchyEdge(edge) && edge.source === resolvedCardId
+            && map.nodes.some((node) => node.id === edge.target))
+          .map((edge) => edge.target))]
+      : []
+    if (target.data?.kind === 'root' && rootChildIds.length === 0) {
+      throw new Error('최상위 카드에 승격할 자식 카드가 없어 삭제할 수 없습니다. 문서 전체를 삭제하려면 문서를 휴지통으로 이동하세요.')
+    }
+    if (target.data?.kind === 'root' && rootChildIds.length > 1) {
+      throw new Error(`최상위 카드의 직계 자식이 ${rootChildIds.length}개여서 삭제할 수 없습니다. 최상위로 승격할 카드 하나만 남긴 뒤 다시 시도하세요.`)
+    }
+    const promotedRootCardId = rootChildIds[0] ?? null
     const previousMap = responseMode === 'affected' ? structuredClone(map) : null
-    const deletedIds = includeDescendants ? descendantsOf(resolvedCardId, map.edges) : new Set()
+    const deletesRoot = target.data?.kind === 'root'
+    const deletedIds = !deletesRoot && includeDescendants ? descendantsOf(resolvedCardId, map.edges) : new Set()
     deletedIds.add(resolvedCardId)
     const deletedCardIds = [...deletedIds]
     const relationChanges = deletedRelationsOf(map, deletedCardIds, resolvedCardId)
-    map.nodes = map.nodes.filter((node) => !deletedIds.has(node.id))
+    map.nodes = map.nodes
+      .filter((node) => !deletedIds.has(node.id))
+      .map((node) => node.id === promotedRootCardId
+        ? { ...node, data: { ...node.data, kind: 'root' } }
+        : node)
     map.edges = map.edges.filter((edge) => !deletedIds.has(edge.source) && !deletedIds.has(edge.target))
     const saved = await saveDocument(map, false, resolvedCardId)
     const savedMap = saved.map
@@ -1905,6 +1922,7 @@ async function main() {
         summary: saved.summary,
         deletedCardIds,
         relationChanges,
+        promotedRootCardId,
       }
     }
     const rootCard = rootCardOf(savedMap)
@@ -1913,6 +1931,7 @@ async function main() {
       document: saved.summary,
       deletedCardIds,
       relationChanges,
+      promotedRootCardId,
       root: rootRollup(rootCard),
       affectedCards: affectedCardsOf(previousMap, savedMap, mapId, [], rootCard?.id),
     }

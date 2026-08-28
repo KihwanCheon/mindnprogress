@@ -2088,7 +2088,40 @@ async function main() {
     }, /자기 자신이나 하위 카드/)
     await invokeExpectError('mindnprogress_delete_card', {
       mapId, nodeId: 'root', includeDescendants: true,
-    }, /루트 카드는 삭제할 수 없습니다/)
+    }, /최상위 카드의 직계 자식이 2개/)
+
+    const rootPromotionDocument = await invoke('mindnprogress_create_document', {
+      title: '최상위 카드 승격 검증', color: 'teal', rootLabel: '삭제할 최상위 카드', rootDescription: '',
+    })
+    const rootPromotionMapId = rootPromotionDocument.map.id
+    const rootPromotionSourceId = rootPromotionDocument.map.nodes[0].id
+    const rootPromotionChild = await invoke('mindnprogress_add_card', {
+      mapId: rootPromotionMapId,
+      parentCardId: rootPromotionSourceId,
+      data: {
+        label: '새 최상위 카드',
+        description: '',
+        kind: 'branch',
+        status: 'planned',
+        progress: 0,
+      },
+      responseMode: 'affected',
+    })
+    const rootPromotionResult = await invoke('mindnprogress_delete_card', {
+      mapId: rootPromotionMapId,
+      cardId: rootPromotionSourceId,
+      includeDescendants: true,
+    })
+    assert.equal(rootPromotionResult.promotedRootCardId, rootPromotionChild.card.id)
+    assert.equal(rootPromotionResult.root.id, rootPromotionChild.card.id)
+    const promotedRootDocument = await invoke('mindnprogress_get_document', { mapId: rootPromotionMapId })
+    assert.equal(promotedRootDocument.map.nodes.length, 1)
+    assert.equal(promotedRootDocument.map.nodes[0].id, rootPromotionChild.card.id)
+    assert.equal(promotedRootDocument.map.nodes[0].data.kind, 'root')
+    await invoke('mindnprogress_move_document_to_trash', { mapId: rootPromotionMapId })
+    await invoke('mindnprogress_delete_trashed_documents', {
+      mapIds: [rootPromotionMapId], confirmPermanentDeletion: true,
+    })
     await invokeExpectError('mindnprogress_add_comment', {
       mapId, nodeId: 'missing-card', summary: '[진행] 존재하지 않는 카드에 댓글을 작성합니다.',
     }, /댓글을 남길 노드를 찾을 수 없습니다/)

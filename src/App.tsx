@@ -55,6 +55,7 @@ import { mergeMapContent } from './utils/mergeMapContent.mjs'
 import { computeProgressRollups } from './utils/progressRollup.mjs'
 import { snapAspectResizeToGrid, snapFreeResizeToGrid } from './utils/resizeGrid.mjs'
 import type { ResizeSnapRequest } from './utils/resizeGrid.mjs'
+import { rootDeletionPlan } from './utils/rootDeletion.mjs'
 import { extractTextLinks } from './utils/textLinks.mjs'
 import { touchPointCentroid, touchPointDistance, viewportForTouchGesture } from './utils/touchViewport.mjs'
 import { normalizeWorkspaceLocation, restorableWorkspaceLocation, workspaceLocationStorageKey } from './utils/workspaceLocation.mjs'
@@ -3866,11 +3867,27 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
 
   const deleteNodeById = useCallback((nodeId: string) => {
     if (mode === 'viewer') return
+    const deletionPlan = rootDeletionPlan(nodes, edges, nodeId)
+    if (!deletionPlan.allowed) {
+      if (deletionPlan.message) setSaveError(deletionPlan.message)
+      return false
+    }
+    setSaveError('')
     setNodes((current) => current
       .filter((node) => node.id !== nodeId)
-      .map((node) => (node.data.blockedBy ?? []).includes(nodeId)
-        ? { ...node, data: { ...node.data, blockedBy: (node.data.blockedBy ?? []).filter((id) => id !== nodeId) } }
-        : node))
+      .map((node) => {
+        const removesDependency = (node.data.blockedBy ?? []).includes(nodeId)
+        const promotesToRoot = node.id === deletionPlan.promotedNodeId
+        if (!removesDependency && !promotesToRoot) return node
+        return {
+          ...node,
+          data: {
+            ...node.data,
+            ...(removesDependency ? { blockedBy: (node.data.blockedBy ?? []).filter((id) => id !== nodeId) } : {}),
+            ...(promotesToRoot ? { kind: 'root' as const } : {}),
+          },
+        }
+      }))
     setEdges((current) => current.filter((edge) => edge.source !== nodeId && edge.target !== nodeId))
     setCollapsedNodeIds((current) => {
       const next = new Set(current)
@@ -3878,7 +3895,8 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
       return next
     })
     setSelectedId((current) => current === nodeId ? null : current)
-  }, [mode, setEdges, setNodes])
+    return true
+  }, [edges, mode, nodes, setEdges, setNodes])
 
   const deleteImageNodeById = useCallback((nodeId: string) => {
     if (mode !== 'editor') return
@@ -6417,6 +6435,16 @@ function Workspace({ user, onLogout, initialDeepLink, theme, onToggleTheme }: { 
               if (applicableChanges.length > 0) onNodesChange(applicableChanges)
             }}
             onEdgesChange={onEdgesChange}
+            onBeforeDelete={async ({ nodes: deletingNodes }) => {
+              const deletingRoot = deletingNodes.find((node) => node.data.kind === 'root')
+              if (!deletingRoot) return true
+              if (deletingNodes.length > 1) {
+                setSaveError('최상위 카드는 다른 카드와 함께 삭제할 수 없습니다. 최상위 카드만 선택한 뒤 다시 시도해 주세요.')
+                return false
+              }
+              deleteNodeById(deletingRoot.id)
+              return false
+            }}
             onConnect={onConnect}
             onInit={() => setMiniMapReadyMapId(activeMapId)}
             onNodeContextMenu={(event, node) => openNodeContextMenu(event, node.id)}
