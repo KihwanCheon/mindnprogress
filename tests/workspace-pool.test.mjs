@@ -983,26 +983,36 @@ test('완료된 worker 변경을 체크포인트로 고정하고 main에 직렬 
       },
     })
     await manager.initialize()
-    const lease = await manager.acquire({ workspaceHint: integrationRoot, cardLabel: '로그인 보완' })
+    const lease = await manager.acquire({
+      workspaceHint: integrationRoot,
+      mapId: 'map-jp-login',
+      cardId: 'node-idp-link',
+      cardLabel: '로그인 보완',
+    })
     await assert.rejects(
       () => manager.checkpoint(lease.leaseId, {
         jobId: lease.jobId,
-        mapId: '',
-        cardId: '',
+        mapId: 'map-jp-login',
+        cardId: 'node-idp-link',
         conversationId: '',
         paths: ['Assets/changed.cs'],
       }),
       (error) => error instanceof WorkspacePoolUnavailableError
         && error.reasonCode === 'AI_WORKSPACE_CHECKPOINT_MESSAGE_INVALID',
     )
-    await manager.checkpoint(lease.leaseId, {
+    const checkpointResult = await manager.checkpoint(lease.leaseId, {
       jobId: lease.jobId,
-      mapId: '',
-      cardId: '',
+      mapId: 'map-jp-login',
+      cardId: 'node-idp-link',
       conversationId: '',
       paths: ['Assets/changed.cs'],
       commitMessage: checkpointCommitMessage,
-      cardLabel: '로그인 보완',
+      mnpContext: {
+        mapId: 'map-jp-login',
+        cardId: 'node-idp-link',
+        documentTitle: 'JP-로그인 제작',
+        cardTitle: 'AOS/iOS 로그인 IDP 실연동·LINE 검증',
+      },
     })
     const result = await manager.finalize(lease.leaseId, {
       childStatus: 'completed',
@@ -1014,7 +1024,17 @@ test('완료된 worker 변경을 체크포인트로 고정하고 main에 직렬 
     assert.equal(result.integratedCommit, 'integrated789')
     const commitCommand = commands.find(({ args }) => args[0] === 'commit')?.args ?? []
     assert.ok(commitCommand.includes('[김용민] 일본 로그인 IDP 뷰 이중 등록 해소'))
-    assert.match(commitCommand.at(-1) ?? '', /\[배경\].*\[원인\].*\[수정\].*\[적용 범위\]/s)
+    assert.match(
+      commitCommand.at(-1) ?? '',
+      /\[MnP\]\n문서: JP-로그인 제작 \(map-jp-login\)\n카드: AOS\/iOS 로그인 IDP 실연동·LINE 검증 \(node-idp-link\)\n경로: \/mindmap\/map-jp-login\/node-idp-link\n\n\[배경\].*\[원인\].*\[수정\].*\[적용 범위\]/s,
+    )
+    assert.deepEqual(checkpointResult.checkpoint.mnpContext, {
+      mapId: 'map-jp-login',
+      cardId: 'node-idp-link',
+      documentTitle: 'JP-로그인 제작',
+      cardTitle: 'AOS/iOS 로그인 IDP 실연동·LINE 검증',
+    })
+    assert.doesNotMatch(commitCommand.at(-1) ?? '', /https?:\/\/|127\.0\.0\.1/)
     assert.ok(commands.some(({ cwd, args }) => cwd === workerRoot && args[0] === 'cherry-pick'))
     assert.ok(commands.some(({ cwd, args }) => cwd === integrationRoot && args[0] === 'merge' && args[1] === '--ff-only'))
     assert.equal(workerBranch, 'mnp/idle/fork2')
@@ -1253,10 +1273,12 @@ test('통합 충돌은 main을 건드리지 않고 같은 worker의 AI 해결 �
     let integrationHead = 'base123'
     let workerDirty = false
     let unmerged = false
+    const commands = []
     const manager = new WorkspacePoolManager({
       registryFile,
       stateFile,
       gitRunner: async (cwd, args) => {
+        commands.push({ cwd, args })
         const worker = cwd === workerRoot
         if (args[0] === 'status') return worker && workerDirty ? ' M Assets/conflict.cs' : ''
         if (args[0] === 'remote') return 'https://example.invalid/holdem.git'
@@ -1287,7 +1309,7 @@ test('통합 충돌은 main을 건드리지 않고 같은 worker의 AI 해결 �
         }
         if (args[0] === '-c' && args.includes('cherry-pick') && args.includes('--continue')) {
           unmerged = false
-          workerDirty = false
+          workerDirty = true
           workerHead = 'resolved789'
           await rm(path.join(workerRoot, '.git', 'CHERRY_PICK_HEAD'), { force: true })
           return ''
@@ -1300,16 +1322,26 @@ test('통합 충돌은 main을 건드리지 않고 같은 worker의 AI 해결 �
       },
     })
     await manager.initialize()
-    const lease = await manager.acquire({ workspaceHint: integrationRoot, cardLabel: '충돌 작업' })
+    const lease = await manager.acquire({
+      workspaceHint: integrationRoot,
+      mapId: 'map-conflict',
+      cardId: 'node-conflict',
+      cardLabel: '충돌 작업',
+    })
     workerDirty = true
     await manager.checkpoint(lease.leaseId, {
       jobId: lease.jobId,
-      mapId: '',
-      cardId: '',
+      mapId: 'map-conflict',
+      cardId: 'node-conflict',
       conversationId: '',
       paths: ['Assets/conflict.cs'],
       commitMessage: checkpointCommitMessage,
-      cardLabel: '충돌 작업',
+      mnpContext: {
+        mapId: 'map-conflict',
+        cardId: 'node-conflict',
+        documentTitle: '충돌 검증 문서',
+        cardTitle: '충돌 작업',
+      },
     })
 
     const conflict = await manager.finalize(lease.leaseId, { childStatus: 'completed' })
@@ -1323,6 +1355,14 @@ test('통합 충돌은 main을 건드리지 않고 같은 worker의 AI 해결 �
     assert.equal(completed.conflictResolvedByAi, true)
     assert.equal(completed.integratedCommit, 'resolved789')
     assert.equal(integrationHead, 'resolved789')
+    const conflictCommit = commands
+      .filter(({ cwd, args }) => cwd === workerRoot && args[0] === 'commit')
+      .at(-1)?.args ?? []
+    assert.ok(conflictCommit.includes('[김용민] 일본 로그인 IDP 뷰 이중 등록 해소 통합 충돌 해소'))
+    assert.match(
+      conflictCommit.at(-1) ?? '',
+      /\[MnP\]\n문서: 충돌 검증 문서 \(map-conflict\)\n카드: 충돌 작업 \(node-conflict\)\n경로: \/mindmap\/map-conflict\/node-conflict/,
+    )
     const state = JSON.parse(await readFile(stateFile, 'utf8'))
     assert.equal(state.integrationLeaseId, null)
     assert.equal(state.workspaces.fork1.status, 'idle')

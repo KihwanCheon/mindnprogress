@@ -286,7 +286,7 @@ AI가 MindNProgress 밖에서 시작되었다면 먼저 `mindnprogress_read_me_f
 | `mindnprogress_get_shared_knowledge_review_context` | 후보 한 카드의 공유 지식 원문과 관계·최근 댓글·검토 기준을 조회합니다. |
 | `mindnprogress_get_ai_work_states` | 지정한 카드 또는 문서 전체에서 연결된 AI 대화의 현재 작업·승인 대기·유휴·확인 불가 상태를 조회합니다. 문서 버전은 변경하지 않습니다. |
 | `mindnprogress_get_ai_workspace_pool` | MindNProgress가 관리하는 AI 작업공간의 역할·경로·Unity 인스턴스 해시와 현재 상태를 조회합니다. 다른 대화의 lease·job 식별자는 노출하지 않습니다. |
-| `mindnprogress_checkpoint_ai_workspace` | worker의 실제 변경 경로와 `summary`·`background`·`cause`·`changes`(선택 `scope`)를 받아 의미 있는 `[김용민]` 커밋으로 고정합니다. 구조화 커밋 메시지를 생략할 수 없습니다. |
+| `mindnprogress_checkpoint_ai_workspace` | worker의 실제 변경 경로와 `summary`·`background`·`cause`·`changes`(선택 `scope`)를 받아 출처가 명확한 `[김용민]` 커밋으로 고정합니다. 구조화 커밋 메시지를 생략할 수 없습니다. |
 | `mindnprogress_confirm_ai_workspace_no_changes` | 조사·검증 결과 의도한 파일 변경이 전혀 없음을 확인합니다. 변경 체크포인트의 빈 경로 호환 입력 대신 이 도구를 사용합니다. |
 | `mindnprogress_list_ai_conversations` | 카드에 연결된 모든 AI 대화 후보의 실행 환경, 시작 정보, 최근 활동과 실시간 상태를 조회해 기존 대화 이어가기와 새 대화 시작 판단에 사용합니다. |
 | `mindnprogress_delegate_ai_work` | 대화 시작 카드의 모든 깊이 하위 카드에 실행 가능한 지시를 전달해 기존 대화를 이어가거나 새 대화를 만들고, 해당 턴 완료 후 결과와 함께 상위 대화를 자동 재개합니다. 다른 카드 조회는 위임 기준을 바꾸지 않습니다. |
@@ -296,7 +296,7 @@ AI가 MindNProgress 밖에서 시작되었다면 먼저 `mindnprogress_read_me_f
 | `mindnprogress_get_ai_conversation_transcript` | 카드에 연결된 최근 AionUi 대화 또는 `conversationId`로 지정한 이전 대화 전문을 `전체 복사`와 같은 텍스트 형식으로 조회합니다. |
 | `mindnprogress_list_users` | 담당자로 지정할 수 있는 편집자 계정 목록을 조회합니다. |
 
-변경 체크포인트의 `commitMessage.summary`에는 `[김용민]`을 넣지 않습니다. 서버가 제목 prefix와 `[배경]`·`[원인]`·`[수정]`·선택적 `[적용 범위]` 섹션을 생성하며 `Co-Authored-By`는 거부합니다. 파일 변경이 없으면 변경 도구에 빈 `paths`를 보내지 않고 `mindnprogress_confirm_ai_workspace_no_changes`를 호출합니다.
+변경 체크포인트의 `commitMessage.summary`에는 `[김용민]`이나 `[MnP]` 출처를 넣지 않습니다. 서버가 제목 prefix와 `[MnP]`·`[배경]`·`[원인]`·`[수정]`·선택적 `[적용 범위]` 섹션을 생성하며 `Co-Authored-By`는 거부합니다. `[MnP]`에는 체크포인트 시점의 문서·카드 제목, 안정적인 `mapId`·`cardId`와 호스트에 의존하지 않는 상대 경로가 기록됩니다. 파일 변경이 없으면 변경 도구에 빈 `paths`를 보내지 않고 `mindnprogress_confirm_ai_workspace_no_changes`를 호출합니다.
 
 ### 문서와 카드 편집
 

@@ -197,6 +197,33 @@ async function defaultGitRunner(cwd, args, { timeoutMs = 0 } = {}) {
   }
 }
 
+function normalizedCheckpointMnpField(value, maxLength) {
+  if (typeof value !== 'string') return null
+  const normalized = [...value]
+    .map((character) => {
+      const code = character.codePointAt(0)
+      return code === 127 || code < 32 ? ' ' : character
+    })
+    .join('')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!normalized) return null
+  return normalized.length <= maxLength
+    ? normalized
+    : `${normalized.slice(0, Math.max(1, maxLength - 1)).trimEnd()}…`
+}
+
+export function normalizeCheckpointMnpContext(value, fallback = {}) {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  const defaults = fallback && typeof fallback === 'object' && !Array.isArray(fallback) ? fallback : {}
+  return {
+    mapId: normalizedCheckpointMnpField(source.mapId ?? defaults.mapId, 200),
+    cardId: normalizedCheckpointMnpField(source.cardId ?? defaults.cardId, 200),
+    documentTitle: normalizedCheckpointMnpField(source.documentTitle ?? defaults.documentTitle, 200),
+    cardTitle: normalizedCheckpointMnpField(source.cardTitle ?? defaults.cardTitle, 300),
+  }
+}
+
 function normalizeRegistry(raw, registryFile) {
   const entries = Array.isArray(raw?.workspaces) ? raw.workspaces : []
   const workspaces = entries
@@ -238,19 +265,31 @@ function publicLease(lease) {
   }
 }
 
-function checkpointMessage(commitMessage) {
+function checkpointMnpSection(mnpContext) {
+  const document = `${mnpContext.documentTitle ?? '확인 불가'}${mnpContext.mapId ? ` (${mnpContext.mapId})` : ''}`
+  const card = `${mnpContext.cardTitle ?? '확인 불가'}${mnpContext.cardId ? ` (${mnpContext.cardId})` : ''}`
+  const relativePath = mnpContext.mapId && mnpContext.cardId
+    ? `/mindmap/${encodeURIComponent(mnpContext.mapId)}/${encodeURIComponent(mnpContext.cardId)}`
+    : '확인 불가'
+  return `[MnP]\n문서: ${document}\n카드: ${card}\n경로: ${relativePath}`
+}
+
+function checkpointMessage(commitMessage, mnpContext) {
   const normalized = normalizeCheckpointCommitMessage(commitMessage)
+  const normalizedMnpContext = normalizeCheckpointMnpContext(mnpContext)
   return {
     title: `[김용민] ${normalized.summary}`,
-    body: `[배경]\n${normalized.background}\n\n[원인]\n${normalized.cause}\n\n[수정]\n${normalized.changes}${normalized.scope ? `\n\n[적용 범위]\n${normalized.scope}` : ''}`,
+    body: `${checkpointMnpSection(normalizedMnpContext)}\n\n[배경]\n${normalized.background}\n\n[원인]\n${normalized.cause}\n\n[수정]\n${normalized.changes}${normalized.scope ? `\n\n[적용 범위]\n${normalized.scope}` : ''}`,
     normalized,
+    mnpContext: normalizedMnpContext,
   }
 }
 
 function integrationConflictCheckpointMessage(lease) {
-  const source = [...(Array.isArray(lease?.checkpoints) ? lease.checkpoints : [])]
+  const checkpoint = [...(Array.isArray(lease?.checkpoints) ? lease.checkpoints : [])]
     .reverse()
-    .find((checkpoint) => checkpoint?.commitMessage)?.commitMessage
+    .find((candidate) => candidate?.commitMessage)
+  const source = checkpoint?.commitMessage
   if (!source) {
     throw new WorkspacePoolIntegrationError(
       '통합 충돌 보완 커밋에 사용할 구조화 커밋 메시지가 없습니다. 최신 체크포인트를 다시 생성해야 합니다.',
@@ -263,6 +302,10 @@ function integrationConflictCheckpointMessage(lease) {
     cause: 'worker와 최신 main이 동일한 코드 또는 자산 영역을 변경하여 자동 적용을 완료할 수 없었습니다.',
     changes: '기존 체크포인트의 변경 의도를 유지하면서 최신 main을 기준으로 충돌을 해결하고 통합 가능한 상태로 정리했습니다.',
     scope: source.scope ?? undefined,
+  }, checkpoint?.mnpContext ?? {
+    mapId: lease?.mapId,
+    cardId: lease?.cardId,
+    cardTitle: lease?.cardLabel,
   })
 }
 
@@ -282,7 +325,7 @@ ${sharedRoot ? `- sharedRoot: \`${sharedRoot}\`\n` : ''}- branch: \`${lease.bran
 
 이 작업에서는 위 \`projectRoot\`만 수정하세요. 다른 등록 작업공간으로 이동하거나 브랜치를 바꾸거나 lease를 직접 해제하지 마세요. \`.ai-session.json\`의 값이 위 정보와 일치하는지 먼저 확인하세요.${sharedRoot ? ` 공통 규칙과 지식은 \`sharedRoot\`에서 읽기 전용으로 사용하고, 제안은 \`knowledge-inbox/${lease.jobId}.md\`에 기록하세요.` : ''}
 
-Unity Play Mode, 재임포트, 동적 폰트·Atlas 생성 등의 검증은 어떤 tracked 파일이든 자동으로 바꿀 수 있습니다. 구현 수정을 마친 뒤 각 검증을 시작하기 전에 \`mindnprogress_checkpoint_ai_workspace\`를 호출하여 의도한 변경 경로와 실제 변경을 설명하는 \`commitMessage\`를 함께 고정하세요. \`summary\`에는 \`[김용민]\` prefix를 넣지 말고, \`background\`·\`cause\`·\`changes\`에는 이번 체크포인트의 실제 변경을 작성하며 \`scope\`는 필요한 경우에만 작성하세요. 파일 변경이 전혀 없는 조사·검증 작업은 \`mindnprogress_confirm_ai_workspace_no_changes\`로 확인하세요. 검증 후 보완했다면 새 변경에 맞는 메시지로 다시 체크포인트를 만들고 검증하세요. Git으로 직접 커밋하지 마세요. 완료 시 MindNProgress는 명시적 체크포인트만 main에 통합하고 그 이후의 자동 변경은 복구 자료로 보존한 뒤 worker에서 제거합니다.`
+Unity Play Mode, 재임포트, 동적 폰트·Atlas 생성 등의 검증은 어떤 tracked 파일이든 자동으로 바꿀 수 있습니다. 구현 수정을 마친 뒤 각 검증을 시작하기 전에 \`mindnprogress_checkpoint_ai_workspace\`를 호출하여 의도한 변경 경로와 실제 변경을 설명하는 \`commitMessage\`를 함께 고정하세요. \`summary\`에는 \`[김용민]\` prefix나 \`[MnP]\` 출처를 넣지 말고, \`background\`·\`cause\`·\`changes\`에는 이번 체크포인트의 실제 변경을 작성하며 \`scope\`는 필요한 경우에만 작성하세요. MindNProgress가 현재 문서·카드 제목과 안정적인 ID를 조회해 커밋 본문의 \`[MnP]\` 섹션을 자동으로 추가합니다. 파일 변경이 전혀 없는 조사·검증 작업은 \`mindnprogress_confirm_ai_workspace_no_changes\`로 확인하세요. 검증 후 보완했다면 새 변경에 맞는 메시지로 다시 체크포인트를 만들고 검증하세요. Git으로 직접 커밋하지 마세요. 완료 시 MindNProgress는 명시적 체크포인트만 main에 통합하고 그 이후의 자동 변경은 복구 자료로 보존한 뒤 worker에서 제거합니다.`
 }
 
 export class WorkspacePoolManager {
@@ -739,6 +782,7 @@ export class WorkspacePoolManager {
     paths,
     confirmNoChanges = false,
     commitMessage,
+    mnpContext,
   } = {}) {
     return this.runExclusive(async () => {
       const lease = this.state?.leases?.[String(leaseId ?? '').trim()]
@@ -811,13 +855,18 @@ export class WorkspacePoolManager {
         await this.git(workspace.root, ['restore', '--staged', '--', ...stagedPaths])
         throw new WorkspacePoolUnavailableError(`의도하지 않은 staged 변경이 포함되어 체크포인트를 중단했습니다: ${unexpected.join(', ')}`)
       }
-      const message = checkpointMessage(normalizedCommitMessage)
+      const message = checkpointMessage(normalizedCommitMessage, normalizeCheckpointMnpContext(mnpContext, {
+        mapId: lease.mapId,
+        cardId: lease.cardId,
+        cardTitle: lease.cardLabel,
+      }))
       await this.git(workspace.root, ['commit', '-m', message.title, '-m', message.body])
       const commit = await this.git(workspace.root, ['rev-parse', 'HEAD'])
       const checkpoint = {
         commit,
         paths: intendedPaths,
         commitMessage: message.normalized,
+        mnpContext: message.mnpContext,
         createdAt: new Date().toISOString(),
       }
       lease.checkpoints ??= []

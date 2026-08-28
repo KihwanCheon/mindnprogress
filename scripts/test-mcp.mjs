@@ -402,7 +402,7 @@ async function main() {
 
     const guide = await invoke('mindnprogress_read_me_first')
     assert.equal(guide.guide.product.name, 'MindNProgress')
-    assert.equal(guide.guide.version, '4.9')
+    assert.equal(guide.guide.version, '4.10')
     assert.match(guide.guide.operationRules.join('\n'), /mindnprogress_complete_ai_delegation/)
     assert.match(guide.guide.operationRules.join('\n'), /중지된 위임을 resume하면 같은 AI 대화와 기존 worker lease/)
     assert.match(guide.guide.dataModel.cardContent.sharedKnowledge, /재사용/)
@@ -438,6 +438,7 @@ async function main() {
     assert.match(guide.guide.operationRules.join('\n'), /mindnprogress_get_ai_workspace_pool.*임의로 worker를 사용하지 않음/)
     assert.match(guide.guide.operationRules.join('\n'), /작업공간 pool.*병렬 위임.*직렬 통합/)
     assert.match(guide.guide.operationRules.join('\n'), /mindnprogress_checkpoint_ai_workspace.*동적 폰트·Atlas|동적 폰트·Atlas.*mindnprogress_checkpoint_ai_workspace/)
+    assert.match(guide.guide.operationRules.join('\n'), /\[MnP\].*mapId.*cardId|mapId.*cardId.*\[MnP\]/)
     assert.match(guide.guide.operationRules.join('\n'), /파일 변경이 없는 조사·검증 작업.*mindnprogress_confirm_ai_workspace_no_changes/)
     assert.match(guide.guide.operationRules.join('\n'), /commitMessage.*summary.*background.*cause.*changes/)
     assert.match(guide.guide.operationRules.join('\n'), /기존 AI 대화를 이어갈지 새로 시작할지.*mindnprogress_list_ai_conversations/)
