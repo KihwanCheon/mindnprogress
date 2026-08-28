@@ -1680,7 +1680,7 @@ function buildDelegatedInstruction({ mapId, cardId, editorId, attributionToken, 
   const workspaceInstruction = buildWorkspaceInstruction(workspaceLease)
   return `# MindNProgress 하위 카드 위임 작업 요청
 
-가장 먼저 MindNProgress MCP 도구 \`mindnprogress_get_context\`를 아래 값으로 한 번 호출하세요. 이 요청은 상위 카드의 AI가 현재 하위 카드에 실행을 위임한 것이므로, 일반적인 다음 작업 제안에 그치지 말고 아래 "상위 AI 지시"를 실제로 수행하세요. \`editorId\`와 \`attributionToken\`은 이후 MindNProgress MCP 작업이 끝날 때까지 유지하세요.
+가장 먼저 MindNProgress MCP 도구 \`mindnprogress_get_context\`를 아래 값으로 한 번 성공적으로 호출하세요. 사용자 중지, 취소, 시간 초과 또는 연결 종료로 응답을 받지 못한 시도는 호출 횟수에 포함하지 말고, 같은 대화를 이어갈 때 다시 호출하세요. 성공 응답을 받은 뒤에는 같은 대화에서 반복 호출하지 마세요. 이 요청은 상위 카드의 AI가 현재 하위 카드에 실행을 위임한 것이므로, 일반적인 다음 작업 제안에 그치지 말고 아래 "상위 AI 지시"를 실제로 수행하세요. \`editorId\`와 \`attributionToken\`은 이후 MindNProgress MCP 작업이 끝날 때까지 유지하세요.
 
 - mapId: \`${mapId}\`
 - cardId: \`${cardId}\`
@@ -5160,7 +5160,26 @@ const server = createServer(async (request, response) => {
       if (!canEdit(user)) return sendJson(response, 403, { error: '편집자만 AI 작업공간 체크포인트를 생성할 수 있습니다.' })
       const leaseId = decodeURIComponent(aiWorkspaceCheckpointRoute[1])
       const scope = integrationRequestScope(request)
-      if (!scope.mapId || !scope.cardId) {
+      const source = scope.mapId && scope.conversationId
+        ? delegationSourceForRequest(scope, scope.mapId)
+        : null
+      if (scope.conversationId && !source) {
+        return sendJson(response, 409, {
+          error: '현재 AionUi 대화가 시작된 MindNProgress 카드를 확인할 수 없습니다.',
+          code: 'AI_WORKSPACE_CHECKPOINT_ORIGIN_NOT_FOUND',
+          conversationId: scope.conversationId,
+        })
+      }
+      if (source && scope.cardId && scope.cardId !== source.cardId) {
+        return sendJson(response, 409, {
+          error: '현재 MCP 범위와 AionUi 대화의 시작 카드가 일치하지 않습니다.',
+          code: 'AI_WORKSPACE_CHECKPOINT_ORIGIN_MISMATCH',
+          conversationId: scope.conversationId,
+          sourceCardId: source.cardId,
+        })
+      }
+      const checkpointCardId = source?.cardId ?? scope.cardId
+      if (!scope.mapId || !checkpointCardId) {
         return sendJson(response, 400, {
           error: '현재 AI 대화의 문서와 카드 범위가 필요합니다.',
           code: 'AI_WORKSPACE_CHECKPOINT_SCOPE_REQUIRED',
@@ -5200,19 +5219,19 @@ const server = createServer(async (request, response) => {
       } catch (error) {
         console.warn('[AI workspace checkpoint context]', error)
       }
-      const card = map?.nodes.find((node) => node.id === scope.cardId)
+      const card = map?.nodes.find((node) => node.id === checkpointCardId)
       try {
         const result = await workspacePoolManager.checkpoint(leaseId, {
           jobId: String(body.jobId),
           mapId: scope.mapId,
-          cardId: scope.cardId,
+          cardId: checkpointCardId,
           conversationId: scope.conversationId,
           paths,
           confirmNoChanges,
           commitMessage: body.commitMessage,
           mnpContext: {
             mapId: scope.mapId,
-            cardId: scope.cardId,
+            cardId: checkpointCardId,
             documentTitle: map?.title,
             cardTitle: card?.data?.label,
           },
@@ -5237,21 +5256,37 @@ const server = createServer(async (request, response) => {
       const mapId = decodeURIComponent(aiDelegationCompletionRoute[1])
       const scope = integrationRequestScope(request)
       if (!isValidMapId(mapId)
-        || scope.mapId !== mapId
-        || !scope.cardId
+        || (scope.mapId && scope.mapId !== mapId)
         || !validAiConversationId(scope.conversationId)) {
         return sendJson(response, 400, {
-          error: '현재 AI 대화의 문서, 카드와 대화 범위가 필요합니다.',
+          error: '현재 AI 대화의 문서와 대화 범위가 필요합니다.',
           code: 'AI_DELEGATION_COMPLETION_SCOPE_REQUIRED',
         })
       }
+      const source = delegationSourceForRequest(scope, mapId)
+      if (!source) {
+        return sendJson(response, 409, {
+          error: '현재 AionUi 대화가 시작된 MindNProgress 카드를 확인할 수 없습니다.',
+          code: 'AI_DELEGATION_COMPLETION_ORIGIN_NOT_FOUND',
+          conversationId: scope.conversationId,
+        })
+      }
+      if (scope.cardId && scope.cardId !== source.cardId) {
+        return sendJson(response, 409, {
+          error: '현재 MCP 범위와 AionUi 대화의 시작 카드가 일치하지 않습니다.',
+          code: 'AI_DELEGATION_COMPLETION_ORIGIN_MISMATCH',
+          conversationId: scope.conversationId,
+          sourceCardId: source.cardId,
+        })
+      }
+      const targetCardId = source.cardId
       const map = await readMap(mapId)
-      if (!map || map.trashedAt || !map.nodes.some((node) => node.id === scope.cardId)) {
+      if (!map || map.trashedAt || !map.nodes.some((node) => node.id === targetCardId)) {
         return sendJson(response, 404, { error: 'AI 위임 완료 대상 문서 또는 카드를 찾지 못했습니다.' })
       }
       const candidates = explicitCompletionAiDelegationsForConversation(aiDelegations.values(), {
         mapId,
-        targetCardId: scope.cardId,
+        targetCardId,
         targetConversationId: scope.conversationId,
       })
       if (candidates.length === 0) {

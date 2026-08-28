@@ -402,7 +402,8 @@ async function main() {
 
     const guide = await invoke('mindnprogress_read_me_first')
     assert.equal(guide.guide.product.name, 'MindNProgress')
-    assert.equal(guide.guide.version, '4.10')
+    assert.equal(guide.guide.version, '4.11')
+    assert.match(guide.guide.operationRules.join('\n'), /응답을 받지 못한 시도는 횟수에 포함하지 않고/)
     assert.match(guide.guide.operationRules.join('\n'), /mindnprogress_complete_ai_delegation/)
     assert.match(guide.guide.operationRules.join('\n'), /중지된 위임을 resume하면 같은 AI 대화와 기존 worker lease/)
     assert.match(guide.guide.dataModel.cardContent.sharedKnowledge, /재사용/)
@@ -1040,17 +1041,6 @@ async function main() {
     await originReconnectClient.connect(originReconnectTransport)
     let delegated
     try {
-      const reconnectedChildContext = parseToolResult('mindnprogress_get_context', await originReconnectClient.callTool({
-        name: 'mindnprogress_get_context',
-        arguments: {
-          mapId,
-          cardId: delegatedChild.id,
-          editorId: attribution.editorId,
-          attributionToken: inspectedCardAttribution.attributionToken,
-        },
-      }))
-      assert.equal(reconnectedChildContext.selection.card.id, delegatedChild.id)
-      assert.equal(reconnectedChildContext.selection.aiWorkCoordination.delegationOrigin.cardId, 'task-a')
       delegated = parseToolResult('mindnprogress_delegate_ai_work', await originReconnectClient.callTool({
         name: 'mindnprogress_delegate_ai_work',
         arguments: delegationArguments,
@@ -1078,6 +1068,8 @@ async function main() {
     )
     assert.match(mockAionUi.dispatchRequests[0].instruction, /MindNProgress 하위 카드 위임 작업 요청/)
     assert.match(mockAionUi.dispatchRequests[0].instruction, /실제로 수행/)
+    assert.match(mockAionUi.dispatchRequests[0].instruction, /한 번 성공적으로 호출/)
+    assert.match(mockAionUi.dispatchRequests[0].instruction, /응답을 받지 못한 시도는 호출 횟수에 포함하지 말고/)
     assert.match(mockAionUi.dispatchRequests[0].instruction, /mindnprogress_complete_ai_delegation/)
     assert.equal(mockAionUi.dispatchRequests[0].explicitCompletionAfterInterruption, true)
 
@@ -1108,16 +1100,6 @@ async function main() {
     const childCompletionClient = new Client({ name: 'mindnprogress-explicit-completion', version: '1.0.0' })
     await childCompletionClient.connect(childCompletionTransport)
     try {
-      parseToolResult('mindnprogress_get_context', await childCompletionClient.callTool({
-        name: 'mindnprogress_get_context',
-        arguments: {
-          mapId,
-          cardId: delegatedChild.id,
-          editorId: attribution.editorId,
-          aiType: 'Claude Code',
-          aiModel: 'Claude Test Model',
-        },
-      }))
       const explicitCompletion = parseToolResult('mindnprogress_complete_ai_delegation',
         await childCompletionClient.callTool({
           name: 'mindnprogress_complete_ai_delegation',

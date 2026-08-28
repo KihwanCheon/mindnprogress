@@ -124,7 +124,7 @@ export function buildAiConversationPrompt(input) {
   if (!mapId || !cardId || !editorId || !attributionToken || !normalizedRequest) {
     throw new Error('AI 대화 전문을 만들 정보가 부족합니다.')
   }
-  return `# MindNProgress 작업 요청\n\n가장 먼저 MindNProgress MCP 도구 \`mindnprogress_get_context\`를 아래 값으로 한 번 호출하세요. \`editorId\`는 이 대화를 시작한 편집자 계정으로 MindNProgress를 조회하고 수정하기 위한 값이므로 이후 MCP 작업이 끝날 때까지 유지하세요. \`attributionToken\`은 댓글과 변경 이력에 현재 AI 종류와 모델을 정확히 기록하기 위한 보조 값입니다. 이 도구가 MindNProgress의 제품 개념과 작성 규칙, 최신 문서 구조, 선택 카드 정보를 함께 제공합니다. 프롬프트에는 카드 스냅샷이 포함되어 있지 않으므로 반드시 MCP 조회 결과를 기준으로 답변하고 필요한 작업을 수행해야 합니다.\n\n- mapId: \`${mapId}\`\n- cardId: \`${cardId}\`\n- editorId: \`${editorId}\`\n- attributionToken: \`${attributionToken}\`\n\n${INSPECTION_INSTRUCTION}\n\nMCP 도구를 사용할 수 없거나 해당 문서 또는 카드를 찾지 못하면 임의로 추측하지 말고 그 사실을 알려주세요.\n\n# 편집자 요청\n\n${normalizedRequest}`
+  return `# MindNProgress 작업 요청\n\n가장 먼저 MindNProgress MCP 도구 \`mindnprogress_get_context\`를 아래 값으로 한 번 성공적으로 호출하세요. 사용자 중지, 취소, 시간 초과 또는 연결 종료로 응답을 받지 못한 시도는 호출 횟수에 포함하지 말고, 같은 대화를 이어갈 때 다시 호출하세요. 성공 응답을 받은 뒤에는 같은 대화에서 반복 호출하지 마세요. \`editorId\`는 이 대화를 시작한 편집자 계정으로 MindNProgress를 조회하고 수정하기 위한 값이므로 이후 MCP 작업이 끝날 때까지 유지하세요. \`attributionToken\`은 댓글과 변경 이력에 현재 AI 종류와 모델을 정확히 기록하기 위한 보조 값입니다. 이 도구가 MindNProgress의 제품 개념과 작성 규칙, 최신 문서 구조, 선택 카드 정보를 함께 제공합니다. 프롬프트에는 카드 스냅샷이 포함되어 있지 않으므로 반드시 MCP 조회 결과를 기준으로 답변하고 필요한 작업을 수행해야 합니다.\n\n- mapId: \`${mapId}\`\n- cardId: \`${cardId}\`\n- editorId: \`${editorId}\`\n- attributionToken: \`${attributionToken}\`\n\n${INSPECTION_INSTRUCTION}\n\nMCP 도구를 사용할 수 없거나 해당 문서 또는 카드를 찾지 못하면 임의로 추측하지 말고 그 사실을 알려주세요.\n\n# 편집자 요청\n\n${normalizedRequest}`
 }
 
 export function buildSharedKnowledgeCleanupRequest(context) {

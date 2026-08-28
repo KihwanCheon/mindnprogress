@@ -128,6 +128,8 @@ test('전문은 대상 식별자와 편집자 요청을 그대로 담는다', ()
   assert.ok(prompt.includes('- editorId: `user-editor`'))
   assert.ok(prompt.includes('- attributionToken: `token-1`'))
   assert.ok(prompt.includes('mindnprogress_get_context'))
+  assert.ok(prompt.includes('한 번 성공적으로 호출'))
+  assert.ok(prompt.includes('응답을 받지 못한 시도는 호출 횟수에 포함하지 말고'))
   assert.ok(prompt.endsWith('# 편집자 요청\n\n정리안을 제안해 주세요.'))
 })
 
