@@ -522,6 +522,117 @@ function Assert-SafeInstallRoot {
   }
 }
 
+function Get-MindNProgressInstallBlockers {
+  param([string]$RootPath)
+
+  $projectPath = [IO.Path]::GetFullPath((Join-Path $RootPath 'MindNProgress')).TrimEnd('\', '/')
+  if (-not (Test-Path -LiteralPath $projectPath -PathType Container)) { return @() }
+  $normalizedProjectPath = $projectPath.Replace('/', '\')
+
+  $blockers = @{}
+  $runtimeNames = @('node.exe', 'bun.exe', 'electron.exe')
+  $processes = @()
+  try {
+    $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+  } catch {
+    Write-Warning "실행 중인 프로세스의 명령행을 확인하지 못했습니다: $($_.Exception.Message)"
+  }
+
+  foreach ($process in $processes) {
+    $processId = [int]$process.ProcessId
+    $processName = [string]$process.Name
+    $commandLine = [string]$process.CommandLine
+    if ($processId -eq $PID -or [string]::IsNullOrWhiteSpace($commandLine)) { continue }
+    if ($runtimeNames -notcontains $processName.ToLowerInvariant()) { continue }
+    if ($commandLine.Replace('/', '\').IndexOf($normalizedProjectPath, [StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
+
+    $blockers[$processId] = [pscustomobject]@{
+      ProcessId = $processId
+      Name = $processName
+      Reason = 'MindNProgress 설치 경로 사용'
+    }
+  }
+
+  $connections = @()
+  try {
+    $connections = @(Get-NetTCPConnection -State Listen -LocalPort 4175,4176 -ErrorAction Stop)
+  } catch {
+    $connections = @()
+  }
+  foreach ($connection in $connections) {
+    $processId = [int]$connection.OwningProcess
+    if ($processId -le 0 -or $processId -eq $PID) { continue }
+    $reason = "MnP 포트 $($connection.LocalPort) 사용"
+    if ($blockers.ContainsKey($processId)) {
+      if ($blockers[$processId].Reason -notmatch [regex]::Escape($reason)) {
+        $blockers[$processId].Reason += ", $reason"
+      }
+      continue
+    }
+    $process = $processes | Where-Object { [int]$_.ProcessId -eq $processId } | Select-Object -First 1
+    if (-not $process -or [string]::IsNullOrWhiteSpace([string]$process.CommandLine) -or
+        ([string]$process.CommandLine).Replace('/', '\').IndexOf($normalizedProjectPath, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+      continue
+    }
+    $processName = [string]$process.Name
+    $blockers[$processId] = [pscustomobject]@{
+      ProcessId = $processId
+      Name = $processName
+      Reason = $reason
+    }
+  }
+
+  return @($blockers.Values | Sort-Object ProcessId)
+}
+
+function Get-MindNProgressStopGuidance {
+  param([string]$RootPath, [object[]]$Blockers)
+
+  $stopPath = Join-Path $RootPath 'MindNProgress_Stop.bat'
+  $detected = @($Blockers | ForEach-Object { "$($_.Name) (PID $($_.ProcessId), $($_.Reason))" }) -join "`n- "
+  $stopInstruction = if (Test-Path -LiteralPath $stopPath -PathType Leaf) {
+    "2. 바탕화면의 MindNProgress-Dev-Stop 바로가기 또는 다음 파일을 실행하세요.`n   $stopPath"
+  } else {
+    '2. MnP 개발 콘솔에서 Ctrl+C를 누르고 콘솔 창을 닫으세요.'
+  }
+
+  return @"
+MindNProgress가 실행 중이어서 npm 의존성 파일을 안전하게 교체할 수 없습니다.
+
+감지된 프로세스:
+- $detected
+
+재부팅할 필요는 없습니다.
+1. MnP와 AionUi Dev 창을 닫으세요.
+$stopInstruction
+3. 프로세스 종료를 확인한 뒤 설치를 계속하세요.
+
+다른 Node.js 작업을 보호하기 위해 설치 프로그램은 node.exe를 일괄 강제 종료하지 않습니다.
+"@
+}
+
+function Assert-MindNProgressStoppedForInstall {
+  param([string]$RootPath, [switch]$NoPrompt)
+
+  $blockers = @(Get-MindNProgressInstallBlockers $RootPath)
+  if ($blockers.Count -eq 0) { return }
+
+  $guidance = Get-MindNProgressStopGuidance $RootPath $blockers
+  Write-Host ''
+  Write-Host $guidance -ForegroundColor Yellow
+  if (-not $NoPrompt -and -not $NonInteractive) {
+    [void](Read-Host '위 프로세스를 종료한 뒤 Enter 키를 누르면 다시 확인합니다')
+    $blockers = @(Get-MindNProgressInstallBlockers $RootPath)
+    if ($blockers.Count -eq 0) {
+      Write-Success 'MindNProgress 종료 확인'
+      return
+    }
+    $guidance = Get-MindNProgressStopGuidance $RootPath $blockers
+  }
+
+  throw $guidance
+}
+
 function Refresh-ProcessPath {
   $current = $env:Path
   $machine = [Environment]::GetEnvironmentVariable('Path', 'Machine')
@@ -1595,6 +1706,10 @@ UNITY_MCP_AND_FORK_GUIDE.md
 
 MindNProgress 주소는 `http://127.0.0.1:4175/`입니다. AionUi는 Electron 창으로 열리며 로컬 `AionCore\target\release\aioncore.exe`를 사용합니다.
 
+## 재설치 전 실행 상태 확인
+
+같은 경로에 Suite를 재설치할 때 MnP 또는 해당 경로의 MCP가 실행 중이면 설치 프로그램이 PID와 종료 방법을 안내합니다. MnP와 AionUi Dev 창을 닫고 `MindNProgress_Stop.bat`을 실행한 뒤 설치 창에서 Enter를 누르세요. 설치 프로그램은 다른 개발 작업을 보호하기 위해 `node.exe` 전체를 자동 종료하지 않으며, 정상적으로 종료되면 PC를 재부팅할 필요가 없습니다.
+
 ## AionUi의 MCP 자동 등록
 
 AionUi Dev 런처는 설치된 MCP 엔트리 경로를 전달합니다. AionUi는 백엔드가 준비되면 다음 서버를 자동 등록하고 활성 상태 및 경로를 현재 설치 위치에 맞춥니다.
@@ -1817,6 +1932,36 @@ function Invoke-SelfTest {
 
     $fakeProject = Join-Path $temporaryRoot 'MindNProgress'
     Write-Utf8File (Join-Path $fakeProject 'package.json') '{}'
+    $blockerScriptPath = Join-Path $fakeProject 'selftest-install-blocker.cjs'
+    Write-Utf8File $blockerScriptPath 'setInterval(() => {}, 1000)'
+    $nodeCommand = Get-Command node.exe -ErrorAction Stop | Select-Object -First 1
+    $blockerProcess = $null
+    try {
+      $blockerProcess = Start-Process -FilePath $nodeCommand.Source -ArgumentList ('"' + $blockerScriptPath + '"') -WindowStyle Hidden -PassThru
+      $detectedBlockers = @()
+      for ($attempt = 0; $attempt -lt 30; $attempt++) {
+        $detectedBlockers = @(Get-MindNProgressInstallBlockers $temporaryRoot)
+        if (@($detectedBlockers | Where-Object { $_.ProcessId -eq $blockerProcess.Id }).Count -gt 0) { break }
+        Start-Sleep -Milliseconds 50
+      }
+      if (@($detectedBlockers | Where-Object { $_.ProcessId -eq $blockerProcess.Id }).Count -eq 0) {
+        throw '재설치 전 MindNProgress 실행 프로세스 감지 실패'
+      }
+      $installBlocked = $false
+      try {
+        Assert-MindNProgressStoppedForInstall $temporaryRoot -NoPrompt
+      } catch {
+        $installBlocked = $_.Exception.Message -match '재부팅할 필요는 없습니다' -and
+          $_.Exception.Message -match 'MindNProgress_Stop\.bat' -and
+          $_.Exception.Message -match [regex]::Escape([string]$blockerProcess.Id)
+      }
+      if (-not $installBlocked) { throw '재설치 전 실행 상태 안내 검증 실패' }
+    } finally {
+      if ($blockerProcess -and -not $blockerProcess.HasExited) {
+        Stop-Process -Id $blockerProcess.Id -Force -ErrorAction SilentlyContinue
+        $blockerProcess.WaitForExit()
+      }
+    }
     $fakeBin = Join-Path $temporaryRoot 'selftest-bin'
     $captureScriptPath = Join-Path $fakeBin 'Capture-Mnp-Dooray.ps1'
     $captureResultPath = Join-Path $fakeBin 'capture-result.json'
@@ -2252,6 +2397,7 @@ try {
   $script:InstallLogPath = Join-Path $logDirectory ("install-" + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.log')
   Start-Transcript -LiteralPath $script:InstallLogPath | Out-Null
   $script:TranscriptStarted = $true
+  Assert-MindNProgressStoppedForInstall $resolvedRoot
 
   if ($missing.Count -gt 0) {
     $autoInstall = [bool]$InstallMissingPrerequisites

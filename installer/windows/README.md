@@ -65,6 +65,8 @@ Install-MnPSuite.bat
 9. 기존 저장소가 있을 때 재사용 또는 fast-forward 업데이트
 10. 바탕화면 바로가기 생성과 설치 직후 Dev 환경 실행
 
+기존 설치 경로에 재설치할 때 MnP 또는 해당 경로의 MCP 프로세스가 실행 중이면 `npm ci`가 네이티브 모듈을 교체하지 못할 수 있습니다. 설치기는 실제 파일 변경을 시작하기 전에 해당 경로를 사용하는 Node 계열 프로세스와 MnP 포트 4175·4176을 확인합니다. 실행 상태가 발견되면 PID와 종료 방법을 보여주고, 사용자가 종료한 뒤 Enter 키를 누르면 같은 설치 창에서 다시 확인합니다. 다른 개발 작업을 보호하기 위해 `node.exe` 전체를 자동 종료하지 않으며 재부팅할 필요도 없습니다.
+
 ## 무인 설치 예시
 
 ```powershell
@@ -214,7 +216,7 @@ Dooray MCP를 선택한 설치에서는 `dev\Start-MindNProgress-Dev.ps1`이 `mc
 .\Install-MnPSuite.ps1 -InstallRoot 'C:\Dev\MnPSuite' -NonInteractive -PlanOnly
 ```
 
-Dev 배치 템플릿의 하드코딩 경로, 선택 MCP 네 조합, Dooray DPAPI 암호화, bootstrap 비밀값 제외와 Claude Code·Codex 전역 구성의 네 가지 사전 상태를 임시 사용자 프로필에서 자체 검증합니다. 이 검증은 실제 사용자 전역 설정을 변경하지 않습니다.
+Dev 배치 템플릿의 하드코딩 경로, 재설치 전 MnP 실행 감지와 종료 안내, 선택 MCP 네 조합, Dooray DPAPI 암호화, bootstrap 비밀값 제외와 Claude Code·Codex 전역 구성의 네 가지 사전 상태를 임시 사용자 프로필에서 자체 검증합니다. 이 검증은 실제 사용자 전역 설정을 변경하지 않습니다.
 
 ```powershell
 .\Install-MnPSuite.ps1 -SelfTest -NonInteractive
@@ -223,6 +225,8 @@ Dev 배치 템플릿의 하드코딩 경로, 선택 MCP 네 조합, Dooray DPAPI
 ## 설치 실패 후 재실행
 
 설치 실패 시 먼저 `<설치 루트>\install-logs\install-YYYYMMDD-HHmmss.log`의 마지막 단계와 실제 하위 명령 오류를 확인합니다. 설치기는 Windows PowerShell 5.1에서도 Git·npm·bun·cargo·Python 같은 네이티브 프로세스의 stdout과 stderr를 콘솔과 transcript 로그에 함께 기록합니다. 로그에는 사용자 이름과 로컬 경로가 포함될 수 있으므로 외부 공개 채널에는 그대로 올리지 않습니다.
+
+재설치 시작 시 MnP 실행 상태 안내가 나오면 MnP와 AionUi Dev 창을 닫고, 바탕화면의 `MindNProgress-Dev-Stop` 바로가기나 `<설치 루트>\MindNProgress_Stop.bat`을 실행한 뒤 설치 창에서 Enter를 누릅니다. 남은 프로세스가 없으면 설치가 이어지고, 계속 감지되면 저장소나 의존성을 변경하기 전에 중단합니다. `npm ci` 로그에 `EPERM`, `unlink`, `.node` 파일이 함께 표시되는 경우에도 같은 순서로 종료한 뒤 재실행합니다.
 
 완료된 저장소와 빌드 결과를 삭제할 필요는 없습니다. 로그에서 JavaScript 의존성 설치와 AionCore release 빌드가 성공한 것이 확인된 경우 다음처럼 기존 결과를 재사용할 수 있습니다.
 
@@ -244,6 +248,7 @@ Dev 배치 템플릿의 하드코딩 경로, 선택 MCP 네 조합, Dooray DPAPI
 - 업데이트는 깨끗한 현재 브랜치에서 `git pull --ff-only`만 사용합니다.
 - 업데이트 전 필수 저장소와 선택한 MCP 저장소를 모두 먼저 검사하므로 뒤쪽 저장소의 로컬 변경 때문에 앞쪽 저장소만 갱신되는 부분 업데이트를 하지 않습니다.
 - 다른 브랜치로 자동 전환하거나 로컬 변경을 초기화하지 않습니다.
+- 재설치 전에 실행 중인 MnP 관련 프로세스를 안내하고 사용자의 종료를 기다리며, `node.exe` 전체를 강제 종료하지 않습니다.
 - `server/data`의 운영 데이터를 Git 업데이트 대상으로 취급하지 않습니다.
 - 작업공간 템플릿과 공통 규칙은 기존 파일이 있으면 덮어쓰지 않습니다.
 - Claude Code·Codex 전역 지침은 관리 표식 사이만 갱신하며 기존 원문을 보존합니다.
