@@ -84,7 +84,7 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\Install-MnPSui
 
 `mnp-dooray`는 항상 Claude Code와 Codex 양쪽에 설치됩니다. `unity-work`와 `pptx`는 각 스위치를 지정할 때 설치되며 대화형 설치에서는 신규·재설치 여부와 관계없이 두 항목을 Y/N으로 각각 질문합니다. 패키지가 이전에 설치한 선택 스킬을 한쪽 전역 구성에서라도 발견하면 기본값은 `Y`이며, 사용자가 그대로 확인하면 양쪽 구성을 유지합니다. 무인 재설치는 기존 패키지 관리 선택을 유지하고, 각 스위치로 새 선택 항목을 추가할 수 있습니다.
 
-`-IncludeDoorayMcp`와 `-IncludePptxMcp`는 Git 저장소·Windows 런타임·AionUi 등록을 함께 선택합니다. Dooray 무인 설치에서는 API 키를 명령행에 넣지 말고 설치 프로세스를 시작하기 직전에 `DOORAY_API_KEY` 환경값으로 제공해야 합니다. 기존 DPAPI 파일을 현재 사용자가 복호화할 수 있으면 환경값 없이 재사용합니다. PowerPoint가 없는 PC에서 무인 `pptx-mcp` 설치를 허용하려면 기능 제한을 확인한 뒤 `-AllowPptxWithoutPowerPoint`를 함께 지정합니다.
+`-IncludeDoorayMcp`와 `-IncludePptxMcp`는 Git 저장소·Windows 런타임·AionUi 등록을 함께 선택합니다. Dooray 무인 설치에서는 API 키를 명령행에 넣지 말고 설치 프로세스를 시작하기 직전에 `DOORAY_API_KEY` 환경값으로 제공해야 합니다. 기존 DPAPI 파일을 현재 사용자가 복호화할 수 있으면 환경값 없이 재사용합니다. PowerPoint COM이 없는 PC에서도 `pptx-mcp`를 설치할 수 있으며, `pptx` 스킬이 AionUi에 기본 포함된 OfficeCLI HTML 렌더러를 fallback으로 사용합니다. 이전 자동화와의 인수 호환성을 위해 `-AllowPptxWithoutPowerPoint`는 계속 받을 수 있지만 더 이상 필요하지 않습니다.
 
 Dooray DPAPI 파일은 같은 Windows 사용자와 PC에서만 재사용할 수 있습니다. 다른 사용자 계정이나 새 PC로 Suite를 복사하면 복호화되지 않으므로 설치기를 다시 실행해 API 키를 입력해야 합니다. 일반 MnP 데이터 백업 ZIP에는 이 파일이 포함되지 않습니다.
 
@@ -135,7 +135,9 @@ CLAUDE.md.mnp-suite-backup-20260824-183015123.bak
 
 ### PPTX 스킬과 MCP
 
-`pptx` 스킬은 `pptx-mcp`로 파일을 열고 모든 슬라이드를 PNG로 저장한 뒤 텍스트·표 구조와 함께 확인하도록 지시합니다. 스킬과 MCP는 별도 Y/N 항목이지만, 스킬을 선택하면 MCP 질문의 기본값도 `Y`입니다. `pptx-mcp`를 선택하면 Git 저장소, 전용 `.venv`, `pywin32`를 준비하고 AionUi 목록에 등록합니다. Microsoft PowerPoint가 없으면 python-pptx 기반 도구는 사용할 수 있지만 PowerPoint COM 기반 PNG 내보내기는 사용할 수 없습니다.
+`pptx` 스킬은 `pptx-mcp`로 파일을 열고 텍스트·표 구조를 추출한 뒤 모든 슬라이드를 PNG로 확인하도록 지시합니다. 렌더링은 PowerPoint COM을 1순위로 사용하고, PowerPoint 미설치나 COM 등록 없음처럼 COM을 사용할 수 없는 경우에만 AionUi에 기본 포함된 OfficeCLI의 HTML 렌더러로 전환합니다. 스킬과 MCP는 별도 Y/N 항목이지만, 스킬을 선택하면 MCP 질문의 기본값도 `Y`입니다. `pptx-mcp`를 선택하면 Git 저장소, 전용 `.venv`, `pywin32`를 준비하고 AionUi 목록에 등록합니다. OfficeCLI는 MnP Suite 설치기가 별도로 설치하거나 필수 도구로 검사하지 않습니다.
+
+OfficeCLI fallback은 `officecli get <파일> / --depth 0 --json`에서 작성자가 지정한 슬라이드 가로 크기를 확인하고 150 DPI 기준 목표 너비로 환산합니다. `--screenshot-width <목표 너비>`만 전달하면 OfficeCLI가 원본 비율로 높이를 자동 계산하고, 최대 변이 1920px를 넘을 때 두 변을 함께 축소합니다. 따라서 표준 16:9의 2000px 목표 너비는 1920×1080으로 축소되고, 상한 이내인 4:3의 1500px 목표 너비는 1500×1125로 유지됩니다. 이 150 DPI는 픽셀 크기 산정 기준이며 HTML PNG의 메타데이터 DPI는 96으로 남을 수 있습니다. PowerPoint와 폰트 대체, SmartArt, 차트, 효과 배치가 달라질 수 있으므로 AI 결과에는 `officecli-html` 사용 사실과 PowerPoint 직접 확인 필요 여부가 포함되어야 합니다. 파일 손상이나 암호 보호처럼 COM 가용성과 무관한 오류는 fallback으로 숨기지 않습니다.
 
 PowerPoint MCP 설치 검사는 Windows PowerShell 5.1에서도 안전하도록 Python 모듈 import의 종료 코드만 사용합니다. Python `-c` 인수 안에 성공 문구를 출력하는 따옴표 표현을 넣지 않으므로 PowerShell 5.1의 네이티브 인수 변환에 영향을 받지 않습니다.
 
@@ -165,7 +167,7 @@ PowerPoint MCP 설치 검사는 Windows PowerShell 5.1에서도 안전하도록 
 - Python 3.11 이상
 - Visual Studio 2022 C++ Build Tools
 - Dooray MCP 선택 시 Java 21. 기존 Java 21이 없으면 설치 루트에 portable Temurin 21을 내려받으며 시스템 `PATH`·`JAVA_HOME`은 변경하지 않음
-- PowerPoint MCP 선택 시 Microsoft PowerPoint 권장. 미설치 상태에서는 PNG 내보내기 제한
+- PPTX 스킬 또는 PowerPoint MCP 선택 시 Microsoft PowerPoint 권장. COM을 사용할 수 없으면 AionUi 기본 OfficeCLI HTML 렌더러 사용
 
 누락 도구 자동 설치를 승인하면 스크립트는 먼저 `winget search`로 커뮤니티 소스가 실제 동작하는지 확인한 뒤 패키지를 설치합니다. `--source winget`을 명시하므로 Microsoft Store 소스의 인증서나 연결 오류가 필수 개발 도구 설치를 막지 않습니다. 상태 확인이 비정상 종료되면 Microsoft Store 또는 사내 배포 도구에서 **앱 설치 관리자(Desktop App Installer)**를 업데이트하거나, IT 담당자가 필수 도구를 먼저 설치해야 합니다.
 

@@ -316,7 +316,8 @@ function Get-MnPSuiteAgentGuidance {
 ## PowerPoint 파일 확인
 
 - pptx·ppt·파워포인트·발표 자료·기획서 슬라이드 내용을 확인하기 전에 `pptx` 스킬을 읽고 따른다.
-- `pptx-mcp`로 모든 슬라이드의 PNG와 텍스트·표 구조를 함께 확인한다. 도구가 없으면 텍스트만으로 내용을 확정하지 말고 필요한 연결을 사용자에게 알린다.
+- 슬라이드 PNG는 `pptx-mcp`의 PowerPoint COM 렌더링을 먼저 사용하고, COM을 사용할 수 없는 경우에만 `officecli --render html`로 대체한다. OfficeCLI에는 원본 가로 크기의 150 DPI 환산 너비만 전달하고 높이·최대 변 1920px 상한 처리는 렌더러에 맡긴다.
+- 텍스트·표 구조와 모든 슬라이드 이미지를 함께 확인한다. 두 렌더러를 모두 사용할 수 없으면 텍스트만으로 내용을 확정하지 말고 필요한 연결을 사용자에게 알린다.
 - 이미지와 추출 구조가 다르면 차이를 기록하고 PowerPoint에서 직접 확인할 필요가 있는지 명시한다.
 '@.Trim()
   }
@@ -1742,7 +1743,7 @@ Claude Code 또는 Codex의 전역 구성 폴더가 아직 없어도 필요한 �
 
 대화형 재설치에서도 `unity-work`와 `pptx`를 각각 다시 묻습니다. 이미 설치된 선택 스킬은 기본값이 `Y`이며, `N`을 선택하면 MnP Suite가 설치했고 이후 수정되지 않은 스킬과 해당 호출 지침만 제거합니다. 설치 후 파일이 수정·삭제되었거나 사용자 파일이 추가된 스킬은 자동 제거하지 않고 설치를 중단합니다.
 
-`pptx`를 선택하면 PowerPoint 파일 확인 절차가 설치됩니다. PowerPoint MCP도 선택하면 Git 저장소와 전용 Python 가상환경을 준비하고 AionUi에 `pptx-mcp`로 등록합니다. Windows에서 슬라이드를 PNG로 내보내려면 Microsoft PowerPoint와 `pywin32`가 필요하며, PowerPoint가 없으면 나머지 python-pptx 기능만 사용할 수 있습니다.
+`pptx`를 선택하면 PowerPoint 파일 확인 절차가 설치됩니다. PowerPoint MCP도 선택하면 Git 저장소와 전용 Python 가상환경을 준비하고 AionUi에 `pptx-mcp`로 등록합니다. 슬라이드 PNG는 PowerPoint COM을 1순위로 사용합니다. Microsoft PowerPoint COM을 사용할 수 없는 PC에서는 AionUi에 기본 포함된 OfficeCLI를 사용해 `officecli --render html`로 모든 슬라이드를 개별 PNG로 렌더링합니다. OfficeCLI에는 작성자가 지정한 가로 크기의 150 DPI 환산 너비만 전달하며, 높이 자동 계산과 최대 변 1920px 상한 내 비례 축소는 렌더러에 맡깁니다. fallback 결과는 PowerPoint와 배치가 달라질 수 있으므로 사용한 렌더러와 직접 확인 필요 여부를 함께 기록합니다.
 
 Dooray MCP를 선택하면 Java 21 fat JAR를 빌드해 AionUi에 `dooray-mcp`로 등록합니다. 기존 Unity Java 환경과 충돌하지 않도록 시스템 `PATH`와 `JAVA_HOME`은 바꾸지 않고, 필요한 경우 설치 루트의 `tools\jdk-21`에 portable Temurin을 준비합니다.
 
@@ -1839,6 +1840,17 @@ function Invoke-SelfTest {
     $dev = Write-DevLaunchers $temporaryRoot
     Write-InstalledReadme $temporaryRoot
     $guide = Copy-UserGuides $temporaryRoot
+    $pptxSkillText = Read-Utf8File (Join-Path (Get-MnPSuitePackagedSkillPath 'pptx') 'SKILL.md')
+    if ($pptxSkillText -notmatch 'PowerPoint COM' -or
+        $pptxSkillText -notmatch 'officecli view.+screenshot --render html' -or
+        $pptxSkillText -notmatch '--screenshot-width \$renderWidth' -or
+        $pptxSkillText -match '--screenshot-height' -or
+        $pptxSkillText -notmatch '\$renderDpi = 150' -or
+        $pptxSkillText -notmatch 'slideWidthEmu \* \$renderDpi / 914400' -or
+        $pptxSkillText -notmatch '최대 변이 1920px' -or
+        $pptxSkillText -notmatch 'officecli-html') {
+      throw 'pptx 스킬의 COM 우선·OfficeCLI fallback 절차 누락'
+    }
     $expected = @(
       'Start-MindNProgress-Dev.bat',
       'Stop-MindNProgress-Dev.bat',
@@ -2347,13 +2359,7 @@ try {
   }
   $powerPointInstalled = [bool](Test-PowerPointInstalled)
   if ($installPptxMcp -and -not $powerPointInstalled) {
-    Write-Warning 'Microsoft PowerPoint가 없어 pptx-mcp의 슬라이드 PNG 내보내기는 사용할 수 없습니다.'
-    if (-not $PlanOnly -and $NonInteractive -and -not $AllowPptxWithoutPowerPoint) {
-      throw 'PowerPoint가 없는 비대화식 설치에서 pptx-mcp를 계속하려면 -AllowPptxWithoutPowerPoint를 지정하세요.'
-    }
-    if (-not $PlanOnly -and -not $NonInteractive -and -not (Read-YesNo 'PNG 내보내기 제한을 확인하고 pptx-mcp 설치를 계속할까요?' $false)) {
-      $installPptxMcp = $false
-    }
+    Write-Warning 'Microsoft PowerPoint COM을 사용할 수 없어 슬라이드 PNG는 AionUi 기본 OfficeCLI HTML 렌더러로 대체합니다.'
   }
   Assert-MnPSuiteAgentConfigurationTargets $agentHomes.CodexHome $agentHomes.ClaudeHome $installUnityWork $installPptx
 
@@ -2370,6 +2376,9 @@ try {
   Write-Info '필수 전역 스킬: mnp-dooray (Claude Code + Codex)'
   Write-Info "Unity 전역 스킬: $(if ($installUnityWork) { 'unity-work 설치' } else { '설치 안 함' })"
   Write-Info "PowerPoint 전역 스킬: $(if ($installPptx) { 'pptx 설치' } else { '설치 안 함' })"
+  if ($installPptx -or $installPptxMcp) {
+    Write-Info "PPTX 렌더러 : $(if ($powerPointInstalled) { 'PowerPoint COM (1순위)' } else { 'OfficeCLI HTML fallback' })"
+  }
   Write-Info "Codex 전역 구성: $($agentHomes.CodexHome)"
   Write-Info "Claude 전역 구성: $($agentHomes.ClaudeHome)"
 
