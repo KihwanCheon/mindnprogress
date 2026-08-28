@@ -3964,7 +3964,7 @@ async function recoverLinkedConversationAttributions() {
     }
   }
   if (targets.length > 0) {
-    console.log(`[AI conversation attribution] ${recovered}/${targets.length}개 대화 복원, 댓글 ${repairedComments}개·알림 ${repairedNotifications}개 보정`)
+    console.log(`[AI conversation attribution] 연결 대화 ${targets.length}개 중 AI 작성자 정보 ${recovered}개 복원, 댓글 ${repairedComments}개·알림 ${repairedNotifications}개 보정`)
   }
 }
 
