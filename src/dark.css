@@ -1466,6 +1466,14 @@
   box-shadow: 0 0 0 3px rgba(156, 141, 255, .2);
 }
 
+[data-theme="dark"] .ai-auto-request textarea,
+[data-theme="dark"] .ai-auto-request textarea:focus {
+  color: var(--theme-text-secondary);
+  border-color: var(--theme-border);
+  background: var(--theme-surface);
+  box-shadow: none;
+}
+
 [data-theme="dark"] .map-item.active {
   box-shadow: inset 3px 0 var(--theme-accent);
 }

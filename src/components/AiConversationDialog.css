@@ -16,6 +16,9 @@
 .ai-dialog-content textarea, .ai-dialog-content input, .ai-dialog-content select { width: 100%; padding: 10px 11px; border: 1px solid #ded9e7; border-radius: 9px; outline: 0; color: #37313e; background: #fbfafc; font: inherit; font-size: 11px; box-sizing: border-box; }
 .ai-dialog-content textarea:focus, .ai-dialog-content input:focus, .ai-dialog-content select:focus { border-color: #7568d5; box-shadow: 0 0 0 3px rgba(104, 88, 210, .1); }
 .ai-request textarea { line-height: 1.55; resize: vertical; }
+.ai-request > small { color: #9a939f; font-size: 8px; font-weight: 500; line-height: 1.45; }
+.ai-auto-request textarea { color: #6f6877; border-color: #e5e1e9; background: #f5f3f7; }
+.ai-auto-request textarea:focus { border-color: #d7d1de; box-shadow: none; }
 .ai-dialog-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; }
 .ai-workspace-field { display: grid; gap: 8px; }
 .ai-workspace-field > label { display: grid; gap: 7px; color: #777080; font-size: 10px; font-weight: 700; }

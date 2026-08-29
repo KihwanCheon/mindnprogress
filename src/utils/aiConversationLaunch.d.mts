@@ -54,6 +54,7 @@ export const DEFAULT_AI_EDITOR_REQUEST: string
 
 export function normalizeAiCardTitle(value: unknown): string
 export function normalizeAiEditorRequest(value: unknown): string
+export function combineAiEditorRequest(automaticRequest: unknown, userInput: unknown): string
 export function isAiConversationPurpose(value: unknown): value is AiConversationPurpose
 export function normalizeAiConversationPurpose(value: unknown): AiConversationPurpose
 export function aiConversationTitle(input?: {

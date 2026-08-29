@@ -4,6 +4,7 @@ import {
   AI_EDITOR_REQUEST_MAX_LENGTH,
   aiConversationTitle,
   buildAiConversationPrompt,
+  combineAiEditorRequest,
   buildSharedKnowledgeCleanupLaunch,
   buildSharedKnowledgeCleanupRequest,
   DEFAULT_AI_EDITOR_REQUEST,
@@ -131,6 +132,15 @@ test('전문은 대상 식별자와 편집자 요청을 그대로 담는다', ()
   assert.ok(prompt.includes('한 번 성공적으로 호출'))
   assert.ok(prompt.includes('응답을 받지 못한 시도는 호출 횟수에 포함하지 말고'))
   assert.ok(prompt.endsWith('# 편집자 요청\n\n정리안을 제안해 주세요.'))
+})
+
+test('자동 적용 내용 뒤에 사용자 입력을 붙여 기존 편집자 요청 형식을 유지한다', () => {
+  assert.equal(
+    combineAiEditorRequest('  자동 적용 내용  ', '  추가 정보 또는 요청  '),
+    '자동 적용 내용\n\n추가 정보 또는 요청',
+  )
+  assert.equal(combineAiEditorRequest('자동 적용 내용', '   '), '자동 적용 내용')
+  assert.equal(combineAiEditorRequest('', '사용자 요청'), '사용자 요청')
 })
 
 test('전문 조립에 필요한 값이 없으면 실패로 알린다', () => {

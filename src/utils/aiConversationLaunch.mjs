@@ -67,6 +67,12 @@ export function normalizeAiEditorRequest(value) {
   return text(value).slice(0, AI_EDITOR_REQUEST_MAX_LENGTH)
 }
 
+export function combineAiEditorRequest(automaticRequest, userInput) {
+  return [normalizeAiEditorRequest(automaticRequest), normalizeAiEditorRequest(userInput)]
+    .filter(Boolean)
+    .join('\n\n')
+}
+
 function explicitTarget(value) {
   if (!isRecord(value)) return null
   const mapId = text(value.mapId)

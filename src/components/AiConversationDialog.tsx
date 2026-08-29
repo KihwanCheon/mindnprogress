@@ -16,6 +16,7 @@ import {
   AI_EDITOR_REQUEST_MAX_LENGTH,
   aiConversationTitle,
   buildAiConversationPrompt,
+  combineAiEditorRequest,
   DEFAULT_AI_EDITOR_REQUEST,
   normalizeAiEditorRequest,
   type AiConversationPurpose,
@@ -209,7 +210,8 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
   const [launching, setLaunching] = useState(false)
   const [error, setError] = useState('')
   const [launchError, setLaunchError] = useState('')
-  const [request, setRequest] = useState(() => normalizeAiEditorRequest(initialRequest) || DEFAULT_AI_EDITOR_REQUEST)
+  const automaticRequest = normalizeAiEditorRequest(initialRequest) || DEFAULT_AI_EDITOR_REQUEST
+  const [userRequest, setUserRequest] = useState('')
   const [agentId, setAgentId] = useState('')
   const [modelId, setModelId] = useState('')
   const [mode, setMode] = useState('')
@@ -391,7 +393,9 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
   }
 
   const launch = async () => {
-    if (!options || !selectedAgent || !modelId || !request.trim()) return
+    if (!options || !selectedAgent || !modelId) return
+    const request = combineAiEditorRequest(automaticRequest, userRequest)
+    if (!request) return
     let launchTab: Window | null = null
     if (launchInWebUi) {
       launchTab = window.open('about:blank', '_blank')
@@ -431,7 +435,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
           disabledBuiltinSkillIds,
           mcpIds,
           workspace: workspace.trim() || undefined,
-          requestPreview: request.trim(),
+          requestPreview: userRequest.trim() || automaticRequest,
         }),
       })
       const attribution = await attributionResponse.json().catch(() => ({})) as { attributionToken?: string; completionUrl?: string; editorId?: string; error?: string }
@@ -510,7 +514,23 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
                 <small>최상위 업무와 원본 자료는 선행 지식만으로 부족할 때만 선택적으로 확인합니다.</small>
               </div>
             )}
-            <label className="ai-request"><span>AI에게 요청할 내용</span><textarea value={request} onChange={(event) => setRequest(event.target.value)} rows={4} maxLength={AI_EDITOR_REQUEST_MAX_LENGTH} autoFocus /></label>
+            <label className="ai-request ai-user-request">
+              <span>추가 정보 또는 요청</span>
+              <textarea
+                value={userRequest}
+                onChange={(event) => setUserRequest(event.target.value)}
+                rows={4}
+                maxLength={AI_EDITOR_REQUEST_MAX_LENGTH}
+                placeholder="추가 정보, 정정 사항 또는 요청할 작업을 입력하세요."
+                autoFocus
+              />
+              <small>비워 두면 아래 자동 적용 내용만 전달됩니다.</small>
+            </label>
+            <label className="ai-request ai-auto-request">
+              <span>자동 적용 내용</span>
+              <textarea value={automaticRequest} rows={7} readOnly aria-readonly="true" />
+              <small>MindNProgress가 대화 목적에 맞춰 자동으로 전달하며 편집할 수 없습니다.</small>
+            </label>
             <div className="ai-dialog-grid">
               <label><span>AI 종류</span><select value={agentId} onChange={(event) => changeAgent(event.target.value)}>{options.agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label>
               <label><span>모델</span><select value={modelId} onChange={(event) => setModelId(event.target.value)}>{selectedAgent?.models.map((model) => <option key={`${model.providerId ?? ''}-${model.id}`} value={model.id}>{model.label}</option>)}</select></label>
@@ -631,7 +651,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
             {launchError && <div className="ai-launch-error" role="alert">{launchError}</div>}
           </div>
         )}
-        <footer><span>응답은 AionUi에서만 처리됩니다.</span><div><button type="button" onClick={onClose}>취소</button><button type="button" className="primary" onClick={() => { void launch() }} disabled={loading || launching || Boolean(error) || !selectedAgent || !modelId || !request.trim()}>{launching ? '준비 중…' : 'AionUi에서 시작'}</button></div></footer>
+        <footer><span>응답은 AionUi에서만 처리됩니다.</span><div><button type="button" onClick={onClose}>취소</button><button type="button" className="primary" onClick={() => { void launch() }} disabled={loading || launching || Boolean(error) || !selectedAgent || !modelId}>{launching ? '준비 중…' : 'AionUi에서 시작'}</button></div></footer>
       </section>
     </div>
   )
