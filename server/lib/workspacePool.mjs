@@ -1293,6 +1293,66 @@ export class WorkspacePoolManager {
     })
   }
 
+  async recoverCheckpointedFinalizationFailure(leaseId) {
+    return this.runExclusive(async () => {
+      const lease = this.state?.leases?.[String(leaseId ?? '').trim()]
+      const result = lease?.result
+      const workspace = this.registry?.workers.find((candidate) => candidate.id === lease?.workspaceId)
+      const workspaceState = this.state?.workspaces?.[lease?.workspaceId]
+      if (!lease || !workspace || lease.status !== 'quarantined'
+        || result?.status !== 'quarantined' || result.childStatus !== 'completed'
+        || result.integratedCommit || lease.integrationBranch || result.integrationBranch
+        || (Array.isArray(result.unmergedFiles) && result.unmergedFiles.length > 0)
+        || workspaceState?.status !== 'quarantined' || workspaceState?.leaseId !== lease.leaseId) return null
+
+      const checkpoints = Array.isArray(lease.checkpoints) ? lease.checkpoints : []
+      const checkpointCommits = new Set(
+        checkpoints.map((checkpoint) => String(checkpoint?.commit ?? '').trim()).filter(Boolean),
+      )
+      const latestCheckpointCommit = String(checkpoints.at(-1)?.commit ?? '').trim()
+      if (!latestCheckpointCommit || latestCheckpointCommit === lease.baseCommit) return null
+
+      const session = await readJson(path.join(workspace.root, '.ai-session.json'), null)
+      if (!session
+        || session.workspaceId !== lease.workspaceId
+        || session.jobId !== lease.jobId
+        || session.leaseId !== lease.leaseId
+        || session.conversationId !== lease.conversationId
+        || session.branch !== lease.branch
+        || session.baseCommit !== lease.baseCommit) return null
+
+      const [dirty, currentBranch, currentHead] = await Promise.all([
+        this.git(workspace.root, ['status', '--porcelain', '--untracked-files=all']),
+        this.git(workspace.root, ['branch', '--show-current']),
+        this.git(workspace.root, ['rev-parse', 'HEAD']),
+      ])
+      if (dirty || currentBranch !== lease.branch || currentHead !== latestCheckpointCommit) return null
+      try {
+        await this.git(workspace.root, ['merge-base', '--is-ancestor', lease.baseCommit, currentHead])
+      } catch {
+        return null
+      }
+
+      const commits = (await this.git(workspace.root, [
+        'rev-list', '--reverse', `${lease.baseCommit}..${currentHead}`,
+      ])).split(/\r?\n/).map((commit) => commit.trim()).filter(Boolean)
+      if (commits.length === 0 || commits.some((commit) => !checkpointCommits.has(commit))) return null
+
+      const integrationChanges = await this.integrationTrackedChanges()
+      lease.headCommit = currentHead
+      lease.commits = commits
+      return this.waitForIntegration(lease, workspace, {
+        childStatus: result.childStatus,
+        childError: result.childError ?? null,
+        headCommit: currentHead,
+        reasonCode: integrationChanges.dirty ? integrationWorktreeDirtyReasonCode : null,
+        waitingReason: integrationChanges.dirty ? integrationWorktreeDirtyMessage : null,
+        trackedChanges: integrationChanges.paths,
+        recoveredFromQuarantine: true,
+      })
+    })
+  }
+
   async finalize(leaseId, { childStatus, childError } = {}) {
     return this.runExclusive(async () => {
       const lease = this.state?.leases?.[leaseId]

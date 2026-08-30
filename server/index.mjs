@@ -2168,9 +2168,9 @@ async function reconcileAiDelegationWorkspaceLeases() {
       || delegation.workspaceResult?.status !== 'quarantined'
       || !delegation.workspaceLease?.leaseId) continue
     try {
-      const workspaceResult = await workspacePoolManager.recoverLegacyDirtyIntegration(
+      const workspaceResult = await workspacePoolManager.recoverCheckpointedFinalizationFailure(
         delegation.workspaceLease.leaseId,
-      )
+      ) ?? await workspacePoolManager.recoverLegacyDirtyIntegration(delegation.workspaceLease.leaseId)
       if (workspaceResult?.status !== 'waiting-integration') continue
       await updateAiDelegation(delegation.id, {
         state: 'waiting-integration',
@@ -2184,9 +2184,9 @@ async function reconcileAiDelegationWorkspaceLeases() {
         completedAt: null,
         legacyIntegrationRecoveredAt: new Date().toISOString(),
       })
-      console.log(`[AI workspace pool] 격리된 통합 대기를 복구했습니다: ${delegation.id}`)
+      console.log(`[AI workspace pool] 체크포인트가 보존된 격리 작업을 통합 대기로 복구했습니다: ${delegation.id}`)
     } catch (error) {
-      console.warn('[AI workspace pool legacy integration recovery]', JSON.stringify({
+      console.warn('[AI workspace pool checkpointed integration recovery]', JSON.stringify({
         delegationId: delegation.id,
         leaseId: delegation.workspaceLease.leaseId,
         error: error?.message ?? String(error),

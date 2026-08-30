@@ -1244,6 +1244,110 @@ test('과거 main dirty 격리는 세션·체크포인트·Git 소유권이 일�
   }
 })
 
+test('체크포인트 이후 인프라 파일로 격리된 완료 작업은 깨끗한 동일 HEAD에서 통합 대기로 복구한다', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'mnp-workspace-recover-checkpointed-finalization-'))
+  try {
+    const integrationRoot = path.join(root, 'main')
+    const workerRoot = path.join(root, 'fork1')
+    const sharedRoot = path.join(root, 'shared')
+    await Promise.all([mkdir(integrationRoot), mkdir(workerRoot), mkdir(sharedRoot)])
+    const registryFile = path.join(sharedRoot, 'workspaces.json')
+    const stateFile = path.join(root, 'state.json')
+    await writeFile(registryFile, JSON.stringify({
+      schemaVersion: 1,
+      poolId: 'holdem',
+      sharedRoot,
+      originUrl: 'https://example.invalid/holdem.git',
+      workspaces: [
+        { id: 'main', root: integrationRoot, role: 'integration', enabled: true },
+        { id: 'fork1', root: workerRoot, role: 'worker', enabled: true },
+      ],
+    }), 'utf8')
+
+    let workerBranch = 'japan-master'
+    let workerHead = 'base123'
+    let workerDirty = false
+    let integrationDirty = false
+    let revisionList = 'checkpoint456'
+    const gitRunner = async (cwd, args) => {
+      const worker = cwd === workerRoot
+      if (args[0] === 'status') return worker ? (workerDirty ? '?? .claude/skills/tool/SKILL.md' : '') : (integrationDirty ? ' M main.txt' : '')
+      if (args[0] === 'diff') return !worker && integrationDirty ? 'main.txt' : ''
+      if (args[0] === 'remote') return 'https://example.invalid/holdem.git'
+      if (args[0] === 'rev-parse') return worker ? workerHead : 'base123'
+      if (args[0] === 'branch' && args[1] === '--show-current') return worker ? workerBranch : 'japan-master'
+      if (args[0] === 'switch') {
+        workerBranch = args[1]
+        return ''
+      }
+      if (args[0] === 'commit') {
+        workerHead = 'checkpoint456'
+        workerDirty = false
+        return ''
+      }
+      if (args[0] === 'rev-list') return revisionList
+      return ''
+    }
+    const manager = new WorkspacePoolManager({ registryFile, stateFile, gitRunner })
+    await manager.initialize()
+    const lease = await manager.acquire({
+      workspaceHint: integrationRoot,
+      mapId: 'map-checkpointed',
+      cardId: 'card-checkpointed',
+      conversationId: 'conversation-checkpointed',
+      cardLabel: '체크포인트 격리 복구',
+    })
+    workerDirty = true
+    await manager.checkpoint(lease.leaseId, {
+      jobId: lease.jobId,
+      mapId: 'map-checkpointed',
+      cardId: 'card-checkpointed',
+      conversationId: 'conversation-checkpointed',
+      paths: ['worker.txt'],
+      commitMessage: checkpointCommitMessage,
+    })
+
+    const storedLease = manager.state.leases[lease.leaseId]
+    const completedAt = new Date().toISOString()
+    storedLease.status = 'quarantined'
+    storedLease.result = {
+      status: 'quarantined',
+      childStatus: 'completed',
+      headCommit: null,
+      integratedCommit: null,
+      error: 'AI 작업공간 인프라 항목은 자동 정리하지 않습니다.',
+      completedAt,
+    }
+    manager.state.workspaces.fork1 = {
+      status: 'quarantined',
+      reason: storedLease.result.error,
+      jobId: lease.jobId,
+      leaseId: lease.leaseId,
+      updatedAt: completedAt,
+    }
+    await manager.persist()
+
+    workerDirty = true
+    assert.equal(await manager.recoverCheckpointedFinalizationFailure(lease.leaseId), null)
+    workerDirty = false
+    revisionList = 'manual789\ncheckpoint456'
+    assert.equal(await manager.recoverCheckpointedFinalizationFailure(lease.leaseId), null)
+    revisionList = 'checkpoint456'
+    integrationDirty = true
+    const recovered = await manager.recoverCheckpointedFinalizationFailure(lease.leaseId)
+    assert.equal(recovered.status, 'waiting-integration')
+    assert.equal(recovered.headCommit, 'checkpoint456')
+    assert.equal(recovered.reasonCode, 'integration-worktree-dirty')
+    assert.equal(recovered.recoveredFromQuarantine, true)
+    assert.deepEqual(recovered.trackedChanges, ['main.txt'])
+    assert.equal(storedLease.headCommit, 'checkpoint456')
+    assert.deepEqual(storedLease.commits, ['checkpoint456'])
+    assert.equal(manager.state.workspaces.fork1.status, 'waiting-integration')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('통합 충돌은 main을 건드리지 않고 같은 worker의 AI 해결 후 반영한다', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'mnp-workspace-conflict-'))
   try {
