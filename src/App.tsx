@@ -1728,7 +1728,7 @@ function updateWithoutInsertedTab(value: string, update: (nextValue: string) => 
   if (sanitized !== value) window.requestAnimationFrame(moveFocus)
 }
 
-function LoginScreen({ onAuthenticated, theme, onToggleTheme }: { onAuthenticated: (user: AuthUser) => void; theme: UiTheme; onToggleTheme: () => void }) {
+function LoginScreen({ onAuthenticated, theme, onToggleTheme, publicViewerEnabled }: { onAuthenticated: (user: AuthUser) => void; theme: UiTheme; onToggleTheme: () => void; publicViewerEnabled: boolean }) {
   const formRef = useRef<HTMLFormElement>(null)
   const emailRef = useRef<HTMLInputElement>(null)
   const passwordRef = useRef<HTMLInputElement>(null)
@@ -1847,7 +1847,7 @@ function LoginScreen({ onAuthenticated, theme, onToggleTheme }: { onAuthenticate
           <button ref={loginButtonRef} className="login-submit" type="submit" disabled={submitting}>
             {submitting ? '확인 중…' : '로그인'}
           </button>
-          <a className="viewer-entry-link" href="/mindmap/"><Icon name="external" size={13} /><span>로그인 없이 읽기 전용으로 보기</span></a>
+          {publicViewerEnabled && <a className="viewer-entry-link" href="/mindmap/"><Icon name="external" size={13} /><span>로그인 없이 읽기 전용으로 보기</span></a>}
         </form>
       </section>
     </main>
@@ -8976,6 +8976,7 @@ function App() {
   const deepLinkEntry = deepLink !== null || groupId !== null
   const [user, setUser] = useState<AuthUser | null>(null)
   const [checkingSession, setCheckingSession] = useState(true)
+  const [publicViewerEnabled, setPublicViewerEnabled] = useState(false)
   const [theme, setTheme] = useState<UiTheme>(() => appliedUiTheme())
 
   const toggleTheme = useCallback(() => {
@@ -8997,9 +8998,14 @@ function App() {
   }, [])
 
   useEffect(() => {
-    void apiRequest<{ user: AuthUser | null }>('/api/auth/me')
-      .then(async (result) => {
-        if (result.user || !deepLinkEntry) return result.user
+    void Promise.all([
+      apiRequest<{ user: AuthUser | null }>('/api/auth/me'),
+      apiRequest<{ publicViewerEnabled?: boolean }>('/api/health'),
+    ])
+      .then(async ([session, health]) => {
+        const viewerEnabled = health.publicViewerEnabled === true
+        setPublicViewerEnabled(viewerEnabled)
+        if (session.user || !deepLinkEntry || !viewerEnabled) return session.user
         const viewerResult = await apiRequest<{ user: AuthUser }>('/api/auth/viewer-access', { method: 'POST' })
         return viewerResult.user
       })
@@ -9026,7 +9032,7 @@ function App() {
     )
   }
 
-  if (!user) return <LoginScreen onAuthenticated={setUser} theme={theme} onToggleTheme={toggleTheme} />
+  if (!user) return <LoginScreen onAuthenticated={setUser} theme={theme} onToggleTheme={toggleTheme} publicViewerEnabled={publicViewerEnabled} />
 
   return (
     <ReactFlowProvider>

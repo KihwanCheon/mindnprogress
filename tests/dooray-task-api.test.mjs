@@ -167,22 +167,14 @@ test('인증된 편집자가 Dooray URL로 업무 제목 미리보기를 조회�
     assert.equal(upstreamRequestCount, 5)
 
     const viewerAccessResponse = await fetch(`${baseUrl}/api/auth/viewer-access`, { method: 'POST' })
-    assert.equal(viewerAccessResponse.status, 200)
-    const viewerCookie = viewerAccessResponse.headers.get('set-cookie')?.split(';', 1)[0]
-    assert.ok(viewerCookie)
+    assert.equal(viewerAccessResponse.status, 403)
+    assert.equal((await viewerAccessResponse.json()).code, 'PUBLIC_VIEWER_DISABLED')
     const viewerTitlesResponse = await fetch(`${baseUrl}/api/integrations/dooray/task-titles`, {
       method: 'POST',
-      headers: { Cookie: viewerCookie, 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ urls: [taskUrl] }),
     })
-    assert.equal(viewerTitlesResponse.status, 200)
-    assert.deepEqual(await viewerTitlesResponse.json(), {
-      tasks: [{
-        key: 'nhnent.dooray.com:4372040364315909997',
-        url: taskUrl,
-        title: 'Dooray API 연동 테스트',
-      }],
-    })
+    assert.equal(viewerTitlesResponse.status, 401)
     assert.equal(upstreamRequestCount, 5)
 
     const invalidResponse = await fetch(`${baseUrl}/api/integrations/dooray/task-preview`, {
