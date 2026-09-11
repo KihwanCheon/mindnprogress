@@ -339,6 +339,19 @@ function detectedPublicIpv4() {
         && !address.internal
         && !address.address.startsWith('169.254.'))
       .map((address) => ({ name, address: address.address })))
+
+  // 랜 카드가 여러 개면 자동 감지가 고른 주소가 외부에서 닿지 않을 수 있다.
+  // (예: 사내망과 별도 고정망이 함께 있을 때) 인터페이스 이름을 지정하면
+  // 그 카드의 주소를 쓴다. eth0 처럼 정확한 이름이나 일부 문자열로 찾는다.
+  const preferredInterface = String(process.env.MNP_PUBLIC_INTERFACE ?? '').trim()
+  if (preferredInterface) {
+    const wanted = preferredInterface.toLowerCase()
+    const matched = candidates.find((candidate) => candidate.name.toLowerCase() === wanted)
+      ?? candidates.find((candidate) => candidate.name.toLowerCase().includes(wanted))
+    if (matched) return matched.address
+    console.warn(`[Mind & Progress] MNP_PUBLIC_INTERFACE=${preferredInterface}에 해당하는 IPv4 주소가 없어 자동 감지를 사용합니다.`)
+  }
+
   candidates.sort((first, second) => Number(virtualInterfacePattern.test(first.name)) - Number(virtualInterfacePattern.test(second.name)))
   return candidates[0]?.address ?? '127.0.0.1'
 }

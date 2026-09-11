@@ -303,6 +303,7 @@ npm run dev
 | `MNP_CONFIG_DIR` | `~/.mnp` | `mnp.conf`를 읽을 저장소 밖 MindNProgress 설정 폴더 |
 | `MNP_DEV_ALLOWED_HOSTS` | 없음 | Vite 개발 서버가 추가로 허용할 호스트. 쉼표로 구분하며 `MNP_PUBLIC_URL`의 호스트는 자동 포함 |
 | `MNP_PUBLIC_VIEWER_ENABLED` | `false` | 로그인 없이 읽기 전용으로 보는 공개 뷰어 활성화 여부. `true`일 때만 첫 화면 링크와 공개 뷰어 세션을 허용 |
+| `MNP_PUBLIC_INTERFACE` | 없음 | 자동 감지가 사용할 네트워크 인터페이스 이름. `eth0`처럼 정확한 이름이나 일부 문자열로 찾으며, 랜 카드가 여러 개일 때 닿지 않는 주소가 잡히는 것을 막습니다. `MNP_PUBLIC_URL`이 있으면 그 값이 우선합니다 |
 | `MNP_DATA_DIR` | `server/data` | 문서와 운영 데이터 저장 경로 |
 | `MNP_IMAGE_MAX_BYTES` | `15000000` | 이미지 파일 1개의 최대 업로드 크기(바이트) |
 | `MNP_AIONUI_URL` | 자동 탐색 | AionUi 백엔드 주소 강제 지정 |
