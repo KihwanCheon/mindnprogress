@@ -34,6 +34,12 @@ Write-Mnp "  cargo : $cargo"
 Write-Mnp "  처음 빌드는 10분 이상 걸릴 수 있습니다."
 Write-Output '============================================================'
 
+# MSIX 패키지 앱(예: Claude 데스크톱)은 자식 프로세스에
+# NoDefaultCurrentDirectoryInExePath 를 주입한다. 설정되어 있으면 cmd 가 현재
+# 디렉터리의 실행 파일을 찾지 못해, 빌드 스크립트나 build.rs 가 그런 호출을
+# 하면 실패한다. cargo 자체는 영향을 받지 않지만 일관성을 위해 함께 비운다.
+Remove-Item Env:\NoDefaultCurrentDirectoryInExePath -ErrorAction SilentlyContinue
+
 Set-Location $aionCoreDir
 & $cargo build --release --locked --bin aioncore
 $exitCode = $LASTEXITCODE
