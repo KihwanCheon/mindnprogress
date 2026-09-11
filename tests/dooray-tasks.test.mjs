@@ -106,6 +106,55 @@ test('DOORAY_API_TOKEN 환경변수도 API 키로 인정한다', async () => {
   assert.equal(config.source, 'environment')
 })
 
+test('Claude 설정에 없으면 AionUi 에 등록된 MCP 에서 토큰을 읽는다', async () => {
+  const config = await loadDoorayApiConfig({
+    env: {},
+    homeDirectory: 'C:/Users/tester',
+    readText: async () => JSON.stringify({ mcpServers: { logncrash: { env: {} } } }),
+    listMcpServers: async () => ([
+      { name: 'aionui-browser', transport: { env: {} } },
+      { name: 'dooray-mcp', transport: { env: { DOORAY_API_TOKEN: 'aionui-token' } } },
+    ]),
+  })
+  assert.equal(config.apiKey, 'aionui-token')
+  assert.equal(config.serverName, 'dooray-mcp')
+  assert.equal(config.source, 'aionui-mcp')
+})
+
+test('Claude 설정에 키가 있으면 AionUi 를 조회하지 않는다', async () => {
+  const config = await loadDoorayApiConfig({
+    env: {},
+    homeDirectory: 'C:/Users/tester',
+    readText: async () => JSON.stringify({ mcpServers: { 'dooray-mcp': { env: { DOORAY_API_KEY: 'config-key' } } } }),
+    listMcpServers: async () => { throw new Error('AionUi 를 조회하면 안 됩니다.') },
+  })
+  assert.equal(config.apiKey, 'config-key')
+  assert.equal(config.source, 'claude-config')
+})
+
+test('설정 파일이 없어도 AionUi 등록만으로 토큰을 찾는다', async () => {
+  const missing = Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+  const config = await loadDoorayApiConfig({
+    env: {},
+    homeDirectory: 'C:/Users/tester',
+    readText: async () => { throw missing },
+    listMcpServers: async () => ([{ name: 'dooray-mcp', transport: { env: { DOORAY_API_TOKEN: 'only-aionui' } } }]),
+  })
+  assert.equal(config.apiKey, 'only-aionui')
+  assert.equal(config.source, 'aionui-mcp')
+})
+
+test('AionUi 조회가 실패하면 오류 대신 unavailable 로 알린다', async () => {
+  const config = await loadDoorayApiConfig({
+    env: {},
+    homeDirectory: 'C:/Users/tester',
+    readText: async () => JSON.stringify({ mcpServers: {} }),
+    listMcpServers: async () => { throw new Error('AIONUI_REQUEST_FAILED') },
+  })
+  assert.equal(config.apiKey, '')
+  assert.equal(config.source, 'unavailable')
+})
+
 test('Dooray 업무 URL에서 프로젝트와 업무 ID를 추출하고 정규화한다', () => {
   assert.deepEqual(parseDoorayTaskUrl(`${taskUrl}/?from=clipboard#detail`), {
     projectId: '4337958142554469981',
