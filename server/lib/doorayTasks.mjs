@@ -34,12 +34,22 @@ function normalizeDoorayBaseUrl(value) {
   }
 }
 
+function isRecord(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+// Dooray MCP 설정은 키 이름을 DOORAY_API_KEY 또는 DOORAY_API_TOKEN 으로 쓴다.
+function readDoorayApiKey(source) {
+  if (!isRecord(source)) return ''
+  return String(source.DOORAY_API_KEY ?? source.DOORAY_API_TOKEN ?? '').trim()
+}
+
 export async function loadDoorayApiConfig({
   env = process.env,
   homeDirectory = homedir(),
   readText = (filePath) => readFile(filePath, 'utf8'),
 } = {}) {
-  const environmentApiKey = String(env.MNP_DOORAY_API_KEY ?? env.DOORAY_API_KEY ?? '').trim()
+  const environmentApiKey = String(env.MNP_DOORAY_API_KEY ?? '').trim() || readDoorayApiKey(env)
   const environmentBaseUrl = String(env.MNP_DOORAY_BASE_URL ?? env.DOORAY_BASE_URL ?? '').trim()
   if (environmentApiKey) {
     return {
@@ -68,14 +78,34 @@ export async function loadDoorayApiConfig({
   }
 
   const serverName = String(env.MNP_DOORAY_MCP_SERVER_NAME ?? '').trim() || defaultDoorayMcpServerName
-  const connectorEnv = parsed?.mcpServers?.[serverName]?.env ?? {}
-  const apiKey = String(connectorEnv.DOORAY_API_KEY ?? '').trim()
+  const servers = isRecord(parsed?.mcpServers) ? parsed.mcpServers : {}
+
+  // 등록 이름은 환경마다 다르다(docker-dooray-mcp, dooray-mcp 등). 지정한 이름을
+  // 먼저 보고, 없으면 이름에 dooray가 들어간 항목에서 키를 찾는다. 키 이름도
+  // 설정에 따라 DOORAY_API_KEY 또는 DOORAY_API_TOKEN 으로 갈린다.
+  const candidateNames = [
+    serverName,
+    ...Object.keys(servers).filter((name) => name !== serverName && /dooray/i.test(name)).sort(),
+  ]
+  let connectorEnv = {}
+  let matchedServerName = ''
+  for (const name of candidateNames) {
+    const candidate = isRecord(servers[name]?.env) ? servers[name].env : {}
+    if (readDoorayApiKey(candidate)) {
+      connectorEnv = candidate
+      matchedServerName = name
+      break
+    }
+  }
+
+  const apiKey = readDoorayApiKey(connectorEnv)
   const baseUrl = environmentBaseUrl || String(connectorEnv.DOORAY_BASE_URL ?? '').trim()
   return {
     apiKey,
     baseUrl: normalizeDoorayBaseUrl(baseUrl),
     source: apiKey ? 'claude-config' : 'unavailable',
     configFile,
+    serverName: matchedServerName,
   }
 }
 

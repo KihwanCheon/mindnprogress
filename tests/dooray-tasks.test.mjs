@@ -55,6 +55,57 @@ test('환경변수 API 키가 Claude 설정보다 우선한다', async () => {
   assert.equal(config.source, 'environment')
 })
 
+test('등록 이름이 달라도 dooray가 들어간 MCP 항목에서 키를 찾는다', async () => {
+  const config = await loadDoorayApiConfig({
+    env: {},
+    homeDirectory: 'C:/Users/tester',
+    readText: async () => JSON.stringify({
+      mcpServers: {
+        logncrash: { env: { LOGNCRASH_APP_KEY: 'other' } },
+        'dooray-mcp': { env: { DOORAY_API_TOKEN: 'token-named-differently' } },
+      },
+    }),
+  })
+  assert.equal(config.apiKey, 'token-named-differently')
+  assert.equal(config.serverName, 'dooray-mcp')
+  assert.equal(config.source, 'claude-config')
+})
+
+test('지정한 MCP 이름을 이름이 비슷한 다른 항목보다 먼저 쓴다', async () => {
+  const config = await loadDoorayApiConfig({
+    env: { MNP_DOORAY_MCP_SERVER_NAME: 'dooray-mcp' },
+    homeDirectory: 'C:/Users/tester',
+    readText: async () => JSON.stringify({
+      mcpServers: {
+        'dooray-mcp': { env: { DOORAY_API_KEY: 'chosen' } },
+        'old-dooray-mcp': { env: { DOORAY_API_KEY: 'stale' } },
+      },
+    }),
+  })
+  assert.equal(config.apiKey, 'chosen')
+  assert.equal(config.serverName, 'dooray-mcp')
+})
+
+test('두레이 MCP 항목이 없으면 키 없이 unavailable 로 알린다', async () => {
+  const config = await loadDoorayApiConfig({
+    env: {},
+    homeDirectory: 'C:/Users/tester',
+    readText: async () => JSON.stringify({ mcpServers: { logncrash: { env: {} } } }),
+  })
+  assert.equal(config.apiKey, '')
+  assert.equal(config.serverName, '')
+  assert.equal(config.source, 'unavailable')
+})
+
+test('DOORAY_API_TOKEN 환경변수도 API 키로 인정한다', async () => {
+  const config = await loadDoorayApiConfig({
+    env: { DOORAY_API_TOKEN: 'env-token' },
+    readText: async () => { throw new Error('설정 파일을 읽으면 안 됩니다.') },
+  })
+  assert.equal(config.apiKey, 'env-token')
+  assert.equal(config.source, 'environment')
+})
+
 test('Dooray 업무 URL에서 프로젝트와 업무 ID를 추출하고 정규화한다', () => {
   assert.deepEqual(parseDoorayTaskUrl(`${taskUrl}/?from=clipboard#detail`), {
     projectId: '4337958142554469981',
