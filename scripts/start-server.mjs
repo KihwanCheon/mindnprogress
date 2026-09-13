@@ -1,4 +1,5 @@
-import { loadLocalEnvironment } from './local-environment.mjs'
+import { loadMindNProgressEnvironment } from './local-environment.mjs'
 
-loadLocalEnvironment()
+const loadedConfigFiles = loadMindNProgressEnvironment()
+console.log(`[Mind & Progress] 설정 파일: ${loadedConfigFiles.length > 0 ? loadedConfigFiles.join(', ') : '없음'}`)
 await import('../server/index.mjs')
