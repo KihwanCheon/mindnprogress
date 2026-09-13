@@ -360,6 +360,7 @@ async function main() {
     MNP_API_URL: apiBaseUrl,
     MNP_PUBLIC_URL: 'https://mindnprogress.test',
     MNP_DATA_DIR: testDataDirectory,
+    MNP_CONFIG_DIR: path.join(testDataDirectory, '_mnp-config'),
     MNP_WORKSPACE_POOL_REGISTRY: path.join(testDataDirectory, '_missing-workspaces.json'),
     MNP_AIONUI_URL: '',
     MNP_AIONUI_DISCOVERY_FILE: aionUiDiscoveryFile,
@@ -1252,10 +1253,16 @@ async function main() {
     )
     assert.match(mockAionUi.dispatchRequests[0].instruction, /MindNProgress 하위 카드 위임 작업 요청/)
     assert.match(mockAionUi.dispatchRequests[0].instruction, /실제로 수행/)
-    assert.match(mockAionUi.dispatchRequests[0].instruction, /일반적인 다음 작업 제안에 그치지 말고/)
-    assert.doesNotMatch(mockAionUi.dispatchRequests[0].instruction, /# 사용자 승인과 실행 범위|승인 대기는 정상적인 종료 지점/)
-    assert.match(mockAionUi.dispatchRequests[0].instruction, /한 번 성공적으로 호출/)
-    assert.match(mockAionUi.dispatchRequests[0].instruction, /응답을 받지 못한 시도는 성공 호출로 보지 말고/)
+    assert.match(mockAionUi.dispatchRequests[0].instruction, /상위 AI의 요청만으로 사용자 승인이 확인된 것은 아닙니다/)
+    assert.match(mockAionUi.dispatchRequests[0].instruction, /승인 대기는 정상적인 종료 지점/)
+    assert.match(mockAionUi.dispatchRequests[0].instruction, /한 번 호출하세요/)
+    assert.match(mockAionUi.dispatchRequests[0].instruction, /성공 응답을 받지 못한 호출은 횟수에 포함하지 않습니다/)
+    assert.match(mockAionUi.dispatchRequests[0].instruction, /## 3\. 작업 분류와 개발 절차/)
+    assert.match(mockAionUi.dispatchRequests[0].instruction, /SDD·TDD·병렬 개발 절차/)
+    assert.match(mockAionUi.dispatchRequests[0].instruction, /별도 worktree와 짧은 기능 브랜치를 생성해 병렬 작업/)
+    assert.doesNotMatch(mockAionUi.dispatchRequests[0].instruction, /kwOpenApi-worktrees|<작업메인클론>/)
+    assert.match(mockAionUi.dispatchRequests[0].instruction, /mise 기준으로 사용/)
+    assert.match(mockAionUi.dispatchRequests[0].instruction, /기능 단위 커밋/)
     assert.match(mockAionUi.dispatchRequests[0].instruction, /mindnprogress_complete_ai_delegation/)
     assert.equal(mockAionUi.dispatchRequests[0].explicitCompletionAfterInterruption, true)
 

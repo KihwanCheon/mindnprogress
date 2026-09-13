@@ -127,6 +127,25 @@ AionUi ── Claude / Codex / Copilot 등
 
 현재 데이터 저장소는 별도 데이터베이스가 아닌 로컬 JSON 파일과 이미지 자산 폴더입니다. `server/data`의 런타임 파일은 Git에서 제외됩니다.
 
+### AI 하위 위임 지시문 개인 설정
+
+하위 AI 위임 전문의 기본 템플릿은 `config/ai-delegation-instruction.md`에 있습니다. 사용자별 프로젝트명, worktree 규칙과 모델 권장값처럼 저장소에 올리면 안 되는 내용은 다음 경로에 별도 설정으로 둘 수 있습니다.
+
+```text
+~/.mnp/ai-delegation-instruction.md
+```
+
+사용자 설정 파일이 있으면 저장소 기본 템플릿보다 우선하며, 파일이 없으면 저장소 기본 템플릿을 사용합니다. 다른 설정 디렉터리를 사용해야 하는 테스트·운영 환경에서는 `MNP_CONFIG_DIR`로 지정할 수 있습니다. 설정을 바꾼 뒤에는 서버를 재시작하고 새 AI 대화를 시작해야 새 전문이 적용됩니다.
+
+템플릿은 다음 변수를 런타임 값으로 치환합니다.
+
+- `{{mapId}}`, `{{cardId}}`, `{{editorId}}`, `{{attributionToken}}`
+- `{{approvalInstruction}}`: 공통 사용자 승인 규칙
+- `{{workspaceInstruction}}`: 위임된 작업공간 안내
+- `{{instruction}}`: 상위 AI가 전달한 실제 작업 지시
+
+저장소 기본 템플릿에는 개인 주소나 특정 프로젝트 경로를 넣지 않습니다. worktree의 구체적인 경로는 위임된 작업공간 안내와 대상 저장소의 규칙을 기준으로 판단합니다.
+
 ## 외부 전체 백업과 복원
 
 Windows에서는 저장소 루트의 `MindNProgress_Backup.bat`을 실행하면 Git으로 복구할 수 없는 운영 데이터를 기본적으로 저장소와 같은 상위 폴더의 `MindNProgress_Backup\YYYY-MM-DD` 아래에 시간별 ZIP 파일로 백업합니다.
