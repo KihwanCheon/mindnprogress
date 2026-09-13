@@ -196,7 +196,9 @@ import {
   integrationWorktreeDirtyReasonCode,
 } from './lib/workspacePool.mjs'
 import {
+  AI_CONVERSATION_REQUEST_MAX_LENGTH,
   loadAiDelegationInstructionTemplate,
+  renderAiConversationPrompt,
   renderAiDelegationInstruction,
 } from './lib/aiDelegationInstructions.mjs'
 
@@ -2219,13 +2221,15 @@ function issueDelegatedAttribution({ mapId, cardId, conversationId, selection, s
 function buildDelegatedInstruction({ mapId, cardId, editorId, attributionToken, instruction, workspaceLease }) {
   const workspaceInstruction = buildWorkspaceInstruction(workspaceLease)
   return renderAiDelegationInstruction(aiDelegationInstructionConfig.template, {
+    requestTitle: 'MindNProgress 하위 카드 위임 작업 요청',
     mapId,
     cardId,
     editorId,
     attributionToken,
-    approvalInstruction: AI_EXECUTION_APPROVAL_INSTRUCTION,
+    approvalInstruction: '',
     workspaceInstruction,
-    instruction: instruction.trim(),
+    instructionHeading: '상위 AI 지시',
+    instruction: `이 요청은 상위 카드의 AI가 현재 하위 카드에 실행을 위임한 것이므로, 일반적인 다음 작업 제안에 그치지 말고 아래 지시를 실제로 수행하세요.\n\n${instruction.trim()}`,
   })
 }
 
@@ -7364,6 +7368,9 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       const providerId = String(body.providerId ?? '').trim().slice(0, 120)
       const mapId = String(body.mapId ?? '').trim().slice(0, 120)
       const cardId = String(body.cardId ?? '').trim().slice(0, 120)
+      const promptRequest = typeof body.request === 'string' && body.request.trim()
+        ? body.request.trim()
+        : 'MNP 작업 요청을 확인하세요.'
       const purpose = body.purpose === undefined ? 'card' : String(body.purpose).trim()
       let doorayApprovalContext = null
       if (purpose === 'dooray-response') {
@@ -7377,6 +7384,9 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       }
       if (!agentId || !modelId || (!doorayApprovalContext && (!isValidMapId(mapId) || !cardId))) {
         return sendJson(response, 400, { error: 'AI 종류, 모델, 문서와 카드를 모두 지정해 주세요.' })
+      }
+      if (promptRequest.length > AI_CONVERSATION_REQUEST_MAX_LENGTH) {
+        return sendJson(response, 400, { error: 'AI 대화 요청이 너무 깁니다.' })
       }
       if (!isAiConversationPurpose(purpose)) {
         return sendJson(response, 400, { error: 'AI 대화 용도가 올바르지 않습니다.' })
@@ -7434,6 +7444,14 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         const attributionToken = randomBytes(32).toString('base64url')
         const completionToken = randomBytes(32).toString('base64url')
         const expiresAt = Date.now() + aiAttributionDurationMs
+        const prompt = renderAiConversationPrompt(aiDelegationInstructionConfig.template, {
+          mapId,
+          cardId,
+          editorId: user.id,
+          attributionToken,
+          approvalInstruction: AI_EXECUTION_APPROVAL_INSTRUCTION,
+          instruction: promptRequest,
+        })
         for (const [tokenKey, attribution] of aiAttributions) {
           if (attribution.expiresAt <= Date.now()) aiAttributions.delete(tokenKey)
         }
@@ -7480,6 +7498,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         return sendJson(response, 201, {
           attributionToken,
           completionUrl,
+          prompt,
           authorName,
           editorId: user.id,
           homeMachineId,

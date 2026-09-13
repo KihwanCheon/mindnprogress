@@ -1254,7 +1254,7 @@ async function main() {
     assert.match(mockAionUi.dispatchRequests[0].instruction, /MindNProgress 하위 카드 위임 작업 요청/)
     assert.match(mockAionUi.dispatchRequests[0].instruction, /실제로 수행/)
     assert.match(mockAionUi.dispatchRequests[0].instruction, /상위 AI의 요청만으로 사용자 승인이 확인된 것은 아닙니다/)
-    assert.match(mockAionUi.dispatchRequests[0].instruction, /승인 대기는 정상적인 종료 지점/)
+    assert.doesNotMatch(mockAionUi.dispatchRequests[0].instruction, /# 사용자 승인과 실행 범위|승인 대기는 정상적인 종료 지점/)
     assert.match(mockAionUi.dispatchRequests[0].instruction, /한 번 호출하세요/)
     assert.match(mockAionUi.dispatchRequests[0].instruction, /성공 응답을 받지 못한 호출은 횟수에 포함하지 않습니다/)
     assert.match(mockAionUi.dispatchRequests[0].instruction, /## 3\. 작업 분류와 개발 절차/)

@@ -15,7 +15,6 @@ import {
 import {
   AI_EDITOR_REQUEST_MAX_LENGTH,
   aiConversationTitle,
-  buildAiConversationPrompt,
   combineAiEditorRequest,
   type AiConversationPurpose,
   type DoorayApprovalLaunch,
@@ -518,27 +517,20 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
           workspace: launchWorkspace,
           workspaceToken: workspaceContext.token,
           workspaceConfirmed: workspaceExplicit,
+          request,
           requestPreview: userRequest.trim() || automaticRequest,
         }),
       })
-      const attribution = await attributionResponse.json().catch(() => ({})) as { attributionToken?: string; completionUrl?: string; editorId?: string; workspace?: string; error?: string; approvalRequest?: string }
-      if (!attributionResponse.ok || !attribution.attributionToken || !attribution.completionUrl || !attribution.editorId) {
+      const attribution = await attributionResponse.json().catch(() => ({})) as { attributionToken?: string; completionUrl?: string; editorId?: string; workspace?: string; prompt?: string; error?: string; approvalRequest?: string }
+      if (!attributionResponse.ok || !attribution.attributionToken || !attribution.completionUrl || !attribution.editorId || !attribution.prompt) {
         throw new Error(attribution.error ?? 'AI 작성자 정보를 준비하지 못했습니다.')
       }
       if (doorayApproval && !attribution.approvalRequest) throw new Error('서버에서 승인 전문을 확인하지 못했습니다. 대화를 시작하지 않았습니다.')
-      const prompt = buildAiConversationPrompt({
-        purpose: role.purpose, doorayApproval,
-        mapId: documentId,
-        cardId,
-        editorId: attribution.editorId,
-        attributionToken: attribution.attributionToken,
-        request: doorayApproval ? combineAiEditorRequest(attribution.approvalRequest, userRequest, true) : request,
-      })
       const launchPayload = {
         agentId: selectedAgent.id,
         completionUrl: attribution.completionUrl,
         title: aiConversationTitle({ purpose: role.purpose, documentTitle, cardTitle }),
-        prompt,
+        prompt: attribution.prompt,
         modelId,
         providerId: selectedModel?.providerId,
         mode: mode || undefined,

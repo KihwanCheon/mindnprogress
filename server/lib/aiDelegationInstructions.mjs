@@ -7,6 +7,7 @@ const moduleDirectory = path.dirname(fileURLToPath(import.meta.url))
 const projectDirectory = path.resolve(moduleDirectory, '../..')
 
 export const AI_DELEGATION_INSTRUCTION_FILE_NAME = 'ai-delegation-instruction.md'
+export const AI_CONVERSATION_REQUEST_MAX_LENGTH = 100_000
 export const bundledAiDelegationInstructionPath = path.join(
   projectDirectory,
   'config',
@@ -48,12 +49,14 @@ export function loadAiDelegationInstructionTemplate({
 
 export function renderAiDelegationInstruction(template, values = {}) {
   const replacements = {
+    requestTitle: values.requestTitle,
     mapId: values.mapId,
     cardId: values.cardId,
     editorId: values.editorId,
     attributionToken: values.attributionToken,
     approvalInstruction: values.approvalInstruction,
     workspaceInstruction: values.workspaceInstruction,
+    instructionHeading: values.instructionHeading,
     instruction: values.instruction,
   }
 
@@ -61,4 +64,13 @@ export function renderAiDelegationInstruction(template, values = {}) {
     if (!Object.hasOwn(replacements, key)) throw new Error(`알 수 없는 위임 지시문 변수입니다: ${match}`)
     return String(replacements[key] ?? '')
   }).trim()
+}
+
+export function renderAiConversationPrompt(template, values = {}) {
+  return renderAiDelegationInstruction(template, {
+    ...values,
+    requestTitle: 'MindNProgress 작업 요청',
+    instructionHeading: '편집자 요청',
+    workspaceInstruction: values.workspaceInstruction ?? '',
+  })
 }

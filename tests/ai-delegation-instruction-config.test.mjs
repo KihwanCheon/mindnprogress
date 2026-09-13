@@ -7,15 +7,16 @@ import {
   AI_DELEGATION_INSTRUCTION_FILE_NAME,
   bundledAiDelegationInstructionPath,
   loadAiDelegationInstructionTemplate,
+  renderAiConversationPrompt,
   renderAiDelegationInstruction,
   resolveMnpConfigDirectory,
 } from '../server/lib/aiDelegationInstructions.mjs'
 
 test('기본 설정 디렉터리는 ~/.mnp이고 MNP_CONFIG_DIR로 대체할 수 있다', () => {
-  assert.equal(resolveMnpConfigDirectory({ homeDirectory: '/tmp/test-home', env: {} }), '/tmp/test-home/.mnp')
+  assert.equal(resolveMnpConfigDirectory({ homeDirectory: '/tmp/test-home', env: {} }), path.resolve('/tmp/test-home', '.mnp'))
   assert.equal(
     resolveMnpConfigDirectory({ homeDirectory: '/tmp/test-home', env: { MNP_CONFIG_DIR: '/tmp/custom-mnp' } }),
-    '/tmp/custom-mnp',
+    path.resolve('/tmp/custom-mnp'),
   )
 })
 
@@ -43,17 +44,36 @@ test('사용자 설정이 없으면 저장소 기본 템플릿을 사용한다',
 
 test('템플릿 변수를 런타임 값으로 치환한다', () => {
   const rendered = renderAiDelegationInstruction(
-    '{{mapId}} {{cardId}} {{editorId}} {{attributionToken}} {{approvalInstruction}} {{workspaceInstruction}} {{instruction}}',
+    '{{requestTitle}} {{mapId}} {{cardId}} {{editorId}} {{attributionToken}} {{approvalInstruction}} {{workspaceInstruction}} {{instructionHeading}} {{instruction}}',
     {
+      requestTitle: 'MindNProgress 작업 요청',
       mapId: 'map-test',
       cardId: 'card-test',
       editorId: 'editor-test',
       attributionToken: 'token-test',
       approvalInstruction: '승인 규칙',
       workspaceInstruction: '',
+      instructionHeading: '편집자 요청',
       instruction: '하위 작업',
     },
   )
-  assert.equal(rendered, 'map-test card-test editor-test token-test 승인 규칙  하위 작업')
+  assert.equal(rendered, 'MindNProgress 작업 요청 map-test card-test editor-test token-test 승인 규칙  편집자 요청 하위 작업')
   assert.throws(() => renderAiDelegationInstruction('{{unknown}}', {}), /알 수 없는 위임 지시문 변수/)
+})
+
+test('기본 템플릿을 일반 MNP 대화용 제목과 편집자 요청으로 렌더링한다', () => {
+  const loaded = loadAiDelegationInstructionTemplate({ env: { MNP_CONFIG_DIR: '/tmp/mnp-config-that-does-not-exist' }, homeDirectory: '/tmp/test-home' })
+  const rendered = renderAiConversationPrompt(loaded.template, {
+    mapId: 'map-test',
+    cardId: 'card-test',
+    editorId: 'editor-test',
+    attributionToken: 'token-test',
+    approvalInstruction: '승인 규칙',
+    instruction: '카드 검토 요청',
+  })
+
+  assert.match(rendered, /^# MindNProgress 작업 요청/)
+  assert.match(rendered, /# 편집자 요청/)
+  assert.ok(rendered.endsWith('카드 검토 요청'))
+  assert.doesNotMatch(rendered, /\{\{[A-Za-z]/)
 })
