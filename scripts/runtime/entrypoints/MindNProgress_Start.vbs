@@ -10,9 +10,9 @@ End If
 WshShell.CurrentDirectory = RootDirectory
 ' This user-facing entrypoint keeps its restart-and-open-browser behavior.
 ' AI operations use the same controller with an explicit start/stop/restart action.
-Command = """" & PowerShellPath & """ -NoLogo -NoProfile -ExecutionPolicy Bypass -File """ & ControllerPath & """ -Action restart -AllowLegacyStop -OpenBrowser"
+Command = """" & PowerShellPath & """ -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File """ & ControllerPath & """ -Action restart -AllowLegacyStop -OpenBrowser"
 On Error Resume Next
-Result = WshShell.Run(Command, 1, True)
+Result = WshShell.Run(Command, 0, True)
 If Err.Number <> 0 Then
   MsgBox Err.Description, vbCritical, "MindNProgress"
   WScript.Quit 1

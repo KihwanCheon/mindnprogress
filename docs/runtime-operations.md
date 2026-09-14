@@ -4,6 +4,7 @@
 
 - 등록된 `\MindNProgress` 작업과 NHN 실행 계정을 유지한다. 작업 등록 내용·계정·자동 실행 조건은 변경하지 않는다.
 - 상위 `MindNProgress_Start.vbs`는 기존처럼 **재시작 후 브라우저 열기**, `MindNProgress_Stop.bat`는 **종료만** 수행한다. 둘 다 `scripts/mnp-runtime.ps1`을 호출한다.
+- 시작 아이콘의 재시작은 콘솔을 표시하지 않고 진행한다. VBS 실행 창 스타일과 PowerShell 창 스타일을 모두 숨김으로 지정하며, 완료를 기다린 뒤 브라우저를 연다. 실패 안내 메시지와 시간·오류 로그는 유지한다. 터미널에서 직접 실행하는 공통 명령의 출력은 그대로 유지한다.
 - 예약 작업의 `MindNProgress_Launcher.cjs`는 장기 실행 런처다. AI 터미널에서 직접 런처나 개발 서버를 띄우지 않는다.
 - Git 밖의 상위 실행 파일은 `scripts/runtime/entrypoints/`에 재배포용 원본을 관리한다. 이번 교체 전 원본은 `../.mindnprogress/runtime-entrypoints-backup-20260914/`에 보관했다.
 
