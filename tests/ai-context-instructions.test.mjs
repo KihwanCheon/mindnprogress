@@ -3,6 +3,7 @@ import test from 'node:test'
 import {
   MNP_CONTEXT_BOOTSTRAP_INSTRUCTION,
   MNP_CONTEXT_LIFECYCLE,
+  MNP_MCP_SERVER_INSTRUCTIONS,
 } from '../src/utils/aiContextInstructions.mjs'
 import { buildAiConversationPrompt } from '../src/utils/aiConversationLaunch.mjs'
 import { buildGroupDocumentInstruction } from '../server/lib/groupDocumentInstructions.mjs'
@@ -23,6 +24,15 @@ test('초기 문맥 바인딩과 이후 대상별 최신성 갱신을 구분한�
   assert.equal(MNP_CONTEXT_LIFECYCLE.refresh.group, 'mindnprogress_get_group_context')
   assert.match(MNP_CONTEXT_LIFECYCLE.staleWrite.action, /version 또는 SHA-256 불일치/)
   assert.match(MNP_CONTEXT_LIFECYCLE.verification.action, /실제 저장 결과/)
+})
+
+test('MCP 연결 지침은 초기 라우팅만 제공하고 상세 정책은 문맥 응답에 맡긴다', () => {
+  assert.match(MNP_MCP_SERVER_INSTRUCTIONS, /mindnprogress_read_me_first/)
+  assert.match(MNP_MCP_SERVER_INSTRUCTIONS, /mindnprogress_get_context/)
+  assert.match(MNP_MCP_SERVER_INSTRUCTIONS, /guide.*nextStep.*reasonCode.*message/s)
+  assert.match(MNP_MCP_SERVER_INSTRUCTIONS, /mindnprogress_get_group_context/)
+  assert.ok(MNP_MCP_SERVER_INSTRUCTIONS.length < 1_200)
+  assert.doesNotMatch(MNP_MCP_SERVER_INSTRUCTIONS, /mindnprogress_patch_card_text|mindnprogress_complete_ai_delegation|waitingItems/)
 })
 
 test('일반 AI 대화가 공통 문맥 생명주기 지침을 사용한다', () => {

@@ -9,6 +9,7 @@ import { groupCriteriaFingerprint, applyGroupWaitingReview, groupWaitingDetails 
 import { GROUP_PLANNING_SOURCE_LIMIT, groupPlanningSources, withGroupPlanningSources, groupProjectCriteriaEqual, groupPlanningSourceSummary, groupPlanningBaseline } from '../src/utils/groupPlanningSources.mjs'
 import { groupProjectDraftAfterRefresh } from '../src/utils/groupOverview.mjs'
 import { buildGroupCoordinatorRequest, buildGroupDocumentRequest } from '../src/utils/aiApprovalInstructions.mjs'
+import { buildAiConversationPrompt } from '../src/utils/aiConversationLaunch.mjs'
 
 const legacy = () => ({ version: 7, coordinatorMapId: null, source: 'https://example.invalid/기본?x=1&y=2', sourceVersion: 'v0.4', objective: '전체 목표\n\n마지막 절 보존', instructions: '공통 지침\n  들여쓰기 보존' })
 const additional = () => ({ id: 'source-added', title: '옷장 추가 기획', source: 'C:\\기획 자료\\옷장 추가.pptx', sourceVersion: 'v0.1' })
@@ -129,7 +130,15 @@ test('기준 요약·재구성 기본값과 총괄·문서 AI 전문은 여러 �
   assert.equal(groupPlanningSourceSummary({}), '기획서 미등록')
   assert.equal(groupPlanningBaseline(legacy()), 'v0.4')
   assert.match(groupPlanningBaseline(project), /기획서 1 · v0.4.*옷장 추가 기획 · v0.1/)
-  for (const prompt of [buildGroupCoordinatorRequest({ groupId: 'group-test' }), buildGroupDocumentRequest({ groupId: 'group-test', groupName: '시험' })]) {
+  const coordinatorPrompt = buildAiConversationPrompt({
+    purpose: 'group-coordination',
+    mapId: 'map-test',
+    cardId: 'root-test',
+    editorId: 'editor-test',
+    attributionToken: 'fixture-token',
+    request: buildGroupCoordinatorRequest({ groupId: 'group-test' }),
+  })
+  for (const prompt of [coordinatorPrompt, buildGroupDocumentRequest({ groupId: 'group-test', groupName: '시험' })]) {
     assert.match(prompt, /project.sources의 모든 기획서 주소·개별 버전/)
     assert.match(prompt, /추가 기획서를 기존 원본의 대체본으로 간주하지/)
     assert.match(prompt, /기획서 추가·제거·주소·개별 버전/)
