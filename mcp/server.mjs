@@ -234,8 +234,8 @@ const productGuide = {
     'startupInspection.mode가 default이고 조사가 요구되면 실제 작업 전에 선택 카드와 최상위 카드의 업무 링크를 조사하되 특정 첨부나 자료가 있다고 가정하지 않음',
     '여러 카드로 새 문서를 만들 때 mindnprogress_create_mindmap을 한 번만 호출',
     '문서 그룹이나 혼합 순서를 변경할 때 먼저 전체 문서와 documentLayout을 조회하고 모든 활성 문서를 정확히 한 번 유지',
-    'create_document 후 save_document를 연속 호출해 전체 구조를 만들지 않음',
-    '지식선 추가·정책 변경·삭제는 전체 save_document 대신 지식선 전용 도구를 사용',
+    '새 문서는 루트 한 건만 필요해도 mindnprogress_create_mindmap으로 원자적으로 생성',
+    '지식선 추가·정책 변경·삭제는 mindnprogress_manage_knowledge_line의 operation.action으로 구분',
     '카드 일부 필드만 변경할 때 mindnprogress_update_card의 data에는 변경할 필드만 보내고 현재 카드 전체 데이터를 재전송하지 않음. 일반 카드에서 생략한 필드와 위치는 보존되지만 완료 상태 또는 진행률 100 적용 시 waitingItems가 자동으로 해제되며 Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있음',
     '기존 description 또는 sharedKnowledge 내부의 일부만 수정할 때는 조회 응답의 textIntegrity SHA-256을 expectedSha256으로 지정해 mindnprogress_patch_card_text를 사용하고 필드 전체를 다시 생성하지 않음',
     ...cardTextSafetyRules,
@@ -1178,7 +1178,7 @@ async function main() {
       ],
     },
     important: [
-      '여러 카드의 새 문서는 create_document와 save_document 조합이 아니라 mindnprogress_create_mindmap으로 생성',
+      '새 문서는 카드 수와 관계없이 mindnprogress_create_mindmap으로 원자적으로 생성',
       '업무로 추적할 task만 isWork=true로 설정',
       'description은 업무 요청과 완료 조건, sharedKnowledge는 다른 카드가 재사용할 안정적인 결론에 사용',
       'sharedKnowledge에는 현재 유효한 재사용 결론만 남기고 진행 기록·도구 로그·중복·폐기 결론은 댓글과 분리하며 같은 주제의 결론은 새 이력 대신 기존 절을 교체',
@@ -1189,7 +1189,7 @@ async function main() {
       '과도한 sharedKnowledge 정리는 후보 목록과 전용 문맥을 조회한 뒤 해시 조건부 검토 도구로 저장',
     '선택 카드 이외의 관련 카드를 수정하기 전에는 mindnprogress_get_ai_work_states로 다른 AI 작업과의 충돌 여부를 확인',
     '하위 카드의 기존 AI 대화를 이어갈지 새로 시작할지 판단할 때는 mindnprogress_list_ai_conversations로 후보를 먼저 비교하고, 같은 업무 흐름이며 idle이고 실행 환경이 호환되는 대화를 우선 이어감. 목적·모델·작업공간이 다르거나 문맥이 독립되어야 할 때만 새 대화를 선택',
-      '지식선만 변경할 때는 전체 문서를 다시 보내지 않고 지식선 전용 도구를 사용',
+      '지식선만 변경할 때는 전체 문서를 다시 보내지 않고 mindnprogress_manage_knowledge_line을 사용',
       '조회 도구는 문서 version을 올리지 않지만 편집 도구와 AI 대화 ID 연결은 version을 올릴 수 있음',
       '업무 링크, 담당자와 마감일은 실제 값이 있을 때만 지정',
       '비밀번호 변경과 관리자 계정 관리는 MCP에서 지원하지 않음',
@@ -1681,15 +1681,23 @@ async function main() {
     }
   })
 
-  registerTool(server, 'mindnprogress_checkpoint_ai_workspace', 'MindNProgress가 할당한 AI worker에서 의도한 구현 변경만 실제 변경을 설명하는 커밋 메시지로 체크포인트에 고정합니다. Unity Play Mode, 재임포트, 동적 폰트·Atlas 생성 등 검증을 시작하기 전에 호출하고, 검증 후 수정했다면 새 변경 내용에 맞는 메시지로 다시 호출하세요. 서버가 현재 문서·카드 제목과 안정적인 ID로 [MnP] 출처 섹션을 생성합니다. 전달한 paths만 커밋되며 체크포인트 이후의 자동 변경은 완료 통합에서 제외됩니다. 파일 변경이 없다면 이 도구가 아니라 mindnprogress_confirm_ai_workspace_no_changes를 사용하세요.', {
+  registerTool(server, 'mindnprogress_checkpoint_ai_workspace', 'MindNProgress가 할당한 AI worker의 검증 전 상태를 기록합니다. operation.action=commit-changes는 실제 변경 경로와 구조화 커밋 메시지를 체크포인트로 고정하고, confirm-no-changes는 git status와 diff를 확인해 의도한 파일 변경이 전혀 없는 조사·검증 작업임을 확인합니다. Unity Play Mode, 재임포트, 동적 폰트·Atlas 생성 등 검증 전에 호출하며 두 action의 증거를 섞지 마세요. 서버가 변경 체크포인트에 현재 문서·카드 제목과 안정적인 ID로 [MnP] 출처를 추가합니다.', {
     mapId: z.string().min(1).describe('할당된 작업 문서 ID'),
     leaseId: z.string().min(1).max(120).describe('최초 위임 전문의 할당된 작업공간 leaseId'),
     jobId: z.string().min(1).max(120).describe('최초 위임 전문의 할당된 작업공간 jobId'),
-    paths: z.array(z.string().min(1).max(4096)).min(1).max(2000)
-      .describe('검증 전에 고정할 의도된 변경의 projectRoot 상대 경로. git status를 확인해 실제 수정·추가한 파일만 전달'),
-    commitMessage: checkpointCommitMessageSchema
-      .describe('이번 paths의 실제 변경을 설명하는 구조화 커밋 메시지. 서버가 [김용민] prefix, [MnP] 출처와 본문 섹션을 생성하므로 출처를 직접 넣지 않음'),
-  }, async ({ mapId, leaseId, jobId, paths, commitMessage }) => {
+    operation: z.discriminatedUnion('action', [
+      z.object({
+        action: z.literal('commit-changes'),
+        paths: z.array(z.string().min(1).max(4096)).min(1).max(2000)
+          .describe('검증 전에 고정할 의도된 변경의 projectRoot 상대 경로. git status를 확인해 실제 수정·추가한 파일만 전달'),
+        commitMessage: checkpointCommitMessageSchema
+          .describe('이번 paths의 실제 변경을 설명하는 구조화 커밋 메시지. 서버가 [김용민] prefix, [MnP] 출처와 본문 섹션을 생성하므로 출처를 직접 넣지 않음'),
+      }).strict(),
+      z.object({
+        action: z.literal('confirm-no-changes'),
+      }).strict(),
+    ]).describe('변경을 커밋할지 파일 변경 없음을 확인할지 선택하는 체크포인트 동작'),
+  }, async ({ mapId, leaseId, jobId, operation }) => {
     const origin = delegationOriginForMap(mapId)
     return apiRequest(`/api/ai-workspaces/${encodeURIComponent(leaseId)}/checkpoint`, {
       method: 'POST',
@@ -1700,26 +1708,9 @@ async function main() {
       aiType: origin.aiType,
       aiModel: origin.aiModel,
       timeoutMs: 60_000,
-      body: JSON.stringify({ jobId, paths, commitMessage }),
-    })
-  })
-
-  registerTool(server, 'mindnprogress_confirm_ai_workspace_no_changes', 'MindNProgress가 할당한 AI worker에서 의도한 파일 변경이 없는 조사·검증 작업임을 명시적으로 확인합니다. git status와 diff를 확인해 구현 변경이 전혀 없을 때만 호출하세요. 파일 변경이 있으면 mindnprogress_checkpoint_ai_workspace에 paths와 구조화 commitMessage를 전달해야 합니다.', {
-    mapId: z.string().min(1).describe('할당된 작업 문서 ID'),
-    leaseId: z.string().min(1).max(120).describe('최초 위임 전문의 할당된 작업공간 leaseId'),
-    jobId: z.string().min(1).max(120).describe('최초 위임 전문의 할당된 작업공간 jobId'),
-  }, async ({ mapId, leaseId, jobId }) => {
-    const origin = delegationOriginForMap(mapId)
-    return apiRequest(`/api/ai-workspaces/${encodeURIComponent(leaseId)}/checkpoint`, {
-      method: 'POST',
-      aiMapId: origin.mapId,
-      aiCardId: origin.cardId,
-      aiAttributionToken: origin.attributionToken,
-      aiEditorId: origin.editorId,
-      aiType: origin.aiType,
-      aiModel: origin.aiModel,
-      timeoutMs: 60_000,
-      body: JSON.stringify({ jobId, paths: [], confirmNoChanges: true }),
+      body: JSON.stringify(operation.action === 'commit-changes'
+        ? { jobId, paths: operation.paths, commitMessage: operation.commitMessage }
+        : { jobId, paths: [], confirmNoChanges: true }),
     })
   })
 
@@ -1877,7 +1868,7 @@ async function main() {
     return result.context
   })
 
-  registerTool(server, 'mindnprogress_create_mindmap', '새 문서와 완성된 계층형 마인드맵을 한 번에 원자적으로 생성합니다. 여러 카드를 만들 때는 create_document 후 save_document를 호출하지 말고 반드시 이 도구를 우선 사용하세요. 실제로 실행할 카드에 독립적으로 판정할 구현·검증 조건이 2개 이상이면 결과 중심 checklist를 작성하되 별도 하위 카드와 중복하지 마세요. 비어 있지 않은 checklist를 보내면 완료 비율로 progress와 status를 자동 계산합니다. 카드 위치와 연결선은 자동 배치됩니다.', {
+  registerTool(server, 'mindnprogress_create_mindmap', '새 문서와 완성된 계층형 마인드맵을 한 번에 원자적으로 생성합니다. 루트 카드 하나만 필요한 문서도 cards에 루트 한 건을 전달하세요. 실제로 실행할 카드에 독립적으로 판정할 구현·검증 조건이 2개 이상이면 결과 중심 checklist를 작성하되 별도 하위 카드와 중복하지 마세요. 비어 있지 않은 checklist를 보내면 완료 비율로 progress와 status를 자동 계산합니다. 카드 위치와 연결선은 자동 배치됩니다.', {
     title: z.string().min(1).max(120),
     color: documentColor.default('violet'),
     cards: z.array(outlineCardSchema).min(1).max(300).describe('루트부터 하위 카드까지 포함한 전체 카드 목록'),
@@ -1892,46 +1883,9 @@ async function main() {
       document: created.summary,
       rootCardId: rootKey,
       cardCount: nodes.length,
-      message: '문서와 전체 마인드맵을 한 번의 저장으로 생성했습니다. 추가 save_document 호출은 필요하지 않습니다.',
+      message: '문서와 전체 마인드맵을 한 번의 저장으로 생성했습니다.',
     }
   })
-
-  registerTool(server, 'mindnprogress_create_document', '루트 카드 하나만 있는 새 문서를 생성합니다. 처음부터 여러 카드로 구성할 때는 버전 충돌 방지를 위해 mindnprogress_create_mindmap을 사용하세요.', {
-    title: z.string().min(1),
-    color: documentColor.default('violet'),
-    rootLabel: z.string().min(1),
-    rootDescription: z.string().default(''),
-    rootSharedKnowledge: z.string().max(sharedKnowledgeMaxLength).default(''),
-  }, async ({ title, color, rootLabel, rootDescription, rootSharedKnowledge }) => {
-    const rootId = `node-${Date.now().toString(36)}-${randomBytes(3).toString('hex')}`
-    return apiRequest('/api/maps', {
-      method: 'POST',
-      body: JSON.stringify({
-        title,
-        color,
-        map: {
-          nodes: [{
-            id: rootId,
-            type: 'mind',
-            position: { x: 0, y: 0 },
-            data: { label: rootLabel, description: rootDescription, sharedKnowledge: rootSharedKnowledge, progress: 0, status: 'planned', kind: 'root' },
-          }],
-          edges: [],
-        },
-      }),
-    })
-  })
-
-  registerTool(server, 'mindnprogress_save_document', '문서의 전체 카드와 연결 관계를 저장합니다. 카드 추가, 복사, 이동, 삭제와 모든 카드 속성 변경을 지원합니다.', {
-    mapId: z.string().min(1),
-    baseVersion: z.number().int().positive(),
-    nodes: z.array(z.record(z.unknown())),
-    edges: z.array(z.record(z.unknown())),
-    force: z.boolean().default(false),
-  }, async ({ mapId, baseVersion, nodes, edges, force }) => apiRequest(`/api/maps/${encodeURIComponent(mapId)}`, {
-    method: 'PUT',
-    body: JSON.stringify({ map: { nodes, edges }, baseVersion, force }),
-  }))
 
   registerTool(server, 'mindnprogress_add_card', '문서에 새 카드 또는 하위 카드를 추가합니다. 실제로 실행할 카드에 독립적으로 판정할 구현·검증 조건이 2개 이상이면 결과 중심 checklist를 작성하되 별도 하위 카드의 작업은 중복하지 마세요. 비어 있지 않은 checklist를 보내면 완료 비율로 progress와 status를 자동 계산합니다. 외부 전달물이나 결정 대기는 제목이 아니라 waitingItems로 기록합니다. 기본 affected 응답은 추가한 카드와 문서 요약만 반환하며, full은 변경 전과 같은 API 원본 전체 문서를 반환합니다.', {
     mapId: z.string().min(1),
@@ -2328,75 +2282,76 @@ async function main() {
     }
   })
 
-  registerTool(server, 'mindnprogress_add_knowledge_line', 'source 카드의 결과를 target 카드가 선행 지식으로 사용하도록 지식선을 추가합니다. 호출 전 mindnprogress_get_context의 guide.knowledgeLinePolicy를 따르세요. 전체 문서를 전달하지 않고 최신 버전에 관계만 안전하게 반영하며 순환과 중복 연결을 거부합니다.', {
+  registerTool(server, 'mindnprogress_manage_knowledge_line', 'source 카드의 결과를 target 카드가 선행 지식으로 사용하도록 지식선을 추가·변경·삭제합니다. operation.action별 필수 입력을 따르며, add 전에 mindnprogress_get_context의 guide.knowledgeLinePolicy를 확인하세요. 전체 문서를 전달하지 않고 최신 버전에 관계만 안전하게 반영하며 추가 시 순환·중복을 거부하고 변경 시 중복 관계를 거부합니다.', {
     mapId: z.string().min(1),
     sourceCardId: z.string().min(1).describe('선행 지식을 제공하는 카드 ID'),
     targetCardId: z.string().min(1).describe('선행 지식을 사용하는 카드 ID'),
-    knowledgePolicy: knowledgePolicySchema.default('reuse-first'),
-  }, async ({ mapId, sourceCardId, targetCardId, knowledgePolicy }) => {
-    const edgeId = `knowledge-${sourceCardId}-${targetCardId}-${Date.now()}-${randomBytes(3).toString('hex')}`
-    const { saved, result } = await mutateDocument(mapId, targetCardId, (map) => {
-      if (!map.nodes.some((node) => node.id === sourceCardId)) throw new Error('선행 지식을 제공하는 카드를 찾을 수 없습니다.')
-      if (!map.nodes.some((node) => node.id === targetCardId)) throw new Error('선행 지식을 사용하는 카드를 찾을 수 없습니다.')
-      if (sourceCardId === targetCardId) throw new Error('카드는 자기 자신을 선행 지식으로 연결할 수 없습니다.')
-      if (map.edges.some((edge) => isKnowledgeEdge(edge) && edge.source === sourceCardId && edge.target === targetCardId)) {
-        throw new Error('이미 연결된 지식선입니다.')
+    operation: z.discriminatedUnion('action', [
+      z.object({
+        action: z.literal('add'),
+        knowledgePolicy: knowledgePolicySchema.default('reuse-first'),
+      }).strict(),
+      z.object({
+        action: z.literal('update'),
+        knowledgePolicy: knowledgePolicySchema,
+      }).strict(),
+      z.object({ action: z.literal('delete') }).strict(),
+    ]).describe('add는 새 지식선 추가, update는 기존 정책 변경, delete는 지식선 삭제'),
+  }, async ({ mapId, sourceCardId, targetCardId, operation }) => {
+    if (operation.action === 'add') {
+      const edgeId = `knowledge-${sourceCardId}-${targetCardId}-${Date.now()}-${randomBytes(3).toString('hex')}`
+      const { saved, result } = await mutateDocument(mapId, targetCardId, (map) => {
+        if (!map.nodes.some((node) => node.id === sourceCardId)) throw new Error('선행 지식을 제공하는 카드를 찾을 수 없습니다.')
+        if (!map.nodes.some((node) => node.id === targetCardId)) throw new Error('선행 지식을 사용하는 카드를 찾을 수 없습니다.')
+        if (sourceCardId === targetCardId) throw new Error('카드는 자기 자신을 선행 지식으로 연결할 수 없습니다.')
+        if (map.edges.some((edge) => isKnowledgeEdge(edge) && edge.source === sourceCardId && edge.target === targetCardId)) {
+          throw new Error('이미 연결된 지식선입니다.')
+        }
+        if (createsKnowledgeCycle(sourceCardId, targetCardId, map.edges)) throw new Error('순환 지식선은 추가할 수 없습니다.')
+        const knowledgeLine = {
+          id: edgeId,
+          source: sourceCardId,
+          target: targetCardId,
+          type: 'default',
+          reconnectable: false,
+          data: { relation: 'knowledge', knowledgePolicy: operation.knowledgePolicy },
+          markerEnd: { type: 'arrowclosed', width: 18, height: 18 },
+        }
+        map.edges.push(knowledgeLine)
+        return knowledgeLine
+      })
+      return {
+        action: operation.action,
+        mapId,
+        version: saved.map.version,
+        knowledgeLine: {
+          id: result.id,
+          sourceCardId: result.source,
+          targetCardId: result.target,
+          knowledgePolicy: knowledgePolicyOf(result),
+        },
       }
-      if (createsKnowledgeCycle(sourceCardId, targetCardId, map.edges)) throw new Error('순환 지식선은 추가할 수 없습니다.')
-      const knowledgeLine = {
-        id: edgeId,
-        source: sourceCardId,
-        target: targetCardId,
-        type: 'default',
-        reconnectable: false,
-        data: { relation: 'knowledge', knowledgePolicy },
-        markerEnd: { type: 'arrowclosed', width: 18, height: 18 },
+    }
+    if (operation.action === 'update') {
+      const { saved, result } = await mutateDocument(mapId, targetCardId, (map) => {
+        const matches = map.edges.filter((edge) => isKnowledgeEdge(edge) && edge.source === sourceCardId && edge.target === targetCardId)
+        if (matches.length === 0) throw new Error('변경할 지식선을 찾을 수 없습니다.')
+        if (matches.length > 1) throw new Error('같은 카드 사이에 중복 지식선이 있어 안전하게 변경할 수 없습니다.')
+        matches[0].data = { ...matches[0].data, relation: 'knowledge', knowledgePolicy: operation.knowledgePolicy }
+        return matches[0]
+      })
+      return {
+        action: operation.action,
+        mapId,
+        version: saved.map.version,
+        knowledgeLine: {
+          id: result.id,
+          sourceCardId: result.source,
+          targetCardId: result.target,
+          knowledgePolicy: knowledgePolicyOf(result),
+        },
       }
-      map.edges.push(knowledgeLine)
-      return knowledgeLine
-    })
-    return {
-      mapId,
-      version: saved.map.version,
-      knowledgeLine: {
-        id: result.id,
-        sourceCardId: result.source,
-        targetCardId: result.target,
-        knowledgePolicy: knowledgePolicyOf(result),
-      },
     }
-  })
-
-  registerTool(server, 'mindnprogress_update_knowledge_line', 'source와 target 카드로 지식선을 찾아 주요 지식 우선 또는 정보 부족 시 확인 정책만 변경합니다. 최신 버전에 관계만 다시 적용하므로 전체 문서 저장이 필요하지 않습니다.', {
-    mapId: z.string().min(1),
-    sourceCardId: z.string().min(1),
-    targetCardId: z.string().min(1),
-    knowledgePolicy: knowledgePolicySchema,
-  }, async ({ mapId, sourceCardId, targetCardId, knowledgePolicy }) => {
-    const { saved, result } = await mutateDocument(mapId, targetCardId, (map) => {
-      const matches = map.edges.filter((edge) => isKnowledgeEdge(edge) && edge.source === sourceCardId && edge.target === targetCardId)
-      if (matches.length === 0) throw new Error('변경할 지식선을 찾을 수 없습니다.')
-      if (matches.length > 1) throw new Error('같은 카드 사이에 중복 지식선이 있어 안전하게 변경할 수 없습니다.')
-      matches[0].data = { ...matches[0].data, relation: 'knowledge', knowledgePolicy }
-      return matches[0]
-    })
-    return {
-      mapId,
-      version: saved.map.version,
-      knowledgeLine: {
-        id: result.id,
-        sourceCardId: result.source,
-        targetCardId: result.target,
-        knowledgePolicy: knowledgePolicyOf(result),
-      },
-    }
-  })
-
-  registerTool(server, 'mindnprogress_delete_knowledge_line', 'source와 target 카드 사이의 지식선을 삭제합니다. 카드와 계층선은 변경하지 않으며 최신 버전에 관계 삭제만 다시 적용합니다.', {
-    mapId: z.string().min(1),
-    sourceCardId: z.string().min(1),
-    targetCardId: z.string().min(1),
-  }, async ({ mapId, sourceCardId, targetCardId }) => {
     const { saved, result } = await mutateDocument(mapId, targetCardId, (map) => {
       const matches = map.edges.filter((edge) => isKnowledgeEdge(edge) && edge.source === sourceCardId && edge.target === targetCardId)
       if (matches.length === 0) throw new Error('삭제할 지식선을 찾을 수 없습니다.')
@@ -2405,6 +2360,7 @@ async function main() {
       return matches.map((edge) => edge.id)
     })
     return {
+      action: operation.action,
       mapId,
       version: saved.map.version,
       deletedKnowledgeLineIds: result,
@@ -2434,19 +2390,30 @@ async function main() {
     body: JSON.stringify({ documentLayout }),
   }))
 
-  registerTool(server, 'mindnprogress_move_document_to_trash', '문서를 휴지통으로 이동합니다.', mapIdSchema, async ({ mapId }) =>
-    apiRequest(`/api/maps/${encodeURIComponent(mapId)}`, { method: 'DELETE' }))
+  registerTool(server, 'mindnprogress_set_document_trash_state', '문서를 휴지통으로 이동하거나 활성 문서로 복원합니다. state=trashed는 복구 가능한 휴지통 이동이고 active는 휴지통 문서 복원입니다. 영구 삭제에는 mindnprogress_delete_trashed_documents를 사용하세요.', {
+    mapId: z.string().min(1),
+    state: z.enum(['trashed', 'active']),
+  }, async ({ mapId, state }) => state === 'trashed'
+    ? apiRequest(`/api/maps/${encodeURIComponent(mapId)}`, { method: 'DELETE' })
+    : apiRequest(`/api/maps/${encodeURIComponent(mapId)}/restore`, { method: 'POST' }))
   registerTool(server, 'mindnprogress_list_trash', '휴지통 문서 목록을 조회합니다.', {}, async () =>
     apiRequest('/api/maps/trash'))
-  registerTool(server, 'mindnprogress_restore_document', '휴지통 문서를 복원합니다.', mapIdSchema, async ({ mapId }) =>
-    apiRequest(`/api/maps/${encodeURIComponent(mapId)}/restore`, { method: 'POST' }))
-  registerTool(server, 'mindnprogress_delete_trashed_documents', '휴지통에서 선택한 문서를 영구 삭제합니다. 문서, 댓글, 변경 이력이 함께 삭제되며 복구할 수 없습니다.', {
-    mapIds: z.array(z.string().min(1)).min(1),
-    confirmPermanentDeletion: z.literal(true),
-  }, async ({ mapIds }) => apiRequest('/api/maps/trash', { method: 'DELETE', body: JSON.stringify({ mapIds }) }))
-  registerTool(server, 'mindnprogress_empty_trash', '휴지통의 모든 문서를 영구 삭제합니다. 문서, 댓글, 변경 이력이 함께 삭제되며 복구할 수 없습니다.', {
-    confirmPermanentDeletion: z.literal(true),
-  }, async () => apiRequest('/api/maps/trash', { method: 'DELETE', body: JSON.stringify({ all: true }) }))
+  registerTool(server, 'mindnprogress_delete_trashed_documents', '휴지통 문서를 영구 삭제합니다. 문서·댓글·변경 이력이 함께 삭제되어 복구할 수 없습니다. selection.scope=selected는 mapIds에 지정한 문서만, all은 휴지통 전체를 삭제하며 두 경우 모두 confirmPermanentDeletion=true가 필수입니다.', {
+    selection: z.discriminatedUnion('scope', [
+      z.object({
+        scope: z.literal('selected'),
+        mapIds: z.array(z.string().min(1)).min(1),
+        confirmPermanentDeletion: z.literal(true),
+      }).strict(),
+      z.object({
+        scope: z.literal('all'),
+        confirmPermanentDeletion: z.literal(true),
+      }).strict(),
+    ]).describe('선택 문서 또는 휴지통 전체를 영구 삭제하는 범위와 명시적 확인'),
+  }, async ({ selection }) => apiRequest('/api/maps/trash', {
+    method: 'DELETE',
+    body: JSON.stringify(selection.scope === 'selected' ? { mapIds: selection.mapIds } : { all: true }),
+  }))
 
   registerTool(server, 'mindnprogress_list_history', '문서 변경 이력을 최신순으로 조회합니다. 다음 이력이 있으면 nextOffset을 offset으로 전달해 이어서 조회하세요.', {
     mapId: z.string().min(1),
@@ -2483,56 +2450,80 @@ async function main() {
     if (resolvedCardId) query.set('nodeId', resolvedCardId)
     return apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments?${query}`)
   })
-  registerTool(server, 'mindnprogress_add_comment', '카드에 댓글 또는 답글을 요약과 상세로 작성합니다. 필수 summary는 [진행], [차단], [결과]로 시작하는 240자 이하의 1~2문장으로 작성하고, 긴 내용은 반드시 별도 detail 인자에 작업을 이어가거나 검증하는 데 필요한 수행 내용·판단·변경 범위·검증 결과·산출물·다음 단계 중 해당 내용을 충실히 기록하세요. summary 문자열 안에 detail이나 도구 호출 마크업을 이어 붙이거나 상세를 여러 댓글로 분산하지 마세요.', {
+  registerTool(server, 'mindnprogress_manage_comment', '댓글 또는 답글을 추가·수정·삭제하거나 스레드 해결 상태와 이모지 반응을 변경합니다. operation.action별 입력 스키마를 따르세요. add의 summary는 [진행], [차단], [결과]로 시작하는 240자 이하의 1~2문장으로 작성하고 긴 내용은 detail에 기록합니다. update는 기존 작성자·시각·답글 관계를 유지하며 expectedText로 동시 수정을 막을 수 있습니다. delete는 연결된 답글도 삭제합니다.', {
     mapId: z.string().min(1),
-    cardId: z.string().min(1).optional().describe('댓글을 작성할 카드 ID. 새 호출에서는 이 필드를 사용'),
-    nodeId: z.string().min(1).optional().describe('기존 대화 호환용 카드 ID. 새 호출에서는 cardId 사용'),
-    summary: z.string().min(1).max(commentSummaryMaxLength, commentSummaryTooLongMessage).describe('필수. [진행], [차단], [결과]로 시작하는 240자 이하의 1~2문장 요약. 긴 내용은 별도 detail 인자로 분리'),
-    detail: z.string().max(6000).optional().describe('작업을 이어가거나 검증하는 데 필요한 상세 내용'),
-    parentCommentId: z.string().min(1).optional().describe('답글을 작성할 상위 댓글 ID'),
-    parentId: z.string().min(1).optional().describe('기존 대화 호환용 상위 댓글 ID. 새 호출에서는 parentCommentId 사용'),
-  }, async ({ mapId, cardId, nodeId, summary, detail, parentCommentId, parentId }) => {
-    const resolvedCardId = resolveAliasedId(cardId, nodeId, {
-      preferredName: 'cardId',
-      legacyName: 'nodeId',
-    })
-    const resolvedParentCommentId = resolveAliasedId(parentCommentId, parentId, {
-      preferredName: 'parentCommentId',
-      legacyName: 'parentId',
-      required: false,
-    })
-    return runCommentWithAttribution(async () => {
-      const result = await apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments`, {
-        method: 'POST', aiCardId: resolvedCardId, requestAttributionContinuation: true,
-        body: JSON.stringify({ nodeId: resolvedCardId, summary, detail, parentId: resolvedParentCommentId }),
+    operation: z.discriminatedUnion('action', [
+      z.object({
+        action: z.literal('add'),
+        cardId: z.string().min(1).optional().describe('댓글을 작성할 카드 ID. 새 호출에서는 이 필드를 사용'),
+        nodeId: z.string().min(1).optional().describe('기존 입력 호환용 카드 ID. 새 호출에서는 cardId 사용'),
+        summary: z.string().min(1).max(commentSummaryMaxLength, commentSummaryTooLongMessage).describe('필수. [진행], [차단], [결과]로 시작하는 240자 이하의 1~2문장 요약'),
+        detail: z.string().max(6000).optional().describe('작업을 이어가거나 검증하는 데 필요한 상세 내용'),
+        parentCommentId: z.string().min(1).optional().describe('답글을 작성할 상위 댓글 ID'),
+        parentId: z.string().min(1).optional().describe('기존 입력 호환용 상위 댓글 ID. 새 호출에서는 parentCommentId 사용'),
+      }).strict(),
+      z.object({
+        action: z.literal('update'),
+        commentId: z.string().min(1),
+        summary: z.string().min(1).max(240).optional(),
+        detail: z.string().max(6000).optional().describe('빈 문자열이면 기존 상세 삭제'),
+        text: z.string().min(1).max(1000).optional().describe('이전 형식 호환용. 새 형식 댓글의 요약 변경에는 summary 사용'),
+        expectedText: z.string().max(1000).optional().describe('현재 댓글 원문과 다르면 다른 편집자의 변경을 덮어쓰지 않고 실패'),
+      }).strict(),
+      z.object({ action: z.literal('delete'), commentId: z.string().min(1) }).strict(),
+      z.object({ action: z.literal('set-resolved'), commentId: z.string().min(1), resolved: z.boolean() }).strict(),
+      z.object({
+        action: z.literal('toggle-reaction'),
+        commentId: z.string().min(1),
+        emoji: z.enum(['👍', '❤️', '🎉', '👀']),
+      }).strict(),
+    ]).describe('댓글에 수행할 동작과 동작별 필수 입력'),
+  }, async ({ mapId, operation }) => {
+    if (operation.action === 'add') {
+      const resolvedCardId = resolveAliasedId(operation.cardId, operation.nodeId, {
+        preferredName: 'cardId',
+        legacyName: 'nodeId',
       })
-      adoptAttributionContinuation(result)
-      return result
+      const resolvedParentCommentId = resolveAliasedId(operation.parentCommentId, operation.parentId, {
+        preferredName: 'parentCommentId',
+        legacyName: 'parentId',
+        required: false,
+      })
+      return runCommentWithAttribution(async () => {
+        const result = await apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments`, {
+          method: 'POST', aiCardId: resolvedCardId, requestAttributionContinuation: true,
+          body: JSON.stringify({ nodeId: resolvedCardId, summary: operation.summary, detail: operation.detail, parentId: resolvedParentCommentId }),
+        })
+        adoptAttributionContinuation(result)
+        return result
+      })
+    }
+    if (operation.action === 'update') {
+      if (operation.summary === undefined && operation.detail === undefined && operation.text === undefined) {
+        throw new Error('수정할 댓글 내용을 입력해 주세요.')
+      }
+      return apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments/${encodeURIComponent(operation.commentId)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          summary: operation.summary,
+          detail: operation.detail,
+          text: operation.text,
+          expectedText: operation.expectedText,
+        }),
+      })
+    }
+    if (operation.action === 'delete') {
+      return apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments/${encodeURIComponent(operation.commentId)}`, { method: 'DELETE' })
+    }
+    if (operation.action === 'set-resolved') {
+      return apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments/${encodeURIComponent(operation.commentId)}/resolve`, {
+        method: 'PATCH', body: JSON.stringify({ resolved: operation.resolved }),
+      })
+    }
+    return apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments/${encodeURIComponent(operation.commentId)}/reactions`, {
+      method: 'POST', body: JSON.stringify({ emoji: operation.emoji }),
     })
   })
-  registerTool(server, 'mindnprogress_update_comment', '기존 댓글 또는 답글의 요약과 상세를 제자리에서 수정합니다. summary를 보내면 기존 단일 본문 댓글도 summary-detail 형식으로 전환되므로, 향후 마이그레이션에서는 원문을 확인한 뒤 summary와 detail을 함께 보내세요. 댓글 ID, 작성자, 생성 시각, 답글 관계, 반응과 해결 상태는 유지됩니다.', {
-    mapId: z.string().min(1),
-    commentId: z.string().min(1),
-    summary: z.string().min(1).max(240).optional(),
-    detail: z.string().max(6000).optional().describe('빈 문자열이면 기존 상세 삭제'),
-    text: z.string().min(1).max(1000).optional().describe('이전 호출과의 호환용. 새 형식 댓글의 요약 변경에는 summary 사용'),
-    expectedText: z.string().max(1000).optional().describe('조건부 수정에 사용할 현재 댓글 원문. 서버 값과 다르면 다른 편집자의 변경을 덮어쓰지 않고 실패'),
-  }, async ({ mapId, commentId, summary, detail, text, expectedText }) => {
-    if (summary === undefined && detail === undefined && text === undefined) throw new Error('수정할 댓글 내용을 입력해 주세요.')
-    return apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments/${encodeURIComponent(commentId)}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ summary, detail, text, expectedText }),
-    })
-  })
-  registerTool(server, 'mindnprogress_delete_comment', '댓글과 연결된 답글을 삭제합니다.', {
-    mapId: z.string().min(1), commentId: z.string().min(1),
-  }, async ({ mapId, commentId }) => apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments/${encodeURIComponent(commentId)}`, { method: 'DELETE' }))
-  registerTool(server, 'mindnprogress_set_comment_resolved', '댓글 스레드의 해결 또는 다시 열기 상태를 변경합니다.', {
-    mapId: z.string().min(1), commentId: z.string().min(1), resolved: z.boolean(),
-  }, async ({ mapId, commentId, resolved }) => apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments/${encodeURIComponent(commentId)}/resolve`, { method: 'PATCH', body: JSON.stringify({ resolved }) }))
-  registerTool(server, 'mindnprogress_toggle_comment_reaction', '댓글의 이모지 반응을 추가하거나 취소합니다.', {
-    mapId: z.string().min(1), commentId: z.string().min(1), emoji: z.enum(['👍', '❤️', '🎉', '👀']),
-  }, async ({ mapId, commentId, emoji }) => apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments/${encodeURIComponent(commentId)}/reactions`, { method: 'POST', body: JSON.stringify({ emoji }) }))
 
   registerTool(server, 'mindnprogress_get_ai_conversation_transcript', '카드에 연결된 AionUi 대화의 전체 내용을 AionUi 세션 목록의 "전체 복사"와 같은 텍스트 형식으로 조회합니다. conversationId를 생략하면 최근 연결 대화를 사용하고, 여러 대화 중 하나를 지정할 수 있습니다. 사용자·어시스턴트·시스템 메시지를 시간순으로 반환하며 도구 호출 메시지는 제외합니다.', {
     mapId: z.string().min(1),
@@ -2552,11 +2543,14 @@ async function main() {
 
   registerTool(server, 'mindnprogress_list_notifications', '현재 AI 편집자의 알림을 조회합니다.', {}, async () =>
     apiRequest('/api/notifications'))
-  registerTool(server, 'mindnprogress_mark_notification_read', '알림을 읽음으로 표시합니다.', {
-    notificationId: z.string().min(1),
-  }, async ({ notificationId }) => apiRequest(`/api/notifications/${encodeURIComponent(notificationId)}/read`, { method: 'PATCH' }))
-  registerTool(server, 'mindnprogress_mark_all_notifications_read', '모든 알림을 읽음으로 표시합니다.', {}, async () =>
-    apiRequest('/api/notifications/read-all', { method: 'POST' }))
+  registerTool(server, 'mindnprogress_mark_notifications_read', '알림을 읽음으로 표시합니다. operation.scope=one은 notificationId 한 건을, all은 현재 AI 편집자의 모든 알림을 처리합니다.', {
+    operation: z.discriminatedUnion('scope', [
+      z.object({ scope: z.literal('one'), notificationId: z.string().min(1) }).strict(),
+      z.object({ scope: z.literal('all') }).strict(),
+    ]).describe('한 알림 또는 모든 알림을 읽음 처리하는 범위'),
+  }, async ({ operation }) => operation.scope === 'one'
+    ? apiRequest(`/api/notifications/${encodeURIComponent(operation.notificationId)}/read`, { method: 'PATCH' })
+    : apiRequest('/api/notifications/read-all', { method: 'POST' }))
 
   await server.connect(new StdioServerTransport())
 }

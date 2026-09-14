@@ -54,8 +54,17 @@ test('HTTP·MCP에서 일반 그룹·총괄·이동·보관·휴지통과 원문
     const result = await mcp.callTool({ name: 'mindnprogress_' + suffix, arguments: args })
     assert.equal(result.isError, undefined, JSON.stringify(result)); return JSON.parse(result.content[0].text)
   }
-  const created = await tool('create_document', { title: '그룹 검증 문서', rootLabel: '검증 루트', rootDescription: '보존할 사용자 요구사항', rootSharedKnowledge: '검토 후보를 만들기 위한 중복 테스트 지식입니다.\n'.repeat(2) })
-  const mapId = created.map.id, cardId = created.map.nodes[0].id
+  const created = await tool('create_mindmap', {
+    title: '그룹 검증 문서',
+    cards: [{
+      key: 'root',
+      label: '검증 루트',
+      kind: 'root',
+      description: '보존할 사용자 요구사항',
+      sharedKnowledge: '검토 후보를 만들기 위한 중복 테스트 지식입니다.\n'.repeat(2),
+    }],
+  })
+  const mapId = created.document.id, cardId = created.rootCardId
   assert.equal(created.group, null); assert.equal(created.groupMembership, 'ungrouped')
   let library = await api('/api/maps')
   const group = { id: 'group-plain', name: '총괄 없는 일반 그룹', mapIds: [mapId] }
@@ -101,10 +110,10 @@ test('HTTP·MCP에서 일반 그룹·총괄·이동·보관·휴지통과 원문
   assert.deepEqual(await readFile(memberPath), memberBefore, '그룹 정보 제공을 위해 보관 원문을 다시 저장하지 않는다')
   await tool('set_document_archive', { mapId: member.map.id, baseVersion: member.map.version, baseLifecycleVersion: archived.lifecycleVersion, archived: false, reason: '테스트 복원' })
   assert.equal((await tool('get_document', { mapId: member.map.id })).group.id, group.id)
-  await tool('move_document_to_trash', { mapId: member.map.id })
+  await tool('set_document_trash_state', { mapId: member.map.id, state: 'trashed' })
   const trashed = (await tool('list_trash')).maps.find((map) => map.id === member.map.id)
   assert.equal(trashed.groupMembership, 'trashed'); assert.equal(trashed.previousGroupKnown, false, '휴지통 이동 당시 기록이 없으면 추측하지 않는다')
-  await tool('restore_document', { mapId: member.map.id })
+  await tool('set_document_trash_state', { mapId: member.map.id, state: 'active' })
   library = await api('/api/maps')
   await tool('save_document_layout', { documentLayout: { ...library.documentLayout,
     groups: library.documentLayout.groups.map((item) => ({ ...item, mapIds: item.mapIds.filter((id) => id !== mapId) })),

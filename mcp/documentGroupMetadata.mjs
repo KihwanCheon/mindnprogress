@@ -1,14 +1,14 @@
-// 등록 도구 수는 유지하고 문서 탐색·편집 결과에만 읽기 전용 소속 메타데이터를 덧붙인다.
+// 문서 탐색·편집 결과에만 읽기 전용 소속 메타데이터를 덧붙인다.
 export const groupAwareToolNames = new Set([
   'list_documents', 'list_archived_documents', 'list_trash', 'get_document', 'get_context', 'get_card',
   'list_shared_knowledge_candidates', 'get_shared_knowledge_review_context', 'apply_shared_knowledge_review',
-  'create_document', 'create_mindmap', 'create_group_document', 'save_document', 'update_document_info',
+  'create_mindmap', 'create_group_document', 'update_document_info',
   'add_card', 'update_card', 'patch_card_text', 'move_card', 'delete_card',
   'get_ai_work_states', 'list_ai_conversations', 'get_ai_conversation_transcript', 'list_ai_delegations',
   'delegate_ai_work', 'complete_ai_delegation', 'recover_ai_delegation', 'refresh_ai_delegation',
   'retry_ai_delegation_report', 'finalize_ai_coordination', 'supersede_ai_delegation',
-  'set_document_archive', 'restore_document', 'restore_history', 'move_document_to_trash',
-  'delete_trashed_documents', 'empty_trash', 'reorder_documents', 'save_document_layout',
+  'set_document_archive', 'restore_history', 'set_document_trash_state',
+  'delete_trashed_documents', 'reorder_documents', 'save_document_layout',
   'get_reconstruction_context', 'get_reconstruction_request', 'submit_reconstruction_proposal',
   'preview_reconstruction', 'apply_reconstruction', 'get_reconstructions', 'rollback_reconstruction',
   'get_card_layout_request', 'submit_card_layout_proposal', 'get_dooray_response_approval', 'list_notifications',

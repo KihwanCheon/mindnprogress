@@ -45,7 +45,7 @@ test('현재 소속을 추가하되 원문·승인·재구성 계획·과거 위
 
 test('조회 부가 정보 실패가 저장 성공을 뒤집지 않고 미소속으로 위장하지 않는다', async () => {
   const result = { summary: { id: 'map-a', version: 8 }, saved: true }
-  const output = await withDocumentGroupMetadata('mindnprogress_save_document', { mapId: 'map-a' }, result, async () => { throw Error('조회 실패') })
+  const output = await withDocumentGroupMetadata('mindnprogress_update_card', { mapId: 'map-a' }, result, async () => { throw Error('조회 실패') })
   assert.equal(output.saved, true); assert.equal(output.summary.version, 8)
   assert.equal(output.documentGroupsStatus, 'unavailable'); assert.match(output.documentGroupsWarning, /작업을 반복하지 말고/)
   assert.equal(Object.hasOwn(output, 'group'), false); assert.equal(Object.hasOwn(output.summary, 'group'), false)
@@ -70,7 +70,7 @@ test('신규 문서·재구성·원본과 대상 문서를 식별하되 본문 �
 
 test('그룹 소속 정보 적용 대상과 비대상 도구의 경계를 유지한다', async () => {
   for (const name of groupAwareToolNames) assert.ok(expectedMcpToolNames.includes(name), name)
-  for (const suffix of ['get_ai_workspace_pool', 'checkpoint_ai_workspace', 'confirm_ai_workspace_no_changes', 'list_users', 'list_comments', 'toggle_comment_reaction', 'add_knowledge_line']) {
+  for (const suffix of ['get_ai_workspace_pool', 'checkpoint_ai_workspace', 'list_users', 'list_comments', 'manage_comment', 'manage_knowledge_line', 'mark_notifications_read']) {
     const result = { mapId: 'map-a', ok: true }
     assert.equal(await withDocumentGroupMetadata('mindnprogress_' + suffix, {}, result, async () => assert.fail('불필요한 조회')), result)
   }

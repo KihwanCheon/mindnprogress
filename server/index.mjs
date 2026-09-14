@@ -3962,7 +3962,7 @@ function workspaceCheckpointInstruction(delegation, workspaceResult) {
 
 ${files}
 
-최신 카드 요구사항과 Git diff를 대조해 의도한 구현 변경과 검증 부산물을 구분하세요. 의도한 파일만 \`mindnprogress_checkpoint_ai_workspace\`의 \`paths\`에 넣고, \`commitMessage\`에는 이번 변경을 실제로 설명하는 \`summary\`·\`background\`·\`cause\`·\`changes\`와 필요한 경우 \`scope\`를 작성하세요. \`summary\`의 \`[김용민]\` prefix와 출처를 나타내는 \`[MnP]\` 및 나머지 본문 섹션은 서버가 추가하므로 직접 넣지 마세요. 자동 변경은 포함하지 마세요. 의도한 파일 변경이 없다면 \`mindnprogress_confirm_ai_workspace_no_changes\`를 호출하세요. 구현과 자동 변경이 같은 파일에 섞여 있으면 기준 내용으로 되돌린 뒤 의도한 수정만 다시 적용하세요. 체크포인트 후 필수 검증을 다시 수행하고 최종 결과를 보고하세요.`
+최신 카드 요구사항과 Git diff를 대조해 의도한 구현 변경과 검증 부산물을 구분하세요. 의도한 파일 변경이 있으면 \`mindnprogress_checkpoint_ai_workspace\`의 \`operation.action=commit-changes\`와 함께 \`paths\` 및 실제 변경을 설명하는 \`commitMessage\`의 \`summary\`·\`background\`·\`cause\`·\`changes\`, 필요한 경우 \`scope\`를 작성하세요. \`summary\`의 \`[김용민]\` prefix와 출처를 나타내는 \`[MnP]\` 및 나머지 본문 섹션은 서버가 추가하므로 직접 넣지 마세요. 자동 변경은 포함하지 마세요. 의도한 파일 변경이 없다면 같은 도구의 \`operation.action=confirm-no-changes\`를 사용하세요. 구현과 자동 변경이 같은 파일에 섞여 있으면 기준 내용으로 되돌린 뒤 의도한 수정만 다시 적용하세요. 체크포인트 후 필수 검증을 다시 수행하고 최종 결과를 보고하세요.`
 }
 
 async function startWorkspaceCheckpointResolution(delegation, workspaceResult) {

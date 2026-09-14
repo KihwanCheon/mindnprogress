@@ -19,7 +19,7 @@ function shard(overrides = {}) {
     conversationId: 'conversation-a',
     startedAt: '2026-08-20T01:00:00.000Z',
     updatedAt: '2026-08-20T01:30:00.000Z',
-    registeredTools: ['mindnprogress_get_context', 'mindnprogress_empty_trash'],
+    registeredTools: ['mindnprogress_get_context', 'mindnprogress_mark_notifications_read'],
     tools: {
       mindnprogress_get_context: {
         ok: 3,
@@ -111,9 +111,9 @@ test('손상된 계측 파일이 섞여도 나머지 집계는 유지된다', ()
 test('등록만 되고 한 번도 호출되지 않은 도구를 삭제 후보로 남긴다', () => {
   const totals = mergeToolUsageShards([shard()])
 
-  assert.deepEqual(totals.unusedTools, ['mindnprogress_empty_trash'])
+  assert.deepEqual(totals.unusedTools, ['mindnprogress_mark_notifications_read'])
   assert.equal(totals.registeredToolCount, 2)
-  const unused = totals.tools.find((tool) => tool.name === 'mindnprogress_empty_trash')
+  const unused = totals.tools.find((tool) => tool.name === 'mindnprogress_mark_notifications_read')
   assert.equal(unused.calls, 0)
   assert.equal(unused.lastCalledAt, null)
 })
@@ -145,7 +145,7 @@ test('성공과 실패를 구분해 세고 응답 문자 수를 누적한다', a
   })
 
   recorder.declare('mindnprogress_update_card')
-  recorder.declare('mindnprogress_empty_trash')
+  recorder.declare('mindnprogress_mark_notifications_read')
   recorder.record('mindnprogress_update_card', { ok: true, chars: 52_190 })
   clock.advance(1_000)
   recorder.record('mindnprogress_update_card', { ok: false, chars: 120 })
@@ -156,7 +156,7 @@ test('성공과 실패를 구분해 세고 응답 문자 수를 누적한다', a
   assert.equal(snapshot.schemaVersion, MCP_TOOL_USAGE_SCHEMA_VERSION)
   assert.equal(snapshot.pid, 4242)
   assert.equal(snapshot.conversationId, 'conversation-b')
-  assert.deepEqual(snapshot.registeredTools, ['mindnprogress_update_card', 'mindnprogress_empty_trash'])
+  assert.deepEqual(snapshot.registeredTools, ['mindnprogress_update_card', 'mindnprogress_mark_notifications_read'])
   assert.deepEqual(snapshot.tools.mindnprogress_update_card, {
     ok: 1,
     fail: 1,
@@ -221,7 +221,7 @@ test('프로세스가 다시 시작해도 이전 계측 파일이 남아 누적�
   try {
     const first = createFileToolUsageRecorder(directory, { flushIntervalMs: 0 })
     first.declare('mindnprogress_get_context')
-    first.declare('mindnprogress_empty_trash')
+    first.declare('mindnprogress_mark_notifications_read')
     first.record('mindnprogress_get_context', { ok: true, chars: 1_000 })
     await first.flush()
     first.close()
@@ -229,7 +229,7 @@ test('프로세스가 다시 시작해도 이전 계측 파일이 남아 누적�
     // 재시작을 모사한다. 새 프로세스는 자기 shard 파일만 새로 쓴다.
     const second = createFileToolUsageRecorder(directory, { flushIntervalMs: 0 })
     second.declare('mindnprogress_get_context')
-    second.declare('mindnprogress_empty_trash')
+    second.declare('mindnprogress_mark_notifications_read')
     second.record('mindnprogress_get_context', { ok: true, chars: 2_000 })
     await second.flush()
     second.close()
@@ -241,7 +241,7 @@ test('프로세스가 다시 시작해도 이전 계측 파일이 남아 누적�
     assert.equal(totals.shardCount, 2)
     assert.equal(context.calls, 2)
     assert.equal(context.chars, 3_000)
-    assert.deepEqual(totals.unusedTools, ['mindnprogress_empty_trash'])
+    assert.deepEqual(totals.unusedTools, ['mindnprogress_mark_notifications_read'])
   } finally {
     await rm(directory, { recursive: true, force: true })
   }

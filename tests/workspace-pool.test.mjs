@@ -46,7 +46,7 @@ test('작업공간 지침은 기존 대화에도 재배정 정보를 명확하�
   assert.match(instruction, /knowledge-inbox\/job-12\.md/)
   assert.match(instruction, /직접 커밋하지 마세요/)
   assert.match(instruction, /commitMessage/)
-  assert.match(instruction, /mindnprogress_confirm_ai_workspace_no_changes/)
+  assert.match(instruction, /mindnprogress_checkpoint_ai_workspace.*operation\.action=confirm-no-changes/)
 })
 
 test('체크포인트 커밋 메시지는 실제 변경 구조와 금지 항목을 검증한다', () => {

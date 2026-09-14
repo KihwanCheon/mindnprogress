@@ -409,8 +409,7 @@ node runner/index.mjs
 | `mindnprogress_get_shared_knowledge_review_context` | 후보 한 카드의 공유 지식 원문과 관계·최근 댓글·검토 기준을 조회합니다. |
 | `mindnprogress_get_ai_work_states` | 지정한 카드 또는 문서 전체에서 연결된 AI 대화의 현재 작업·승인 대기·유휴·확인 불가 상태를 조회합니다. 문서 버전은 변경하지 않습니다. |
 | `mindnprogress_get_ai_workspace_pool` | MindNProgress가 관리하는 AI 작업공간의 역할·경로·Unity 인스턴스 해시와 현재 상태를 조회합니다. 다른 대화의 lease·job 식별자는 노출하지 않습니다. |
-| `mindnprogress_checkpoint_ai_workspace` | worker의 실제 변경 경로와 `summary`·`background`·`cause`·`changes`(선택 `scope`)를 받아 출처가 명확한 `[김용민]` 커밋으로 고정합니다. 구조화 커밋 메시지를 생략할 수 없습니다. |
-| `mindnprogress_confirm_ai_workspace_no_changes` | 조사·검증 결과 의도한 파일 변경이 전혀 없음을 확인합니다. 변경 체크포인트의 빈 경로 호환 입력 대신 이 도구를 사용합니다. |
+| `mindnprogress_checkpoint_ai_workspace` | `operation.action=commit-changes`이면 worker의 실제 변경 경로와 구조화 커밋 메시지를 체크포인트로 고정하고, `confirm-no-changes`이면 git status와 diff로 의도한 파일 변경이 없음을 확인합니다. 두 action의 입력은 서로 섞을 수 없습니다. |
 | `mindnprogress_list_ai_conversations` | 카드에 연결된 모든 AI 대화 후보의 실행 환경, 시작 정보, 최근 활동과 실시간 상태를 조회해 기존 대화 이어가기와 새 대화 시작 판단에 사용합니다. |
 | `mindnprogress_delegate_ai_work` | 대화 시작 카드의 모든 깊이 하위 카드에 실행 가능한 지시를 전달해 기존 대화를 이어가거나 새 대화를 만들고, 해당 턴 완료 후 결과와 함께 상위 대화를 자동 재개합니다. 다른 카드 조회는 위임 기준을 바꾸지 않습니다. |
 | `mindnprogress_complete_ai_delegation` | 사용자가 중지한 하위 위임을 같은 대화에서 직접 이어 실제 작업을 완료했을 때, 카드 기록과 작업공간 체크포인트 이후 마지막 턴에 명시적 완료 신호를 보냅니다. 단순 질의 응답과 중간 보고에는 사용하지 않습니다. |
@@ -421,27 +420,38 @@ node runner/index.mjs
 | `mindnprogress_get_ai_conversation_transcript` | 카드에 연결된 최근 AionUi 대화 또는 `conversationId`로 지정한 이전 대화 전문을 `전체 복사`와 같은 텍스트 형식으로 조회합니다. |
 | `mindnprogress_list_users` | 담당자로 지정할 수 있는 편집자 계정 목록을 조회합니다. |
 
-변경 체크포인트의 `commitMessage.summary`에는 `[김용민]`이나 `[MnP]` 출처를 넣지 않습니다. 서버가 제목 prefix와 `[MnP]`·`[배경]`·`[원인]`·`[수정]`·선택적 `[적용 범위]` 섹션을 생성하며 `Co-Authored-By`는 거부합니다. `[MnP]`에는 체크포인트 시점의 문서·카드 제목, 안정적인 `mapId`·`cardId`와 호스트에 의존하지 않는 상대 경로가 기록됩니다. 파일 변경이 없으면 변경 도구에 빈 `paths`를 보내지 않고 `mindnprogress_confirm_ai_workspace_no_changes`를 호출합니다.
+변경 체크포인트의 `commitMessage.summary`에는 `[김용민]`이나 `[MnP]` 출처를 넣지 않습니다. 서버가 제목 prefix와 `[MnP]`·`[배경]`·`[원인]`·`[수정]`·선택적 `[적용 범위]` 섹션을 생성하며 `Co-Authored-By`는 거부합니다. `[MnP]`에는 체크포인트 시점의 문서·카드 제목, 안정적인 `mapId`·`cardId`와 호스트에 의존하지 않는 상대 경로가 기록됩니다. 파일 변경이 없으면 빈 `paths`를 보내지 않고 `operation.action=confirm-no-changes`를 사용합니다.
 
 ### 문서와 카드 편집
 
 | 명령어 | 설명 |
 | --- | --- |
-| `mindnprogress_create_mindmap` | 여러 카드로 구성된 새 문서와 계층 구조를 한 번에 생성하고 자동 배치합니다. |
-| `mindnprogress_create_document` | Root 카드 하나만 포함한 빈 문서를 생성합니다. |
-| `mindnprogress_save_document` | 기준 버전을 확인하면서 문서의 전체 카드와 연결 관계를 저장합니다. |
+| `mindnprogress_create_mindmap` | 루트 한 건부터 여러 카드까지 새 문서와 계층 구조를 한 번에 생성하고 자동 배치합니다. |
 | `mindnprogress_add_card` | 새 카드 또는 지정한 상위 카드의 하위 카드를 추가합니다. 기본 `responseMode=affected`는 추가한 카드와 문서·Root 요약만, `full`은 변경 전과 같은 API 원본 전체 문서를 반환합니다. |
 | `mindnprogress_update_card` | 전달한 필드만 부분 병합하여 카드 제목, 설명, 공유 지식, 상태, 진행률과 업무 관리 필드를 수정합니다. 일반 카드에서 생략한 필드와 위치는 보존됩니다. 기본 `responseMode=full`은 저활용 필드를 제외한 최신 전체 문서를, `affected`는 직접·간접 변경 카드와 문서·Root 요약을 반환합니다. |
 | `mindnprogress_patch_card_text` | 조회한 SHA-256이 유지된 경우에만 설명 또는 공유 지식의 유일 문자열·경계 내부를 교체하거나 뒤에 추가합니다. 장문 필드 전체를 다시 생성하지 않습니다. |
 | `mindnprogress_apply_shared_knowledge_review` | 문서 버전과 카드별 SHA-256이 모두 일치할 때만 최대 20개 카드의 정리 결과와 검토 기록을 한 번에 저장합니다. |
 | `mindnprogress_move_card` | 카드와 전체 하위 구조를 다른 카드 아래로 이동합니다. 기본 `responseMode=affected`는 이동한 카드와 이전·새 상위 관계만, `full`은 변경 전과 같은 API 원본 전체 문서를 반환합니다. |
 | `mindnprogress_delete_card` | 카드와 선택적으로 전체 하위 카드를 삭제합니다. Root 카드는 삭제할 수 없습니다. 기본 `responseMode=affected`는 삭제한 카드 ID와 끊어진 계층·지식선 관계 및 함께 조정된 카드만, `full`은 변경 전과 같은 API 원본 전체 문서를 반환합니다. |
-| `mindnprogress_add_knowledge_line` | 두 카드 사이에 지식선을 추가합니다. 중복과 순환 관계를 거부합니다. |
-| `mindnprogress_update_knowledge_line` | 지식선 정책을 `reuse-first` 또는 `inspect-if-insufficient`로 변경합니다. |
-| `mindnprogress_delete_knowledge_line` | 두 카드 사이의 지식선만 삭제합니다. |
+| `mindnprogress_manage_knowledge_line` | `operation.action=add/update/delete`로 지식선을 추가하거나 정책을 변경하거나 삭제합니다. add는 중복·순환을 거부하고 update는 중복 관계를 거부합니다. |
 | `mindnprogress_update_document_info` | 문서 이름 또는 아이콘 색상을 변경합니다. |
 
-처음부터 여러 카드가 필요한 경우 `mindnprogress_create_document`와 `mindnprogress_save_document`를 연속 호출하지 말고 `mindnprogress_create_mindmap`을 사용합니다. 지식선만 바꿀 때는 전체 카드와 장문 본문을 다시 전달하는 `mindnprogress_save_document` 대신 지식선 전용 도구를 사용합니다. 전용 도구는 최신 문서를 내부에서 조회해 관계 변경만 재적용하고 일시적인 버전 충돌을 최대 3회까지 다시 시도합니다. 전체 저장과 문서 정보 변경은 최신 `baseVersion`을 사용하며, 버전 충돌이 발생하면 문서를 다시 조회해야 합니다.
+새 문서는 카드 수와 관계없이 `mindnprogress_create_mindmap`으로 원자적으로 생성합니다. 기존 문서는 카드·관계 전용 도구로 부분 변경하며 전체 문서 덮어쓰기 도구는 공개하지 않습니다. 지식선만 바꿀 때는 `mindnprogress_manage_knowledge_line`을 사용합니다. 이 도구는 최신 문서를 내부에서 조회해 관계 변경만 재적용하고 일시적인 버전 충돌을 최대 3회까지 다시 시도합니다. 문서 정보 변경은 최신 `baseVersion`을 사용하며, 버전 충돌이 발생하면 문서를 다시 조회해야 합니다.
+
+### 통합 도구 전환
+
+유사한 동작은 자원군별 단일 도구의 중첩 `operation` 스키마로 통합합니다. 각 action은 필요한 필드만 허용하는 구별된 스키마이므로 다른 action의 입력을 섞으면 호출 전에 거부됩니다. 대형 조회 도구의 응답 정보량과 재구성·AI 위임 상태 기계의 단계별 도구는 변경하지 않습니다.
+
+| 이전 공개 도구 | 새 공개 도구 |
+| --- | --- |
+| 지식선 add/update/delete 3개 | `mindnprogress_manage_knowledge_line`의 `add/update/delete` |
+| 댓글 add/update/delete/resolve/reaction 5개 | `mindnprogress_manage_comment`의 5개 action. 조회는 `mindnprogress_list_comments` 유지 |
+| 알림 단건/전체 읽음 2개 | `mindnprogress_mark_notifications_read`의 `one/all` |
+| 변경 있음/변경 없음 체크포인트 2개 | `mindnprogress_checkpoint_ai_workspace`의 `commit-changes/confirm-no-changes` |
+| 휴지통 이동/복원 2개 | `mindnprogress_set_document_trash_state`의 `trashed/active` |
+| 선택/전체 영구 삭제 2개 | `mindnprogress_delete_trashed_documents`의 `selected/all` |
+
+통합 버전을 배포하면 기존 이름은 tools/list에서 제거됩니다. 이미 연결된 MCP 프로세스는 종료 전까지 기존 구현을 사용하지만, 재시작한 프로세스와 도구 목록을 캐시한 기존 대화는 MCP를 재연결해 새 목록을 받은 뒤 위 대응표의 새 이름과 중첩 입력을 사용해야 합니다. 되돌릴 때는 서버를 이전 버전으로 배포하고 MCP를 다시 연결합니다.
 
 MCP 도구에서 카드를 지정할 때는 `cardId`를 사용합니다. 상위 카드는 `parentCardId`, 이동할 새 상위 카드는 `newParentCardId`, 답글의 상위 댓글은 `parentCommentId`로 지정합니다. 기존 `nodeId`, `parentId`, `newParentId`는 이미 시작된 AI 대화와의 호환을 위해 한시적으로 허용되지만 새 호출에서는 사용하지 않습니다. 선호 필드와 호환 필드를 동시에 서로 다른 값으로 전달하면 안전을 위해 요청이 거부됩니다. 원시 문서의 `nodes`, 댓글 저장 데이터의 `nodeId` 등 내부 저장 구조는 기존 문서 및 백업 호환을 위해 유지됩니다.
 
@@ -479,13 +489,11 @@ AI 정리는 `mindnprogress_list_shared_knowledge_candidates`로 원문 없는 �
 
 | 명령어 | 설명 |
 | --- | --- |
-| `mindnprogress_move_document_to_trash` | 문서를 휴지통으로 이동합니다. |
+| `mindnprogress_set_document_trash_state` | `state=trashed`로 문서를 휴지통으로 이동하고 `active`로 복원합니다. |
 | `mindnprogress_list_trash` | 휴지통 문서 목록을 조회합니다. |
-| `mindnprogress_restore_document` | 휴지통의 문서를 활성 문서로 복원합니다. |
-| `mindnprogress_delete_trashed_documents` | 휴지통에서 선택한 문서를 영구 삭제합니다. |
-| `mindnprogress_empty_trash` | 휴지통의 모든 문서를 영구 삭제합니다. |
+| `mindnprogress_delete_trashed_documents` | `selection.scope=selected/all`로 선택 문서 또는 휴지통 전체를 영구 삭제합니다. |
 
-영구 삭제는 문서, 댓글과 변경 이력을 함께 제거하며 복구할 수 없습니다. `mindnprogress_delete_trashed_documents`와 `mindnprogress_empty_trash`는 `confirmPermanentDeletion=true`를 명시해야 합니다.
+영구 삭제는 문서, 댓글과 변경 이력을 함께 제거하며 복구할 수 없습니다. `mindnprogress_delete_trashed_documents`는 두 scope 모두 중첩 `selection`에 `confirmPermanentDeletion=true`를 명시해야 합니다.
 
 ### 변경 이력
 
@@ -501,11 +509,7 @@ AI 정리는 `mindnprogress_list_shared_knowledge_candidates`로 원문 없는 �
 | 명령어 | 설명 |
 | --- | --- |
 | `mindnprogress_list_comments` | 문서 전체 또는 특정 카드의 댓글과 답글을 페이지 조회합니다. `includeDetail=true`이면 상세 본문을 포함합니다. |
-| `mindnprogress_add_comment` | 카드에 짧은 `summary`와 선택적 `detail`로 새 댓글 또는 답글을 작성합니다. |
-| `mindnprogress_update_comment` | 기존 댓글이나 답글의 요약과 상세를 수정하고 기존 단일 본문 댓글을 새 형식으로 전환할 수 있습니다. `expectedText`를 보내면 조회 이후 원문이 달라졌을 때 수정을 거부합니다. |
-| `mindnprogress_delete_comment` | 댓글과 연결된 답글을 삭제합니다. |
-| `mindnprogress_set_comment_resolved` | 댓글 스레드를 해결하거나 다시 엽니다. |
-| `mindnprogress_toggle_comment_reaction` | 댓글의 `👍`, `❤️`, `🎉`, `👀` 반응을 추가하거나 취소합니다. |
+| `mindnprogress_manage_comment` | `operation.action=add/update/delete/set-resolved/toggle-reaction`으로 댓글을 변경합니다. action별로 작성 대상·본문·댓글 ID·해결 상태·이모지 입력을 분리해 검증합니다. |
 
 `mindnprogress_list_comments` 응답에 `nextOffset`이 있으면 다음 호출의 `offset`으로 전달합니다. AI 댓글의 `summary`는 의미 있는 진행, 차단과 완료 결과에 따라 `[진행]`, `[차단]`, `[결과]` 머리말로 시작하는 1~2문장으로 작성합니다. `detail`에는 다른 세션이 작업을 이어가거나 검증하는 데 필요한 수행 내용, 판단, 변경 범위, 검증 방법과 실제 결과, 산출물, 제한사항과 다음 단계 중 해당 내용을 충실하게 기록합니다. 요약 때문에 상세를 축약하지 않으며 개별 도구 호출과 의미 없는 반복만 제외합니다.
 
@@ -539,8 +543,7 @@ npm run comments:migration -- verify
 | 명령어 | 설명 |
 | --- | --- |
 | `mindnprogress_list_notifications` | 현재 AI 편집자의 알림을 조회합니다. |
-| `mindnprogress_mark_notification_read` | 지정한 알림을 읽음으로 표시합니다. |
-| `mindnprogress_mark_all_notifications_read` | 모든 알림을 읽음으로 표시합니다. |
+| `mindnprogress_mark_notifications_read` | `operation.scope=one/all`로 지정한 알림 또는 모든 알림을 읽음으로 표시합니다. |
 
 ## 주요 조작
 
