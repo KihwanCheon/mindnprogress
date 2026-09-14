@@ -153,12 +153,19 @@ exit 7
             Listeners = @([pscustomobject]@{LocalPort=44176;OwningProcess=101},[pscustomobject]@{LocalPort=44175;OwningProcess=102}) }
     }
     function Test-MnpHttp { $script:httpChecks++; return $script:httpChecks -eq 1 -or (-not $script:finalChecksFail -and $script:httpChecks -ge 3) }
+    function Wait-MnpHttpReady($Context, [datetime]$Deadline, [string]$Failure) {
+        $script:httpDeadlines += $Deadline
+        for ($attempt = 0; $attempt -lt 2; $attempt++) { if (Test-MnpHttp $Context) { return } }
+        throw $Failure
+    }
     function Wait-MnpCondition([scriptblock]$Condition, [int]$Seconds, [string]$Failure) {
         for ($attempt = 0; $attempt -lt 2; $attempt++) { if (& $Condition) { return } }
         throw $Failure
     }
+    $script:httpDeadlines = @()
     Invoke-MnpRuntime restart 1 1 $false $true
     Assert-MnpTest ($script:httpChecks -eq 3) 'Final readiness did not retry a transient failure'
+    Assert-MnpTest ($script:httpDeadlines.Count -eq 2 -and $script:httpDeadlines[0] -eq $script:httpDeadlines[1]) 'Final verification reset the startup deadline'
     Assert-MnpTest (($script:calls -join ',') -eq 'stop-task,legacy,start-task') 'HTTP retry repeated task startup'
     $script:calls = @(); $script:httpChecks = 0
     Invoke-MnpRuntime restart 1 1 $false $true $true

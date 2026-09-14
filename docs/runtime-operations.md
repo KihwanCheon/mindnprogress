@@ -14,6 +14,8 @@
 
 프로젝트 폴더에서 실행한다. `status`는 서버와 예약 작업을 변경하지 않는다.
 
+AI와 사용자의 시작 아이콘 모두 아래 공통 제어 스크립트를 사용한다. `Stop-ScheduledTask`만 실행한 뒤 `Ready`를 중지 완료로 취급하거나, 별도 PID 강제 종료 명령을 즉석에서 만들어 재시작 절차를 대체하지 않는다. 작업 실행기와 자식 PID의 수명은 같지 않다.
+
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/mnp-runtime.ps1 -Action status
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/mnp-runtime.ps1 -Action start
@@ -33,13 +35,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/mnp-runtime.ps1 -Act
 2. 재시작 명령의 독점 파일 잠금을 유지한다. 예약 작업부터 중지하고, 남은 감시자에 설치 경로별 파이프와 실행 인스턴스 식별자로 정상 종료를 요청한다. 외부 HTTP 종료 API는 만들지 않는다.
 3. API는 신규 요청과 반복 작업을 중지하고, 처리 중인 요청 함수·명시적 백그라운드 작업을 기다린다. 응답만 먼저 반환한 저장도 기다리며 SSE 연결을 정리한다. 이후 웹 서버를 닫고 프로세스가 실제로 종료될 때까지 기다린다.
 4. 반복 확인에는 프로세스 핸들·기동 시각·실행 파일과 빠른 TCP 목록을 사용한다. PID 파일만으로 종료하지 않는다. 구형 전환에만 명령줄·생성 시각·부모 관계를 재조회한 동일 대상의 종료를 허용한다.
-5. 기존 프로세스와 포트가 모두 사라진 뒤 같은 예약 작업을 시작한다. 웹/API HTTP 200과 API 상태, 새 PID/기동 시각, 실제 NHN 계정과 포트 소유자를 다시 확인한다. 최종 HTTP 확인이 일시적으로 실패하면 최대 5초 동안 확인만 재시도하며, 예약 작업을 다시 시작하지 않는다.
+5. 기존 프로세스와 포트가 모두 사라진 뒤 같은 예약 작업을 시작한다. 웹/API HTTP 200과 API 상태, 새 PID/기동 시각, 실제 NHN 계정과 포트 소유자를 다시 확인한다. 기동과 최종 HTTP 검증은 `StartTimeoutSeconds`(기본 60초)의 **동일한 마감 시각**을 사용한다. 요청마다 900ms에 취소하거나 최종 확인에 별도의 5초 제한을 덧씌우지 않는다. 실패 시 예약 작업을 다시 시작하지 않는다.
 
 `npm run dev`의 `--watch` 개발 경로는 유지한다. 예약 작업은 자동 코드 감시 재시작이 없는 stable 경로다. 개발 경로는 운영 제어 명령의 종료 대상에 포함하지 않는다.
 
 ## 기록과 검증 범위
 
-- `../.mindnprogress/runtime-operations.jsonl`: 사전 검사, 종료, 작업 시작, HTTP 준비, 최종 검증, 전체 시간 및 성공 여부.
+- `../.mindnprogress/runtime-operations.jsonl`: 사전 검사, 종료, 작업 시작, HTTP 준비, 최종 검증, 전체 시간 및 성공 여부. 마지막 HTTP 검사의 웹/API 상태 코드, 응답 시간, 남은 제한 시간, 오류 종류도 기록한다.
 - `../.mindnprogress/dev.out.log`: API/웹 자원 정리 및 실제 하위 프로세스 종료 시간.
 - `../.mindnprogress/dev.err.log`: 오류 상세. 인증 정보나 제어 인스턴스 식별자는 로그에 기록하지 않는다.
 
@@ -50,7 +52,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/mnp-runtime.ps1 -Act
 사전 검사 단일 측정은 WMI 계정 조회 반복 제거 전 약 22.6초, Windows 프로세스 토큰 조회 적용 후 약 9.5초였다. 통제된 반복 벤치마크는 아니다. 임시 웹 서버는 자원 정리 이후 실제 프로세스 종료까지 수 초 이상 편차가 관찰됐다. **전체 10~15초는 아직 검증된 보장이 아니며**, 다음 실제 재시작의 단계별 로그로 확인한다.
 
 ```powershell
-node --test tests/runtime-controller.test.mjs tests/runtime-entrypoints.test.mjs tests/runtime-task-host.test.mjs tests/runtime-lifecycle.test.mjs tests/runtime-supervisor.test.mjs
+node --test --test-concurrency=1 tests/runtime-controller.test.mjs tests/runtime-entrypoints.test.mjs tests/runtime-task-host.test.mjs tests/runtime-lifecycle.test.mjs tests/runtime-supervisor.test.mjs tests/runtime-orphan-recovery.test.mjs tests/runtime-http-readiness.test.mjs
 npm run build
 ```
 
@@ -67,3 +69,14 @@ npm run build
 - 실제 재시작 전체의 SHOW 이벤트는 0건이었다. 기록은 `../.mindnprogress/runtime-window-verification-20260914-094153.json`에 있다. 이 기록의 전체 성공 여부는 아래 HTTP 시간 초과 때문에 `false`이며, 실패 전에 저장한 실행 파일/프로세스 정보는 전환 전 스냅샷이다.
 - 새 작업 호스트는 `wscript.exe` PID `99180`, API/웹은 PID `219608`/`230420`(18:42:27 KST)다. 이후 읽기 전용 재조회에서도 같은 PID·NHN 계정·검증된 부모 관계·포트 소유권을 확인했다.
 - 처음 HTTP 준비 검사는 통과했으나 마지막 900ms 단위 HTTP 검사에서 시간 초과했다. 추가 재시작 없이 후속 확인 3회 모두 웹/API HTTP 200, API `status=ok`였고 응답 시간은 각각 78/4/3ms였다. 창 노출 검증과 기존의 짧은 HTTP 준비 제한 문제를 구분하며, 이번 변경에서는 HTTP 제한을 수정하지 않았다.
+
+### 재시작 절차 누락과 HTTP 판정 보완 — 2026-09-14
+
+- 기존 배치 원본(`../.mindnprogress/runtime-entrypoints-backup-20260914/`)은 `dev.pids`에 런처·감시자 PID를 기록하고 중지 시 `taskkill /F /T /PID`로 하위 트리를 종료한 뒤 포트 해제를 확인했다. 현재도 PID 기록은 유지하지만 정상 종료 스크립트가 실제 실행 파일·생성 시각·부모 관계를 검증하고 저장 완료를 기다린다.
+- 격리한 동일 실행기·런처·감시자·서버 구성에서 **바깥 실행기만 중지하면 기록된 자식 4개가 모두 남는 현상**을 재현했다. 그 상태에서 공통 `stop` 절차는 4개 모두 종료하고 두 포트를 해제했다. 응답 후 저장 완료를 기다렸으며, 다른 테스트 프로세스를 가리키는 오래된 PID 힌트는 종료 대상으로 사용하지 않았다. 테스트는 실제 예약 작업을 등록·중지하거나 운영 데이터를 사용하지 않는다.
+- 실제 최근 20:52 기동은 예약 작업에는 기록됐지만 공통 제어 로그의 마지막 기록은 18:42였다. 사용자가 제공한 개별 스케줄러 중지 명령과 위 재현 결과는 공통 절차를 생략한 경로의 문제를 뒷받침한다. 새로운 실행기를 도입하거나 강제 종료를 기본 동작으로 되돌리지 않았다.
+- 운영 스킬의 공통 제어 경로를 명확히 하고, 중지 시 검증된 대상 PID·정상 종료 접수·남은 PID/포트를 표시한다. `Ready`만으로 완료를 판단하지 않는다. 운영 스킬 원본은 `skills/mnp-runtime/SKILL.md`, 이 PC에 적용된 계정 사본은 `C:/Users/NHN/.codex/skills/mnp-runtime/SKILL.md`다.
+- 1.8초 후 정상 200을 반환하는 격리 HTTP 서버에서 기존 900ms 검사의 실패를 재현했다. 같은 서버를 시작 제한 안에서 기다리는 검사는 통과했고, 무응답 서버는 주어진 500ms 제한으로 실패했다. 503·잘못된 JSON·준비되지 않은 API 상태도 성공으로 인정하지 않는다. 전체 시작 제한을 늘리지 않고 기동·최종 검증의 마감 시각을 통일했다. 이는 HTTP 판정 결함의 재현이며, 과거 운영 응답 지연 각각의 원인까지 확정한 것은 아니다.
+- 최종 격리 회귀 테스트 **10개 모두 통과**. 운영 스킬 형식 검증과 저장소 원본/계정 사본의 동일성도 확인했다.
+- 실제 재시작은 기본 종료 30초·시작 60초 설정으로 **2회 연속 성공**했다. 첫 회 총 55.961초(종료 15.455초), 두 번째 총 47.641초(종료 9.208초)였다. 각각 기존 PID 전부와 포트 해제를 확인한 뒤 새 PID를 검증했고 웹/API 200, NHN 계정, SHOW 이벤트 0건이었다. 추가 강제 종료·재시도·예약 작업 설정 변경은 없었다.
+- 실제 검증 기록: `../.mindnprogress/runtime-window-verification-20260914-121110.json`, `../.mindnprogress/runtime-window-verification-20260914-121332.json`. 첫 회 최종 HTTP 검사에는 26.395초가 걸렸으나 기존 시작 제한 안에서 정상 판정됐다. 시작 중 응답 지연 자체를 없앤 변경은 아니며, 그 지연을 임의로 실패로 판정하던 조건을 바로잡은 것이다.

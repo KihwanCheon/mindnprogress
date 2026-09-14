@@ -190,13 +190,30 @@ function Test-MnpStopped($Context, $Snapshot) {
     return @($ports | Where-Object { $Context.Ports -contains $_.Port }).Count -eq 0
 }
 
-function Wait-MnpCondition([scriptblock]$Condition, [int]$Seconds, [string]$Failure) {
+function Wait-MnpCondition([scriptblock]$Condition, [int]$Seconds, [string]$Failure, [scriptblock]$OnWaiting) {
     $watch = [Diagnostics.Stopwatch]::StartNew()
+    $nextReport = 0
     do {
         if (& $Condition) { return }
+        if ($OnWaiting -and $watch.ElapsedMilliseconds -ge $nextReport) {
+            & $OnWaiting
+            $nextReport = $watch.ElapsedMilliseconds + 2000
+        }
         Start-Sleep -Milliseconds 150
     } while ($watch.Elapsed.TotalSeconds -lt $Seconds)
     throw $Failure
+}
+
+function Write-MnpStopProgress($Context, $Snapshot) {
+    $remaining = @($Snapshot.Records | ForEach-Object {
+        $live = Get-MnpLiveProcess $_.Process
+        if ($null -ne $live) {
+            try { "$($_.Role)=$($_.Process.ProcessId)" } finally { $live.Dispose() }
+        }
+    })
+    $ports = @([Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() |
+        Where-Object { $Context.Ports -contains $_.Port } | ForEach-Object Port | Sort-Object -Unique)
+    Write-Host "[stop-wait] remaining PIDs: $($remaining -join ', '); occupied ports: $($ports -join ', '). Task Ready alone does not mean stopped."
 }
 
 function Get-MnpDescriptor($Context, $Snapshot) {
@@ -252,24 +269,46 @@ function Stop-MnpLegacy($Snapshot) {
     }
 }
 
-function Test-MnpHttp($Context) {
+function Test-MnpHttp($Context, [int]$TimeoutMilliseconds = 900) {
     Add-Type -AssemblyName System.Net.Http
     $handler = New-Object Net.Http.HttpClientHandler
     $handler.UseProxy = $false
     $client = New-Object Net.Http.HttpClient($handler)
-    $client.Timeout = [timespan]::FromMilliseconds(900)
+    $client.Timeout = [timespan]::FromMilliseconds([math]::Max(1, $TimeoutMilliseconds))
     $web = $null; $api = $null
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    $check = [ordered]@{ healthy = $false; timeoutMs = $TimeoutMilliseconds; webStatus = $null; apiStatus = $null; error = $null; elapsedMs = 0 }
     try {
         $webTask = $client.GetAsync($Context.Config.webUrl)
         $apiTask = $client.GetAsync($Context.Config.apiUrl)
         $web = $webTask.GetAwaiter().GetResult(); $api = $apiTask.GetAwaiter().GetResult()
+        $check.webStatus = [int]$web.StatusCode
+        $check.apiStatus = [int]$api.StatusCode
         if ([int]$web.StatusCode -ne 200 -or [int]$api.StatusCode -ne 200) {
             Write-Verbose "HTTP check: web=$([int]$web.StatusCode); api=$([int]$api.StatusCode)"
-            return $false
+        } else {
+            $check.healthy = ($api.Content.ReadAsStringAsync().GetAwaiter().GetResult() | ConvertFrom-Json).status -eq 'ok'
         }
-        return ($api.Content.ReadAsStringAsync().GetAwaiter().GetResult() | ConvertFrom-Json).status -eq 'ok'
-    } catch { Write-Verbose "HTTP check failed: $($_.Exception.Message)"; return $false }
-    finally { if ($web) { $web.Dispose() }; if ($api) { $api.Dispose() }; $client.Dispose(); $handler.Dispose() }
+    } catch { $check.error = $_.Exception.GetBaseException().GetType().Name; Write-Verbose "HTTP check failed: $($_.Exception.Message)" }
+    finally {
+        if ($web) { $web.Dispose() }; if ($api) { $api.Dispose() }; $client.Dispose(); $handler.Dispose()
+        $check.elapsedMs = $watch.ElapsedMilliseconds
+        $script:MnpLastHttpCheck = $check
+    }
+    return [bool]$check.healthy
+}
+
+function Wait-MnpHttpReady($Context, [datetime]$Deadline, [string]$Failure) {
+    do {
+        $remainingMs = [int][math]::Ceiling(($Deadline - [datetime]::UtcNow).TotalMilliseconds)
+        if ($remainingMs -le 0) { break }
+        # One deadline covers startup and final verification. Do not repeatedly
+        # cancel a healthy slow response after 900 ms or create a fresh final budget.
+        if (Test-MnpHttp $Context $remainingMs) { return }
+        $sleepMs = [math]::Min(150, [math]::Max(0, ($Deadline - [datetime]::UtcNow).TotalMilliseconds))
+        if ($sleepMs -gt 0) { Start-Sleep -Milliseconds ([int]$sleepMs) }
+    } while ([datetime]::UtcNow -lt $Deadline)
+    throw $Failure
 }
 
 function Get-MnpTaskPolicyXml([string]$TaskXml) {
@@ -308,6 +347,7 @@ function Invoke-MnpRuntime {
     $phaseName = 'preflight'
     $phase = [Diagnostics.Stopwatch]::StartNew()
     $lock = $null; $context = $null; $succeeded = $false
+    $script:MnpLastHttpCheck = $null
     try {
         $context = Get-MnpContext
         if ($GuiTaskHost -and -not (Test-Path -LiteralPath (Join-Path $context.Project 'scripts\runtime\task-host.vbs') -PathType Leaf)) {
@@ -322,7 +362,7 @@ function Invoke-MnpRuntime {
         $phases.preflightMs = $total.ElapsedMilliseconds
         Write-Host "[preflight] $($phases.preflightMs)ms; task=$($context.Task.TaskPath)$($context.Task.TaskName); account=NHN"
         if ($Operation -eq 'status') {
-            [pscustomobject]@{ Healthy = (Test-MnpHttp $context); GracefulShutdown = ($null -ne $descriptor);
+            [pscustomobject]@{ TaskState = [string]$context.Task.State; Healthy = (Test-MnpHttp $context); GracefulShutdown = ($null -ne $descriptor);
                 Processes = @($before.Records | ForEach-Object { [pscustomobject]@{ Role = $_.Role; Pid = $_.Process.ProcessId; StartedAt = $_.Process.CreationDate } }) } | ConvertTo-Json -Depth 5
             return
         }
@@ -332,14 +372,18 @@ function Invoke-MnpRuntime {
                 throw 'Legacy runtime has no graceful IPC. Use -AllowLegacyStop once after confirming that active saves can be interrupted.'
             }
             Write-Host '[stop] stopping the registered task and draining existing servers...'
+            Write-Host ('[stop-targets] verified PIDs: ' + (($before.Records | ForEach-Object { "$($_.Role)=$($_.Process.ProcessId)" }) -join ', '))
             $phaseName = 'stop'
             $phase = [Diagnostics.Stopwatch]::StartNew()
             Stop-ScheduledTask -TaskName $context.Task.TaskName -TaskPath $context.Task.TaskPath
             if (-not (Test-MnpStopped $context $before)) {
-                if ($descriptor) { Send-MnpShutdown $descriptor }
+                if ($descriptor) {
+                    Send-MnpShutdown $descriptor
+                    Write-Host '[stop] graceful request accepted; waiting for the verified child PIDs and ports.'
+                }
                 elseif ($Legacy) { Stop-MnpLegacy $before }
             }
-            Wait-MnpCondition { Test-MnpStopped $context $before } $StopSeconds 'Stop timed out. No forced shutdown or new instance was attempted. Check dev.out.log / dev.err.log, then retry status.'
+            Wait-MnpCondition { Test-MnpStopped $context $before } $StopSeconds 'Stop timed out. No forced shutdown or new instance was attempted. Check dev.out.log / dev.err.log, then retry status.' { Write-MnpStopProgress $context $before }
             $phases.stopMs = $phase.ElapsedMilliseconds
             # PID hints are cleared only after verified processes and ports have disappeared.
             $pidFile = Join-Path $context.StateDirectory 'dev.pids'
@@ -360,13 +404,14 @@ function Invoke-MnpRuntime {
                 # Recheck fast port/process state immediately before starting the same registered task.
                 if (-not (Test-MnpStopped $context $before)) { throw 'Processes or ports are still occupied. No instance was started.' }
                 $startTime = [datetime]::UtcNow
+                $startupDeadline = $startTime.AddSeconds($StartSeconds)
                 $phaseName = 'taskStart'
                 $phase = [Diagnostics.Stopwatch]::StartNew()
                 Start-ScheduledTask -TaskName $context.Task.TaskName -TaskPath $context.Task.TaskPath
                 $phases.taskStartMs = $phase.ElapsedMilliseconds
                 $phaseName = 'httpReady'
                 $phase.Restart()
-                Wait-MnpCondition { Test-MnpHttp $context } $StartSeconds 'Startup HTTP checks timed out. Inspect the task and dev logs; do not repeatedly start it.'
+                Wait-MnpHttpReady $context $startupDeadline 'Startup HTTP checks timed out. Inspect the task and dev logs; do not repeatedly start it.'
                 $phases.httpReadyMs = $phase.ElapsedMilliseconds
                 $phaseName = 'finalVerification'
                 $phase.Restart()
@@ -383,7 +428,7 @@ function Invoke-MnpRuntime {
                     }
                     Write-Host "[verified] $role PID=$($record[0].Process.ProcessId) started=$($record[0].Process.CreationDate.ToString('o'))"
                 }
-                Wait-MnpCondition { Test-MnpHttp $context } 5 'HTTP readiness was not restored after final identity verification. No additional restart was attempted.'
+                Wait-MnpHttpReady $context $startupDeadline 'HTTP readiness was not restored within the startup deadline after final identity verification. No additional restart was attempted.'
                 $phases.finalVerificationMs = $phase.ElapsedMilliseconds
                 Write-Host '[ready] web=200; api=200; new NHN processes verified.'
             }
@@ -396,7 +441,7 @@ function Invoke-MnpRuntime {
         if ($lock) {
             try {
                 $entry = @{ at = [datetime]::UtcNow.ToString('o'); action = $Operation; succeeded = $succeeded;
-                    failedPhase = $(if ($succeeded) { $null } else { $phaseName }); phases = $phases } | ConvertTo-Json -Depth 4 -Compress
+                    failedPhase = $(if ($succeeded) { $null } else { $phaseName }); phases = $phases; http = $script:MnpLastHttpCheck } | ConvertTo-Json -Depth 4 -Compress
                 [IO.File]::AppendAllText((Join-Path $context.StateDirectory 'runtime-operations.jsonl'), $entry + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
             } finally { $lock.Dispose() }
         }

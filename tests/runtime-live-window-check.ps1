@@ -12,7 +12,8 @@ $mnpStartedAt = [datetime]::UtcNow
 $mnpFailure = $null
 $mnpAfter = $null
 try {
-    Invoke-MnpRuntime restart 60 90 $false $false $mnpMigrate
+    # Exercise the same default budgets as the actual start/stop entrypoints.
+    Invoke-MnpRuntime restart 30 60 $false $false $mnpMigrate
 } catch { $mnpFailure = $_ }
 try {
     # Even if the controller's HTTP deadline expired, record the actual task and
