@@ -50,6 +50,7 @@ export function loadAiDelegationInstructionTemplate({
 export function renderAiDelegationInstruction(template, values = {}) {
   const replacements = {
     requestTitle: values.requestTitle,
+    taskTitle: values.taskTitle,
     mapId: values.mapId,
     cardId: values.cardId,
     editorId: values.editorId,
@@ -57,6 +58,8 @@ export function renderAiDelegationInstruction(template, values = {}) {
     approvalInstruction: values.approvalInstruction,
     taskContext: values.taskContext,
     workspaceInstruction: values.workspaceInstruction,
+    modelName: values.modelName,
+    thoughtLevel: values.thoughtLevel,
     instructionHeading: values.instructionHeading,
     instruction: values.instruction,
   }
