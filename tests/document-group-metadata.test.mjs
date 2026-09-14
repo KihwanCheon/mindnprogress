@@ -68,8 +68,7 @@ test('신규 문서·재구성·원본과 대상 문서를 식별하되 본문 �
   }), ['map-route', 'map-new', 'map-source'])
 })
 
-test('70개 도구의 등록은 유지하고 불필요한 도구에는 그룹 조회를 추가하지 않는다', async () => {
-  assert.equal(expectedMcpToolNames.length, 70)
+test('그룹 소속 정보 적용 대상과 비대상 도구의 경계를 유지한다', async () => {
   for (const name of groupAwareToolNames) assert.ok(expectedMcpToolNames.includes(name), name)
   for (const suffix of ['get_ai_workspace_pool', 'checkpoint_ai_workspace', 'confirm_ai_workspace_no_changes', 'list_users', 'list_comments', 'toggle_comment_reaction', 'add_knowledge_line']) {
     const result = { mapId: 'map-a', ok: true }

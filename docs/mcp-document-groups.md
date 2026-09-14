@@ -1,6 +1,6 @@
 # MCP 문서 소속 정보
 
-문서·카드 조회와 편집 결과에는 그룹 ID·이름을 직접 제공한다. 기존 `documentLayout`과 도구 이름·인자는 유지하며 MCP 도구 수는 68개다. 기획서·공통 지침 전문은 `mindnprogress_get_group_context`에서만 조회한다.
+문서·카드 조회와 편집 결과에는 그룹 ID·이름을 직접 제공한다. 기존 `documentLayout`과 도구 이름·인자는 호환 유지하며, 그룹 소속 정보는 관련 도구의 응답 메타데이터로 제공한다. 기획서·공통 지침 전문은 `mindnprogress_get_group_context`에서만 조회한다.
 
 ## 응답 계약
 
