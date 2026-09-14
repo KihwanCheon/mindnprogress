@@ -355,9 +355,11 @@ async function apiRequest(pathname, init = {}) {
     }
   }
   if (!response.ok) {
-    const error = new Error(body?.error ?? `MindNProgress 요청 실패 (${response.status})`)
+    const error = new Error(body?.message ?? body?.error ?? `MindNProgress 요청 실패 (${response.status})`)
     error.status = response.status
     error.code = body?.code
+    error.reasonCode = body?.reasonCode ?? body?.code
+    error.details = body?.details
     throw error
   }
   const result = body ?? { ok: true, status: response.status }
@@ -485,9 +487,18 @@ function registerTool(server, name, description, schema, handler, options = {}) 
       return result
     } catch (error) {
       const message = error instanceof Error ? error.message : '요청을 처리하지 못했습니다.'
-      toolUsage?.record(name, { ok: false, chars: message.length })
+      const reasonCode = String(error?.reasonCode ?? '').trim()
+      const errorResult = reasonCode
+        ? {
+            reasonCode,
+            message,
+            ...(error?.details === undefined ? {} : { details: error.details }),
+          }
+        : null
+      const errorText = errorResult ? JSON.stringify(errorResult) : message
+      toolUsage?.record(name, { ok: false, chars: errorText.length })
       return {
-        content: [{ type: 'text', text: message }],
+        content: [{ type: 'text', text: errorText }],
         isError: true,
       }
     }
@@ -1678,7 +1689,7 @@ async function main() {
     })
   })
 
-  registerTool(server, 'mindnprogress_delegate_ai_work', '사용자가 승인한 계획·허용 범위와 실제 승인 근거가 확인된 작업만 이 대화가 시작된 카드의 계층상 하위 카드 AI 대화에 위임합니다. 승인 근거가 없으면 제안 후 승인 대기로 마치고 호출하지 마세요. 그룹 작업은 전체 방향과 문서별 실행 계획의 두 단계 승인을 구분하며 총괄 AI가 사용자 승인을 대신하지 않습니다. 그룹에 연결된 총괄 문서의 루트는 targetMapId와 targetRevision을 지정하여 같은 그룹의 다른 문서 루트에 분석·조정을 위임할 수 있으며, 이 문서 담당 위임은 worker를 점유하지 않습니다. 직계 자식뿐 아니라 모든 깊이의 하위 카드를 지원하며, 다른 카드를 get_context로 조회해도 위임 기준 카드는 바뀌지 않습니다. 기존 대화를 이어가거나 새 대화를 만들 수 있습니다. 중지된 위임을 resume하면 같은 AI 대화와 기존 작업공간 lease를 함께 이어가며, 같은 카드·대화의 활성 위임은 중복 생성하지 않습니다. 풀 lease가 없는 일반 위임은 machineId 또는 편집자의 기본 머신으로 라우팅하지만, 등록된 Unity 작업공간 pool 위임은 원격 풀 Tier 2 전까지 메인 머신에서만 실행합니다. 등록된 AI 작업공간 pool은 독립 worker를 자동 배정하고 lease 없이 실행하지 않으며, 가용 worker가 없으면 waiting-workspace로 접수해 FIFO 대기 후 자동 시작합니다. waiting-integration-clean은 통합 작업공간의 추적 변경 때문에 하위 전문을 아직 전달하지 않은 대기 상태이며, 변경이 정리되면 같은 위임을 자동 시작하므로 재위임하지 마세요. 완료 변경은 main에 직렬 통합합니다. 통합 충돌은 같은 하위 AI가 worker에서 해결하며, 실제 통합과 최종 검증이 끝난 뒤에만 결과를 포함한 메시지로 현재 상위 AI 대화를 자동 재개합니다. 먼저 후보 목록과 작업 상태를 확인하고, 현재 문서 version을 sourceRevision으로 전달하세요.', {
+  registerTool(server, 'mindnprogress_delegate_ai_work', '사용자가 승인한 계획·허용 범위와 실제 승인 근거가 확인된 작업만 이 대화가 시작된 카드의 계층상 하위 카드 AI 대화에 위임합니다. 승인 근거가 없으면 제안 후 승인 대기로 마치고 호출하지 마세요. 그룹 작업은 전체 방향과 문서별 실행 계획의 두 단계 승인을 구분하며 총괄 AI가 사용자 승인을 대신하지 않습니다. 그룹에 연결된 총괄 문서의 루트는 targetMapId와 targetRevision을 지정하여 같은 그룹에 속한 다른 문서의 원본 루트에 분석·조정을 위임할 수 있으며, 이 문서 담당 위임은 worker를 점유하지 않습니다. 직계 자식뿐 아니라 모든 깊이의 하위 카드를 지원하며, 다른 카드를 get_context로 조회해도 위임 기준 카드는 바뀌지 않습니다. 기존 대화를 이어가거나 새 대화를 만들 수 있습니다. 중지된 위임을 resume하면 같은 AI 대화와 기존 작업공간 lease를 함께 이어가며, 같은 카드·대화의 활성 위임은 중복 생성하지 않습니다. 풀 lease가 없는 일반 위임은 machineId 또는 편집자의 기본 머신으로 라우팅하지만, 등록된 Unity 작업공간 pool 위임은 원격 풀 Tier 2 전까지 메인 머신에서만 실행합니다. 등록된 AI 작업공간 pool은 독립 worker를 자동 배정하고 lease 없이 실행하지 않으며, 가용 worker가 없으면 waiting-workspace로 접수해 FIFO 대기 후 자동 시작합니다. waiting-integration-clean은 통합 작업공간의 추적 변경 때문에 하위 전문을 아직 전달하지 않은 대기 상태이며, 변경이 정리되면 같은 위임을 자동 시작하므로 재위임하지 마세요. 모든 응답의 reasonCode와 message를 함께 읽고 message를 그대로 보고하세요. waiting-workspace만으로 모든 worker의 점유를 추론하지 말고 AI_WORKSPACE_ALLOCATION_PENDING은 비동기 배정 전 단계, CAPACITY_EXHAUSTED는 실제 배정 시도 후 용량 부족이 확인된 상태로 구분하세요. 완료 변경은 main에 직렬 통합합니다. 통합 충돌은 같은 하위 AI가 worker에서 해결하며, 실제 통합과 최종 검증이 끝난 뒤에만 결과를 포함한 메시지로 현재 상위 AI 대화를 자동 재개합니다. 먼저 후보 목록과 작업 상태를 확인하고, 현재 문서 version을 sourceRevision으로 전달하세요.', {
     mapId: z.string().min(1).describe('이 대화가 시작된 상위 카드가 속한 문서 ID'),
     targetMapId: z.string().min(1).optional().describe('그룹 총괄 루트에서 같은 그룹 소속 문서 루트에 분석·조정을 위임할 때만 지정합니다. 먼저 mindnprogress_get_group_context로 범위를 확인하세요. 생략하면 같은 문서의 하위 카드 위임입니다.'),
     targetRevision: z.number().int().positive().optional().describe('targetMapId 지정 시 대상 문서의 최신 version. 그룹→문서 위임은 worker를 점유하지 않으며 실제 구현은 문서의 하위 업무로 위임합니다.'),

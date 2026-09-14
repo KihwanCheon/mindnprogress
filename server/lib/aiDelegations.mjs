@@ -4,6 +4,150 @@ export const AI_DELEGATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_:-]{0,127}$/
 export const AI_DELEGATION_WAIT_POLL_DELAYS_MS = Object.freeze([3_000, 5_000, 10_000, 30_000])
 export const AI_DELEGATION_TERMINAL_STATES = new Set(['completed', 'failed', 'superseded', 'closed'])
 
+const AI_DELEGATION_STATE_REASONS = Object.freeze({
+  'waiting-usage-limit': {
+    reasonCode: 'AI_DELEGATION_WAITING_USAGE_LIMIT',
+    message: 'AI 사용량 한도가 해제되기를 기다리고 있습니다. 기존 작업과 작업공간이 보존되므로 새 위임을 만들지 마세요.',
+  },
+  'waiting-rate-limit': {
+    reasonCode: 'AI_DELEGATION_WAITING_RATE_LIMIT',
+    message: 'AI 요청 한도가 해제되기를 기다리고 있습니다. 기존 작업과 작업공간이 보존되므로 새 위임을 만들지 마세요.',
+  },
+  'waiting-document-work': {
+    reasonCode: 'AI_DELEGATION_WAITING_DOCUMENT_WORK',
+    message: '문서 조정 결과는 준비됐지만 하위 업무 완료를 기다리고 있습니다.',
+  },
+  starting: {
+    reasonCode: 'AI_DELEGATION_STARTING',
+    message: '작업공간 배정을 마쳤고 대상 AI 대화를 시작하고 있습니다.',
+  },
+  'waiting-resource': {
+    reasonCode: 'AI_DELEGATION_WAITING_RESOURCE',
+    message: '대상 AI 실행 자원이 준비되기를 기다리고 있습니다. 같은 작업을 다시 위임하지 마세요.',
+  },
+  running: {
+    reasonCode: 'AI_DELEGATION_RUNNING',
+    message: '대상 AI가 위임 작업을 수행하고 있습니다.',
+  },
+  resuming: {
+    reasonCode: 'AI_DELEGATION_RESUMING',
+    message: '보존된 AI 대화와 작업공간에서 위임을 재개하고 있습니다.',
+  },
+  'waiting-child-resume': {
+    reasonCode: 'AI_DELEGATION_WAITING_CHILD_RESUME',
+    message: '중단된 하위 AI 대화의 명시적인 재개를 기다리고 있습니다. 새 위임을 만들지 마세요.',
+  },
+  'recovery-required': {
+    reasonCode: 'AI_DELEGATION_RECOVERY_REQUIRED',
+    message: '기존 AI 대화와 작업공간을 보존한 복구가 필요합니다. 새 위임 대신 기존 위임 복구를 사용하세요.',
+  },
+  'waiting-integration': {
+    reasonCode: 'AI_DELEGATION_WAITING_INTEGRATION',
+    message: '구현 작업을 마쳤고 통합 작업공간 반영 순서를 기다리고 있습니다.',
+  },
+  'integration-starting': {
+    reasonCode: 'AI_DELEGATION_INTEGRATION_STARTING',
+    message: '완료된 worker 변경의 통합을 시작하고 있습니다.',
+  },
+  'integration-waiting-resource': {
+    reasonCode: 'AI_DELEGATION_INTEGRATION_WAITING_RESOURCE',
+    message: '통합 검증에 필요한 AI 실행 자원이 준비되기를 기다리고 있습니다.',
+  },
+  'integration-running': {
+    reasonCode: 'AI_DELEGATION_INTEGRATION_RUNNING',
+    message: 'worker 변경을 통합하고 검증하고 있습니다.',
+  },
+  'integration-waiting-resume': {
+    reasonCode: 'AI_DELEGATION_INTEGRATION_WAITING_RESUME',
+    message: '통합 충돌을 해결할 기존 하위 AI 대화의 재개를 기다리고 있습니다.',
+  },
+  'integration-recovery-required': {
+    reasonCode: 'AI_DELEGATION_INTEGRATION_RECOVERY_REQUIRED',
+    message: '보존된 worker에서 통합 작업을 복구해야 합니다. 새 위임을 만들지 마세요.',
+  },
+  'waiting-parent': {
+    reasonCode: 'AI_DELEGATION_WAITING_PARENT',
+    message: '위임 결과가 준비됐고 상위 AI 대화가 유휴 상태가 되기를 기다리고 있습니다.',
+  },
+  'waking-parent': {
+    reasonCode: 'AI_DELEGATION_WAKING_PARENT',
+    message: '완료 결과를 상위 AI 대화에 전달하고 있습니다.',
+  },
+  completed: {
+    reasonCode: 'AI_DELEGATION_COMPLETED',
+    message: '위임 작업과 필요한 통합을 완료했습니다.',
+  },
+  superseded: {
+    reasonCode: 'AI_DELEGATION_SUPERSEDED',
+    message: '이 위임은 완료된 후속 위임으로 대체되었습니다.',
+  },
+  closed: {
+    reasonCode: 'AI_DELEGATION_CLOSED',
+    message: '보존할 실행 결과 없이 위임 기록을 종료했습니다.',
+  },
+  'parent-wake-failed': {
+    reasonCode: 'AI_DELEGATION_PARENT_WAKE_FAILED',
+    message: '하위 작업은 끝났지만 상위 AI 대화에 결과를 전달하지 못했습니다.',
+  },
+  'recovery-dispatch-pending': {
+    reasonCode: 'AI_DELEGATION_RECOVERY_DISPATCH_PENDING',
+    message: '복구 요청의 전달 결과를 확인하고 있습니다. 같은 작업을 다시 위임하지 마세요.',
+  },
+})
+
+function requiredAiDelegationReason(reasonCode, message) {
+  const normalizedReasonCode = String(reasonCode ?? '').trim()
+  const normalizedMessage = String(message ?? '').trim()
+  if (!normalizedReasonCode || !normalizedMessage) {
+    throw new TypeError('AI 위임 응답에는 reasonCode와 message가 모두 필요합니다.')
+  }
+  return { reasonCode: normalizedReasonCode, message: normalizedMessage }
+}
+
+export function aiDelegationResponseBody(statusCode, reasonCode, message, payload = {}) {
+  const reason = requiredAiDelegationReason(reasonCode, message)
+  const response = { ...payload, ...reason }
+  if (Number(statusCode) >= 400 && !Object.hasOwn(response, 'error')) response.error = reason.message
+  return response
+}
+
+export function aiDelegationStateReason(delegation) {
+  const displayState = aiDelegationDisplayState(delegation)
+  if (displayState === 'waiting-workspace') {
+    return requiredAiDelegationReason(
+      delegation?.workspaceWaitReasonCode ?? 'AI_WORKSPACE_ALLOCATION_PENDING',
+      delegation?.workspaceWaitMessage
+        ?? delegation?.workspaceWaitError
+        ?? '위임을 접수했고 작업공간을 비동기로 배정하고 있습니다. waiting-workspace만으로 모든 worker가 사용 중이라고 판단하지 마세요.',
+    )
+  }
+  if (displayState === 'waiting-integration-clean') {
+    return requiredAiDelegationReason(
+      delegation?.workspaceWaitReasonCode ?? 'integration-worktree-dirty',
+      delegation?.workspaceWaitMessage
+        ?? delegation?.workspaceWaitError
+        ?? '통합 작업공간의 추적 변경이 정리되기를 기다리고 있습니다. 정리되면 같은 위임이 자동으로 시작됩니다.',
+    )
+  }
+  if (displayState === 'failed') {
+    return requiredAiDelegationReason(
+      delegation?.failureReasonCode
+        ?? delegation?.workspaceResult?.reasonCode
+        ?? 'AI_DELEGATION_FAILED',
+      delegation?.childError
+        ?? delegation?.workspaceError
+        ?? delegation?.integrationError
+        ?? 'AI 위임 작업을 완료하지 못했습니다.',
+    )
+  }
+  const configured = AI_DELEGATION_STATE_REASONS[displayState]
+  if (configured) return requiredAiDelegationReason(configured.reasonCode, configured.message)
+  return requiredAiDelegationReason(
+    'AI_DELEGATION_STATE_UNKNOWN',
+    `AI 위임 상태 ${String(displayState || 'unknown')}의 안내 메시지가 등록되지 않았습니다.`,
+  )
+}
+
 export const ACTIVE_AI_DELEGATION_STATES = new Set([
   'waiting-usage-limit',
   'waiting-rate-limit',
