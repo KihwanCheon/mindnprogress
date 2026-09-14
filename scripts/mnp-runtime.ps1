@@ -1,0 +1,323 @@
+param(
+    [ValidateSet('status', 'start', 'stop', 'restart')][string]$Action = 'status',
+    [ValidateRange(1, 300)][int]$StopTimeoutSeconds = 30,
+    [ValidateRange(1, 300)][int]$StartTimeoutSeconds = 60,
+    [switch]$OpenBrowser,
+    [switch]$AllowLegacyStop
+)
+
+$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'runtime\process-owner.ps1')
+
+function Get-MnpContext {
+    $project = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+    $root = Split-Path $project -Parent
+    $launcher = Join-Path $root 'MindNProgress_Launcher.cjs'
+    $required = @('scripts\dev.mjs', 'server\index.mjs', 'scripts\runtime\launcher.cjs',
+        'scripts\runtime\supervisor.mjs', 'scripts\runtime\web.mjs', 'scripts\runtime\config.mjs',
+        'server\lib\runtimeLifecycle.mjs', 'node_modules\vite\package.json')
+    foreach ($file in @($launcher) + @($required | ForEach-Object { Join-Path $project $_ })) {
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Runtime file missing: $file" }
+    }
+    $task = Get-ScheduledTask -TaskName 'MindNProgress' -TaskPath '\'
+    $account = $task.Principal.UserId
+    if ($account -match '^S-1-') {
+        $account = (New-Object Security.Principal.SecurityIdentifier($account)).Translate([Security.Principal.NTAccount]).Value
+    }
+    if (($account -split '\\')[-1] -ine 'NHN') { throw 'The registered task must run as NHN.' }
+    $ownerSid = (New-Object Security.Principal.NTAccount($account)).Translate([Security.Principal.SecurityIdentifier]).Value
+    if (@($task.Actions).Count -ne 1) { throw 'Ambiguous scheduled task actions.' }
+    $actionDefinition = $task.Actions[0]
+    $taskExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if ($actionDefinition.Execute -ine $taskExe -or [IO.Path]::GetFullPath($actionDefinition.WorkingDirectory) -ine $root) {
+        throw 'Scheduled task executable or working directory does not match this installation.'
+    }
+    if ($actionDefinition.Arguments -notmatch "& '([^']+node\.exe)' ") { throw 'Cannot identify the registered Node executable.' }
+    $node = $Matches[1]
+    $expected = '-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -Command "& ''{0}'' ''{1}''; exit $LASTEXITCODE"' -f $node, $launcher
+    if ($actionDefinition.Arguments -ine $expected -or -not (Test-Path -LiteralPath $node -PathType Leaf)) {
+        throw 'Scheduled task command differs from the verified launcher. No processes were stopped.'
+    }
+    $settings = & $node (Join-Path $project 'scripts\runtime\config.mjs')
+    if ($LASTEXITCODE -ne 0) { throw 'Could not read local runtime configuration.' }
+    $config = $settings | ConvertFrom-Json
+    [pscustomobject]@{ Project = $project; Root = $root; Launcher = $launcher; Node = $node; Task = $task; OwnerSid = $ownerSid;
+        TaskExe = $taskExe; Config = $config; Ports = @([int]$config.webPort, [int]$config.apiPort);
+        StateDirectory = Join-Path $root '.mindnprogress' }
+}
+
+function Test-MnpCommand($ProcessRecord, [string]$Executable, [string]$Entry) {
+    $pattern = '^(?:"' + [regex]::Escape($Executable) + '"|' + [regex]::Escape($Executable) + ')\s+(?:"' + [regex]::Escape($Entry) + '"|' + [regex]::Escape($Entry) + ')\s*$'
+    return $ProcessRecord.ExecutablePath -ieq $Executable -and $ProcessRecord.CommandLine -imatch $pattern
+}
+
+function Test-MnpSameRecord($Before, $After) {
+    return $null -ne $After -and $Before.ProcessId -eq $After.ProcessId -and
+        $Before.ParentProcessId -eq $After.ParentProcessId -and $Before.CreationDate -eq $After.CreationDate -and
+        $Before.ExecutablePath -ieq $After.ExecutablePath -and $Before.CommandLine -ceq $After.CommandLine
+}
+
+function Get-MnpSnapshot($Context, [switch]$FastPorts) {
+    # Expensive identity queries are performed at boundaries, never inside polling loops.
+    $all = @(Get-CimInstance Win32_Process -Filter "Name='node.exe' OR Name='powershell.exe'")
+    $definitions = @(
+        @{ Role = 'launcher'; Entry = $Context.Launcher; Parent = 'task' },
+        @{ Role = 'supervisor'; Entry = Join-Path $Context.Project 'scripts\dev.mjs'; Parent = 'launcher' },
+        @{ Role = 'api'; Entry = Join-Path $Context.Project 'server\index.mjs'; Parent = 'supervisor' },
+        @{ Role = 'web'; Entry = Join-Path $Context.Project 'scripts\runtime\web.mjs'; Parent = 'supervisor' },
+        @{ Role = 'web'; Entry = Join-Path $Context.Project 'node_modules\vite\bin\vite.js'; Parent = 'supervisor' }
+    )
+    $records = @()
+    $wrapperCommand = '"' + $Context.TaskExe + '" ' + $Context.Task.Actions[0].Arguments
+    foreach ($item in $all) {
+        if ($item.ExecutablePath -ieq $Context.TaskExe -and $item.CommandLine -ieq $wrapperCommand) {
+            $records += [pscustomobject]@{ Role = 'task'; Parent = $null; Process = $item }
+        }
+        foreach ($definition in $definitions) {
+            if (Test-MnpCommand $item $Context.Node $definition.Entry) {
+                $records += [pscustomobject]@{ Role = $definition.Role; Parent = $definition.Parent; Process = $item }
+            }
+        }
+    }
+    # Tests and other sessions may run the same API source with isolated data/ports.
+    # Only the exact deployment launcher and its descendants belong to this task.
+    $launchers = @($records | Where-Object Role -eq 'launcher')
+    $supervisors = @($records | Where-Object { $_.Role -eq 'supervisor' -and $launchers.Process.ProcessId -contains $_.Process.ParentProcessId })
+    $records = @($records | Where-Object {
+        $_.Role -in @('task', 'launcher') -or
+        ($_.Role -eq 'supervisor' -and $launchers.Process.ProcessId -contains $_.Process.ParentProcessId) -or
+        ($_.Role -in @('api', 'web') -and $supervisors.Process.ProcessId -contains $_.Process.ParentProcessId)
+    })
+    foreach ($record in $records) {
+        if (@($records | Where-Object Role -eq $record.Role).Count -ne 1) { throw "Multiple $($record.Role) processes. Manual inspection required." }
+        if ($record.Parent) {
+            $parent = @($records | Where-Object Role -eq $record.Parent)
+            # A stopped task wrapper may already be gone. Other ancestry must be intact.
+            if ($parent.Count -eq 0 -and $record.Parent -eq 'task') {
+                if ($all.ProcessId -contains $record.Process.ParentProcessId) { throw 'Launcher parent is not the registered task.' }
+            } elseif ($parent.Count -ne 1 -or $record.Process.ParentProcessId -ne $parent[0].Process.ProcessId -or
+                $record.Process.CreationDate -lt $parent[0].Process.CreationDate) { throw "Unverified parent for $($record.Role)." }
+        }
+        if ((Get-MnpProcessOwnerSid $record.Process.ProcessId) -ne $Context.OwnerSid) { throw "Cannot verify NHN ownership: $($record.Role)." }
+    }
+    if ($FastPorts) {
+        $listeners = @(& (Join-Path $env:SystemRoot 'System32\netstat.exe') -ano -p tcp | ForEach-Object {
+            if ($_ -match '^\s*TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$' -and $Context.Ports -contains [int]$Matches[1]) {
+                [pscustomobject]@{ LocalPort = [int]$Matches[1]; OwningProcess = [int]$Matches[2] }
+            }
+        })
+        if ($LASTEXITCODE -ne 0) { throw 'Could not verify final port ownership.' }
+    } else {
+        $listeners = @(Get-NetTCPConnection -State Listen | Where-Object { $Context.Ports -contains $_.LocalPort })
+    }
+    foreach ($listener in $listeners) {
+        $expectedRole = if ($listener.LocalPort -eq $Context.Config.apiPort) { 'api' } else { 'web' }
+        if (-not @($records | Where-Object { $_.Role -eq $expectedRole -and $_.Process.ProcessId -eq $listener.OwningProcess }).Count) {
+            throw "Port $($listener.LocalPort) is not owned by the verified MnP $expectedRole. No unrelated process will be stopped."
+        }
+    }
+    [pscustomobject]@{ Records = $records; Listeners = $listeners }
+}
+
+function Get-MnpLiveProcess($Record) {
+    try { $live = [Diagnostics.Process]::GetProcessById([int]$Record.ProcessId) }
+    catch [ArgumentException] { return $null }
+    try {
+        if ($live.HasExited) { $live.Dispose(); return $null }
+        # Open the handle and check creation time + image; reused PIDs are never stop targets.
+        $null = $live.Handle
+        if ([math]::Abs(($live.StartTime.ToUniversalTime() - $Record.CreationDate.ToUniversalTime()).TotalMilliseconds) -gt 1 -or
+            $live.MainModule.FileName -ine $Record.ExecutablePath) { $live.Dispose(); return $null }
+        return $live
+    } catch { $live.Dispose(); throw }
+}
+
+function Test-MnpStopped($Context, $Snapshot) {
+    foreach ($record in $Snapshot.Records) {
+        $live = Get-MnpLiveProcess $record.Process
+        if ($null -ne $live) { $live.Dispose(); return $false }
+    }
+    $ports = [Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners()
+    return @($ports | Where-Object { $Context.Ports -contains $_.Port }).Count -eq 0
+}
+
+function Wait-MnpCondition([scriptblock]$Condition, [int]$Seconds, [string]$Failure) {
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        if (& $Condition) { return }
+        Start-Sleep -Milliseconds 150
+    } while ($watch.Elapsed.TotalSeconds -lt $Seconds)
+    throw $Failure
+}
+
+function Get-MnpDescriptor($Context, $Snapshot) {
+    $file = Join-Path $Context.StateDirectory 'runtime.json'
+    if (-not (Test-Path -LiteralPath $file)) { return $null }
+    $descriptor = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
+    $supervisor = @($Snapshot.Records | Where-Object { $_.Role -eq 'supervisor' -and $_.Process.ProcessId -eq $descriptor.pid })
+    if ($supervisor.Count -ne 1) { return $null } # Stale metadata is not authority.
+    # Node's uptime starts after native initialization, not necessarily at Windows process creation.
+    # Metadata must have been written by this process generation; the pipe then checks its random instance ID.
+    $metadataWrittenAt = (Get-Item -LiteralPath $file).LastWriteTimeUtc
+    $processCreatedAt = $supervisor[0].Process.CreationDate.ToUniversalTime()
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try {
+        $key = $Context.Project.ToLowerInvariant() + "`n" + $Context.StateDirectory.ToLowerInvariant()
+        $digest = ([BitConverter]::ToString($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes($key)))).Replace('-', '').ToLowerInvariant().Substring(0, 24)
+        $expectedPipe = '\\.\pipe\mnp-runtime-' + $digest
+    } finally { $hash.Dispose() }
+    if ($descriptor.version -ne 1 -or $descriptor.projectDirectory -ine $Context.Project -or
+        $descriptor.parentPid -ne $supervisor[0].Process.ParentProcessId -or
+        $metadataWrittenAt -lt $processCreatedAt -or
+        $descriptor.pipe -cne $expectedPipe -or $descriptor.instanceId -notmatch '^[a-f0-9-]{36}$') {
+        throw 'Runtime descriptor identity mismatch. No shutdown request was sent.'
+    }
+    return $descriptor
+}
+
+function Send-MnpShutdown($Descriptor) {
+    $pipe = New-Object IO.Pipes.NamedPipeClientStream('.', $Descriptor.pipe.Substring(9), [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::Asynchronous)
+    try {
+        $pipe.Connect(1000)
+        $message = @{ type = 'mnp:shutdown'; instanceId = $Descriptor.instanceId } | ConvertTo-Json -Compress
+        $bytes = [Text.Encoding]::UTF8.GetBytes($message + "`n")
+        $pipe.Write($bytes, 0, $bytes.Length)
+        $pipe.Flush()
+        $reader = New-Object IO.StreamReader($pipe)
+        $read = $reader.ReadLineAsync()
+        if (-not $read.Wait(2000) -or $read.Result -ne 'accepted') { throw 'Runtime did not accept the graceful shutdown request.' }
+    } finally { $pipe.Dispose() }
+}
+
+function Stop-MnpLegacy($Snapshot) {
+    Write-Warning 'Legacy runtime: graceful IPC is unavailable. Stopping only revalidated processes for this one-time migration.'
+    $fresh = @(Get-CimInstance Win32_Process -Filter "Name='node.exe' OR Name='powershell.exe'")
+    foreach ($record in @($Snapshot.Records | Sort-Object { switch ($_.Role) { 'api' { 0 } 'web' { 1 } 'supervisor' { 2 } default { 3 } } })) {
+        $current = $fresh | Where-Object ProcessId -eq $record.Process.ProcessId
+        if (-not $current) { continue }
+        if (-not (Test-MnpSameRecord $record.Process $current)) { throw 'Process identity changed. Legacy stop aborted.' }
+        $live = Get-MnpLiveProcess $record.Process
+        if ($null -ne $live) {
+            try { $live.Kill(); $null = $live.WaitForExit(500) } finally { $live.Dispose() }
+        }
+    }
+}
+
+function Test-MnpHttp($Context) {
+    Add-Type -AssemblyName System.Net.Http
+    $handler = New-Object Net.Http.HttpClientHandler
+    $handler.UseProxy = $false
+    $client = New-Object Net.Http.HttpClient($handler)
+    $client.Timeout = [timespan]::FromMilliseconds(900)
+    $web = $null; $api = $null
+    try {
+        $webTask = $client.GetAsync($Context.Config.webUrl)
+        $apiTask = $client.GetAsync($Context.Config.apiUrl)
+        $web = $webTask.GetAwaiter().GetResult(); $api = $apiTask.GetAwaiter().GetResult()
+        if ([int]$web.StatusCode -ne 200 -or [int]$api.StatusCode -ne 200) {
+            Write-Verbose "HTTP check: web=$([int]$web.StatusCode); api=$([int]$api.StatusCode)"
+            return $false
+        }
+        return ($api.Content.ReadAsStringAsync().GetAwaiter().GetResult() | ConvertFrom-Json).status -eq 'ok'
+    } catch { Write-Verbose "HTTP check failed: $($_.Exception.Message)"; return $false }
+    finally { if ($web) { $web.Dispose() }; if ($api) { $api.Dispose() }; $client.Dispose(); $handler.Dispose() }
+}
+
+function Invoke-MnpRuntime {
+    param([string]$Operation, [int]$StopSeconds, [int]$StartSeconds, [bool]$Browser, [bool]$Legacy)
+    $total = [Diagnostics.Stopwatch]::StartNew()
+    $phases = [ordered]@{}
+    $phaseName = 'preflight'
+    $phase = [Diagnostics.Stopwatch]::StartNew()
+    $lock = $null; $context = $null; $succeeded = $false
+    try {
+        $context = Get-MnpContext
+        if ($Operation -ne 'status') {
+            $null = [IO.Directory]::CreateDirectory($context.StateDirectory)
+            $lock = [IO.File]::Open((Join-Path $context.StateDirectory 'runtime-operation.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        }
+        $before = Get-MnpSnapshot $context
+        $descriptor = Get-MnpDescriptor $context $before
+        $phases.preflightMs = $total.ElapsedMilliseconds
+        Write-Host "[preflight] $($phases.preflightMs)ms; task=$($context.Task.TaskPath)$($context.Task.TaskName); account=NHN"
+        if ($Operation -eq 'status') {
+            [pscustomobject]@{ Healthy = (Test-MnpHttp $context); GracefulShutdown = ($null -ne $descriptor);
+                Processes = @($before.Records | ForEach-Object { [pscustomobject]@{ Role = $_.Role; Pid = $_.Process.ProcessId; StartedAt = $_.Process.CreationDate } }) } | ConvertTo-Json -Depth 5
+            return
+        }
+        if ($Operation -in @('stop', 'restart')) {
+            $hasNodes = @($before.Records | Where-Object Role -ne 'task').Count -gt 0
+            if ($hasNodes -and -not $descriptor -and -not $Legacy) {
+                throw 'Legacy runtime has no graceful IPC. Use -AllowLegacyStop once after confirming that active saves can be interrupted.'
+            }
+            Write-Host '[stop] stopping the registered task and draining existing servers...'
+            $phaseName = 'stop'
+            $phase = [Diagnostics.Stopwatch]::StartNew()
+            Stop-ScheduledTask -TaskName $context.Task.TaskName -TaskPath $context.Task.TaskPath
+            if (-not (Test-MnpStopped $context $before)) {
+                if ($descriptor) { Send-MnpShutdown $descriptor }
+                elseif ($Legacy) { Stop-MnpLegacy $before }
+            }
+            Wait-MnpCondition { Test-MnpStopped $context $before } $StopSeconds 'Stop timed out. No forced shutdown or new instance was attempted. Check dev.out.log / dev.err.log, then retry status.'
+            $phases.stopMs = $phase.ElapsedMilliseconds
+            # PID hints are cleared only after verified processes and ports have disappeared.
+            $pidFile = Join-Path $context.StateDirectory 'dev.pids'
+            if (Test-Path -LiteralPath $pidFile) { Remove-Item -LiteralPath $pidFile }
+            Write-Host "[stop] confirmed; $($phases.stopMs)ms"
+        }
+        if ($Operation -in @('start', 'restart')) {
+            if ($Operation -eq 'start' -and $before.Records.Count -gt 0) {
+                if (-not (Test-MnpHttp $context)) { throw 'An existing instance is not healthy. Start did not restart or replace it.' }
+                Write-Host '[ready] already running; no restart performed.'
+            } else {
+                # Recheck fast port/process state immediately before starting the same registered task.
+                if (-not (Test-MnpStopped $context $before)) { throw 'Processes or ports are still occupied. No instance was started.' }
+                $startTime = [datetime]::UtcNow
+                $phaseName = 'taskStart'
+                $phase = [Diagnostics.Stopwatch]::StartNew()
+                Start-ScheduledTask -TaskName $context.Task.TaskName -TaskPath $context.Task.TaskPath
+                $phases.taskStartMs = $phase.ElapsedMilliseconds
+                $phaseName = 'httpReady'
+                $phase.Restart()
+                Wait-MnpCondition { Test-MnpHttp $context } $StartSeconds 'Startup HTTP checks timed out. Inspect the task and dev logs; do not repeatedly start it.'
+                $phases.httpReadyMs = $phase.ElapsedMilliseconds
+                $phaseName = 'finalVerification'
+                $phase.Restart()
+                $after = Get-MnpSnapshot $context -FastPorts
+                foreach ($role in @('api', 'web')) {
+                    $record = @($after.Records | Where-Object Role -eq $role)
+                    if ($record.Count -ne 1 -or $record[0].Process.CreationDate.ToUniversalTime() -lt $startTime -or
+                        @($before.Records | Where-Object { Test-MnpSameRecord $_.Process $record[0].Process }).Count) {
+                        throw "Fresh $role process identity was not verified."
+                    }
+                    $port = if ($role -eq 'api') { $context.Config.apiPort } else { $context.Config.webPort }
+                    if (-not @($after.Listeners | Where-Object { $_.LocalPort -eq $port -and $_.OwningProcess -eq $record[0].Process.ProcessId }).Count) {
+                        throw "Fresh $role port ownership was not verified."
+                    }
+                    Write-Host "[verified] $role PID=$($record[0].Process.ProcessId) started=$($record[0].Process.CreationDate.ToString('o'))"
+                }
+                Wait-MnpCondition { Test-MnpHttp $context } 5 'HTTP readiness was not restored after final identity verification. No additional restart was attempted.'
+                $phases.finalVerificationMs = $phase.ElapsedMilliseconds
+                Write-Host '[ready] web=200; api=200; new NHN processes verified.'
+            }
+            if ($Browser) { Start-Process $context.Config.webUrl }
+        }
+        $succeeded = $true
+    } finally {
+        if (-not $phases.Contains($phaseName + 'Ms')) { $phases[$phaseName + 'Ms'] = $phase.ElapsedMilliseconds }
+        $phases.totalMs = $total.ElapsedMilliseconds
+        if ($lock) {
+            try {
+                $entry = @{ at = [datetime]::UtcNow.ToString('o'); action = $Operation; succeeded = $succeeded;
+                    failedPhase = $(if ($succeeded) { $null } else { $phaseName }); phases = $phases } | ConvertTo-Json -Depth 4 -Compress
+                [IO.File]::AppendAllText((Join-Path $context.StateDirectory 'runtime-operations.jsonl'), $entry + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
+            } finally { $lock.Dispose() }
+        }
+        Write-Host "[total] $($phases.totalMs)ms"
+    }
+}
+
+if ($MyInvocation.InvocationName -ne '.') {
+    try { Invoke-MnpRuntime $Action $StopTimeoutSeconds $StartTimeoutSeconds ([bool]$OpenBrowser) ([bool]$AllowLegacyStop) }
+    catch { Write-Error $_ -ErrorAction Continue; exit 1 }
+}

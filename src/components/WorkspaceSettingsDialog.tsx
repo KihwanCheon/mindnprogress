@@ -100,11 +100,12 @@ export function WorkspaceSettingsDialog({ mapId = '', groupId = '', machineId = 
             {history.length > 0 && <details><summary>최근 작업공간에서 선택</summary><div className="workspace-settings-choices">{history.map((item) => <button key={item} type="button" disabled={busy} onClick={() => setWorkspace(item)}>{item}</button>)}</div></details>}
             {!editScope && <fieldset disabled={busy}><legend>선택한 경로의 적용 범위</legend>{([{ value: 'once', label: '이번 대화만 사용', available: true }, { value: 'document', label: '이 문서의 작업공간으로 설정', available: Boolean(mapId) }, { value: 'group', label: `이 그룹의 작업공간으로 설정 (${context.groupName})`, available: Boolean(context.groupId) }] as const).filter((item) => item.available).map((item) => <label key={item.value}><input type="radio" name="workspace-scope" checked={scope === item.value} onChange={() => setScope(item.value)} />{item.label}</label>)}</fieldset>}
             {scope === 'group' && !editScope && <small>별도 문서 설정이 없는 소속 문서에 적용됩니다.{context.documentSetting.workspace ? ' 현재 문서에는 별도 설정이 있어 다음 시작에도 문서 설정이 우선합니다. 이번 대화만 선택한 경로를 사용합니다.' : ''}</small>}
+            {!editScope && <small>선택하면 AI 대화 시작 창으로 돌아갑니다. 나머지 옵션을 확인한 뒤 ‘AionUi에서 시작’을 눌러 주세요.</small>}
           </>}
           {savedNotice && <p role="status">{savedNotice}</p>}
           {error && <p className="workspace-settings-error" role="alert">{error}</p>}
         </div>
-        <footer><button type="button" disabled={busy} onClick={onClose}>취소</button><button type="submit" className="primary" disabled={busy || !context || (editScope ? !title.trim() : !workspace.trim())}>{busy ? '처리 중…' : editScope ? '저장' : scope === 'once' ? '선택하고 시작' : '설정하고 시작'}</button></footer>
+        <footer><button type="button" disabled={busy} onClick={onClose}>취소</button><button type="submit" className="primary" disabled={busy || !context || (editScope ? !title.trim() : !workspace.trim())}>{busy ? '처리 중…' : editScope ? '저장' : '선택'}</button></footer>
       </form>
     </div>
   </div>

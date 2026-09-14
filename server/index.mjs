@@ -1,5 +1,7 @@
 import { createServer } from 'node:http'
+import { createRuntimeLifecycle, installRuntimeShutdown } from './lib/runtimeLifecycle.mjs'
 import { createAiWorkspaceSettings } from './lib/aiWorkspaceSettings.mjs'
+import { createAiDialogPreferences } from './lib/aiDialogPreferences.mjs'
 import { createDocumentMutationGate, createDocumentReconstruction, reconstructionError } from './lib/documentReconstruction.mjs'
 import { createReconstructionRequests } from './lib/documentReconstructionRequests.mjs'
 import { createCardLayoutRequests } from './lib/cardLayoutRequests.mjs'
@@ -175,6 +177,16 @@ import {
 
 const serverDirectory = path.dirname(fileURLToPath(import.meta.url))
 const projectDirectory = path.resolve(serverDirectory, '..')
+const runtimeLifecycle = createRuntimeLifecycle()
+let resolveRuntimeReady
+const runtimeReady = new Promise((resolve) => { resolveRuntimeReady = resolve })
+installRuntimeShutdown(async () => {
+  await runtimeReady
+  await runtimeLifecycle.stop(server, () => {
+    for (const response of eventClients.keys()) response.end()
+    eventClients.clear()
+  })
+})
 const dataDirectory = path.resolve(String(process.env.MNP_DATA_DIR ?? '').trim() || path.join(serverDirectory, 'data'))
 let documentReconstruction = null
 const historyDirectory = path.join(dataDirectory, '_history')
@@ -5944,6 +5956,7 @@ const groupProjects = createGroupProjects({
   delegations: aiDelegations, publicDelegation: delegationPublicView, runtimeSnapshot: aiConversationRuntimeSnapshot,
 })
 
+const aiDialogPreferences = await createAiDialogPreferences({ dataDirectory, replaceFile: replaceFileWithRetry })
 const aiWorkspaceSettings = await createAiWorkspaceSettings({
   dataDirectory, readMap,
   readGroups: async () => (await readDocumentLayout((await listMaps()).map((map) => map.id))).groups,
@@ -5965,7 +5978,7 @@ const doorayResponses = createDoorayResponseIntegration({
 
 const acquireDocumentMutation = createDocumentMutationGate()
 
-const server = createServer(async (request, response) => {
+const server = createServer(runtimeLifecycle.request(async (request, response) => {
   const loopbackLocation = localLoopbackRedirectLocation(request)
   if (loopbackLocation) {
     response.writeHead(307, {
@@ -6634,7 +6647,7 @@ const server = createServer(async (request, response) => {
         error: null,
       })
       // 수집은 수 분이 걸릴 수 있어 응답을 붙잡지 않고 진행 상황은 조회 API로 노출한다.
-      void runDoorayMentionScan(user.id, options)
+      void runtimeLifecycle.track(() => runDoorayMentionScan(user.id, options))
       return sendJson(response, 202, { scan, ...options })
     }
 
@@ -7049,7 +7062,7 @@ const server = createServer(async (request, response) => {
           updatedAt: updatedMap.updatedAt,
           updatedBy: publicUser(actor),
         })
-        void refreshAiConversationRuntimeForMap(launch.mapId).catch((error) => {
+        void runtimeLifecycle.track(() => refreshAiConversationRuntimeForMap(launch.mapId)).catch((error) => {
           console.warn('[AI conversation runtime link refresh]', error)
         })
         return sendJson(response, 200, { conversationId, homeMachineId: launch.homeMachineId })
@@ -8082,7 +8095,7 @@ const server = createServer(async (request, response) => {
         aiDelegations.set(id, waitingDelegation)
         await persistAiDelegations()
         broadcastEvent({ type: 'ai-delegation-changed', delegation: delegationPublicView(waitingDelegation) })
-        void pollAiDelegations().catch((error) => console.warn('[AI delegation queue start]', error))
+        void runtimeLifecycle.track(() => pollAiDelegations()).catch((error) => console.warn('[AI delegation queue start]', error))
         return sendAiDelegationResponse(response, 202, workspaceWaitReasonCode, workspaceWaitMessage, {
           delegation: delegationPublicView(waitingDelegation),
           mapVersion: map.version,
@@ -8995,6 +9008,22 @@ const server = createServer(async (request, response) => {
       return sendJson(response, 405, { error: '지원하지 않는 요청입니다.' })
     }
 
+    if (url.pathname === '/api/integrations/aionui/dialog-preferences') {
+      const user = requireSignedInUser(request, response)
+      if (!user) return
+      if (!canEdit(user)) return sendJson(response, 403, { error: '편집자만 AI 대화 시작 화면을 설정할 수 있습니다.' })
+      if (request.method === 'GET') return sendJson(response, 200, { userId: user.id, sections: aiDialogPreferences.get(user.id) })
+      if (request.method !== 'PATCH') return sendJson(response, 405, { error: '지원하지 않는 요청입니다.' })
+      const body = await readJsonBody(request)
+      if (body?.expectedUserId !== user.id) return sendJson(response, 409, { error: '로그인 계정이 변경되었습니다. 대화 시작 창을 다시 열어 주세요.' })
+      if (Object.keys(body).some(key => !['expectedUserId', 'sections'].includes(key))) return sendJson(response, 400, { error: '지원하지 않는 화면 설정입니다.' })
+      try {
+        return sendJson(response, 200, { userId: user.id, sections: await aiDialogPreferences.patch(user.id, body.sections) })
+      } catch (error) {
+        return sendJson(response, error.status ?? 500, { error: error.status ? error.message : '계정의 접힘 상태를 저장하지 못했습니다.' })
+      }
+    }
+
     if (url.pathname === '/api/integrations/aionui/workspaces') {
       const user = requireSignedInUser(request, response)
       if (!user) return
@@ -9303,7 +9332,7 @@ const server = createServer(async (request, response) => {
       response.write(`data: ${JSON.stringify({ type: 'connected', user: publicUser(user), clientId, mapId })}\n\n`)
       eventClients.set(response, { clientId, mapId, user: publicUser(user) })
       broadcastPresence(mapId)
-      void refreshAiConversationRuntimeLibrary()
+      void runtimeLifecycle.track(() => refreshAiConversationRuntimeLibrary())
         .then((summaries) => {
           if (!eventClients.has(response)) return
           response.write(`data: ${JSON.stringify({ type: 'ai-conversation-runtime-summary-snapshot', summaries })}\n\n`)
@@ -10267,38 +10296,31 @@ const server = createServer(async (request, response) => {
     releaseDocumentMutation?.()
     if (delegationActionId) aiDelegationActions.delete(delegationActionId)
   }
-})
+}))
 
-setInterval(() => {
+runtimeLifecycle.interval(() => {
   broadcastEvent({ type: 'heartbeat', sentAt: new Date().toISOString() })
-}, eventHeartbeatIntervalMs).unref()
+}, eventHeartbeatIntervalMs, 'Event heartbeat')
 
-setInterval(() => {
-  void refreshVisibleAiConversationRuntimes().catch((error) => console.warn('[AI conversation runtime poll]', error))
-}, aiConversationRuntimePollIntervalMs).unref()
+runtimeLifecycle.interval(() => refreshVisibleAiConversationRuntimes(), aiConversationRuntimePollIntervalMs, 'AI conversation runtime poll')
 
-setInterval(() => {
-  void pollAiDelegations().catch((error) => console.warn('[AI delegation poll]', error))
-}, aiDelegationPollIntervalMs).unref()
+runtimeLifecycle.interval(() => pollAiDelegations(), aiDelegationPollIntervalMs, 'AI delegation poll')
 
-setInterval(() => {
-  void doorayResponses.poll().catch((error) => console.warn('[Dooray response poll]', error.message))
-}, 3_000).unref()
+runtimeLifecycle.interval(() => doorayResponses.poll(), 3_000, 'Dooray response poll')
 
-setInterval(() => {
-  void ensureDailyBackups().catch((error) => console.warn('[Daily backup scheduler]', error))
-}, 60 * 60 * 1000).unref()
+runtimeLifecycle.interval(() => ensureDailyBackups(), 60 * 60 * 1000, 'Daily backup scheduler')
 
 // 제한 시간을 넘긴 서브 머신 요청을 재전달 없이 실패로 확정한다.
-setInterval(() => {
+runtimeLifecycle.interval(() => {
   const expired = machineOperationQueue.sweep()
   if (expired > 0) console.warn(`[Machine operation sweep] ${expired}개 요청을 제한 시간 초과로 실패 처리했습니다.`)
-}, 5_000).unref()
+}, 5_000, 'Machine operation sweep')
 
 server.listen(port, host, () => {
+  resolveRuntimeReady()
   console.log(`[Mind & Progress API] http://${host}:${port}`)
   console.log(`[Mind & Progress Public] ${publicBaseUrl}`)
-  void recoverLinkedConversationAttributions().catch((error) => {
+  void runtimeLifecycle.track(() => recoverLinkedConversationAttributions()).catch((error) => {
     console.warn('[AI conversation attribution startup recovery]', error)
   })
 })

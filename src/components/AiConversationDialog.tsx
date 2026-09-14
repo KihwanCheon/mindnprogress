@@ -23,6 +23,7 @@ import {
 import { loadAiConversationRole, type AiConversationRole } from '../utils/aiConversationRole.mjs'
 import './AiConversationDialog.css'
 import { WorkspaceSettingsDialog } from './WorkspaceSettingsDialog'
+import { useAiDialogSections } from './useAiDialogSections'
 import { loadWorkspaceContext, saveWorkspaceSetting, type WorkspaceContext, type WorkspaceChoice } from '../utils/workspaceSettings'
 
 type RuntimeOption = { id: string; label: string; description: string; providerId?: string }
@@ -198,6 +199,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
   const [launching, setLaunching] = useState(false)
   const [error, setError] = useState('')
   const [launchError, setLaunchError] = useState('')
+  const dialogSections = useAiDialogSections(userId)
   const roleInput = useMemo(() => ({ mapId: documentId, cardId, purpose, groupId, initialRequest, fullInitialRequest }), [documentId, cardId, purpose, groupId, initialRequest, fullInitialRequest])
   const [roleResult, setRoleResult] = useState<{ input: typeof roleInput; role?: AiConversationRole; error?: string } | null>(null)
   const role = roleResult?.input === roleInput ? roleResult.role : undefined
@@ -211,6 +213,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
   const [thoughtLevel, setThoughtLevel] = useState('')
   const [workspace, setWorkspace] = useState('')
   const [workspaceExplicit, setWorkspaceExplicit] = useState(false)
+  const [workspaceSavedScope, setWorkspaceSavedScope] = useState<'document' | 'group' | null>(null)
   const [workspacePrompt, setWorkspacePrompt] = useState(false)
   const [workspaceHistory, setWorkspaceHistory] = useState(() => readWorkspaceHistory(userId))
   const workspaceHistoryRef = useRef(workspaceHistory)
@@ -305,6 +308,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
         if (body.machineId !== machineId) setMachineId(body.machineId)
         setWorkspace(body.workspaceContext?.workspace ?? '')
         setWorkspaceExplicit(false)
+        setWorkspaceSavedScope(null)
         const savedSelections = runtimeSelectionsRef.current
         const savedMcpIds = readMcpSelections()
         const initialAgent = body.agents.find((agent) => agent.id === savedSelections.lastAgentId && agent.models.length > 0)
@@ -343,6 +347,10 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
 
   const selectedAgent = useMemo(() => options?.agents.find((agent) => agent.id === agentId) ?? null, [agentId, options])
   const selectedModel = selectedAgent?.models.find((model) => model.id === modelId)
+  const selectedMcpServers = options?.mcpServers.filter((server) => server.required || selectedMcpIds.has(server.id)) ?? []
+  const workspaceSummary = workspace.trim() || '선택 없음'
+  const mcpSummary = selectedMcpServers.map((server) => server.name).join(', ') || '선택 없음'
+  const skillsSummary = options?.skills.filter((skill) => selectedSkillIds.has(skill.id)).map((skill) => skill.name).join(', ') || '선택 없음'
 
   const changeAgent = (nextAgentId: string) => {
     persistRuntimeSelection(agentId, { modelId, mode, thoughtLevel })
@@ -366,6 +374,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
   const updateWorkspace = (value: string) => {
     setWorkspace(value)
     setWorkspaceExplicit(true)
+    setWorkspaceSavedScope(null)
   }
 
   const openWorkspaceBrowser = useCallback((directoryPath: string) => {
@@ -417,9 +426,33 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
     }
   }
 
-  const launch = async (choice?: WorkspaceChoice) => {
+  const selectWorkspace = async (choice: WorkspaceChoice) => {
+    if (!options || launching) throw new Error('대화 시작 옵션을 확인한 뒤 다시 선택해 주세요.')
+    let settingSaved = false
+    try {
+      let workspaceContext = await loadWorkspaceContext(documentId, options.machineId)
+      if (choice.context.machineId !== options.machineId || choice.context.token !== workspaceContext.token) {
+        throw new Error('작업공간 기준이 변경되었습니다. 경로를 다시 확인하고 선택해 주세요.')
+      }
+      if (choice.scope !== 'once') {
+        await saveWorkspaceSetting(choice)
+        settingSaved = true
+        workspaceContext = await loadWorkspaceContext(documentId, options.machineId)
+      }
+      setOptions({ ...options, workspaceContext })
+      setWorkspace(choice.workspace.trim())
+      setWorkspaceExplicit(true)
+      setWorkspaceSavedScope(choice.scope === 'once' ? null : choice.scope)
+      setLaunchError('')
+      setWorkspacePrompt(false)
+    } catch (reason) {
+      throw new Error(`${settingSaved ? '작업공간 기준은 저장되었지만 선택한 경로를 화면에 반영하지 못했습니다. ' : ''}${reason instanceof Error ? reason.message : '작업공간을 선택하지 못했습니다.'}`)
+    }
+  }
+
+  const launch = async () => {
     if (!options || !selectedAgent || !modelId || !role || loading || error || launching) return
-    if (!choice && (!workspace.trim() || (!workspaceExplicit && (!options.workspaceContext || options.workspaceContext.needsSelection)))) {
+    if (!workspace.trim() || (!workspaceExplicit && (!options.workspaceContext || options.workspaceContext.needsSelection))) {
       setWorkspacePrompt(true)
       return
     }
@@ -444,21 +477,14 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
     }
     setLaunching(true)
     setLaunchError('')
-    let settingSaved = false
     try {
-      let workspaceContext = await loadWorkspaceContext(documentId, options.machineId)
-      if (choice && choice.context.token !== workspaceContext.token) throw new Error('작업공간 기준이 변경되었습니다. 선택 창을 닫고 다시 확인해 주세요.')
-      if (!choice && options.workspaceContext?.token !== workspaceContext.token) {
+      const workspaceContext = await loadWorkspaceContext(documentId, options.machineId)
+      if (options.workspaceContext?.token !== workspaceContext.token) {
         setOptions({ ...options, workspaceContext }); setWorkspace(workspaceContext.workspace); setWorkspaceExplicit(false)
+        setWorkspaceSavedScope(null)
         throw new Error('문서·그룹의 작업공간 기준이 변경되었습니다. 갱신된 경로를 확인한 뒤 다시 시작해 주세요.')
       }
-      if (choice && choice.scope !== 'once') {
-        await saveWorkspaceSetting(choice)
-        settingSaved = true
-        workspaceContext = await loadWorkspaceContext(documentId, options.machineId)
-        setOptions({ ...options, workspaceContext })
-      }
-      const launchWorkspace = choice?.workspace ?? workspace.trim()
+      const launchWorkspace = workspace.trim()
       const latestRole = await loadAiConversationRole(roleInput, { signal: AbortSignal.timeout(10_000) })
       if (latestRole.purpose !== role.purpose || latestRole.groupId !== role.groupId || latestRole.automaticRequest !== role.automaticRequest) {
         setRoleResult({ input: roleInput, role: latestRole })
@@ -489,7 +515,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
           mcpIds,
           workspace: launchWorkspace,
           workspaceToken: workspaceContext.token,
-          workspaceConfirmed: Boolean(choice) || workspaceExplicit,
+          workspaceConfirmed: workspaceExplicit,
           requestPreview: userRequest.trim() || automaticRequest,
         }),
       })
@@ -548,9 +574,8 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
       onClose()
     } catch (launchFailure) {
       if (launchTab && !launchTab.closed) launchTab.close()
-      const message = `${settingSaved ? '작업공간 기준은 저장되었지만 대화 시작은 완료되지 않았습니다. ' : ''}${launchFailure instanceof Error ? launchFailure.message : 'AI 대화를 시작하지 못했습니다.'}`
+      const message = launchFailure instanceof Error ? launchFailure.message : 'AI 대화를 시작하지 못했습니다.'
       setLaunchError(message)
-      if (choice) throw new Error(message)
     } finally {
       setLaunching(false)
     }
@@ -628,7 +653,12 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
               {selectedAgent && selectedAgent.modes.length > 0 && <label><span>권한</span><select value={mode} onChange={(event) => setMode(event.target.value)}>{selectedAgent.modes.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>}
               {selectedAgent && selectedAgent.thoughtLevels.length > 0 && <label><span>사고 수준</span><select value={thoughtLevel} onChange={(event) => setThoughtLevel(event.target.value)}>{selectedAgent.thoughtLevels.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>}
             </div>
-            <div className="ai-workspace-field">
+            <details className="ai-workspace-section" open={dialogSections.sections.workspace}>
+              <summary onClick={(event) => { event.preventDefault(); dialogSections.toggle('workspace') }}>
+                <span className="ai-section-label">작업공간</span>
+                {!dialogSections.sections.workspace && <span className="ai-section-selection" title={workspaceSummary}>{workspaceSummary}</span>}
+              </summary>
+              <div className="ai-workspace-field">
               <label className="ai-workspace-input">
                 <span>작업공간</span>
                 <div className="ai-workspace-input-row">
@@ -651,7 +681,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
                   </button>
                 </div>
               </label>
-              <small>{workspaceExplicit ? '이번 대화에서 선택한 경로 · 문서/그룹 기준은 변경하지 않습니다.' : options.workspaceContext?.source === 'document' ? '문서 작업공간 기준' : options.workspaceContext?.source === 'group' ? `${options.workspaceContext.groupName} 그룹 작업공간 기준` : '기준 미설정 · AionUi에서 시작을 누르면 선택할 수 있습니다.'}</small>
+              <small>{workspaceSavedScope ? `${workspaceSavedScope === 'document' ? '문서' : '그룹'} 작업공간 기준에 저장한 경로 · 이번 대화에서 사용합니다.` : workspaceExplicit ? '이번 대화에서 선택한 경로 · 문서/그룹 기준은 변경하지 않습니다.' : options.workspaceContext?.source === 'document' ? '문서 작업공간 기준' : options.workspaceContext?.source === 'group' ? `${options.workspaceContext.groupName} 그룹 작업공간 기준` : '기준 미설정 · AionUi에서 시작을 누르면 선택할 수 있습니다.'}</small>
               {options.workspaceContext?.error && <small role="alert">{options.workspaceContext.error}</small>}
               <button type="button" className="ai-workspace-browse" disabled={launching} onClick={() => setWorkspacePrompt(true)}>작업공간 확인·설정…</button>
               {doorayApproval && Boolean(options.workspaceChoices?.length) && <div className="ai-workspace-history">
@@ -731,9 +761,13 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
                   </div>
                 </div>
               )}
-            </div>
-            <details open>
-              <summary>MCP 도구 <b>{options.mcpServers.filter((server) => server.required || selectedMcpIds.has(server.id)).length}</b></summary>
+              </div>
+            </details>
+            <details className="ai-mcp-section" open={dialogSections.sections.mcp}>
+              <summary onClick={(event) => { event.preventDefault(); dialogSections.toggle('mcp') }}>
+                <span className="ai-section-label">MCP 도구</span><b>{selectedMcpServers.length}</b>
+                {!dialogSections.sections.mcp && <span className="ai-section-selection" title={mcpSummary}>{mcpSummary}</span>}
+              </summary>
               <div className="ai-capability-list ai-mcp-capability-list" aria-label="사용할 MCP 도구 선택">
                 {options.mcpServers.map((server) => (
                   <label key={server.id} title={server.description}>
@@ -746,17 +780,21 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
                 ))}
               </div>
             </details>
-            <details open>
-              <summary>스킬 <b>{selectedSkillIds.size}</b></summary>
+            <details className="ai-skills-section" open={dialogSections.sections.skills}>
+              <summary onClick={(event) => { event.preventDefault(); dialogSections.toggle('skills') }}>
+                <span className="ai-section-label">스킬</span><b>{selectedSkillIds.size}</b>
+                {!dialogSections.sections.skills && <span className="ai-section-selection" title={skillsSummary}>{skillsSummary}</span>}
+              </summary>
               <div className="ai-capability-list">{options.skills.map((skill) => <label key={skill.id} title={skill.description}><input type="checkbox" checked={selectedSkillIds.has(skill.id)} onChange={() => toggleSelection(setSelectedSkillIds, skill.id)} /><span><strong>{skill.name}</strong><small>{skill.description || '설명 없음'}</small></span></label>)}</div>
             </details>
+            {dialogSections.error && <div className="ai-section-preferences-error" role="alert"><span>{dialogSections.error}</span><button type="button" onClick={dialogSections.retry}>다시 시도</button></div>}
             {launchError && <div className="ai-launch-error" role="alert">{launchError}</div>}
           </div>
         )}
         <footer><span>응답은 {options?.machineLabel ?? '선택한 머신'}의 AionUi에서만 처리됩니다.</span><div><button type="button" onClick={onClose}>취소</button><button type="button" className="primary" onClick={() => { void launch() }} disabled={roleLoading || Boolean(roleError) || loading || launching || Boolean(error) || !selectedAgent || !modelId}>{launching ? '준비 중…' : 'AionUi에서 시작'}</button></div></footer>
       </section>
     </div>
-    {workspacePrompt && <WorkspaceSettingsDialog mapId={documentId} machineId={options?.machineId} name={documentTitle || cardTitle} initialWorkspace={workspace} onConfirm={launch} onClose={() => setWorkspacePrompt(false)} />}
+    {workspacePrompt && <WorkspaceSettingsDialog mapId={documentId} machineId={options?.machineId} name={documentTitle || cardTitle} initialWorkspace={workspace} onConfirm={selectWorkspace} onClose={() => setWorkspacePrompt(false)} />}
     </>
   )
 }
