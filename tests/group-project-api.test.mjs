@@ -130,9 +130,12 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
     const prepared = await api('/api/groups/' + groupId, 'PATCH', { baseVersion: 0, source, sourceVersion: 'v0.3', objective: '전체 기획 구현', instructions: '첫 절\n\n마지막 절은 보존합니다.', createCoordinator: true })
     assert.equal(prepared.status, 200, JSON.stringify(prepared.body))
     let context = prepared.body
+    assert.equal(context.guide.executionApproval, AI_EXECUTION_APPROVAL_INSTRUCTION)
     assert.equal(context.guide.coordinator, GROUP_COORDINATOR_INSTRUCTION)
     assert.equal(context.guide.documentCoordinator, DOCUMENT_COORDINATOR_INSTRUCTION)
     assert.equal(context.guide.approval, GROUP_APPROVAL_INSTRUCTION)
+    assert.ok(!context.guide.coordinator.includes(AI_EXECUTION_APPROVAL_INSTRUCTION))
+    assert.ok(!context.guide.coordinator.includes(GROUP_APPROVAL_INSTRUCTION))
     assert.equal(context.coordinator.root.data.description, GROUP_COORDINATOR_INSTRUCTION)
     const coordinatorId = context.coordinator.id
     const coordinatorRoot = context.coordinator.root.id

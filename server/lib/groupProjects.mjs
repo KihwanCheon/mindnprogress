@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { randomBytes } from 'node:crypto'
 import path from 'node:path'
-import { GROUP_COORDINATOR_INSTRUCTION, GROUP_APPROVAL_INSTRUCTION, DOCUMENT_COORDINATOR_INSTRUCTION } from '../../src/utils/aiApprovalInstructions.mjs'
+import { AI_EXECUTION_APPROVAL_INSTRUCTION, GROUP_COORDINATOR_INSTRUCTION, GROUP_APPROVAL_INSTRUCTION, DOCUMENT_COORDINATOR_INSTRUCTION } from '../../src/utils/aiApprovalInstructions.mjs'
 import { applyGroupWaitingReview, groupWaitingDetails } from './groupWaitingReviews.mjs'
 import { GROUP_PLANNING_SOURCE_LIMIT, groupPlanningSources, withGroupPlanningSources } from '../../src/utils/groupPlanningSources.mjs'
 
@@ -97,6 +97,7 @@ export function createGroupProjects({ dataDirectory, replaceFile, listMaps, read
       guide: {
         approvalScope: 'group-coordinator',
         instructionScope: 'coordinator와 approval은 그룹 총괄 전용 지침이며 documentCoordinator는 문서 담당 지침입니다. 문서 담당·하위 AI에게 같은 사용자 승인을 반복해서 요구하지 않습니다.',
+        executionApproval: AI_EXECUTION_APPROVAL_INSTRUCTION,
         coordinator: GROUP_COORDINATOR_INSTRUCTION,
         documentCoordinator: DOCUMENT_COORDINATOR_INSTRUCTION,
         approval: GROUP_APPROVAL_INSTRUCTION,

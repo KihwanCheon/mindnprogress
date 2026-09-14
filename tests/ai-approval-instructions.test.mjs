@@ -3,6 +3,7 @@ import test from 'node:test'
 import {
   AI_EXECUTION_APPROVAL_INSTRUCTION,
   GROUP_APPROVAL_INSTRUCTION,
+  GROUP_COORDINATOR_APPROVAL_BOOTSTRAP_INSTRUCTION,
   GROUP_COORDINATOR_INSTRUCTION,
   DOCUMENT_COORDINATOR_INSTRUCTION,
   AI_DELEGATION_FOLLOWUP_INSTRUCTION,
@@ -17,12 +18,18 @@ test('총괄 시작은 전체 방향과 문서별 실행을 각각 사용자에�
   const request = buildGroupCoordinatorRequest({ groupId: 'group-test' })
   assert.match(request, /groupId="group-test"/)
   assert.ok(request.includes(GROUP_COORDINATOR_INSTRUCTION))
-  assert.ok(request.includes(GROUP_APPROVAL_INSTRUCTION))
-  assert.match(request, /1\. 전체 방향 제안/)
-  assert.match(request, /2\. 문서별 실행 계획 제안/)
-  assert.match(request, /전체 방향 승인은 문서별 실행의 일괄 승인이 아닙니다/)
-  assert.match(request, /일부 문서만 승인되면 나머지는 대기/)
+  assert.ok(request.includes(GROUP_COORDINATOR_APPROVAL_BOOTSTRAP_INSTRUCTION))
+  assert.ok(!request.includes(AI_EXECUTION_APPROVAL_INSTRUCTION))
+  assert.ok(!request.includes(GROUP_APPROVAL_INSTRUCTION))
   assert.match(request, /원본 요구사항 전수 등록.*주 소유권 확정.*구현을 위임하지/)
+
+  const prompt = buildAiConversationPrompt({ purpose: 'group-coordination', mapId: 'map', cardId: 'root', editorId: 'editor', attributionToken: 'token', request })
+  assert.equal(prompt.split(AI_EXECUTION_APPROVAL_INSTRUCTION).length - 1, 1)
+  assert.equal(prompt.split(GROUP_APPROVAL_INSTRUCTION).length - 1, 1)
+  assert.match(prompt, /1\. 전체 방향 제안/)
+  assert.match(prompt, /2\. 문서별 실행 계획 제안/)
+  assert.match(prompt, /전체 방향 승인은 문서별 실행의 일괄 승인이 아닙니다/)
+  assert.match(prompt, /일부 문서만 승인되면 나머지는 대기/)
 })
 
 test('문서 지시 제안 버튼은 식별자와 제안 범위를 전달하지만 실행을 승인하지 않는다', () => {
@@ -32,7 +39,13 @@ test('문서 지시 제안 버튼은 식별자와 제안 범위를 전달하지�
   assert.match(request, /문서별 사용자 승인 전에는 루트 수정, 지시 전달이나 AI 위임을 하지 마세요/)
   assert.match(request, /mindnprogress_send_group_document_instruction/)
   assert.match(request, /이 버튼 요청은 실행 승인이나 지시 전달이 아니라 제안 요청입니다/)
-  assert.ok(request.includes(GROUP_APPROVAL_INSTRUCTION))
+  assert.ok(request.includes(GROUP_COORDINATOR_APPROVAL_BOOTSTRAP_INSTRUCTION))
+  assert.ok(!request.includes(GROUP_APPROVAL_INSTRUCTION))
+})
+
+test('총괄 역할 지침은 승인 정책 전문을 복제하지 않는다', () => {
+  assert.ok(!GROUP_COORDINATOR_INSTRUCTION.includes(AI_EXECUTION_APPROVAL_INSTRUCTION))
+  assert.ok(!GROUP_COORDINATOR_INSTRUCTION.includes(GROUP_APPROVAL_INSTRUCTION))
 })
 
 test('문서 담당은 그룹 승인 전문 없이 맡긴 범위를 수행하고 최신 원본 검토를 유지한다', () => {
@@ -79,7 +92,8 @@ test('최대 길이의 그룹·문서 식별자에서도 승인 규칙과 마지
   for (const request of requests) {
     assert.ok(request.length <= AI_EDITOR_REQUEST_MAX_LENGTH)
     assert.equal(normalizeAiEditorRequest(request), request)
-    const prompt = buildAiConversationPrompt({ mapId: 'map-test', cardId: 'root-test', editorId: 'editor-test', attributionToken: 'fixture-token', request })
+    const groupCoordinator = request.includes(GROUP_COORDINATOR_INSTRUCTION)
+    const prompt = buildAiConversationPrompt({ purpose: groupCoordinator ? 'group-coordination' : 'card', mapId: 'map-test', cardId: 'root-test', editorId: 'editor-test', attributionToken: 'fixture-token', request })
     assert.equal(prompt.includes(AI_EXECUTION_APPROVAL_INSTRUCTION), request.includes(GROUP_COORDINATOR_INSTRUCTION))
     assert.ok(prompt.endsWith(request))
   }

@@ -16,13 +16,11 @@ mindnprogress_send_group_document_instruction을 호출할 때 approvalEvidence�
 전체 방향 승인은 문서별 실행의 일괄 승인이 아닙니다. 총괄 준비·대화 시작·위임 제안 버튼을 누른 것만으로도 승인되지는 않습니다. 승인된 준비·정비 작업과 승인된 문서 실행만 구분해서 진행하세요.
 실행 전 최신 그룹 기준과 승인받은 계획을 대조하세요. 기획서 추가·제거·주소·개별 버전·목표·공통 지침·핵심 방향·담당 범위가 달라졌거나 승인 근거를 확인할 수 없으면 영향받은 실행은 보류하고 사용자에게 재승인을 요청하세요. 문서 AI가 다른 방향을 발견하면 총괄에 수정안을 반환하고, 총괄은 사용자에게 재승인을 받아야 합니다.`
 
+export const GROUP_COORDINATOR_APPROVAL_BOOTSTRAP_INSTRUCTION = `대화 시작은 그룹의 전체 방향이나 문서별 실행 승인이 아닙니다. mindnprogress_get_group_context의 guide.executionApproval과 guide.approval에서 최신 승인 정책을 확인하고, 승인 전에는 읽기 전용 분석과 제안만 수행하세요.`
+
 export const GROUP_COORDINATOR_INSTRUCTION = `이 문서는 그룹 전체의 기획과 개발을 총괄합니다.
 먼저 mindnprogress_get_group_context로 최신 기획 기준·전체 목표·공통 지침, 소속 문서와 위임 상태를 확인하세요.
 project.sources의 모든 기획서 주소·개별 버전을 확인하세요. 첫 원본만 분석하거나 추가 기획서를 기존 원본의 대체본으로 간주하지 마세요. 원본 간 관계·충돌이 불명확하면 사용자에게 확인하세요.
-
-${AI_EXECUTION_APPROVAL_INSTRUCTION}
-
-${GROUP_APPROVAL_INSTRUCTION}
 
 # 승인된 범위의 운영·검수 원칙
 기획서 기반 개발에는 mnp-spec-driven-development 스킬을 사용하세요. 원본 전수 분석, 문서 분할, 전역 요구사항 주 소유권 원장, 공통 계약, 실행 순서와 완료 기준을 관리하되 미승인 내용은 대화의 제안으로만 제시하세요.
@@ -58,7 +56,7 @@ export const GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION = `하위 결과 알림과
 mindnprogress_delegate_ai_work로 같은 문서의 하위 카드에 위임한 경우에도 이번에 계획한 위임의 접수 결과와 현재 상태를 확인한 뒤, 접수·대기·실패를 구분해 사용자에게 보고하고 현재 턴을 종료하세요. 하위 완료를 기다리며 반복 조회하거나 턴을 유지하지 말고, 완료 후 처리는 MindNProgress가 자동 재개하는 다음 턴에서 수행하세요.`
 
 export function buildGroupCoordinatorRequest({ groupId, instruction } = {}) {
-  return `그룹 총괄 업무입니다. mindnprogress_get_group_context를 groupId="${groupId}"로 먼저 조회하세요.\n\n${instruction ?? '기획 원본과 기존 문서를 읽기 전용으로 분석하고 전체 진행 방향을 먼저 제안하세요. 사용자의 명시적인 승인 전에는 문서·카드를 변경하거나 AI를 위임하지 말고 승인 대기로 응답을 마치세요.'}\n\n${GROUP_COORDINATOR_INSTRUCTION}`
+  return `그룹 총괄 업무입니다. mindnprogress_get_group_context를 groupId="${groupId}"로 먼저 조회하세요.\n\n${GROUP_COORDINATOR_APPROVAL_BOOTSTRAP_INSTRUCTION}\n\n${instruction ?? '기획 원본과 기존 문서를 읽기 전용으로 분석하고 전체 진행 방향을 먼저 제안하세요. 사용자의 명시적인 승인 전에는 문서·카드를 변경하거나 AI를 위임하지 말고 승인 대기로 응답을 마치세요.'}\n\n${GROUP_COORDINATOR_INSTRUCTION}`
 }
 
 export function buildGroupDocumentRequest({ groupId, groupName } = {}) {
