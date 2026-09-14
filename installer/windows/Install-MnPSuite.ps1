@@ -323,9 +323,7 @@ function Get-MnPSuiteAgentGuidance {
 ## PowerPoint 파일 확인
 
 - pptx·ppt·파워포인트·발표 자료·기획서 슬라이드 내용을 확인하기 전에 `pptx` 스킬을 읽고 따른다.
-- 슬라이드 PNG는 `pptx-mcp`의 PowerPoint COM 렌더링을 먼저 사용하고, COM을 사용할 수 없는 경우에만 `officecli --render html`로 대체한다. OfficeCLI에는 원본 가로 크기의 150 DPI 환산 너비만 전달하고 높이·최대 변 1920px 상한 처리는 렌더러에 맡긴다.
-- 텍스트·표 구조와 모든 슬라이드 이미지를 함께 확인한다. 두 렌더러를 모두 사용할 수 없으면 텍스트만으로 내용을 확정하지 말고 필요한 연결을 사용자에게 알린다.
-- 이미지와 추출 구조가 다르면 차이를 기록하고 PowerPoint에서 직접 확인할 필요가 있는지 명시한다.
+- 텍스트·표 구조와 모든 슬라이드 이미지를 함께 확인한다. 렌더러 선택·해상도·차이 확인 절차는 스킬을 따르며, 이미지를 확인할 수 없으면 텍스트만으로 내용을 확정하지 않는다.
 '@.Trim()
   }
 
@@ -1849,6 +1847,11 @@ function Invoke-SelfTest {
     $dev = Write-DevLaunchers $temporaryRoot
     Write-InstalledReadme $temporaryRoot
     $guide = Copy-UserGuides $temporaryRoot
+    $agentGuidance = Get-MnPSuiteAgentGuidance $true $true
+    if ($agentGuidance -match '150 DPI|officecli --render html|최대 변 1920px' -or
+        $agentGuidance -notmatch '렌더러 선택·해상도·차이 확인 절차는 스킬을 따르') {
+      throw '전역 지침이 pptx 스킬의 상세 렌더링 절차를 중복함'
+    }
     $pptxSkillText = Read-Utf8File (Join-Path (Get-MnPSuitePackagedSkillPath 'pptx') 'SKILL.md')
     if ($pptxSkillText -notmatch 'PowerPoint COM' -or
         $pptxSkillText -notmatch 'officecli view.+screenshot --render html' -or
