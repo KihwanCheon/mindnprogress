@@ -13,7 +13,7 @@ type Stats = { documents: number; cards: number; work: number; done: number; unf
 type Preview = { id: string; previewHash: string; layoutPhase: 'draft' | 'measured' | 'verified'; baseline: string; reason: string; newSource?: string; changeSummary?: string; before: Stats; after: Stats; warnings: string[]; dispositionCounts: Record<string, number>; sourceCards: { mapId: string; cardId: string; label: string }[]; targets: { key: string; map: ReconstructionPreviewMap; renderMap: ReconstructionPreviewMap; layout: MindMapLayout }[] }
 type Scope = { type: 'map' | 'group'; id: string }
 type Choice = { id: string; title: string; excluded: boolean }
-type ReconstructionRequest = { id: string; mode: 'compact' | 'spec-update'; baseline: string; notes: string; newSource: string; createdAt: string; createdBy: { id: string }; revision: number; mapIds: string[]; documents: { id: string; title: string }[]; hasProposal?: boolean; planId?: string; plan?: Record<string, unknown>; conversation?: { id: string }; launchTarget: { mapId: string; cardId: string; cardTitle: string; documentTitle: string } }
+type ReconstructionRequest = { id: string; mode: 'compact' | 'spec-update'; baseline: string; notes: string; newSource: string; createdAt: string; createdBy: { id: string }; revision: number; mapIds: string[]; documents: { id: string; title: string }[]; hasProposal?: boolean; planId?: string; plan?: Record<string, unknown>; conversation?: { id: string; name?: string; displayLabel?: string; displaySource?: 'live' | 'id-only' }; launchTarget: { mapId: string; cardId: string; cardTitle: string; documentTitle: string } }
 type AiDelegationBlocker = { id: string; state: string; mapId: string; cardId: string; cardLabel?: string }
 type Api = <T>(path: string, init?: RequestInit) => Promise<T>
 
@@ -225,7 +225,7 @@ export function DocumentLifecycle({ api, editable, documents, initialIds, scope,
         {activeRequest && <article className="lifecycle-request-detail"><strong>선택한 요청: {activeRequest.baseline} · {activeRequest.documents.map((doc) => doc.title).join(', ')}</strong><p>{activeRequest.notes}</p>{activeRequest.newSource && <p>새 원본: {activeRequest.newSource}</p>}
           {!activeRequest.plan && <p>정리안이 아직 제출되지 않았습니다. 이 화면을 열어 두면 도착 여부를 확인합니다.</p>}
           {editable && activeRequest.createdBy.id === userId && !activeRequest.conversation && !activeRequest.plan && <button disabled={busy} onClick={() => setLaunchRequest(activeRequest)}>AI 선택·시작</button>}
-          {activeRequest.conversation && <small>AI 대화 ID: {activeRequest.conversation.id} · 응답과 추가 질문은 AionUi에서 확인하세요.</small>}
+          {activeRequest.conversation && <small>AI 대화: {activeRequest.conversation.displayLabel || activeRequest.conversation.id} · 응답과 추가 질문은 AionUi에서 확인하세요.</small>}
         </article>}
         <details><summary>고급 · 원본 정보와 정리안 JSON 직접 입력</summary>
           <button disabled={busy || !selected.size || selected.size > 30} onClick={() => void run(async () => { setContext(JSON.stringify(await api(`/api/document-reconstructions/context?${new URLSearchParams([...selected].map((id) => ['mapId', id]))}`), null, 2)) })}>AI용 원본 정보 조회</button>

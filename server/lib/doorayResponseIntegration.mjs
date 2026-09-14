@@ -147,8 +147,11 @@ export function createDoorayResponseIntegration(d) {
         if (!result.has_more_before) {
           if (!messages.size) throw fail('이전 승인 대화의 텍스트 전문이 비어 있어 인계하지 않았습니다.')
           if (result.has_more_before === undefined && result.items.length >= 100) throw fail('대화 전문의 조회 범위를 확인할 수 없습니다.')
-          return [...messages.values()].sort((a, b) => Number(a.created_at) - Number(b.created_at) || String(a.id).localeCompare(String(b.id)))
-            .map((message) => `### ${message.position === 'right' ? '사용자' : 'AI'} · 메시지 ${message.id} · ${message.created_at ?? ''}\n${redactDoorayTranscript(d.readAionUiMessageContent(message))}`).join('\n\n')
+          return {
+            conversationName: String(conversation.name ?? ''),
+            transcript: [...messages.values()].sort((a, b) => Number(a.created_at) - Number(b.created_at) || String(a.id).localeCompare(String(b.id)))
+              .map((message) => `### ${message.position === 'right' ? '사용자' : 'AI'} · 메시지 ${message.id} · ${message.created_at ?? ''}\n${redactDoorayTranscript(d.readAionUiMessageContent(message))}`).join('\n\n'),
+          }
         }
         if (!result.oldest_cursor || result.oldest_cursor === before) throw fail('대화 전문 페이지를 이어서 확인하지 못했습니다.')
         before = result.oldest_cursor

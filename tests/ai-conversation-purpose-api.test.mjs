@@ -179,6 +179,38 @@ test('지식·문서 정리 대화는 임시 귀속만 유지하고 원본 카�
     })
     assert.equal(cardCompletionResponse.status, 200)
 
+    const displayHeaders = { ...headers, 'X-MNP-AI-Conversation-Id': cardConversationId }
+    let displayResponse = await fetch(`${baseUrl}/api/integrations/aionui/conversation-display/resolve`, {
+      method: 'POST',
+      headers: displayHeaders,
+      body: '{}',
+    })
+    assert.equal(displayResponse.status, 200)
+    assert.deepEqual(await displayResponse.json(), {
+      conversationId: cardConversationId,
+      name: '카드 대화',
+      displayLabel: `카드 대화 (${cardConversationId})`,
+      source: 'live',
+    })
+    conversations.set(cardConversationId, { ...conversations.get(cardConversationId), name: '사용자가 변경한 카드 대화' })
+    displayResponse = await fetch(`${baseUrl}/api/integrations/aionui/conversation-display/resolve`, {
+      method: 'POST',
+      headers: displayHeaders,
+      body: '{}',
+    })
+    assert.equal((await displayResponse.json()).displayLabel, `사용자가 변경한 카드 대화 (${cardConversationId})`)
+    displayResponse = await fetch(`${baseUrl}/api/integrations/aionui/conversation-display/resolve`, {
+      method: 'POST',
+      headers: { ...headers, 'X-MNP-AI-Conversation-Id': 'conversation-unavailable' },
+      body: '{}',
+    })
+    assert.deepEqual(await displayResponse.json(), {
+      conversationId: 'conversation-unavailable',
+      name: '',
+      displayLabel: 'conversation-unavailable',
+      source: 'id-only',
+    })
+
     const linkedMap = (await (await fetch(`${baseUrl}/api/maps/${mapId}`, { headers })).json()).map
     const linkedVersion = linkedMap.version
     assert.equal(linkedMap.nodes.find((node) => node.id === 'review-card').data.aiConversationId, cardConversationId)
@@ -220,13 +252,19 @@ test('지식·문서 정리 대화는 임시 귀속만 유지하고 원본 카�
     const cleanupCompletion = await fetch(cleanupAttribution.completionUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ conversationId: 'conversation-reconstruction' }) })
     assert.equal(cleanupCompletion.status, 200)
     assert.equal((await cleanupCompletion.json()).linked, false)
-    assert.equal((await (await fetch(`${baseUrl}/api/document-reconstructions/requests/${cleanup.id}`, { headers })).json()).conversation.id, 'conversation-reconstruction')
+    const reconstructionRequest = await (await fetch(`${baseUrl}/api/document-reconstructions/requests/${cleanup.id}`, { headers })).json()
+    assert.equal(reconstructionRequest.conversation.id, 'conversation-reconstruction')
+    assert.equal(reconstructionRequest.conversation.name, '[문서 정리] 정리안 제안')
+    assert.equal(reconstructionRequest.conversation.displayLabel, '[문서 정리] 정리안 제안 (conversation-reconstruction)')
     assert.deepEqual(await readFile(path.join(dataDirectory, `${mapId}.json`)), sourceBytes)
     const reviewedMap = (await (await fetch(`${baseUrl}/api/maps/${mapId}`, { headers })).json()).map
     const reviewedCard = reviewedMap.nodes.find((node) => node.id === 'review-card')
     assert.equal(reviewedMap.version, linkedVersion)
     assert.equal(reviewedCard.data.aiConversationId, cardConversationId)
     assert.deepEqual(reviewedCard.data.aiConversations.map((item) => item.conversationId), [cardConversationId])
+    assert.equal(reviewedCard.data.aiConversations[0].name, undefined, '변동 가능한 대화 제목을 카드에 저장하지 않습니다.')
+    const storedReconstructionRequests = JSON.parse(await readFile(path.join(dataDirectory, '_document-reconstruction-requests.json'), 'utf8'))
+    assert.equal(storedReconstructionRequests[cleanup.id].conversation.name, undefined, '표시용 대화 제목을 정리 요청 기록에 저장하지 않습니다.')
 
     const listed = await (await fetch(
       `${baseUrl}/api/maps/${mapId}/cards/review-card/ai-conversations`,

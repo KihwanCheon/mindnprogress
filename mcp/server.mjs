@@ -22,6 +22,7 @@ import {
 import { imageCardLocalAccess } from './imageAccess.mjs'
 import { withDocumentGroupMetadata } from './documentGroupMetadata.mjs'
 import { MCP_TOOL_USAGE_DIRECTORY_NAME, createFileToolUsageRecorder } from '../server/lib/mcpToolUsage.mjs'
+import { formatAiConversationDisplay } from '../server/lib/aiConversationDisplay.mjs'
 
 const projectDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const dataDirectory = path.resolve(String(process.env.MNP_DATA_DIR ?? '').trim() || path.join(projectDirectory, 'server', 'data'))
@@ -32,7 +33,7 @@ const toolUsageDirectory = path.resolve(String(process.env.MNP_MCP_USAGE_DIR ?? 
   || path.join(dataDirectory, MCP_TOOL_USAGE_DIRECTORY_NAME))
 const toolUsageDisabled = String(process.env.MNP_MCP_USAGE_DISABLED ?? '').trim() === '1'
 const toolUsageFlushIntervalMs = Number(String(process.env.MNP_MCP_USAGE_FLUSH_MS ?? '').trim())
-const contextSchemaVersion = '3.0'
+const contextSchemaVersion = '3.1'
 const commentSummaryMaxLength = 240
 const commentSummaryTooLongMessage = 'summary는 240자 이하의 1~2문장만 입력하세요. 상세 내용은 summary 문자열에 이어 붙이지 말고 detail 인자로 분리하세요. 예: {"summary":"[결과] 구현과 검증을 완료했습니다.","detail":"## 수행 내용\\n..."}. 호환용 text로 우회하거나 상세를 여러 댓글로 나누지 마세요.'
 const contextCommentLimit = 20
@@ -141,7 +142,7 @@ const knowledgeLinePolicy = Object.freeze({
   }),
 })
 
-const serverInstructions = `MindNProgress는 마인드맵과 업무 진행 관리를 결합한 웹 서비스입니다. MindNProgress 밖에서 시작해 문서 ID나 카드 ID가 없다면 mindnprogress_read_me_first를 먼저 호출하세요. 선택 문서와 카드가 있다면 mindnprogress_get_context로 제품 규칙과 최신 문서 구조를 먼저 확인하세요. MCP 도구에서 카드를 지정할 때는 cardId 계열 인자를 사용하세요. nodeId 계열 인자는 기존 대화 호환용이므로 새 호출에서는 사용하지 마세요. AionUi 일반 대화는 get_context 호출 시 현재 대화의 AI 종류와 모델을 자동 확인하므로 aiType과 aiModel을 임의로 채우지 마세요. AionUi가 아닌 외부 MCP 세션만 자신이 현재 AI 종류와 모델을 정확히 알고 있을 때 get_context의 aiType과 aiModel에 함께 전달하고, 알지 못하면 추측하지 마세요. get_context의 selection.taskLinks.startupInspection을 따르세요. mode가 knowledge-guided이면 primary 선행 지식 중 kind=image인 항목은 imageAccess.localPath의 원본을 사용 가능한 로컬 이미지 열람 도구로 직접 확인하고 설명과 댓글을 함께 사용하며, 일반 카드는 sharedKnowledge를 먼저 재사용하고 설명과 댓글로 보완합니다. fallbackSources와 fallbackTargets는 정보가 부족할 때만 선택적으로 조사합니다. mode가 default이고 required가 true이면 targets의 업무 본문, 댓글, 첨부파일 목록과 관련 링크를 조사하세요. 지식선 생성과 제안은 get_context의 guide.knowledgeLinePolicy를 따르세요. 그룹 총괄 AI는 get_group_context의 총괄 전용 승인 절차를 따르고, 승인된 문서별 작업은 mindnprogress_send_group_document_instruction으로 해당 문서 루트 AI에 지시 전문을 전달하세요. 이 전달은 AI 작업 위임이나 worker 배정이 아니며, mindnprogress_delegate_ai_work는 같은 문서의 계층상 하위 업무에만 사용하세요. 일반·문서 담당·하위 AI는 사용자 요청 또는 상위 AI가 맡긴 범위에서 수행하세요. 진행 과정과 결과는 댓글에 기록하고, 다른 카드나 후속 세션이 재사용할 현재 유효한 사실·결정·제약·검증 결과만 sharedKnowledge에 남기세요. 진행 기록·도구 로그·중복·폐기 결론은 넣지 말고 같은 주제의 결론은 새 이력으로 덧붙이지 말고 기존 절을 안전하게 교체하세요. 실제로 실행할 카드에 독립적으로 완료 여부를 판정할 구현·검증 조건이 2개 이상이면 결과 중심 체크리스트로 작성하고 진행에 맞춰 갱신하세요. 별도 하위 카드로 추적할 작업은 체크리스트에 중복하지 마세요. AI 댓글은 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 충실히 담은 detail로 작성하며, 요약 때문에 상세를 축약하지 마세요. 외부 전달물이나 결정 대기는 waitingItems로 기록하고 제목에 대기 문구를 붙이지 마세요. 대기를 등록할 때는 [차단], 해제할 때는 [진행] 댓글로 이유와 재개 상태를 기록하세요. 카드 일부 필드만 변경할 때는 mindnprogress_update_card의 data에 변경할 필드만 보내고 현재 카드 전체 데이터를 재전송하지 마세요. 기존 description 또는 sharedKnowledge 내부의 일부만 고칠 때는 조회 결과의 textIntegrity SHA-256과 mindnprogress_patch_card_text를 사용하세요. ${cardTextSafetyInstructions} 과도한 sharedKnowledge를 정리할 때는 후보 목록과 전용 검토 문맥을 조회한 뒤 mindnprogress_apply_shared_knowledge_review로 현재 해시가 일치하는 결과만 원자적으로 저장하세요. 일반 카드에서 생략한 필드와 위치는 보존되지만 완료 상태 또는 진행률 100 적용 시 waitingItems는 자동으로 해제되며, Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 선택 카드 밖의 형제·하위·선행 카드를 함께 수정하기 전에는 mindnprogress_get_ai_work_states로 해당 카드에 다른 AI 작업이 진행 중인지 확인하세요. running 또는 waiting-confirmation인 카드는 사용자 지시 없이 동시에 수정하지 마세요. 등록된 AI 작업공간의 최신 목록·경로·상태가 필요하면 폴더명을 추측하지 말고 mindnprogress_get_ai_workspace_pool을 호출하세요. 작업공간 선택·점유·전환·해제는 MindNProgress만 수행하며 AI가 임의로 worker를 선택하지 않습니다. 현재 위임 실행이 사용자의 중지로 끊긴 뒤 같은 대화에서 직접 이어 실제 작업을 완료했다면 카드 기록과 작업공간 체크포인트를 마친 뒤 최종 답변 직전에 mindnprogress_complete_ai_delegation을 호출하세요. 같은 대화의 과거 위임만 중지됐거나 현재 위임이 중단 없이 진행됐다면 호출하지 마세요. 도구가 required=false를 반환하면 오류가 아니며 최종 답변을 마치면 자동으로 상위 AI에 보고됩니다. 지식선만 변경할 때는 전체 문서를 다시 보내지 말고 지식선 전용 도구를 사용하세요. 조회 도구는 문서 version을 변경하지 않지만 카드·관계 편집과 AI 대화 ID 연결은 version을 증가시킬 수 있습니다. 특정 자료가 있다고 가정하지 마세요. 여러 카드로 구성된 새 문서는 mindnprogress_create_mindmap으로 한 번에 생성하고, 변경 후에는 최신 문서를 다시 조회해 결과를 검증하세요. 비밀번호 변경과 계정 관리 작업은 지원하지 않습니다.`
+const serverInstructions = `MindNProgress는 마인드맵과 업무 진행 관리를 결합한 웹 서비스입니다. MindNProgress 밖에서 시작해 문서 ID나 카드 ID가 없다면 mindnprogress_read_me_first를 먼저 호출하세요. 선택 문서와 카드가 있다면 mindnprogress_get_context로 제품 규칙과 최신 문서 구조를 먼저 확인하세요. MCP 도구에서 카드를 지정할 때는 cardId 계열 인자를 사용하세요. nodeId 계열 인자는 기존 대화 호환용이므로 새 호출에서는 사용하지 마세요. AionUi 일반 대화는 get_context 호출 시 현재 대화의 AI 종류와 모델을 자동 확인하므로 aiType과 aiModel을 임의로 채우지 마세요. AionUi가 아닌 외부 MCP 세션만 자신이 현재 AI 종류와 모델을 정확히 알고 있을 때 get_context의 aiType과 aiModel에 함께 전달하고, 알지 못하면 추측하지 마세요. 사용자에게 AionUi 대화를 언급할 때는 get_context의 currentConversation.displayLabel 또는 대화 목록의 name을 사용해 제목을 먼저 쓰고 ID는 괄호 안의 보조 정보로만 표시하세요. 제목을 확인할 수 없을 때만 ID를 단독으로 사용하세요. get_context의 selection.taskLinks.startupInspection을 따르세요. mode가 knowledge-guided이면 primary 선행 지식 중 kind=image인 항목은 imageAccess.localPath의 원본을 사용 가능한 로컬 이미지 열람 도구로 직접 확인하고 설명과 댓글을 함께 사용하며, 일반 카드는 sharedKnowledge를 먼저 재사용하고 설명과 댓글로 보완합니다. fallbackSources와 fallbackTargets는 정보가 부족할 때만 선택적으로 조사합니다. mode가 default이고 required가 true이면 targets의 업무 본문, 댓글, 첨부파일 목록과 관련 링크를 조사하세요. 지식선 생성과 제안은 get_context의 guide.knowledgeLinePolicy를 따르세요. 그룹 총괄 AI는 get_group_context의 총괄 전용 승인 절차를 따르고, 승인된 문서별 작업은 mindnprogress_send_group_document_instruction으로 해당 문서 루트 AI에 지시 전문을 전달하세요. 이 전달은 AI 작업 위임이나 worker 배정이 아니며, mindnprogress_delegate_ai_work는 같은 문서의 계층상 하위 업무에만 사용하세요. 일반·문서 담당·하위 AI는 사용자 요청 또는 상위 AI가 맡긴 범위에서 수행하세요. 진행 과정과 결과는 댓글에 기록하고, 다른 카드나 후속 세션이 재사용할 현재 유효한 사실·결정·제약·검증 결과만 sharedKnowledge에 남기세요. 진행 기록·도구 로그·중복·폐기 결론은 넣지 말고 같은 주제의 결론은 새 이력으로 덧붙이지 말고 기존 절을 안전하게 교체하세요. 실제로 실행할 카드에 독립적으로 완료 여부를 판정할 구현·검증 조건이 2개 이상이면 결과 중심 체크리스트로 작성하고 진행에 맞춰 갱신하세요. 별도 하위 카드로 추적할 작업은 체크리스트에 중복하지 마세요. AI 댓글은 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 충실히 담은 detail로 작성하며, 요약 때문에 상세를 축약하지 마세요. 외부 전달물이나 결정 대기는 waitingItems로 기록하고 제목에 대기 문구를 붙이지 마세요. 대기를 등록할 때는 [차단], 해제할 때는 [진행] 댓글로 이유와 재개 상태를 기록하세요. 카드 일부 필드만 변경할 때는 mindnprogress_update_card의 data에 변경할 필드만 보내고 현재 카드 전체 데이터를 재전송하지 마세요. 기존 description 또는 sharedKnowledge 내부의 일부만 고칠 때는 조회 결과의 textIntegrity SHA-256과 mindnprogress_patch_card_text를 사용하세요. ${cardTextSafetyInstructions} 과도한 sharedKnowledge를 정리할 때는 후보 목록과 전용 검토 문맥을 조회한 뒤 mindnprogress_apply_shared_knowledge_review로 현재 해시가 일치하는 결과만 원자적으로 저장하세요. 일반 카드에서 생략한 필드와 위치는 보존되지만 완료 상태 또는 진행률 100 적용 시 waitingItems는 자동으로 해제되며, Ref 카드는 원본 관리 필드가 최신 원본 값으로 동기화될 수 있습니다. 선택 카드 밖의 형제·하위·선행 카드를 함께 수정하기 전에는 mindnprogress_get_ai_work_states로 해당 카드에 다른 AI 작업이 진행 중인지 확인하세요. running 또는 waiting-confirmation인 카드는 사용자 지시 없이 동시에 수정하지 마세요. 등록된 AI 작업공간의 최신 목록·경로·상태가 필요하면 폴더명을 추측하지 말고 mindnprogress_get_ai_workspace_pool을 호출하세요. 작업공간 선택·점유·전환·해제는 MindNProgress만 수행하며 AI가 임의로 worker를 선택하지 않습니다. 현재 위임 실행이 사용자의 중지로 끊긴 뒤 같은 대화에서 직접 이어 실제 작업을 완료했다면 카드 기록과 작업공간 체크포인트를 마친 뒤 최종 답변 직전에 mindnprogress_complete_ai_delegation을 호출하세요. 같은 대화의 과거 위임만 중지됐거나 현재 위임이 중단 없이 진행됐다면 호출하지 마세요. 도구가 required=false를 반환하면 오류가 아니며 최종 답변을 마치면 자동으로 상위 AI에 보고됩니다. 지식선만 변경할 때는 전체 문서를 다시 보내지 말고 지식선 전용 도구를 사용하세요. 조회 도구는 문서 version을 변경하지 않지만 카드·관계 편집과 AI 대화 ID 연결은 version을 증가시킬 수 있습니다. 특정 자료가 있다고 가정하지 마세요. 여러 카드로 구성된 새 문서는 mindnprogress_create_mindmap으로 한 번에 생성하고, 변경 후에는 최신 문서를 다시 조회해 결과를 검증하세요. 비밀번호 변경과 계정 관리 작업은 지원하지 않습니다.`
 const productGuide = {
   version: '4.21',
   documentReconstruction: {
@@ -170,7 +171,7 @@ const productGuide = {
       description: '업무의 목적, 범위, 요구사항과 완료 조건. 사용자가 작성한 원래 맥락을 보존함',
       sharedKnowledge: '다른 카드나 후속 AI 세션에서 재사용할 안정적인 사실, 결정, 제약, 조사 결과와 사용 방법',
       comments: '시간순 진행 과정, 검증 결과, 차단 사유와 완료 기록. 새 댓글은 요약과 접을 수 있는 상세 내용으로 구분',
-      aiConversations: '카드에서 시작한 AionUi 대화 목록. focused 컨텍스트는 최근 대화 ID와 전체 개수만 제공하며, 이어서 작업할 대화를 판단할 때는 mindnprogress_list_ai_conversations로 후보의 실행 환경과 상태를 비교한 뒤 필요한 conversationId만 전문 조회',
+      aiConversations: '현재 대화 제목은 currentConversation, 다른 연결 대화 제목·실행 상태는 mindnprogress_list_ai_conversations로 확인한 뒤 필요한 conversationId만 전문 조회',
     },
     cardKinds: {
       root: '문서의 최상위 주제',
@@ -418,6 +419,19 @@ async function resolveCurrentAionUiConversationAttribution({ mapId, cardId, edit
     }
   })()
   return activeAttributionResolutionPromise
+}
+
+async function resolveCurrentAionUiConversationDisplay() {
+  if (!aionUiConversationId) return null
+  try {
+    return await apiRequest('/api/integrations/aionui/conversation-display/resolve', {
+      method: 'POST',
+      allowUnresolvedAttribution: true,
+      body: JSON.stringify({}),
+    })
+  } catch {
+    return formatAiConversationDisplay(aionUiConversationId)
+  }
 }
 
 function rememberDelegationOrigin({ mapId, cardId, editorId, attributionToken, aiType, aiModel }) {
@@ -1221,11 +1235,12 @@ async function main() {
         // 조회는 계속 허용하되 이후 쓰기는 apiRequest에서 재확인 후 차단합니다.
       }
     }
-    const [documentResult, commentsResult, usersResult, health] = await Promise.all([
+    const [documentResult, commentsResult, usersResult, health, currentConversation] = await Promise.all([
       apiRequest(`/api/maps/${encodeURIComponent(mapId)}`, { aiCardId: cardId, requestAttributionContinuation: true }),
       apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments?includeDetail=false`),
       apiRequest('/api/assignees'),
       apiRequest('/api/health'),
+      resolveCurrentAionUiConversationDisplay(),
     ])
     const map = documentResult.map
     const selectedCard = map.nodes.find((node) => node.id === cardId)
@@ -1470,6 +1485,7 @@ async function main() {
     return {
       contextSchemaVersion,
       detailLevel,
+      ...(currentConversation ? { currentConversation: { displayLabel: currentConversation.displayLabel } } : {}),
       group: documentResult.group,
       documentGroups: documentResult.documentGroups,
       groupProject: documentResult.groupProject ? {

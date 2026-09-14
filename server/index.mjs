@@ -29,6 +29,7 @@ import { applyProgressRollup } from './lib/progressRollup.mjs'
 import { detectReleasedWaitingItems } from './lib/waitingItems.mjs'
 import { resolveAttributionWithoutToken, resolveScopedAttribution } from './lib/attributionScope.mjs'
 import { readAionUiSubscriptionUsage } from './lib/aionUiSubscriptionUsage.mjs'
+import { resolveConversationDisplay } from './lib/aiConversationDisplay.mjs'
 import { AiDelegationStatusLookupError, readAiDelegationDispatchStatus } from './lib/aiDelegationStatusLookup.mjs'
 import { aiDelegationReportArchived, aiDelegationReportArchivePending, createAiDelegationReportArchiver } from './lib/aiDelegationReportArchive.mjs'
 import {
@@ -2499,7 +2500,7 @@ async function pollGroupDocumentInstructions() {
   }
 }
 
-function delegationRecoveryInstruction(delegation, instruction, recovery = null) {
+function delegationRecoveryInstruction(delegation, instruction, recovery = null, conversationDisplayLabel = delegation.targetConversationId) {
   const inspection = delegation.coordinationOnly
     ? `${DOCUMENT_COORDINATOR_INSTRUCTION}\n\n먼저 그룹 기준, 현재 문서의 실행 계약, 하위 위임 상태와 최근 대화·카드 결과를 대조하세요. 이 조정 업무에는 worker가 배정되지 않으므로 작업공간을 임의로 점유하거나 새 lease를 만들지 마세요.`
     : '먼저 `.ai-session.json`, 현재 브랜치, Git 변경과 최근 대화·카드 결과를 서로 대조하세요. 다른 작업공간으로 이동하거나 새 lease를 만들지 마세요.'
@@ -2516,7 +2517,7 @@ ${reason} 원래 지시를 처음부터 반복하지 말고, 아래 복구 확�
 
 - 위임 ID: ${delegation.id}
 - 대상 카드: ${delegation.targetCardLabel} (${delegation.targetCardId})
-- 대상 대화: ${delegation.targetConversationId}
+- 대상 대화: ${conversationDisplayLabel}
 - 작업공간: ${delegation.coordinationOnly ? '문서 조정 전용 · worker 배정 없음' : delegation.workspaceLease?.projectRoot ?? '기존 대화 작업공간'}
 
 ${inspection}
@@ -3310,6 +3311,10 @@ async function parentWakeInstruction(delegation, reportResult = aiDelegationRepo
   const workspaceResult = delegation.workspaceResult
     ? `- 작업공간: ${delegation.workspaceResult.workspaceId ?? delegation.workspaceLease?.workspaceId ?? '미확인'}\n- 체크포인트: ${delegation.workspaceResult.headCommit ?? '변경 없음'}\n- 통합 커밋: ${delegation.workspaceResult.integratedCommit ?? '통합되지 않음'}\n- 작업공간 결과: ${delegation.workspaceResult.status ?? '미확인'}\n`
     : ''
+  const conversationDisplay = await resolveAiConversationDisplay(
+    delegation.targetConversationId,
+    delegationTargetMachineId(delegation),
+  )
   return `# MindNProgress 하위 AI 작업 결과
 
 상위 카드에서 위임한 하위 카드 작업이 ${outcome} 상태가 되었습니다.
@@ -3317,7 +3322,7 @@ async function parentWakeInstruction(delegation, reportResult = aiDelegationRepo
 
 - 위임 ID: ${delegation.id}
 - 하위 카드: ${delegation.targetCardLabel} (${delegation.targetCardId})
-- 실행 대화: ${delegation.targetConversationId}
+- 실행 대화: ${conversationDisplay.displayLabel}
 - 하위 실행 턴: ${delegation.childTurnId ?? '미확인'}
 - 결과 원문: ${reportResult.availability === 'captured' ? '캡처됨' : reportResult.availability === 'integrity-failed' ? '무결성 오류로 제외됨' : '캡처되지 않음'}
 - 선택 방식: ${delegation.strategy === 'resume' ? '기존 대화 이어가기' : '새 대화 시작'}
@@ -3337,7 +3342,7 @@ function aiDelegationRecoveryKey(delegation) {
   ].join(':')
 }
 
-function parentRecoveryInstruction(delegation) {
+function parentRecoveryInstruction(delegation, conversationDisplayLabel = delegation.targetConversationId) {
   const error = delegation.integrationError ?? delegation.childError ?? delegation.workspaceError ?? '상세 원인 없음'
   const checkpoint = delegation.workspaceResult?.status === 'checkpoint-required'
     ? `- 체크포인트 회차: ${delegation.workspaceResult.checkpointRound ?? '미확인'}\n`
@@ -3349,7 +3354,7 @@ function parentRecoveryInstruction(delegation) {
 
 - 위임 ID: ${delegation.id}
 - 하위 카드: ${delegation.targetCardLabel} (${delegation.targetCardId})
-- 실행 대화: ${delegation.targetConversationId}
+- 실행 대화: ${conversationDisplayLabel}
 - 상태: ${delegation.state}
 ${checkpoint}- 원인: ${error}
 
@@ -3673,7 +3678,7 @@ function integrationCleanWaitMessage(delegation) {
   return `통합 작업공간의 커밋되지 않은 추적 변경 때문에 하위 AI 전문을 아직 전달하지 않았습니다. 변경이 정리되면 같은 위임을 자동 시작합니다.${pathSummary}`
 }
 
-function parentIntegrationCleanWaitInstruction(delegation) {
+function parentIntegrationCleanWaitInstruction(delegation, conversationDisplayLabel = delegation.targetConversationId) {
   const paths = Array.isArray(delegation?.integrationCleanTrackedChanges)
     ? delegation.integrationCleanTrackedChanges
     : []
@@ -3686,7 +3691,7 @@ function parentIntegrationCleanWaitInstruction(delegation) {
 
 - 위임 ID: ${delegation.id}
 - 하위 카드: ${delegation.targetCardLabel} (${delegation.targetCardId})
-- 대상 대화: ${delegation.targetConversationId}
+- 대상 대화: ${conversationDisplayLabel}
 - 상태: waiting-integration-clean
 
 ## 차단 중인 추적 파일
@@ -3749,6 +3754,10 @@ async function processAiDelegationIntegrationCleanWaitNotice(originalDelegation)
   const parent = await fetchAiConversationRuntime(delegation.parentConversationId)
   const runtime = normalizeAiConversationRuntime(delegation.parentConversationId, parent)
   if (runtime.state !== 'idle') return
+  const targetConversationDisplay = await resolveAiConversationDisplay(
+    delegation.targetConversationId,
+    delegationTargetMachineId(delegation),
+  )
 
   const attempt = Number(delegation.integrationCleanWakeAttempt ?? 0) + 1
   const operationId = boundedAionOperationId(delegation.id, `integration-clean-notice-${attempt}`)
@@ -3759,7 +3768,7 @@ async function processAiDelegationIntegrationCleanWaitNotice(originalDelegation)
       actorConversationId: delegation.parentConversationId,
       strategy: 'resume',
       targetConversationId: delegation.parentConversationId,
-      instruction: parentIntegrationCleanWaitInstruction(delegation),
+      instruction: parentIntegrationCleanWaitInstruction(delegation, targetConversationDisplay.displayLabel),
     },
   })
   await updateAiDelegation(delegation.id, {
@@ -3829,6 +3838,10 @@ async function processAiDelegationRecoveryNotice(originalDelegation) {
   const parent = await fetchAiConversationRuntime(delegation.parentConversationId)
   const runtime = normalizeAiConversationRuntime(delegation.parentConversationId, parent)
   if (runtime.state !== 'idle') return
+  const targetConversationDisplay = await resolveAiConversationDisplay(
+    delegation.targetConversationId,
+    delegationTargetMachineId(delegation),
+  )
 
   const recoveryWakeAttempt = Number(delegation.recoveryWakeAttempt ?? 0) + 1
   const operationId = boundedAionOperationId(delegation.id, `recovery-notice-${recoveryWakeAttempt}`)
@@ -3839,7 +3852,7 @@ async function processAiDelegationRecoveryNotice(originalDelegation) {
       actorConversationId: delegation.parentConversationId,
       strategy: 'resume',
       targetConversationId: delegation.parentConversationId,
-      instruction: parentRecoveryInstruction(delegation),
+      instruction: parentRecoveryInstruction(delegation, targetConversationDisplay.displayLabel),
     },
   })
   await updateAiDelegation(delegation.id, {
@@ -4907,6 +4920,14 @@ function fetchAiConversationRuntime(conversationId) {
     .finally(() => aiConversationRuntimeRequests.delete(requestKey))
   aiConversationRuntimeRequests.set(requestKey, request)
   return request
+}
+
+function resolveAiConversationDisplay(conversationId, machineId = conversationHomeMachineId(conversationId)) {
+  return resolveConversationDisplay(conversationId, (id) => fetchAionUiOn(
+    machineId,
+    `/api/conversations/${encodeURIComponent(id)}`,
+    { timeoutMs: 2_500 },
+  ))
 }
 
 function refreshAiConversationRuntimeForMap(mapId, suppliedRuntimeSnapshots = null, forceSnapshots = false) {
@@ -6457,7 +6478,20 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       if (request.method === 'GET') {
         if (suffix === '/choices') return sendJson(response, 200, await documentReconstruction.choices({ groupId: url.searchParams.get('groupId'), mapId: url.searchParams.get('mapId') }))
         if (suffix === '/requests') return sendJson(response, 200, { requests: reconstructionRequests.list() })
-        if (/^\/requests\/[^/]+$/.test(suffix)) return sendJson(response, 200, reconstructionRequests.get(decodeURIComponent(suffix.split('/')[2])))
+        if (/^\/requests\/[^/]+$/.test(suffix)) {
+          const record = reconstructionRequests.get(decodeURIComponent(suffix.split('/')[2]))
+          if (!record.conversation?.id) return sendJson(response, 200, record)
+          const display = await resolveAiConversationDisplay(record.conversation.id, conversationHomeMachineId(record.conversation.id, record.conversation))
+          return sendJson(response, 200, {
+            ...record,
+            conversation: {
+              ...record.conversation,
+              name: display.name,
+              displayLabel: display.displayLabel,
+              displaySource: display.source,
+            },
+          })
+        }
         if (suffix === '/context') return sendJson(response, 200, await documentReconstruction.context(url.searchParams.getAll('mapId')))
         if (!suffix) return sendJson(response, 200, { operations: documentReconstruction.list() })
         const record = documentReconstruction.get(decodeURIComponent(suffix.slice(1)))
@@ -6656,6 +6690,20 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         aionUiWebBaseUrl,
         aionUiWebConfigured: Boolean(configuredAionUiWebBaseUrl),
       })
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/integrations/aionui/conversation-display/resolve') {
+      if (!hasValidIntegrationBearer(request)) {
+        return sendJson(response, 401, { error: '올바른 MindNProgress 연동 토큰이 필요합니다.' })
+      }
+      const scope = integrationRequestScope(request)
+      if (!validAiConversationId(scope.conversationId)) {
+        return sendJson(response, 400, {
+          error: '현재 AionUi 대화 ID를 확인할 수 없습니다.',
+          code: 'AI_CONVERSATION_DISPLAY_ID_REQUIRED',
+        })
+      }
+      return sendJson(response, 200, await resolveAiConversationDisplay(scope.conversationId))
     }
 
     if (request.method === 'POST' && url.pathname === '/api/integrations/aionui/conversation-attribution/resolve') {
@@ -7933,14 +7981,18 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         `${integrationRecovery ? 'integrate-' : ''}recover-${recoveryAttempt}`,
       )
       const recoveryContext = { ...delegation, workspaceLease }
+      const recoveryConversationDisplay = await resolveAiConversationDisplay(
+        delegation.targetConversationId,
+        delegationTargetMachineId(delegation),
+      )
       const replacementNotice = replacedWorkspaceLease
         ? '이전 작업공간은 변경 없이 반납되어 MindNProgress가 복구용 작업공간을 새로 배정했습니다. 과거 대화에 남은 경로·브랜치·lease 대신 이번 전문의 할당된 작업공간과 .ai-session.json을 사용하세요.\n\n'
         : ''
       const requestedInstruction = replacementNotice + (integrationRecovery
         ? `${delegation.workspaceResult?.status === 'checkpoint-required'
             ? workspaceCheckpointInstruction(delegation, delegation.workspaceResult)
-            : workspaceConflictInstruction(delegation, delegation.workspaceResult)}\n\n${delegationRecoveryInstruction(recoveryContext, instruction, recoveryAvailability)}`
-        : delegationRecoveryInstruction(recoveryContext, instruction, recoveryAvailability))
+            : workspaceConflictInstruction(delegation, delegation.workspaceResult)}\n\n${delegationRecoveryInstruction(recoveryContext, instruction, recoveryAvailability, recoveryConversationDisplay.displayLabel)}`
+        : delegationRecoveryInstruction(recoveryContext, instruction, recoveryAvailability, recoveryConversationDisplay.displayLabel))
       const delegatedInstruction = buildDelegatedInstruction({
         mapId,
         cardId: targetCard.id,

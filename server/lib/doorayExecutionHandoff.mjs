@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { documentRoot } from './groupProjects.mjs'
 import { buildDoorayApprovalRequest } from './doorayResponseDecision.mjs'
+import { formatAiConversationDisplay } from './aiConversationDisplay.mjs'
 
 const fail = (message) => Object.assign(new Error(message), { status: 409 })
 export function doorayExecutionTargets(maps) {
@@ -22,16 +23,17 @@ export function redactDoorayTranscript(value) {
     .replace(/Bearer\s+[A-Za-z0-9._-]{16,}/gi, 'Bearer [비공개]')
 }
 
-export function buildDoorayExecutionHandoff(job, target, transcript) {
+export function buildDoorayExecutionHandoff(job, target, transcript, sourceConversationName = '') {
   const source = currentDoorayExecution(job)
   if (!source?.conversationId) throw fail('먼저 승인 대화를 시작해야 인계할 수 있습니다.')
   const initial = buildDoorayApprovalRequest(job, { execution: true, conversationId: source.conversationId })
+  const sourceConversationDisplay = formatAiConversationDisplay(source.conversationId, sourceConversationName)
   const request = `# 새 문서 상위 카드로 승인 작업 인계
 
 이번 대화는 ${target.documentTitle} / ${target.cardTitle}에서 새로 시작합니다.
 - 시작 문서: ${target.mapId}
 - 시작 카드: ${target.cardId}
-- 이전 실행 대화: ${source.conversationId}
+- 이전 실행 대화: ${sourceConversationDisplay.displayLabel}
 
 사용자가 이 대상과 인계 전문을 확인했습니다. 이는 기존 승인 범위의 인계이며 새 범위의 승인이 아닙니다.
 기존 대화의 시작 카드를 변경하거나 위임 권한의 예외를 만들지 않습니다. 이 대화는 현재 시작 카드의 계층상 하위 카드에만 위임할 수 있고, 그룹 조정은 기존 제품 규칙을 그대로 따릅니다.

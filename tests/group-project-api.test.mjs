@@ -186,6 +186,7 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
     assert.equal(delegated.body.delegation.mapId, target.id)
     assert.equal(delegated.body.delegation.coordinationOnly, true)
     assert.equal(delegated.body.delegation.workspaceLease, null)
+    const documentConversationId = delegated.body.delegation.targetConversationId
     assert.match(calls[0].instruction, /코드·Prefab은 직접 수정하지 마세요/)
     assert.ok(!calls[0].instruction.includes(AI_EXECUTION_APPROVAL_INSTRUCTION))
     assert.ok(!calls[0].instruction.includes(GROUP_APPROVAL_INSTRUCTION))
@@ -209,6 +210,7 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
     await until(async () => (await api(`/api/groups/${groupId}`)).body.delegations.some((item) => item.state === 'recovery-required'), '복구 필요 상태가 되지 않았습니다.')
     await stop(child); await start()
     assert.equal((await api(`/api/groups/${groupId}`)).body.project.source, source)
+    const documentConversationNameBeforeRecovery = conversations.get(documentConversationId).name
     const recovery = await api(`${delegateUrl}/group-first/recover`, 'POST', { sourceRevision: parent.version, instruction: '현재 문서 분석을 이어가세요.' }, sourceHeaders)
     assert.equal(recovery.status, 202, JSON.stringify(recovery.body))
     assert.equal(recovery.body.delegation.parentMapId, coordinatorId)
@@ -223,7 +225,7 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
     assert.match(recoveryCall.instruction, /원래 맡긴 범위의 미완료 작업만/)
     assert.match(recoveryCall.instruction, /분석·제안 위임의 복구는 계속 분석·제안만 허용/)
     assert.doesNotMatch(recoveryCall.instruction, /먼저 `\.ai-session\.json`/)
-    const documentConversationId = delegated.body.delegation.targetConversationId
+    assert.ok(recoveryCall.instruction.includes(`- 대상 대화: ${documentConversationNameBeforeRecovery} (${documentConversationId})`))
     const childHeaders = { 'X-MNP-AI-Map-Id': target.id, 'X-MNP-AI-Card-Id': targetRoot, 'X-MNP-AI-Conversation-Id': documentConversationId, 'X-MNP-AI-Editor-Id': attribution.body.editorId }
     const beforeLeaf = (await api(`/api/maps/${target.id}`, 'GET', undefined, childHeaders)).body.map
     const leafId = 'implementation-leaf'
@@ -239,6 +241,8 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
       targetCardId: leafId, sourceRevision: withLeaf.body.map.version, strategy: 'new', instruction: '하위 구현을 검증하세요.', decisionReason: '독립 하위 업무입니다.', idempotencyKey: 'nested-leaf', newConversation: { agentId: 'claude', modelId: 'opus', workspace: projectDirectory },
     }, childHeaders)
     assert.equal(leaf.status, 202, JSON.stringify(leaf.body))
+    const leafConversationId = leaf.body.delegation.targetConversationId
+    const leafConversationNameBeforeWake = conversations.get(leafConversationId).name
     assert.ok(!calls.find((call) => call.operationId === 'nested-leaf').instruction.includes(AI_EXECUTION_APPROVAL_INSTRUCTION))
     dispatches.get(operationId).state = 'completed'
     await until(async () => (await api(`/api/groups/${groupId}`)).body.delegations.some((item) => item.state === 'waiting-document-work'), '하위 구현을 기다리지 않고 총괄에 완료를 보고했습니다.')
@@ -271,6 +275,7 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
     assert.ok(wake.instruction.includes(GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION))
     assert.ok(wake.instruction.includes(GROUP_APPROVAL_INSTRUCTION))
     const documentWake = calls.find((call) => /^nested-leaf-wake-/.test(call.operationId)).instruction
+    assert.ok(documentWake.includes(`- 실행 대화: ${leafConversationNameBeforeWake} (${leafConversationId})`))
     assert.ok(documentWake.includes(AI_DELEGATION_FOLLOWUP_INSTRUCTION))
     assert.ok(!documentWake.includes(AI_EXECUTION_APPROVAL_INSTRUCTION))
     assert.ok(!documentWake.includes(GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION))

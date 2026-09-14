@@ -396,6 +396,7 @@ test('로그인 계정의 실제 서버 API에서 제안 접수·삭제 초기�
   const options = await (await fetch(executionHandoffUrl, { headers })).json()
   assert.equal(options.targets[0].cardId, 'root1')
   const prepared = await (await fetch(`${executionHandoffUrl}?mapId=map-test`, { headers })).json()
+  assert.ok(prepared.preview.request.includes('- 이전 실행 대화: 베팅 표시 대화 (approved-work)'))
   assert.ok(prepared.preview.request.includes('2단계 분석 계획 승인'))
   assert.ok(prepared.preview.request.includes('문서 구성 완료'))
   assert.ok(prepared.preview.request.indexOf('2단계 분석 계획 승인') < prepared.preview.request.indexOf('문서 구성 완료'))

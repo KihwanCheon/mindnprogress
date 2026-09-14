@@ -40,6 +40,7 @@ async function startMockAionUi({
   generalModelId = 'claude-general-model',
   generalModelName = 'Claude General Model',
   conversationId = 'conversation-test',
+  conversationName = 'MCP 전체 대화 조회 검증',
   conversationCreatedAt = Date.parse('2026-07-20T00:00:00.000Z'),
   conversationModelId = `${modelId}[1m]`,
 } = {}) {
@@ -93,7 +94,7 @@ async function startMockAionUi({
     if (request.url === `/api/conversations/${conversationId}`) {
       return send({
         id: conversationId,
-        name: 'MCP 전체 대화 조회 검증',
+        name: conversationName,
         type: 'acp',
         created_at: conversationCreatedAt,
         modified_at: conversationCreatedAt + 60_000,
@@ -287,6 +288,7 @@ async function startMockAionUi({
     baseUrl: `http://127.0.0.1:${address.port}`,
     dispatchRequests,
     conversationTitleUpdates,
+    setConversationName: (name) => { conversationName = name },
     setConversationRuntimeState: (state) => { conversationRuntimeState = state },
     completeDispatch: (operationId) => {
       const dispatch = dispatches.get(operationId)
@@ -829,7 +831,10 @@ async function main() {
       editorId: attribution.editorId,
       attributionToken: attribution.attributionToken,
     })
-    assert.equal(context.contextSchemaVersion, '3.0')
+    assert.equal(context.contextSchemaVersion, '3.1')
+    assert.deepEqual(context.currentConversation, {
+      displayLabel: 'MCP 전체 대화 조회 검증 (conversation-test)',
+    })
     assert.equal(context.detailLevel, 'focused')
     assert.equal(context.document.nodes, undefined)
     assert.equal(context.document.outline.length, 4)
@@ -855,6 +860,15 @@ async function main() {
     assert.equal(context.selection.commentsPage.hasMore, false)
     assert.match(context.nextStep, /guide\.knowledgeLinePolicy.*작업 종료 전에 연결 또는 제안 여부/)
     assert.ok(context.teamMembers.every((member) => member.lastLoginAt === undefined))
+    mockAionUi.setConversationName('사용자가 변경한 현재 제목')
+    const renamedConversationContext = await invoke('mindnprogress_get_context', {
+      mapId,
+      cardId: 'task-a',
+      editorId: attribution.editorId,
+      attributionToken: attribution.attributionToken,
+    })
+    assert.equal(renamedConversationContext.currentConversation.displayLabel, '사용자가 변경한 현재 제목 (conversation-test)')
+    mockAionUi.setConversationName('MCP 전체 대화 조회 검증')
 
     await invokeExpectError('mindnprogress_checkpoint_ai_workspace', {
       mapId,
@@ -926,7 +940,7 @@ async function main() {
     assert.equal(fullContext.document.outline, undefined)
     assert.equal(fullContext.selection.knowledgeSources.all.length, 0)
     assert.ok(JSON.stringify(context).length < JSON.stringify(fullContext).length)
-    assert.ok(JSON.stringify(context).length < 25_000, `focused 컨텍스트가 크기 회귀 기준을 초과했습니다: ${JSON.stringify(context).length} / 25000`)
+    assert.ok(JSON.stringify(context).length < 25_500, `focused 컨텍스트가 크기 회귀 기준을 초과했습니다: ${JSON.stringify(context).length} / 25500`)
     documentResult = await invoke('mindnprogress_get_document', { mapId })
     assert.equal(documentResult.map.version, versionBeforeReadOnlyTools, '조회 도구가 문서 버전을 변경했습니다.')
 
@@ -1522,6 +1536,9 @@ async function main() {
         authorName: 'Claude Code(Claude General Model)',
         conversationId: 'conversation-unlinked-known',
       })
+      assert.deepEqual(generalContext.currentConversation, {
+        displayLabel: 'MindNProgress 밖에서 시작한 일반 대화 (conversation-unlinked-known)',
+      })
       const generalConversationComment = parseToolResult('mindnprogress_add_comment', await generalConversationClient.callTool({
         name: 'mindnprogress_add_comment',
         arguments: { mapId, cardId: 'task-a', summary: '[진행] 일반 AionUi 대화의 실제 모델 귀속을 검증합니다.' },
@@ -1554,6 +1571,9 @@ async function main() {
       }))
       assert.equal(unknownConversationContext.aiAttribution.status, 'unresolved')
       assert.equal(unknownConversationContext.aiAttribution.code, 'AI_ATTRIBUTION_UNRESOLVED')
+      assert.deepEqual(unknownConversationContext.currentConversation, {
+        displayLabel: 'conversation-not-linked',
+      })
       const unknownConversationComment = await unknownConversationClient.callTool({
         name: 'mindnprogress_add_comment',
         arguments: { mapId, cardId: 'branch-b', summary: '[진행] 확인되지 않은 AionUi 대화의 쓰기 차단을 검증합니다.' },

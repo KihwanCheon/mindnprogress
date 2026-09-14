@@ -487,8 +487,10 @@ export function createDoorayResponseService(deps) {
     const target = targets.find((entry) => entry.mapId === mapId)
     if (!target) throw error('활성 문서의 원본 루트 카드를 선택해 주세요.', 409)
     const user = await deps.user(userId)
-    const transcript = await deps.executionTranscript(user, source)
-    return { targets, preview: buildDoorayExecutionHandoff(job, target, transcript) }
+    const transcriptResult = await deps.executionTranscript(user, source)
+    const transcript = typeof transcriptResult === 'string' ? transcriptResult : transcriptResult.transcript
+    const conversationName = typeof transcriptResult === 'string' ? '' : transcriptResult.conversationName
+    return { targets, preview: buildDoorayExecutionHandoff(job, target, transcript, conversationName) }
   }
   return {
     start, complete, approvalContext, executionHandoffOptions,
