@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { reconstructionLayoutFixture } from '../tests/helpers/reconstructionLayoutFixture.mjs'
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { createServer as createHttpServer } from 'node:http'
 import { createServer as createNetServer } from 'node:net'
 import { access, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
@@ -10,6 +11,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { MCP_TOOL_USAGE_DIRECTORY_NAME, readToolUsageTotals } from '../server/lib/mcpToolUsage.mjs'
 import { sharedKnowledgeMaxLength } from '../src/utils/sharedKnowledgePolicy.mjs'
+import { expectedMcpToolNames } from '../tests/helpers/mcpToolNames.mjs'
 
 const projectDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const testDataDirectory = path.resolve(projectDirectory, '.mcp-test-data')
@@ -193,7 +195,19 @@ async function startMockAionUi({
         releasesRuntimeOnTerminal: true,
         persistentRecoveryState: true,
         explicitCompletionAfterInterruption: true,
+        historyOnlyReports: true,
       })
+    }
+    if (request.method === 'POST' && request.url === `/api/conversations/${conversationId}/external-reports`) {
+      const chunks = []
+      request.on('data', (chunk) => chunks.push(chunk))
+      request.on('end', () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+        send({ operationId: body.operationId, conversationId,
+          messageId: `external-report-${createHash('sha256').update(body.operationId).digest('hex')}`,
+          contentHash: createHash('sha256').update(body.content).digest('hex'), executionRequested: false })
+      })
+      return
     }
     if (request.method === 'POST' && request.url === '/api/internal/external-conversation-dispatches') {
       const chunks = []
@@ -320,6 +334,13 @@ function parseToolResult(name, result) {
   return JSON.parse(text)
 }
 
+function assertReasonMessagePair(value, context) {
+  assert.equal(typeof value?.reasonCode, 'string', `${context}: reasonCode가 없습니다.`)
+  assert.ok(value.reasonCode.trim(), `${context}: reasonCode가 비어 있습니다.`)
+  assert.equal(typeof value?.message, 'string', `${context}: message가 없습니다.`)
+  assert.ok(value.message.trim(), `${context}: message가 비어 있습니다.`)
+}
+
 async function main() {
   await rm(testDataDirectory, { recursive: true, force: true })
   await mkdir(testDataDirectory, { recursive: true })
@@ -376,7 +397,21 @@ async function main() {
     await client.connect(transport)
     const listedTools = await client.listTools()
     const registeredToolNames = listedTools.tools.map((tool) => tool.name).sort()
-    assert.equal(registeredToolNames.length, 66, `예상과 다른 MCP 도구 수: ${registeredToolNames.length}`)
+    assert.deepEqual(
+      expectedMcpToolNames,
+      [...new Set(expectedMcpToolNames)].sort(),
+      'MCP 도구 기대 목록은 중복 없이 정렬되어야 합니다.',
+    )
+    const duplicateToolNames = registeredToolNames.filter((name, index, names) => index > 0 && name === names[index - 1])
+    const registeredToolNameSet = new Set(registeredToolNames)
+    const expectedToolNameSet = new Set(expectedMcpToolNames)
+    const missingToolNames = expectedMcpToolNames.filter((name) => !registeredToolNameSet.has(name))
+    const unexpectedToolNames = registeredToolNames.filter((name) => !expectedToolNameSet.has(name))
+    assert.deepEqual(
+      { missingToolNames, unexpectedToolNames, duplicateToolNames },
+      { missingToolNames: [], unexpectedToolNames: [], duplicateToolNames: [] },
+      'MCP 도구 목록이 기대 목록과 다릅니다.',
+    )
     for (const suffix of ['list_archived_documents', 'set_document_archive', 'get_reconstruction_context', 'preview_reconstruction', 'apply_reconstruction', 'get_reconstructions', 'rollback_reconstruction']) {
       assert.ok(registeredToolNames.includes(`mindnprogress_${suffix}`), `문서 재구성 도구 누락: ${suffix}`)
     }
@@ -424,17 +459,42 @@ async function main() {
     assert.ok(toolSchema('mindnprogress_complete_ai_delegation')?.required?.includes('mapId'))
     assert.ok(toolSchema('mindnprogress_finalize_ai_coordination')?.required?.includes('expectedUpdatedAt'))
     assert.ok(toolSchema('mindnprogress_supersede_ai_delegation')?.required?.includes('replacementDelegationId'))
+    assert.deepEqual(toolSchema('mindnprogress_get_card_layout_request')?.required, ['requestId'])
+    assert.deepEqual(
+      toolSchema('mindnprogress_submit_card_layout_proposal')?.required,
+      ['requestId', 'baseRevision', 'plan'],
+    )
+    assert.deepEqual(
+      toolSchema('mindnprogress_submit_card_layout_proposal')?.properties?.plan?.required,
+      ['order', 'reason'],
+    )
+    assert.equal(
+      toolSchema('mindnprogress_submit_card_layout_proposal')?.properties?.plan?.properties?.order?.minItems,
+      1,
+    )
 
     const invoke = async (name, args = {}) => {
       calledTools.set(name, (calledTools.get(name) ?? 0) + 1)
       return parseToolResult(name, await client.callTool({ name, arguments: args }))
     }
-    const invokeExpectError = async (name, args, expectedText) => {
+    const invokeExpectError = async (name, args, expectedText, expectedReasonCode = null) => {
       calledTools.set(name, (calledTools.get(name) ?? 0) + 1)
       const result = await client.callTool({ name, arguments: args })
       const text = result.content?.find((item) => item.type === 'text')?.text ?? ''
       assert.equal(result.isError, true, `${name}: 실패해야 하는 요청이 성공했습니다.`)
-      assert.match(text, expectedText, `${name}: 예상한 오류가 아닙니다. ${text}`)
+      let errorPayload = null
+      try {
+        errorPayload = JSON.parse(text)
+      } catch {
+        // 구조화 사유가 없는 MCP·스키마 오류는 기존 텍스트 검증을 유지합니다.
+      }
+      const message = typeof errorPayload?.message === 'string' ? errorPayload.message : text
+      assert.match(message, expectedText, `${name}: 예상한 오류가 아닙니다. ${text}`)
+      if (expectedReasonCode) {
+        assertReasonMessagePair(errorPayload, `${name} 오류 응답`)
+        assert.equal(errorPayload.reasonCode, expectedReasonCode)
+      }
+      return errorPayload
     }
 
     const guide = await invoke('mindnprogress_read_me_first')
@@ -982,7 +1042,7 @@ async function main() {
       decisionReason: '회귀 테스트에서 상위-하위 범위 검증',
       sourceRevision: documentResult.map.version,
       idempotencyKey: 'mcp-regression-invalid-parent',
-    }, /하위 카드에만 AI 작업을 위임/)
+    }, /하위 카드에만 AI 작업을 위임/, 'AI_DELEGATION_TARGET_OUTSIDE_SOURCE')
     const versionBeforeAiWorkStateRead = documentResult.map.version
     const aiWorkStates = await invoke('mindnprogress_get_ai_work_states', {
       mapId,
@@ -1101,8 +1161,13 @@ async function main() {
     assert.equal(delegated.delegation.parentCardId, 'task-a', '다른 카드 get_context 조회가 위임 기준 카드를 변경했습니다.')
     assert.equal(delegated.delegation.strategy, 'new')
     assert.equal(delegated.mapVersion, delegationArguments.sourceRevision + 1)
+    assertReasonMessagePair(delegated, 'AI 위임 접수 응답')
+    assert.equal(delegated.reasonCode, 'AI_DELEGATION_ACCEPTED')
+    assertReasonMessagePair(delegated.delegation, 'AI 위임 공개 상태')
     const delegatedRepeat = await invoke('mindnprogress_delegate_ai_work', delegationArguments)
     assert.equal(delegatedRepeat.repeated, true)
+    assertReasonMessagePair(delegatedRepeat, 'AI 위임 멱등 응답')
+    assert.equal(delegatedRepeat.reasonCode, 'AI_DELEGATION_REPEATED')
     assert.equal(mockAionUi.dispatchRequests.length, 1, '멱등 재호출이 하위 대화를 중복 실행했습니다.')
     assert.deepEqual(mockAionUi.conversationTitleUpdates, [{
       name: 'MCP 전체 회귀 문서: 위임 하위 카드',
@@ -2380,6 +2445,40 @@ async function main() {
       attributionToken: lifecycleAttribution.attributionToken,
     })
     const lifecycleSource = (await invoke('mindnprogress_create_document', { title: '재구성 MCP 검증', rootLabel: '현재 기준', rootDescription: '기준 원문' })).map
+    const cardLayoutRequestResponse = await fetch(`${apiBaseUrl}/api/card-layouts`, {
+      method: 'POST',
+      headers: { Cookie: editorSessionCookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mapId: lifecycleSource.id, proposalOnly: true }),
+    })
+    assert.equal(cardLayoutRequestResponse.status, 201)
+    const cardLayoutRequest = await cardLayoutRequestResponse.json()
+    const cardLayoutMeasurements = lifecycleSource.nodes.map((node) => ({
+      cardId: node.id,
+      ...node.position,
+      width: 218,
+      height: 170,
+      outsets: { left: 8, right: 8, top: 40, bottom: 8 },
+    }))
+    const cardLayoutCaptureResponse = await fetch(`${apiBaseUrl}/api/card-layouts/${cardLayoutRequest.id}/capture`, {
+      method: 'POST',
+      headers: { Cookie: editorSessionCookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ measurements: cardLayoutMeasurements }),
+    })
+    assert.equal(cardLayoutCaptureResponse.status, 200)
+    const cardLayoutContext = await invoke('mindnprogress_get_card_layout_request', {
+      requestId: cardLayoutRequest.id,
+    })
+    assert.equal(cardLayoutContext.revision, 0)
+    const cardLayoutProposal = await invoke('mindnprogress_submit_card_layout_proposal', {
+      requestId: cardLayoutRequest.id,
+      baseRevision: cardLayoutContext.revision,
+      plan: {
+        order: cardLayoutContext.snapshot.map.nodes.map((node) => node.id),
+        reason: '카드 계층과 실측 크기를 기준으로 읽기 순서를 정렬했습니다.',
+      },
+    })
+    assert.equal(cardLayoutProposal.submitted, true)
+    assert.equal(cardLayoutProposal.revision, 1)
     const lifecycleContext = await invoke('mindnprogress_get_reconstruction_context', { mapIds: [lifecycleSource.id] })
     const lifecyclePlan = {
       id: 'mcp-full-lifecycle', mode: 'compact', baseline: 'v0.4', reason: '임시 데이터 전환 검증',
