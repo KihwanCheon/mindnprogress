@@ -23,6 +23,16 @@ export function legacyGroupDelegationCreationAllowed(value) {
   return String(value ?? '').trim() === '1'
 }
 
+function normalizeInstructionBlock(value) {
+  return String(value ?? '').replace(/\r\n?/g, '\n').trim()
+}
+
+export function containsApprovalEvidenceDuplicate({ approvalEvidence, instruction } = {}) {
+  const evidence = normalizeInstructionBlock(approvalEvidence)
+  const body = normalizeInstructionBlock(instruction)
+  return Boolean(evidence) && body.includes(evidence)
+}
+
 export function groupDocumentInstructionOperationId(id) {
   return `gdi:${id}`
 }

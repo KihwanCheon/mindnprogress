@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   buildGroupDocumentInstruction,
+  containsApprovalEvidenceDuplicate,
   createGroupDocumentInstructionSignature,
   groupDocumentInstructionOperationId,
   groupDocumentInstructionPublicView,
@@ -53,6 +54,17 @@ test('과거 교차 문서 위임 생성은 명시적인 마이그레이션 테�
   assert.equal(legacyGroupDelegationCreationAllowed('1'), true)
 })
 
+test('승인 근거 전문의 실행 지시 중복만 검출하고 일반적인 승인 범위 표현은 허용한다', () => {
+  assert.equal(containsApprovalEvidenceDuplicate({
+    approvalEvidence: '사용자가 문서별 실행 전문을 승인했습니다.\r\n대화 turn-42.',
+    instruction: '로비 문서를 검증하세요.\n\n사용자가 문서별 실행 전문을 승인했습니다.\n대화 turn-42.',
+  }), true)
+  assert.equal(containsApprovalEvidenceDuplicate({
+    approvalEvidence: request.approvalEvidence,
+    instruction: '승인된 범위에서 로비 문서를 검증하세요.',
+  }), false)
+})
+
 test('그룹 문서 지시 전문은 위임·worker 완료와 분리하고 승인 경계를 전달한다', () => {
   const instruction = buildGroupDocumentInstruction({
     groupId: 'group-project',
@@ -75,6 +87,7 @@ test('그룹 문서 지시 전문은 위임·worker 완료와 분리하고 승�
   assert.match(instruction, /실제 하위 업무 카드에 AI 위임/)
   assert.match(instruction, /같은 승인을 사용자에게 반복해서 요구하지 마세요/)
   assert.match(instruction, /사용자가 문서별 실행 전문을 승인했습니다/)
+  assert.equal(instruction.split(request.approvalEvidence).length - 1, 1)
   assert.doesNotMatch(instruction, /# MindNProgress 하위 카드 위임 작업 요청/)
 })
 

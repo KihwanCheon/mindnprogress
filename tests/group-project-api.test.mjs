@@ -485,6 +485,15 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
       newConversation: { agentId: 'claude', modelId: 'opus', workspace: projectDirectory },
     }
     const instructionUrl = `/api/maps/${coordinatorId}/group-document-instructions`
+    const duplicateApprovalEvidence = await api(instructionUrl, 'POST', {
+      ...instructionArgs,
+      idempotencyKey: 'group-instruction-duplicate-evidence',
+      instruction: `${instructionArgs.instruction}\n\n${instructionArgs.approvalEvidence}`,
+    }, sourceHeaders)
+    assert.equal(duplicateApprovalEvidence.status, 400)
+    assert.equal(duplicateApprovalEvidence.body.reasonCode, 'GROUP_DOCUMENT_INSTRUCTION_DUPLICATE_APPROVAL_EVIDENCE')
+    assert.match(duplicateApprovalEvidence.body.message, /approvalEvidence에는 승인 발언·출처·승인 범위만/)
+    assert.equal(calls.some((call) => call.operationId === 'gdi:group-instruction-duplicate-evidence'), false)
     const instructed = await api(instructionUrl, 'POST', instructionArgs, sourceHeaders)
     assert.equal(instructed.status, 202, JSON.stringify(instructed.body))
     assert.equal(instructed.body.reasonCode, 'GROUP_DOCUMENT_INSTRUCTION_DELIVERED', JSON.stringify(instructed.body))

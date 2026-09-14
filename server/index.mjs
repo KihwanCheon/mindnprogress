@@ -9,6 +9,7 @@ import { createGroupProjects, documentRoot, DOCUMENT_COORDINATOR_INSTRUCTION } f
 import { createDocumentGroupMetadata, documentGroupFields } from './lib/documentGroupMetadata.mjs'
 import {
   buildGroupDocumentInstruction,
+  containsApprovalEvidenceDuplicate,
   createGroupDocumentInstructionSignature,
   groupDocumentInstructionOperationId,
   groupDocumentInstructionPublicView,
@@ -8183,6 +8184,14 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         || !Number.isInteger(groupProjectVersion) || groupProjectVersion < 1) {
         return sendGroupDocumentInstructionResponse(
           response, 400, 'GROUP_DOCUMENT_INSTRUCTION_REQUEST_INVALID', '그룹 문서 지시 값이 올바르지 않습니다.',
+        )
+      }
+      if (containsApprovalEvidenceDuplicate({ approvalEvidence, instruction: instructionText })) {
+        return sendGroupDocumentInstructionResponse(
+          response,
+          400,
+          'GROUP_DOCUMENT_INSTRUCTION_DUPLICATE_APPROVAL_EVIDENCE',
+          '승인 근거 전문이 실행 지시에 중복되어 있습니다. approvalEvidence에는 승인 발언·출처·승인 범위만, instruction에는 실행 계획·제외 범위·완료 및 회신 조건만 작성해 다시 요청하세요.',
         )
       }
       return groupProjects.exclusive(async () => {
