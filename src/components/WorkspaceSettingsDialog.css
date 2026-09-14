@@ -1,32 +1,56 @@
-.workspace-settings-backdrop { position: fixed; inset: 0; z-index: 2400; display: grid; place-items: center; box-sizing: border-box; padding: 12px; background: #1d19276b; }
-.workspace-settings-dialog { width: min(500px, 100%); box-sizing: border-box; max-height: min(680px, calc(100dvh - 24px)); display: flex; flex-direction: column; overflow: hidden; color: #37313e; background: #fff; border: 1px solid #ded9e7; border-radius: 10px; box-shadow: 0 20px 60px #18132040; font-size: 10px; outline: none; }
-.workspace-settings-dialog header { display: flex; justify-content: space-between; gap: 12px; padding: 12px 14px; border-bottom: 1px solid #ded9e7; }
-.workspace-settings-dialog header div { min-width: 0; display: grid; gap: 4px; }
-.workspace-settings-dialog strong { font-size: 15px; }
-.workspace-settings-dialog small { display: block; font-size: 9px; color: #827b89; line-height: 1.5; overflow-wrap: anywhere; }
-.workspace-settings-dialog form { display: flex; flex-direction: column; min-height: 0; }
-.workspace-settings-content { display: grid; gap: 10px; overflow: auto; padding: 14px; }
-.workspace-settings-dialog p { margin: 0; line-height: 1.6; }
-.workspace-settings-dialog label { display: grid; gap: 5px; font-size: 10px; }
-.workspace-settings-dialog input:not([type=radio]), .workspace-settings-dialog select { width: 100%; min-width: 0; box-sizing: border-box; padding: 7px 8px; border: 1px solid #ded9e7; border-radius: 6px; color: inherit; background: #fbfafc; font: inherit; }
-.workspace-settings-path { display: flex; gap: 5px; }
-.workspace-settings-dialog button { color: inherit; background: #f6f4f8; border: 1px solid #ded9e7; border-radius: 6px; padding: 6px 9px; font: inherit; font-size: 9px; cursor: pointer; }
-.workspace-settings-dialog button:disabled { opacity: .5; cursor: default; }
-.workspace-settings-dialog input:focus, .workspace-settings-dialog button:focus-visible, .workspace-settings-dialog select:focus { outline: 2px solid #8a7ae0; outline-offset: 1px; }
-.workspace-settings-dialog footer { flex: none; display: flex; justify-content: flex-end; gap: 6px; padding: 10px 14px; border-top: 1px solid #ded9e7; }
-.workspace-settings-dialog button.primary { color: #fff; background: #6758d8; border-color: #6758d8; }
-.workspace-settings-choices { display: grid; gap: 5px; }
-.workspace-settings-choices button { text-align: left; overflow-wrap: anywhere; }
-.workspace-settings-choices span { display: block; }
-.workspace-settings-dialog fieldset { margin: 0; border: 1px solid #ded9e7; border-radius: 6px; padding: 8px; display: grid; gap: 7px; }
-.workspace-settings-dialog fieldset label { display: flex; align-items: center; gap: 6px; }
-.workspace-settings-dialog input[type=radio] { margin: 0; accent-color: #6758d8; }
-.workspace-settings-folders > div { display: flex; align-items: center; gap: 5px; }
-.workspace-settings-folders span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+/* AI 대화 시작과 같은 표면·입력·목록 규격을 쓰되, 확인 창은 내용에 맞는 높이를 유지한다. */
+.workspace-settings-backdrop { position: fixed; inset: 0; z-index: 2400; display: grid; place-items: center; box-sizing: border-box; padding: clamp(10px, 2.5vmin, 24px); background: rgba(29, 25, 39, .42); backdrop-filter: blur(3px); }
+.workspace-settings-dialog { width: min(560px, 100%); box-sizing: border-box; max-height: min(760px, calc(100dvh - 48px)); min-height: 0; display: flex; flex-direction: column; overflow: hidden; color: #37313e; background: #fff; border: 1px solid #dfdbe7; border-radius: 18px; box-shadow: 0 28px 90px rgba(28, 22, 43, .32); font-size: 10px; outline: none; }
+.workspace-settings-dialog > header { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 20px; border-bottom: 1px solid #ece9f1; }
+.workspace-settings-dialog > header > div { min-width: 0; display: grid; gap: 2px; }
+.workspace-settings-dialog > header strong { color: #302a38; font-size: 16px; }
+.workspace-settings-dialog > header small { overflow: hidden; color: #918a99; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-settings-dialog > header button { width: 32px; height: 32px; flex: none; padding: 0; border: 0; border-radius: 9px; color: #7d7585; background: #f5f3f7; font-size: 20px; cursor: pointer; }
+.workspace-settings-dialog form { min-height: 0; display: flex; flex-direction: column; }
+.workspace-settings-content { min-height: 0; display: grid; gap: 12px; overflow: auto; padding: 20px; scrollbar-gutter: stable; }
+.workspace-settings-content > p { margin: 0; color: #777080; font-size: 10px; line-height: 1.55; }
+.workspace-settings-content > small { display: block; color: #9a939f; font-size: 8px; font-weight: 500; line-height: 1.45; overflow-wrap: anywhere; }
+.workspace-settings-content > label { min-width: 0; display: grid; gap: 7px; color: #777080; font-size: 10px; font-weight: 700; }
+.workspace-settings-dialog input:not([type=radio]), .workspace-settings-dialog select { width: 100%; min-width: 0; box-sizing: border-box; padding: 10px 11px; border: 1px solid #ded9e7; border-radius: 9px; outline: none; color: #37313e; background: #fbfafc; font: inherit; font-size: 11px; }
+.workspace-settings-dialog input:focus, .workspace-settings-dialog select:focus { border-color: #7568d5; box-shadow: 0 0 0 3px rgba(104, 88, 210, .1); }
+.workspace-settings-path { min-width: 0; display: flex; align-items: stretch; gap: 6px; }
+.workspace-settings-path > input { flex: 1; }
+/* 이력 목록 버튼은 공통 컴포넌트의 스타일을 그대로 사용한다. */
+.workspace-settings-path > button, .workspace-settings-folders button, .workspace-settings-choices button { color: #625b69; background: #f6f4f8; border: 1px solid #dedae6; border-radius: 8px; padding: 7px 11px; font: inherit; font-size: 9px; cursor: pointer; }
+.workspace-settings-path > button { flex: none; font-weight: 700; white-space: nowrap; }
+.workspace-settings-path > button:hover, .workspace-settings-folders button:hover, .workspace-settings-choices button:hover { color: #5d50c7; border-color: #cfc7e6; background: #f0edfa; }
+.workspace-settings-dialog button:disabled { opacity: .45; cursor: not-allowed; }
+.workspace-settings-dialog button:focus-visible { outline: 2px solid var(--theme-accent, #7768da); outline-offset: -2px; }
+.workspace-settings-dialog footer { flex: none; display: flex; justify-content: flex-end; gap: 8px; padding: 14px 20px; border-top: 1px solid #ece9f1; background: #faf9fb; }
+.workspace-settings-dialog footer button { padding: 9px 14px; color: #655e6c; border: 1px solid #ddd8e4; border-radius: 8px; background: #fff; font: inherit; font-size: 10px; font-weight: 700; cursor: pointer; }
+.workspace-settings-dialog footer button.primary { color: #fff; background: #6758d8; border-color: #6758d8; }
+.workspace-settings-choices { min-width: 0; display: grid; gap: 5px; }
+.workspace-settings-choices > small { color: #827b89; font-size: 8px; font-weight: 750; }
+.workspace-settings-choices button { display: grid; gap: 3px; text-align: left; overflow-wrap: anywhere; }
+.workspace-settings-choices button small { color: #9a939f; font-size: 8px; }
+.workspace-settings-dialog fieldset { min-width: 0; margin: 0; border: 1px solid #e7e3eb; border-radius: 11px; padding: 10px 12px; display: grid; gap: 8px; }
+.workspace-settings-dialog legend { padding: 0 4px; color: #777080; font-size: 9px; font-weight: 700; }
+.workspace-settings-dialog fieldset label { display: flex; align-items: center; gap: 8px; color: #625b69; font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; cursor: pointer; }
+.workspace-settings-dialog input[type=radio] { width: 14px; height: 14px; flex: none; margin: 0; accent-color: #6758d8; }
+.workspace-settings-folders { min-width: 0; padding: 8px; border: 1px solid #e3dfea; border-radius: 9px; background: #fbfafc; }
+.workspace-settings-folders > div { display: flex; align-items: center; gap: 6px; }
+.workspace-settings-folders span { min-width: 0; flex: 1; overflow-wrap: anywhere; font-size: 9px; }
 .workspace-settings-folders nav { display: grid; gap: 3px; max-height: 150px; overflow: auto; margin-top: 5px; }
-.workspace-settings-folders nav button { text-align: left; }
-.workspace-settings-dialog .workspace-settings-error { color: #b64e58; }
-[data-theme='dark'] .workspace-settings-dialog { color: #e0dce7; background: #24222d; border-color: #4b465b; }
-[data-theme='dark'] .workspace-settings-dialog :is(header, footer, fieldset) { border-color: #4b465b; }
-[data-theme='dark'] .workspace-settings-dialog :is(input:not([type=radio]), select, button:not(.primary)) { color: #e0dce7; background: #302d3b; border-color: #4b465b; }
-[data-theme='dark'] .workspace-settings-dialog small { color: #aaa3b8; }
+.workspace-settings-folders nav button { text-align: left; overflow-wrap: anywhere; }
+.workspace-settings-dialog .workspace-settings-error { flex: none; margin: 0 20px 12px; padding: 9px 11px; color: #a94750; border: 1px solid #efcdd1; border-radius: 8px; background: #fff3f4; font-size: 9px; line-height: 1.45; overflow-wrap: anywhere; }
+[data-theme='dark'] .workspace-settings-dialog { color: var(--theme-text-secondary); background: var(--theme-surface); border-color: var(--theme-border-strong); box-shadow: 0 28px 90px rgba(0, 0, 0, .52); }
+[data-theme='dark'] .workspace-settings-dialog > header, [data-theme='dark'] .workspace-settings-dialog footer { background: var(--theme-surface); border-color: var(--theme-border); }
+[data-theme='dark'] .workspace-settings-dialog > header strong { color: var(--theme-text); }
+[data-theme='dark'] .workspace-settings-dialog > header small, [data-theme='dark'] .workspace-settings-content > small, [data-theme='dark'] .workspace-settings-choices button small { color: var(--theme-text-muted); }
+[data-theme='dark'] .workspace-settings-dialog > header button { color: var(--theme-text-secondary); background: var(--theme-surface-soft); }
+[data-theme='dark'] .workspace-settings-content > p, [data-theme='dark'] .workspace-settings-content > label, [data-theme='dark'] .workspace-settings-dialog fieldset label, [data-theme='dark'] .workspace-settings-dialog legend, [data-theme='dark'] .workspace-settings-choices > small { color: var(--theme-text-secondary); }
+[data-theme='dark'] .workspace-settings-dialog input:not([type=radio]), [data-theme='dark'] .workspace-settings-dialog select { color: var(--theme-text); background: var(--theme-surface-soft); border-color: var(--theme-control-border); }
+[data-theme='dark'] .workspace-settings-dialog input:focus, [data-theme='dark'] .workspace-settings-dialog select:focus { border-color: var(--theme-accent); box-shadow: 0 0 0 3px rgba(156, 141, 255, .2); }
+[data-theme='dark'] .workspace-settings-path > button, [data-theme='dark'] .workspace-settings-folders button, [data-theme='dark'] .workspace-settings-choices button { color: var(--theme-text-secondary); background: var(--theme-surface-soft); border-color: var(--theme-control-border); }
+[data-theme='dark'] .workspace-settings-path > button:hover, [data-theme='dark'] .workspace-settings-folders button:hover, [data-theme='dark'] .workspace-settings-choices button:hover { color: #c3bcff; background: var(--theme-accent-soft); border-color: var(--theme-accent-strong); }
+[data-theme='dark'] .workspace-settings-dialog fieldset { border-color: var(--theme-border); }
+[data-theme='dark'] .workspace-settings-folders { background: var(--theme-surface-raised); border-color: var(--theme-border-strong); }
+[data-theme='dark'] .workspace-settings-dialog footer button { color: var(--theme-text-secondary); background: var(--theme-surface-raised); border-color: var(--theme-border-strong); }
+[data-theme='dark'] .workspace-settings-dialog footer button.primary { color: #fff; background: var(--theme-accent-strong); border-color: var(--theme-accent-strong); }
+[data-theme='dark'] .workspace-settings-dialog .workspace-settings-error { color: var(--theme-danger); background: var(--theme-danger-soft); border-color: var(--theme-danger); }
+@media (max-height: 720px), (max-width: 620px) { .workspace-settings-dialog > header { padding: 13px 16px; } .workspace-settings-content { padding: 14px 16px; } .workspace-settings-dialog footer { padding: 10px 16px; } .workspace-settings-dialog .workspace-settings-error { margin-inline: 16px; } }

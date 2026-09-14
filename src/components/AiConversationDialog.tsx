@@ -23,6 +23,7 @@ import {
 import { loadAiConversationRole, type AiConversationRole } from '../utils/aiConversationRole.mjs'
 import './AiConversationDialog.css'
 import { WorkspaceSettingsDialog } from './WorkspaceSettingsDialog'
+import { WorkspaceHistoryList } from './WorkspaceHistoryList'
 import { useAiDialogSections } from './useAiDialogSections'
 import { loadWorkspaceContext, saveWorkspaceSetting, type WorkspaceContext, type WorkspaceChoice } from '../utils/workspaceSettings'
 
@@ -421,8 +422,9 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
       if (options?.machineRole === 'sub') return
       const history = await enqueueWorkspaceHistoryRequest(() => requestWorkspaceHistory('DELETE', { workspace: value }))
       if (workspaceHistoryMutationRef.current === mutationVersion) applyWorkspaceHistory(history)
-    } catch {
+    } catch (reason) {
       if (workspaceHistoryMutationRef.current === mutationVersion) applyWorkspaceHistory(previous)
+      throw reason
     }
   }
 
@@ -683,13 +685,8 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
               </label>
               <small>{workspaceSavedScope ? `${workspaceSavedScope === 'document' ? '문서' : '그룹'} 작업공간 기준에 저장한 경로 · 이번 대화에서 사용합니다.` : workspaceExplicit ? '이번 대화에서 선택한 경로 · 문서/그룹 기준은 변경하지 않습니다.' : options.workspaceContext?.source === 'document' ? '문서 작업공간 기준' : options.workspaceContext?.source === 'group' ? `${options.workspaceContext.groupName} 그룹 작업공간 기준` : '기준 미설정 · AionUi에서 시작을 누르면 선택할 수 있습니다.'}</small>
               {options.workspaceContext?.error && <small role="alert">{options.workspaceContext.error}</small>}
-              <button type="button" className="ai-workspace-browse" disabled={launching} onClick={() => setWorkspacePrompt(true)}>작업공간 확인·설정…</button>
-              {doorayApproval && Boolean(options.workspaceChoices?.length) && <div className="ai-workspace-history">
-                <div className="ai-workspace-history-heading"><span>문서·등록 작업공간</span></div>
-                <div className="ai-workspace-history-list">{options.workspaceChoices?.map((item) => <div className={`ai-workspace-history-item ${workspace.trim() === item ? 'selected' : ''}`} key={item}>
-                  <button type="button" className="ai-workspace-history-select" title={item} onClick={() => updateWorkspace(item)}><span>{item}</span></button>
-                </div>)}</div>
-              </div>}
+              <button type="button" className="ai-workspace-browse ai-workspace-settings-button" disabled={launching} onClick={() => setWorkspacePrompt(true)}>작업공간 확인·설정…</button>
+              {doorayApproval && Boolean(options.workspaceChoices?.length) && <WorkspaceHistoryList heading="문서·등록 작업공간" workspaces={options.workspaceChoices ?? []} workspace={workspace} onSelect={updateWorkspace} disabled={launching} />}
               {browserOpen && (
                 <div className="ai-workspace-browser">
                   <div className="ai-workspace-browser-bar">
@@ -746,21 +743,6 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
                   </div>
                 </div>
               )}
-              {workspaceHistory.length > 0 && (
-                <div className="ai-workspace-history">
-                  <div className="ai-workspace-history-heading"><span>최근 작업공간</span><small>{workspaceHistory.length}개</small></div>
-                  <div className="ai-workspace-history-list" role="list" aria-label="최근 작업공간">
-                    {workspaceHistory.map((item) => (
-                      <div className={`ai-workspace-history-item ${workspace.trim() === item ? 'selected' : ''}`} role="listitem" key={item}>
-                        <button type="button" className="ai-workspace-history-select" onClick={() => updateWorkspace(item)} title={item}>
-                          <span>{item}</span>
-                        </button>
-                        <button type="button" className="ai-workspace-history-remove" onClick={() => { void deleteWorkspaceHistory(item) }} aria-label={`${item} 이력 삭제`} title="이력에서 삭제">×</button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
               </div>
             </details>
             <details className="ai-mcp-section" open={dialogSections.sections.mcp}>
@@ -794,7 +776,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
         <footer><span>응답은 {options?.machineLabel ?? '선택한 머신'}의 AionUi에서만 처리됩니다.</span><div><button type="button" onClick={onClose}>취소</button><button type="button" className="primary" onClick={() => { void launch() }} disabled={roleLoading || Boolean(roleError) || loading || launching || Boolean(error) || !selectedAgent || !modelId}>{launching ? '준비 중…' : 'AionUi에서 시작'}</button></div></footer>
       </section>
     </div>
-    {workspacePrompt && <WorkspaceSettingsDialog mapId={documentId} machineId={options?.machineId} name={documentTitle || cardTitle} initialWorkspace={workspace} onConfirm={selectWorkspace} onClose={() => setWorkspacePrompt(false)} />}
+    {workspacePrompt && <WorkspaceSettingsDialog mapId={documentId} machineId={options?.machineId} name={documentTitle || cardTitle} initialWorkspace={workspace} workspaceHistory={workspaceHistory} onRemoveWorkspaceHistory={deleteWorkspaceHistory} onConfirm={selectWorkspace} onClose={() => setWorkspacePrompt(false)} />}
     </>
   )
 }

@@ -20,6 +20,8 @@ const options = {connected:true,machineId:'fixture',machineLabel:'테스트',mac
 window.audit = { calls:[], fail:false, hold:false, closed:0, context:null };
 window.sectionPreferences = {};
 window.sectionFlags = {};
+window.workspaceHistories = {};
+window.historyFlags = {};
 window.open = () => {window.audit.opened++;return {document:{body:{style:{}}},location:{href:''},closed:false,focus(){},close(){this.closed=true}}};
 window.fetch = async (url, init = {}) => {
   if (!String(url).startsWith('/api/')) return originalFetch(url, init);
@@ -39,7 +41,16 @@ window.fetch = async (url, init = {}) => {
     a.workspaceContext={...ctx,[input.scope==='group'?'groupSetting':'documentSetting']:setting,workspace:input.workspace,source:input.scope,error:'',needsSelection:false,token:ctx.token+'-saved'};
     body={setting};
   }
-  else if (url === '/api/integrations/aionui/workspaces') body = {workspaces:[]};
+  else if (url === '/api/integrations/aionui/workspaces') {
+    const userId=a.userId||'fixture';
+    let history=window.workspaceHistories[userId]||[];
+    if (init.method==='DELETE') {
+      if(window.historyFlags.fail) return new Response(JSON.stringify({error:'테스트 이력 삭제 실패'}),{status:503});
+      history=history.filter(item=>item!==JSON.parse(init.body).workspace);
+      window.workspaceHistories[userId]=history;
+    }
+    body={workspaces:history};
+  }
   else if (url === '/api/integrations/aionui/dialog-preferences') {
     const userId=a.userId||'fixture';
     const saved={workspace:true,mcp:true,skills:true,...window.sectionPreferences[userId]};
@@ -182,7 +193,7 @@ test('작업공간 확인·문서/그룹 저장·공통 메뉴·이름 편집·�
       await evaluate('document.querySelector(".workspace-settings-choices button").click()');
       await evaluate('document.querySelectorAll(".workspace-settings-dialog input[type=radio]")['+(['once','document','group'].indexOf(scope))+'].click()');
       const sizes=await evaluate('({title:getComputedStyle(document.querySelector(".workspace-settings-dialog strong")).fontSize,body:getComputedStyle(document.querySelector(".workspace-settings-dialog")).fontSize,button:getComputedStyle(document.querySelector(".workspace-settings-dialog footer button")).fontSize})');
-      assert.deepEqual(sizes,{title:'15px',body:'10px',button:'9px'});
+      assert.deepEqual(sizes,{title:'16px',body:'10px',button:'10px'});
       assert.equal(await evaluate('document.querySelector(".workspace-settings-dialog footer .primary").textContent'),'선택');
       await evaluate('document.querySelector(".workspace-settings-dialog footer .primary").click()');
       await waitFor(()=>evaluate('!document.querySelector(".workspace-settings-dialog")'));
@@ -334,7 +345,83 @@ test('작업공간 확인·문서/그룹 저장·공통 메뉴·이름 편집·�
     await evaluate('document.documentElement.dataset.theme="dark";window.renderEditor()');
     await waitFor(()=>evaluate('Boolean(document.querySelector(".workspace-settings-path input"))'));
     assert.equal(await evaluate('document.querySelector(".workspace-settings-dialog").getBoundingClientRect().width<=390'),true);
-    assert.equal(await evaluate('getComputedStyle(document.querySelector(".workspace-settings-dialog")).backgroundColor'),'rgb(36, 34, 45)');
+    assert.equal(await evaluate('getComputedStyle(document.querySelector(".workspace-settings-dialog")).backgroundColor'),'rgb(26, 29, 39)');
+
+    // 최근 목록은 시작 창에서 제거하고 확인 창에 기존 목록 스타일로 펼쳐 표시한다.
+    const recentPaths=['/recent/project','/recent/'+'아주-긴-작업공간-경로/'.repeat(30),...Array.from({length:8},(_,i)=>'/recent/project-'+i)];
+    await evaluate('window.workspaceHistories["history-account"]='+JSON.stringify(recentPaths));
+    await open({userId:'history-account'}, {workspaceContext:configured});
+    assert.equal(await evaluate(`document.querySelector('.ai-dialog [aria-label="최근 작업공간"]')`),null);
+    assert.ok(await evaluate('document.querySelector(".ai-workspace-settings-button").getBoundingClientRect().height>=34'),'확인·설정 버튼 높이를 확보');
+    await evaluate('document.querySelector(".ai-workspace-settings-button").click()');
+    await waitFor(()=>evaluate('document.querySelectorAll(".workspace-settings-dialog .ai-workspace-history-select").length===10'));
+    assert.equal(await evaluate('document.querySelector(".workspace-settings-path input").value'),'/document','최근 목록이 기존 문서 기준을 자동 변경하지 않는다');
+    assert.equal(await evaluate('document.querySelector(".ai-workspace-history-list").closest("details")'),null,'추가 펼침 동작 없이 목록 표시');
+    assert.equal(await evaluate('document.querySelector(".ai-workspace-history-list").checkVisibility()'),true);
+    await evaluate('document.querySelector(".ai-workspace-history-select").click()');
+    await waitFor(()=>evaluate('document.querySelector(".workspace-settings-path input").value==="/recent/project"'));
+    assert.equal(await evaluate('document.querySelector(".ai-workspace-history-select[aria-pressed=true]").title'),recentPaths[0]);
+    assert.equal(await evaluate('window.audit.calls.some(c=>c.url.endsWith("/workspace-settings")||c.url.endsWith("/attributions"))'),false,'목록 클릭만으로 저장·대화 시작하지 않는다');
+    const historyShots=process.env.MNP_TEST_SCREENSHOTS==='1'?await mkdtemp(path.join(tmpdir(),'mnp-workspace-settings-screenshots-')):null;
+    for(const width of [1440,390]) for(const theme of ['light','dark']) {
+      await send('Emulation.setDeviceMetricsOverride',{width,height:width===390?620:1000,deviceScaleFactor:1,mobile:width===390});
+      await evaluate('document.documentElement.dataset.theme='+JSON.stringify(theme)+';document.documentElement.style.colorScheme='+JSON.stringify(theme));
+      const layout=await evaluate(`(()=>{
+        const popup=document.querySelector('.workspace-settings-dialog'), content=popup.querySelector('.workspace-settings-content'), footer=popup.querySelector('footer');
+        const list=popup.querySelector('.ai-workspace-history-list'), label=popup.querySelectorAll('.ai-workspace-history-select > span')[1], style=getComputedStyle(label);
+        return {surface:getComputedStyle(popup).backgroundColor, aiSurface:getComputedStyle(document.querySelector('.ai-dialog')).backgroundColor, radius:getComputedStyle(popup).borderRadius,
+          title:getComputedStyle(popup.querySelector('header strong')).fontSize, path:getComputedStyle(popup.querySelector('input')).fontSize,
+          font:style.fontSize, ellipsis:style.textOverflow, clipped:label.scrollWidth>label.clientWidth, tooltip:label.parentElement.title,
+          listScroll:list.scrollHeight>list.clientHeight, contentFits:content.scrollWidth<=content.clientWidth, popupFits:popup.getBoundingClientRect().width<=innerWidth,
+          footerVisible:footer.getBoundingClientRect().bottom<=innerHeight&&footer.getBoundingClientRect().top>=popup.getBoundingClientRect().top,
+          selected:getComputedStyle(popup.querySelector('.ai-workspace-history-item.selected')).backgroundColor,
+          rowBorder:getComputedStyle(label.parentElement).borderTopWidth, rowBackground:getComputedStyle(label.parentElement).backgroundColor};
+      })()`);
+      assert.equal(layout.surface,layout.aiSurface,`${theme}: AI 시작 창과 동일한 표면 색상`);
+      assert.equal(layout.radius,'18px');assert.equal(layout.title,'16px');assert.equal(layout.path,'11px');
+      assert.equal(layout.font,'9px');assert.equal(layout.ellipsis,'ellipsis');assert.equal(layout.clipped,true);assert.equal(layout.tooltip,recentPaths[1]);
+      assert.equal(layout.listScroll,true);assert.equal(layout.contentFits,true);assert.equal(layout.popupFits,true);assert.equal(layout.footerVisible,true);
+      assert.equal(layout.selected,theme==='dark'?'rgb(54, 49, 79)':'rgb(238, 235, 251)');
+      assert.equal(layout.rowBorder,'0px');assert.equal(layout.rowBackground,'rgba(0, 0, 0, 0)','확인 창의 일반 버튼 스타일이 이력 행을 덮어쓰지 않는다');
+      if(historyShots) {
+        const shot=await send('Page.captureScreenshot',{format:'png'});
+        await writeFile(path.join(historyShots,theme+'-'+width+'.png'),Buffer.from(shot.data,'base64'));
+      }
+    }
+    if(historyShots) t.diagnostic('작업공간 확인 화면 캡처: '+historyShots);
+    // 삭제 실패 시 목록을 복원하고, 성공 시 부모 목록·계정 캐시도 함께 갱신한다.
+    await evaluate('window.historyFlags.fail=true;document.querySelector(".ai-workspace-history-remove").click()');
+    await waitFor(()=>evaluate('document.querySelector(".workspace-settings-error")?.textContent.includes("이력 삭제 실패")'));
+    assert.equal(await evaluate('document.querySelectorAll(".ai-workspace-history-select").length'),10);
+    await evaluate('window.historyFlags.fail=false;document.querySelector(".ai-workspace-history-remove").click()');
+    await waitFor(()=>evaluate('document.querySelectorAll(".ai-workspace-history-select").length===9&&!document.querySelector(".workspace-settings-dialog footer .primary").disabled'));
+    assert.equal(await evaluate('document.querySelector(".workspace-settings-path input").value'),recentPaths[0],'이력 삭제는 현재 경로·기준 설정을 지우지 않는다');
+    await evaluate('document.querySelector(".workspace-settings-dialog footer .primary").click()');
+    await waitFor(()=>evaluate('!document.querySelector(".workspace-settings-dialog")'));
+    assert.equal(await evaluate('document.querySelector(".ai-workspace-input-row input").value'),recentPaths[0]);
+    assert.equal(await evaluate('window.audit.opened'),0,'선택 후 옵션 창으로 돌아오며 대화를 시작하지 않는다');
+    await evaluate('document.querySelector(".ai-workspace-settings-button").click()');
+    await waitFor(()=>evaluate('document.querySelectorAll(".ai-workspace-history-select").length===9'));
+    await open({userId:'history-other-account'}, {workspaceContext:configured});
+    await evaluate('document.querySelector(".ai-workspace-settings-button").click()');
+    await waitFor(()=>evaluate('Boolean(document.querySelector(".ai-workspace-history-empty"))'));
+    assert.equal(await evaluate('document.querySelectorAll(".ai-workspace-history-select").length'),0,'다른 계정의 이력을 표시하지 않는다');
+
+    // 서브 머신은 기존 머신별 브라우저 이력을 사용하며 메인 이력 API를 호출하지 않는다.
+    await evaluate('localStorage.setItem("mindnprogress-ai-workspace-history-v2:remote-history:remote",JSON.stringify(["/remote/project"]))');
+    await open({userId:'remote-history'}, {workspaceContext:{...mixed,machineId:'remote',machineRole:'sub'},optionOverrides:{machineId:'remote',machineRole:'sub',machines:[{machineId:'remote',label:'원격',role:'sub'}]}});
+    await evaluate('document.querySelector(".ai-workspace-settings-button").click()');
+    await waitFor(()=>evaluate('document.querySelector(".ai-workspace-history-select")?.title==="/remote/project"'));
+    await evaluate('document.querySelector(".ai-workspace-history-remove").click()');
+    await waitFor(()=>evaluate('Boolean(document.querySelector(".ai-workspace-history-empty"))'));
+    assert.equal(await evaluate('window.audit.calls.some(c=>c.url.endsWith("/workspaces"))'),false);
+    assert.deepEqual(await evaluate('JSON.parse(localStorage.getItem("mindnprogress-ai-workspace-history-v2:remote-history:remote"))'),[]);
+
+    // 이름 편집에서 단독으로 열린 창도 같은 목록을 사용한다.
+    await evaluate('window.audit.userId="editor-history";window.workspaceHistories["editor-history"]=["/editor/project"];window.audit.workspaceContext='+JSON.stringify(configured)+';window.renderEditor()');
+    await waitFor(()=>evaluate('document.querySelector(".ai-workspace-history-select")?.title==="/editor/project"'));
+    await evaluate('document.querySelector(".ai-workspace-history-remove").click()');
+    await waitFor(()=>evaluate('Boolean(document.querySelector(".ai-workspace-history-empty"))'));
 
   } finally {
     if (send && socket?.readyState === WebSocket.OPEN) await send('Browser.close').catch(() => {})
