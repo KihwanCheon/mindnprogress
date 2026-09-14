@@ -3,7 +3,8 @@ param(
     [ValidateRange(1, 300)][int]$StopTimeoutSeconds = 30,
     [ValidateRange(1, 300)][int]$StartTimeoutSeconds = 60,
     [switch]$OpenBrowser,
-    [switch]$AllowLegacyStop
+    [switch]$AllowLegacyStop,
+    [switch]$UseGuiTaskHost
 )
 
 $ErrorActionPreference = 'Stop'
@@ -37,6 +38,32 @@ function Invoke-MnpHiddenCommand([string]$Executable, [string]$Arguments, [int]$
     } finally { $helper.Dispose() }
 }
 
+function Get-MnpTaskLaunch($ActionDefinition, [string]$Root, [string]$Project, [string]$Launcher) {
+    if ([IO.Path]::GetFullPath($ActionDefinition.WorkingDirectory) -ine $Root) {
+        throw 'Scheduled task working directory does not match this installation.'
+    }
+    $legacyExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $hostExe = Join-Path $env:SystemRoot 'System32\wscript.exe'
+    if ($ActionDefinition.Execute -ieq $legacyExe) {
+        # Keep the old action readable until the verified stop-and-migrate operation.
+        if ($ActionDefinition.Arguments -notmatch "& '([^']+node\.exe)' ") { throw 'Cannot identify the registered Node executable.' }
+        $node = $Matches[1]
+        $expected = '-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -Command "& ''{0}'' ''{1}''; exit $LASTEXITCODE"' -f $node, $Launcher
+    } elseif ($ActionDefinition.Execute -ieq $hostExe) {
+        $hostScript = Join-Path $Project 'scripts\runtime\task-host.vbs'
+        if (-not (Test-Path -LiteralPath $hostScript -PathType Leaf)) { throw 'Scheduled task host is missing.' }
+        if ($ActionDefinition.Arguments -notmatch '^//B //NoLogo "[^"]+" "([^"]+node\.exe)" "[^"]+"$') { throw 'Cannot identify the registered Node executable.' }
+        $node = $Matches[1]
+        $expected = '//B //NoLogo "{0}" "{1}" "{2}"' -f $hostScript, $node, $Launcher
+    } else {
+        throw 'Scheduled task executable does not match this installation.'
+    }
+    if ($ActionDefinition.Arguments -ine $expected -or -not (Test-Path -LiteralPath $node -PathType Leaf)) {
+        throw 'Scheduled task command differs from the verified launcher. No processes were stopped.'
+    }
+    return [pscustomobject]@{ TaskExe = $ActionDefinition.Execute; Node = $node }
+}
+
 function Get-MnpContext {
     $project = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
     $root = Split-Path $project -Parent
@@ -56,16 +83,9 @@ function Get-MnpContext {
     $ownerSid = (New-Object Security.Principal.NTAccount($account)).Translate([Security.Principal.SecurityIdentifier]).Value
     if (@($task.Actions).Count -ne 1) { throw 'Ambiguous scheduled task actions.' }
     $actionDefinition = $task.Actions[0]
-    $taskExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    if ($actionDefinition.Execute -ine $taskExe -or [IO.Path]::GetFullPath($actionDefinition.WorkingDirectory) -ine $root) {
-        throw 'Scheduled task executable or working directory does not match this installation.'
-    }
-    if ($actionDefinition.Arguments -notmatch "& '([^']+node\.exe)' ") { throw 'Cannot identify the registered Node executable.' }
-    $node = $Matches[1]
-    $expected = '-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -Command "& ''{0}'' ''{1}''; exit $LASTEXITCODE"' -f $node, $launcher
-    if ($actionDefinition.Arguments -ine $expected -or -not (Test-Path -LiteralPath $node -PathType Leaf)) {
-        throw 'Scheduled task command differs from the verified launcher. No processes were stopped.'
-    }
+    $launch = Get-MnpTaskLaunch $actionDefinition $root $project $launcher
+    $taskExe = $launch.TaskExe
+    $node = $launch.Node
     $settings = Invoke-MnpHiddenCommand $node ('"{0}"' -f (Join-Path $project 'scripts\runtime\config.mjs'))
     if ($settings.ExitCode -ne 0) { throw 'Could not read local runtime configuration.' }
     $config = $settings.Output | ConvertFrom-Json
@@ -87,7 +107,7 @@ function Test-MnpSameRecord($Before, $After) {
 
 function Get-MnpSnapshot($Context, [switch]$FastPorts) {
     # Expensive identity queries are performed at boundaries, never inside polling loops.
-    $all = @(Get-CimInstance Win32_Process -Filter "Name='node.exe' OR Name='powershell.exe'")
+    $all = @(Get-CimInstance Win32_Process -Filter "Name='node.exe' OR Name='powershell.exe' OR Name='wscript.exe'")
     $definitions = @(
         @{ Role = 'launcher'; Entry = $Context.Launcher; Parent = 'task' },
         @{ Role = 'supervisor'; Entry = Join-Path $Context.Project 'scripts\dev.mjs'; Parent = 'launcher' },
@@ -220,7 +240,7 @@ function Send-MnpShutdown($Descriptor) {
 
 function Stop-MnpLegacy($Snapshot) {
     Write-Warning 'Legacy runtime: graceful IPC is unavailable. Stopping only revalidated processes for this one-time migration.'
-    $fresh = @(Get-CimInstance Win32_Process -Filter "Name='node.exe' OR Name='powershell.exe'")
+    $fresh = @(Get-CimInstance Win32_Process -Filter "Name='node.exe' OR Name='powershell.exe' OR Name='wscript.exe'")
     foreach ($record in @($Snapshot.Records | Sort-Object { switch ($_.Role) { 'api' { 0 } 'web' { 1 } 'supervisor' { 2 } default { 3 } } })) {
         $current = $fresh | Where-Object ProcessId -eq $record.Process.ProcessId
         if (-not $current) { continue }
@@ -252,8 +272,37 @@ function Test-MnpHttp($Context) {
     finally { if ($web) { $web.Dispose() }; if ($api) { $api.Dispose() }; $client.Dispose(); $handler.Dispose() }
 }
 
+function Get-MnpTaskPolicyXml([string]$TaskXml) {
+    [xml]$document = $TaskXml
+    $actions = @($document.DocumentElement.ChildNodes | Where-Object LocalName -eq 'Actions')
+    foreach ($entry in $actions) { $null = $document.DocumentElement.RemoveChild($entry) }
+    return $document.OuterXml
+}
+
+function Set-MnpGuiTaskHost($Context) {
+    $hostExe = Join-Path $env:SystemRoot 'System32\wscript.exe'
+    if ($Context.TaskExe -ieq $hostExe) { return $Context }
+    $arguments = '//B //NoLogo "{0}" "{1}" "{2}"' -f (Join-Path $Context.Project 'scripts\runtime\task-host.vbs'), $Context.Node, $Context.Launcher
+    $actionDefinition = New-ScheduledTaskAction -Execute $hostExe -Argument $arguments -WorkingDirectory $Context.Root
+    $null = Get-MnpTaskLaunch $actionDefinition $Context.Root $Context.Project $Context.Launcher
+    $originalXml = Export-ScheduledTask -TaskName $Context.Task.TaskName -TaskPath $Context.Task.TaskPath
+    $backup = Join-Path $Context.StateDirectory ('task-before-gui-host-' + [guid]::NewGuid().ToString('N') + '.xml')
+    # Export-ScheduledTask declares UTF-16; preserve that encoding for a loadable backup.
+    [IO.File]::WriteAllText($backup, $originalXml, [Text.Encoding]::Unicode)
+    $null = Set-ScheduledTask -TaskName $Context.Task.TaskName -TaskPath $Context.Task.TaskPath -Action $actionDefinition
+    $updatedXml = Export-ScheduledTask -TaskName $Context.Task.TaskName -TaskPath $Context.Task.TaskPath
+    if ((Get-MnpTaskPolicyXml $originalXml) -cne (Get-MnpTaskPolicyXml $updatedXml)) {
+        throw "Task policy unexpectedly changed. Startup was not attempted. Inspect backup: $backup"
+    }
+    $updatedContext = Get-MnpContext
+    if ($updatedContext.TaskExe -ine $hostExe) { throw 'GUI task action was not saved. Startup was not attempted.' }
+    Write-Host "[task-host] GUI action saved; task policy unchanged; backup=$backup"
+    return $updatedContext
+}
+
 function Invoke-MnpRuntime {
-    param([string]$Operation, [int]$StopSeconds, [int]$StartSeconds, [bool]$Browser, [bool]$Legacy)
+    param([string]$Operation, [int]$StopSeconds, [int]$StartSeconds, [bool]$Browser, [bool]$Legacy, [bool]$GuiTaskHost = $false)
+    if ($GuiTaskHost -and $Operation -ne 'restart') { throw 'GUI task host migration requires an explicit restart.' }
     $total = [Diagnostics.Stopwatch]::StartNew()
     $phases = [ordered]@{}
     $phaseName = 'preflight'
@@ -261,6 +310,9 @@ function Invoke-MnpRuntime {
     $lock = $null; $context = $null; $succeeded = $false
     try {
         $context = Get-MnpContext
+        if ($GuiTaskHost -and -not (Test-Path -LiteralPath (Join-Path $context.Project 'scripts\runtime\task-host.vbs') -PathType Leaf)) {
+            throw 'GUI task host is missing. No processes were stopped.'
+        }
         if ($Operation -ne 'status') {
             $null = [IO.Directory]::CreateDirectory($context.StateDirectory)
             $lock = [IO.File]::Open((Join-Path $context.StateDirectory 'runtime-operation.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
@@ -293,6 +345,12 @@ function Invoke-MnpRuntime {
             $pidFile = Join-Path $context.StateDirectory 'dev.pids'
             if (Test-Path -LiteralPath $pidFile) { Remove-Item -LiteralPath $pidFile }
             Write-Host "[stop] confirmed; $($phases.stopMs)ms"
+            if ($GuiTaskHost) {
+                $phaseName = 'taskHostMigration'
+                $phase.Restart()
+                $context = Set-MnpGuiTaskHost $context
+                $phases.taskHostMigrationMs = $phase.ElapsedMilliseconds
+            }
         }
         if ($Operation -in @('start', 'restart')) {
             if ($Operation -eq 'start' -and $before.Records.Count -gt 0) {
@@ -347,6 +405,6 @@ function Invoke-MnpRuntime {
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
-    try { Invoke-MnpRuntime $Action $StopTimeoutSeconds $StartTimeoutSeconds ([bool]$OpenBrowser) ([bool]$AllowLegacyStop) }
+    try { Invoke-MnpRuntime $Action $StopTimeoutSeconds $StartTimeoutSeconds ([bool]$OpenBrowser) ([bool]$AllowLegacyStop) ([bool]$UseGuiTaskHost) }
     catch { Write-Error $_ -ErrorAction Continue; exit 1 }
 }
