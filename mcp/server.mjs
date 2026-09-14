@@ -2068,7 +2068,7 @@ async function main() {
   })
 
   for (const [name, action, description] of [
-    ['mindnprogress_refresh_ai_delegation', 'refresh', '기존 위임 operation의 실제 상태를 다시 확인하고 위임 메타데이터를 동기화합니다. AI 실행 요청·재위임·카드 변경은 하지 않습니다. 같은 대화의 다른 턴을 임의로 완료 근거로 삼지 않습니다. 담당 상위 AI가 list_ai_delegations(includeResult=true)로 원문을 읽은 뒤 acknowledgeResultHash에 반환된 resultHash를 명시하면 실행·통합이 끝난 해당 결과의 수신만 확인합니다. 이 확인은 품질 검증 완료나 후속 작업의 사용자 승인이 아닙니다.'],
+    ['mindnprogress_refresh_ai_delegation', 'refresh', '기존 위임 operation의 실제 상태를 다시 확인하고 위임 메타데이터를 동기화합니다. AI 실행 요청·재위임·카드 변경은 하지 않습니다. 같은 대화의 다른 턴을 임의로 완료 근거로 삼지 않습니다. 담당 상위 AI가 list_ai_delegations(includeResult=true)로 원문을 읽은 뒤 acknowledgeResultHash에 반환된 resultHash를 명시하면 실행·통합이 끝난 해당 결과의 수신을 확인하고 사용자용 완료 전문을 상위 대화에 기록합니다. reportArchived/reportArchivePending은 전문 저장 여부이며 실패 시 AI 실행 없이 재시도합니다. 이 확인은 품질 검증 완료나 후속 작업의 사용자 승인이 아닙니다.'],
     ['mindnprogress_retry_ai_delegation_report', 'retry-report', '사용자 요청과 기존 승인 범위를 확인한 뒤, 작업 완료가 확인됐으나 상위 보고만 실패한 위임의 결과를 재전달합니다. 상위 AI가 재개될 수 있지만 하위 작업은 재실행하지 않습니다. 캡처된 원문이 없거나 해시·실행 턴 무결성이 맞지 않으면 같은 대화의 최신 응답으로 대체하지 않고 원문 미포함 메타데이터만 전달합니다. 상태 조회와 실제 작업 복구를 구분하세요.'],
   ]) {
     registerTool(server, name, description, {

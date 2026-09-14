@@ -51,12 +51,14 @@ export function groupDelegationPresentation(item) {
 }
 
 export function groupDelegationReportHint(item) {
+  if (item?.reportArchivePending) return '결과는 보존되어 있으며 상위 대화에 완료 전문을 기록하는 중입니다. AionCore 연결·업데이트 후 AI 실행 없이 자동 재시도합니다.'
   if (item?.reportStatus === 'received') return '결과 수신이 확인됐습니다. 상위 AI의 후속 작업이나 품질 검수 완료를 뜻하지 않습니다.'
   if (item?.state === 'parent-wake-failed') return '하위 실행 결과는 보존되어 있습니다. 전달 상태를 확인한 뒤 필요한 경우 결과만 재전달하세요.'
   if (item?.state === 'waking-parent') return '상위 대화로 결과 전달을 요청했습니다. 실행 요청 접수와 수신 확인은 구분됩니다.'
   if (item?.state !== 'waiting-parent') return ''
   return ({
     'parent-busy': '상위 AI가 작업 중이어서 자동 전달을 기다립니다. 담당 상위 AI가 결과를 읽고 수신 확인하면 대기를 해제할 수 있습니다.',
+    'report-history-pending': '사용자용 완료 전문 저장을 기다립니다. AionCore의 완료 전문 기록 API가 적용되면 자동으로 이어집니다.',
     'parent-confirmation': '상위 AI가 사용자 확인을 기다리고 있어 결과를 자동 전달하지 않았습니다.',
     'parent-unavailable': '상위 대화 상태를 확인할 수 없어 결과를 자동 전달하지 않았습니다.',
     'earlier-report': '같은 상위 대화에 먼저 요청한 결과 전달을 확인하고 있습니다.',

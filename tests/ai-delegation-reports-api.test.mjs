@@ -29,11 +29,23 @@ test('재시작 후 전달 기록을 복원하고, 실행 중인 상위 AI의 �
   }
   let parentBusy = true
   const dispatchRequests = []
+  const reportMessages = new Map()
   const operationReads = []
   const fake = createServer(async (request, response) => {
     const send = (data, status = 200) => {
       response.writeHead(status, { 'Content-Type': 'application/json' })
       response.end(JSON.stringify({ success: status === 200, data }))
+    }
+    if (request.url === '/api/internal/external-conversation-dispatches/capabilities') return send({ historyOnlyReports: true })
+    if (request.method === 'POST' && request.url?.endsWith('/external-reports')) {
+      let body = ''
+      for await (const chunk of request) body += chunk
+      const input = JSON.parse(body)
+      if (reportMessages.has(input.operationId)) assert.equal(reportMessages.get(input.operationId).content, input.content)
+      const messageId = `external-report-${hash(input.operationId)}`
+      reportMessages.set(input.operationId, { content: input.content, messageId })
+      return send({ operationId: input.operationId, conversationId: 'parent-report', messageId,
+        contentHash: hash(input.content), executionRequested: false })
     }
     if (request.url?.startsWith('/api/conversations/')) {
       const id = request.url.split('/')[3]
@@ -43,6 +55,7 @@ test('재시작 후 전달 기록을 복원하고, 실행 중인 상위 AI의 �
       let body = ''
       for await (const chunk of request) body += chunk
       const input = JSON.parse(body)
+      assert.ok([...reportMessages.values()].some((message) => message.messageId === input.historyMessageId && message.content === input.instruction), '자동 실행은 먼저 저장된 전문을 재사용한다.')
       dispatchRequests.push(input)
       parentBusy = true
       return send({ operationId: input.operationId, conversationId: 'parent-report', state: 'running', turnId: 'new-report-turn' })
@@ -122,6 +135,8 @@ test('재시작 후 전달 기록을 복원하고, 실행 중인 상위 AI의 �
       { ...base, ...delivery, id: 'stopped-delivered', parentDispatchState: 'waiting-resume' },
       { ...base, id: 'pending-ack', state: 'waiting-parent' },
       { ...base, id: 'pending-auto', state: 'waiting-parent' },
+      { ...base, id: 'legacy-ack', state: 'completed', reportReceipt: { method: 'parent-acknowledged',
+        parentConversationId: base.parentConversationId, resultHash: base.childResultHash, childTurnId: base.childTurnId } },
     ]), 'utf8')
     await writeFile(path.join(directory, '_ai-conversation-origins.json'), JSON.stringify([
       { conversationId: 'parent-report', mapId, cardId: 'parent-card', startedBy: 'user-editor', linkedAt: base.createdAt },
@@ -132,13 +147,15 @@ test('재시작 후 전달 기록을 복원하고, 실행 중인 상위 AI의 �
     headers['X-MNP-AI-Card-Id'] = 'parent-card'
     headers['X-MNP-AI-Conversation-Id'] = 'parent-report'
     const list = async () => (await api(listUrl)).body.delegations
-    const restored = await until(list, (items) => items.filter((x) => x.state === 'completed').length === 2 && items.find((x) => x.id === 'pending-ack')?.reportWaitReason === 'parent-busy')
+    const restored = await until(list, (items) => items.filter((x) => x.state === 'completed').length === 3 && items.find((x) => x.id === 'pending-ack')?.reportWaitReason === 'parent-busy' && items.find((x) => x.id === 'legacy-ack')?.reportArchived)
     const beforeMap = (await api(mapUrl)).body.map
     assert.equal(dispatchRequests.length, 0, '상위 실행 중에는 추가 턴을 요청하지 않는다.')
     assert.equal(operationReads.length, 0, '재시작 전 확인된 전달을 만료된 operation으로 되돌리지 않는다.')
     assert.equal(restored.find((x) => x.id === 'old-delivered').reportPending, false)
     const plain = restored.find((x) => x.id === 'pending-ack')
     assert.equal(plain.result, undefined, '기본 목록에 긴 원문을 중복 포함하지 않는다.')
+    assert.equal(plain.reportArchive.content, undefined, '전문 저장용 본문도 목록에서 숨긴다.')
+    assert.equal(reportMessages.size, 3, '상위 실행 중에도 두 대기 보고와 과거 누락 전문을 먼저 보존한다.')
     const full = (await api(`${listUrl}?targetCardId=child-card&includeResult=true`)).body.delegations.find((x) => x.id === plain.id)
     assert.equal(full.result, base.childResultSnapshot)
     assert.equal(full.resultHash, base.childResultHash)
@@ -154,6 +171,7 @@ test('재시작 후 전달 기록을 복원하고, 실행 중인 상위 AI의 �
     assert.equal(result.body.delegation.state, 'completed')
     assert.equal(result.body.delegation.reportReceipt.method, 'parent-acknowledged')
     assert.equal(result.body.executionRequested, false)
+    assert.equal(result.body.delegation.reportArchived, true)
     result = await api(ackUrl, 'POST', { ...ack, expectedUpdatedAt: result.body.delegation.updatedAt })
     assert.equal(result.status, 200)
     assert.deepEqual((await api(mapUrl)).body.map, beforeMap, '수신 확인은 카드나 문서 버전을 변경하지 않는다.')
@@ -170,6 +188,7 @@ test('재시작 후 전달 기록을 복원하고, 실행 중인 상위 AI의 �
     await start()
     await pause(250)
     assert.equal(dispatchRequests.length, 1, '두 번째 재시작에서도 완료 보고를 중복 실행하지 않는다.')
+    assert.equal(reportMessages.size, 3, '수신 확인·자동 실행·재시작이 전문 메시지를 중복 생성하지 않는다.')
     assert.deepEqual((await api(mapUrl)).body.map, beforeMap)
   } finally {
     await stop(child)

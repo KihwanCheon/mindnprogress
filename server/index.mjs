@@ -16,6 +16,7 @@ import { detectReleasedWaitingItems } from './lib/waitingItems.mjs'
 import { resolveAttributionWithoutToken, resolveScopedAttribution } from './lib/attributionScope.mjs'
 import { readAionUiSubscriptionUsage } from './lib/aionUiSubscriptionUsage.mjs'
 import { AiDelegationStatusLookupError, readAiDelegationDispatchStatus } from './lib/aiDelegationStatusLookup.mjs'
+import { aiDelegationReportArchived, aiDelegationReportArchivePending, createAiDelegationReportArchiver } from './lib/aiDelegationReportArchive.mjs'
 import {
   acknowledgeAiDelegationReport,
   aiDelegationDeliveredReportPatch,
@@ -2151,6 +2152,12 @@ function delegationPublicView(delegation, includeResult = false) {
   delete publicDelegation.pendingSelection
   delete publicDelegation.pendingWorkspaceHint
   delete publicDelegation.childResultSnapshot
+  if (publicDelegation.reportArchive) {
+    const { content: _content, ...metadata } = publicDelegation.reportArchive
+    publicDelegation.reportArchive = metadata
+  }
+  publicDelegation.reportArchived = aiDelegationReportArchived(delegation)
+  publicDelegation.reportArchivePending = aiDelegationReportArchivePending(delegation)
   const recovery = aiDelegationRecoveryAvailability(delegation)
   if (recovery) publicDelegation.recovery = recovery
   const closure = aiDelegationClosureAvailability(delegation)
@@ -3957,6 +3964,11 @@ async function drainWaitingWorkspaceDelegations() {
   }
 }
 
+const archiveAiDelegationReport = createAiDelegationReportArchiver({
+  update: updateAiDelegation, fetchOn: fetchAionUiOn, capabilities: fetchAionCoreDispatchCapabilities,
+  parentMachineId: delegationParentMachineId, instruction: parentWakeInstruction,
+})
+
 async function pollAiDelegations() {
   if (aiDelegationPollRunning) return
   aiDelegationPollRunning = true
@@ -3970,12 +3982,17 @@ async function pollAiDelegations() {
         'waiting-integration', 'integration-starting', 'integration-waiting-resource',
         'integration-running', 'integration-waiting-resume', 'integration-recovery-required',
         'waiting-parent', 'waking-parent',
-      ].includes(delegation.state) || delegation.pendingRecovery || aiDelegationStoredReportDeliveryPatch(delegation))
-    for (const delegation of active) {
+      ].includes(delegation.state) || delegation.pendingRecovery || aiDelegationStoredReportDeliveryPatch(delegation)
+        || aiDelegationReportArchivePending(delegation))
+    for (let delegation of active) {
       if (aiDelegationActions.has(delegation.id)) continue
       const delivered = aiDelegationStoredReportDeliveryPatch(delegation)
       if (delivered) {
         await updateAiDelegation(delegation.id, delivered)
+        continue
+      }
+      if (delegation.state === 'completed' && aiDelegationReportArchivePending(delegation)) {
+        await archiveAiDelegationReport(delegation)
         continue
       }
       if (delegation.pendingRecovery) {
@@ -4211,6 +4228,16 @@ async function pollAiDelegations() {
             await updateAiDelegation(delegation.id, { state: 'parent-wake-failed', parentDispatchState: 'not-sent', parentError: null })
             continue
           }
+          delegation = await archiveAiDelegationReport(delegation)
+          if (aiDelegationReportArchivePending(delegation)) {
+            await updateAiDelegation(delegation.id, { reportWaitReason: 'report-history-pending' })
+            continue
+          }
+          if (aiDelegationReportArchived(delegation)
+            && (await fetchAionCoreDispatchCapabilities(delegationParentMachineId(delegation)))?.historyOnlyReports !== true) {
+            await updateAiDelegation(delegation.id, { reportWaitReason: 'report-history-pending' })
+            continue
+          }
           const parent = await fetchAiConversationRuntime(delegation.parentConversationId)
           const runtime = normalizeAiConversationRuntime(delegation.parentConversationId, parent)
           if (runtime.state !== 'idle') {
@@ -4221,7 +4248,8 @@ async function pollAiDelegations() {
           const reportResult = aiDelegationReportResult(delegation)
           const parentWakeAttempt = Number(delegation.parentWakeAttempt ?? 0) + 1
           const wakeOperationId = boundedAionOperationId(delegation.id, `wake-${parentWakeAttempt}`)
-          const wakeInstruction = parentWakeInstruction(delegation, reportResult)
+          const wakeInstruction = aiDelegationReportArchived(delegation)
+            ? delegation.reportArchive.content : parentWakeInstruction(delegation, reportResult)
           const reportPreparedAt = new Date().toISOString()
           // 전달 의도를 먼저 저장하여 응답 유실·재시작 뒤에도 같은 요청을 조회한다.
           await updateAiDelegation(delegation.id, {
@@ -4241,6 +4269,7 @@ async function pollAiDelegations() {
               strategy: 'resume',
               targetConversationId: delegation.parentConversationId,
               instruction: wakeInstruction,
+              ...(aiDelegationReportArchived(delegation) ? { historyMessageId: delegation.reportArchive.messageId } : {}),
             },
           })
           const received = aiDelegationDeliveredReportPatch(aiDelegations.get(delegation.id), response)
@@ -6066,7 +6095,9 @@ const server = createServer(async (request, response) => {
             if (body.expectedUpdatedAt !== delegation.updatedAt) return sendJson(response, 409, { error: '최신 위임 상태를 조회한 뒤 수신 확인하세요.' })
             if (await documentCoordinationPending(delegation)) return sendJson(response, 409, { error: '미완료 하위 업무가 남아 문서 조정 결과를 수신 완료로 처리할 수 없습니다.' })
             const patch = acknowledgeAiDelegationReport(delegation, { conversationId: source.conversationId, resultHash: body.acknowledgeResultHash })
-            return sendJson(response, 200, { delegation: delegationPublicView(await updateAiDelegation(id, patch)), executionRequested: false, resultAcknowledged: true, cardChanged: false })
+            const acknowledged = await updateAiDelegation(id, patch)
+            const archived = await archiveAiDelegationReport(acknowledged)
+            return sendJson(response, 200, { delegation: delegationPublicView(archived), executionRequested: false, resultAcknowledged: true, cardChanged: false })
           }
           return sendJson(response, 200, { delegation: delegationPublicView(await refreshSuspendedAiDelegation(delegation)), executionRequested: false })
         }

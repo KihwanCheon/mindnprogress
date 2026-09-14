@@ -45,6 +45,8 @@ test('보고 전달 대기·전달 중·수신 완료와 상위 실행 상태를
   assert.match(groupDelegationReportHint({ state: 'waiting-parent', reportWaitReason: 'parent-busy' }), /상위 AI가 작업 중/)
   assert.match(groupDelegationReportHint({ state: 'waiting-parent', reportWaitReason: 'parent-confirmation' }), /사용자 확인/)
   assert.match(groupDelegationReportHint({ reportStatus: 'received' }), /품질 검수 완료를 뜻하지/)
+  assert.match(groupDelegationReportHint({ reportStatus: 'received', reportArchivePending: true }), /AI 실행 없이 자동 재시도/)
+  assert.match(groupDelegationReportHint({ state: 'waiting-parent', reportWaitReason: 'report-history-pending' }), /완료 전문 저장/)
   assert.equal(groupDelegationReportHint({ state: 'running' }), '')
   assert.equal(groupDelegationPresentation({ state: 'parent-wake-failed', displayState: 'recovery-dispatch-pending', workCompleted: true, reportPending: true }).label, '복구 요청 전달 확인 대기')
 })
