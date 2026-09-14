@@ -2404,6 +2404,7 @@ async function main() {
     const savedGroup = await invoke('mindnprogress_get_group_context', { groupId: groupTestId })
     assert.ok(savedGroup.documents.some((document) => document.id === groupDocument.map.id))
     assert.equal(savedGroup.delegations.length, 0)
+    assert.equal(savedGroup.documentInstructions.length, 0)
     assert.match(savedGroup.guide.approval, /전체 방향 승인은 문서별 실행의 일괄 승인이 아닙니다/)
     assert.match(savedGroup.guide.documentCoordinator, /사용자의 요청 또는 상위 AI가 전달한 작업 범위를 수행/)
     assert.doesNotMatch(savedGroup.guide.documentCoordinator, /# 사용자 승인과 실행 범위|# 그룹의 두 단계 사용자 승인/)
@@ -2419,11 +2420,40 @@ async function main() {
     assert.equal(sourceContext.project.sources[0].sourceVersion, 'v2')
     assert.deepEqual(sourceContext.project.sources[1], multipleSources[1])
     assert.match(sourceContext.guide.sources, /모든 기획서/)
+    assert.match(sourceContext.guide.documentInstruction, /mindnprogress_send_group_document_instruction/)
     const groupCoordinatorContext = await invoke('mindnprogress_get_context', { mapId: managedGroup.coordinator.id, cardId: managedGroup.coordinator.root.id })
     assert.match(groupCoordinatorContext.groupProject.instruction, /두 단계 모두 승인자는 사용자/)
     assert.ok(groupCoordinatorContext.guide.operationRules.some((rule) => rule.includes('승인 대기는 정상적인 종료 지점')))
     assert.match(groupCoordinatorContext.nextStep, /미승인 분석·제안은 대화로 보고/)
-    assert.match(groupCoordinatorContext.selection.aiWorkCoordination.childDelegation.instruction, /사용자 승인 근거와 허용 범위가 확인된 하위 작업만/)
+    assert.equal(groupCoordinatorContext.selection.aiWorkCoordination.groupDocumentInstruction.sendTool, 'mindnprogress_send_group_document_instruction')
+    assert.equal(groupCoordinatorContext.selection.aiWorkCoordination.groupDocumentInstruction.listTool, 'mindnprogress_list_group_document_instructions')
+    assert.match(groupCoordinatorContext.selection.aiWorkCoordination.groupDocumentInstruction.instruction, /업무 완료 상태가 아닙니다/)
+    assert.match(groupCoordinatorContext.selection.aiWorkCoordination.childDelegation.instruction, /같은 문서의 계층상 하위 카드/)
+    assert.equal(Object.hasOwn(toolSchema('mindnprogress_delegate_ai_work').properties, 'targetMapId'), false)
+    assert.equal(Object.hasOwn(toolSchema('mindnprogress_delegate_ai_work').properties, 'targetRevision'), false)
+    const groupInstructionSchema = toolSchema('mindnprogress_send_group_document_instruction')
+    for (const field of ['mapId', 'targetMapId', 'targetRevision', 'groupProjectVersion', 'instructionType', 'approvalScope', 'approvalEvidence', 'strategy', 'instruction', 'decisionReason', 'sourceRevision', 'idempotencyKey']) {
+      assert.ok(groupInstructionSchema.required.includes(field), `그룹 문서 지시 필수 필드 누락: ${field}`)
+    }
+    assert.equal(Object.hasOwn(groupInstructionSchema.properties, 'targetCardId'), false)
+    const emptyInstructionList = await invoke('mindnprogress_list_group_document_instructions', { mapId: managedGroup.coordinator.id })
+    assert.equal(emptyInstructionList.reasonCode, 'GROUP_DOCUMENT_INSTRUCTION_LISTED')
+    assert.deepEqual(emptyInstructionList.instructions, [])
+    await invokeExpectError('mindnprogress_send_group_document_instruction', {
+      mapId: managedGroup.coordinator.id,
+      targetMapId: groupDocument.map.id,
+      targetRevision: groupDocument.map.version,
+      groupProjectVersion: sourceContext.project.version,
+      instructionType: 'planning',
+      approvalScope: 'analysis-only',
+      approvalEvidence: 'MCP 도구 귀속 검증 요청',
+      strategy: 'new',
+      instruction: '담당 범위를 읽기 전용으로 분석하세요.',
+      decisionReason: '새 문서 담당 대화가 필요합니다.',
+      sourceRevision: managedGroup.coordinator.version,
+      idempotencyKey: 'mcp-group-instruction-origin-check',
+      newConversation: { agentId: 'claude-code', modelId: 'claude-test' },
+    }, /현재 그룹 총괄 루트 카드|현재 AionUi 대화|현재 AI 대화/)
     const groupDocumentContext = await invoke('mindnprogress_get_context', { mapId: groupDocument.map.id, cardId: groupDocument.map.nodes.find((node) => node.data.kind === 'root').id })
     for (const value of [groupDocumentContext.groupProject.instruction, groupDocumentContext.guide.operationRules.join('\n'), groupDocumentContext.nextStep, groupDocumentContext.selection.aiWorkCoordination.childDelegation.instruction]) {
       assert.doesNotMatch(value, /# 사용자 승인과 실행 범위|# 그룹의 두 단계 사용자 승인|미승인 분석·제안은|사용자 승인 근거와 허용 범위가 확인된/)

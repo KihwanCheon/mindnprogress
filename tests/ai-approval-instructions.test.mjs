@@ -25,12 +25,13 @@ test('총괄 시작은 전체 방향과 문서별 실행을 각각 사용자에�
   assert.match(request, /원본 요구사항 전수 등록.*주 소유권 확정.*구현을 위임하지/)
 })
 
-test('위임 제안 버튼은 식별자와 제안 범위를 전달하지만 실행을 승인하지 않는다', () => {
+test('문서 지시 제안 버튼은 식별자와 제안 범위를 전달하지만 실행을 승인하지 않는다', () => {
   const instruction = buildGroupDocumentProposalRequest({ mapId: 'map-lobby', cardId: 'root-lobby', title: '획득·로비' })
   const request = buildGroupCoordinatorRequest({ groupId: 'group-test', instruction })
   assert.match(request, /targetMapId: map-lobby, targetCardId: root-lobby/)
-  assert.match(request, /문서별 사용자 승인 전에는 루트 수정이나 AI 위임을 하지 마세요/)
-  assert.match(request, /이 버튼 요청은 실행 승인이 아니라 제안 요청입니다/)
+  assert.match(request, /문서별 사용자 승인 전에는 루트 수정, 지시 전달이나 AI 위임을 하지 마세요/)
+  assert.match(request, /mindnprogress_send_group_document_instruction/)
+  assert.match(request, /이 버튼 요청은 실행 승인이나 지시 전달이 아니라 제안 요청입니다/)
   assert.ok(request.includes(GROUP_APPROVAL_INSTRUCTION))
 })
 

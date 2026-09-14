@@ -151,7 +151,7 @@ export function GroupOverview({ groupId, name, membershipKey, editable, clientId
     try {
       await request(baseUrl + '/documents', clientId, { method: 'POST', body: JSON.stringify({ baseVersion: context.project.version, title: newTitle.trim(), description: newDescription }) })
       if (!mounted.current) return
-      setNewTitle(''); setNewDescription(''); setNotice('문서와 최상위 카드를 만들었습니다. 담당 범위를 확인한 뒤 위임하세요.')
+      setNewTitle(''); setNewDescription(''); setNotice('문서와 최상위 카드를 만들었습니다. 담당 범위를 확인한 뒤 지시 전문을 제안하고 승인하세요.')
       await refresh(); onLibraryChanged()
     } catch (reason) { if (mounted.current) setError(`문서 추가: ${reason instanceof Error ? reason.message : '문서를 생성하지 못했습니다.'}`) }
     finally { if (mounted.current) setBusy(false) }
@@ -275,7 +275,7 @@ export function GroupOverview({ groupId, name, membershipKey, editable, clientId
             {editable && <div className="group-detail-actions"><button type="submit" form="group-criteria-form" className="primary" disabled={busy || !context.sourcesSupported || Boolean(stale) || Boolean(loadError) || !changed}>기준 저장</button>{!coordinator && <button disabled={busy || !context.sourcesSupported || Boolean(stale) || Boolean(loadError)} onClick={() => void save(true)}>기준 저장 · 총괄 준비</button>}</div>}
           </> : panel === 'create' && editable ? <>
             <div className="group-panel-heading"><h2>문서 추가</h2><button onClick={() => setPanel('document')}>문서로 돌아가기</button></div>
-            <div className="group-detail-scroll"><p className="group-muted">문서와 최상위 카드만 만듭니다. AI 위임은 별도로 제안받고 승인합니다.</p><form id="group-create-form" onSubmit={(event) => { event.preventDefault(); void createDocument() }}><fieldset disabled={busy}><label>문서 이름<input value={newTitle} maxLength={80} required onChange={(event) => setNewTitle(event.target.value)} /></label><label>최상위 카드의 담당 범위와 완료 조건<textarea value={newDescription} maxLength={100000} rows={12} onChange={(event) => setNewDescription(event.target.value)} /></label></fieldset></form></div>
+            <div className="group-detail-scroll"><p className="group-muted">문서와 최상위 카드만 만듭니다. 문서 지시 전문은 총괄 AI에게 별도로 제안받고 승인합니다.</p><form id="group-create-form" onSubmit={(event) => { event.preventDefault(); void createDocument() }}><fieldset disabled={busy}><label>문서 이름<input value={newTitle} maxLength={80} required onChange={(event) => setNewTitle(event.target.value)} /></label><label>최상위 카드의 담당 범위와 완료 조건<textarea value={newDescription} maxLength={100000} rows={12} onChange={(event) => setNewDescription(event.target.value)} /></label></fieldset></form></div>
             <div className="group-detail-actions"><button type="submit" form="group-create-form" className="primary" disabled={aiDisabled || !newTitle.trim()}>문서 만들기</button></div>
           </> : selected ? <>
             <div className="group-panel-heading group-detail-heading"><div><h2>{selected.title}</h2><small>{selectedDocument ? '최상위 카드의 담당 범위와 실행 기록' : '현재 그룹에서 제외된 문서 · 위임 이력 읽기 전용'}</small></div>{selectedDocument && <RuntimeStatus document={selectedDocument} />}</div>
@@ -299,7 +299,7 @@ export function GroupOverview({ groupId, name, membershipKey, editable, clientId
               <div className="group-detail-actions">
                 <button onClick={() => onNavigate(selected.mapId, selectedDocument?.root?.id ?? delegation?.targetCardId)}>문서와 검증 근거 확인</button>
                 {selectedDocument && linked(selectedDocument) && <button onClick={() => openConversations(selectedDocument)}>AI 대화</button>}
-                {editable && coordinator && selectedDocument && <button disabled={aiDisabled || !selectedDocument.root || !coordinator.root} onClick={() => launch(coordinator, buildGroupDocumentProposalRequest({ mapId: selectedDocument.id, cardId: selectedDocument.root?.id ?? '', title: selectedDocument.title }))}>위임 제안 요청</button>}
+                {editable && coordinator && selectedDocument && <button disabled={aiDisabled || !selectedDocument.root || !coordinator.root} onClick={() => launch(coordinator, buildGroupDocumentProposalRequest({ mapId: selectedDocument.id, cardId: selectedDocument.root?.id ?? '', title: selectedDocument.title }))}>지시 전문 제안</button>}
               </div>
               {(detailTab === 'results' || detailTab === 'history') && delegation && editable && selectedDocument && coordinator && <div className="group-recovery-actions"><small>선택 위임 · {formatTime(delegation.createdAt)}</small><div className="group-actions">
                 {delegation.displayState && <button disabled={aiDisabled} onClick={() => void delegationAction(delegation, 'refresh')}>상태 다시 확인</button>}

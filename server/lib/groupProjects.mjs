@@ -34,7 +34,7 @@ function validateSources(value) {
 }
 
 // 그룹 설정은 목록 배치와 분리해 보관한다. 이전 클라이언트의 정렬 저장이 설정을 지우지 않는다.
-export function createGroupProjects({ dataDirectory, replaceFile, listMaps, readMap, saveMap, readLayout, writeLayout, delegations, publicDelegation, runtimeSnapshot }) {
+export function createGroupProjects({ dataDirectory, replaceFile, listMaps, readMap, saveMap, readLayout, writeLayout, delegations, publicDelegation, documentInstructions = new Map(), publicDocumentInstruction = (item) => item, runtimeSnapshot }) {
   const directory = path.join(dataDirectory, '_group-projects')
   let queue = Promise.resolve()
   const exclusive = (action) => {
@@ -91,6 +91,9 @@ export function createGroupProjects({ dataDirectory, replaceFile, listMaps, read
       group, project, coordinator, documents, waitingReviewSupported: true, sourcesSupported: true,
       delegations: [...delegations.values()].filter((item) => item.groupId === id).map((item) => ({ ...publicDelegation(item), result: item.childResultSnapshot ?? '' }))
         .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))),
+      documentInstructions: [...documentInstructions.values()].filter((item) => item.groupId === id)
+        .map((item) => publicDocumentInstruction(item, { includeContent: true }))
+        .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))),
       guide: {
         approvalScope: 'group-coordinator',
         instructionScope: 'coordinator와 approval은 그룹 총괄 전용 지침이며 documentCoordinator는 문서 담당 지침입니다. 문서 담당·하위 AI에게 같은 사용자 승인을 반복해서 요구하지 않습니다.',
@@ -98,8 +101,9 @@ export function createGroupProjects({ dataDirectory, replaceFile, listMaps, read
         documentCoordinator: DOCUMENT_COORDINATOR_INSTRUCTION,
         approval: GROUP_APPROVAL_INSTRUCTION,
         sources: 'project.sources에 등록된 모든 기획서의 주소·개별 버전을 확인하세요. source와 sourceVersion은 첫 항목의 구버전 호환 별칭이며 전체 기준이 아닙니다. 추가 기획서를 기존 원본의 대체본으로 간주하거나 버전 숫자만으로 서로 다른 기획서의 우선순위를 정하지 마세요. 원본별 요구사항·변경 범위·충돌을 분석하세요. 문서 담당은 범위 변경을 총괄에 보고하고, 그룹 총괄은 변경된 실행 범위의 사용자 재승인을 받으세요.',
-        documentDelegation: 'mindnprogress_delegate_ai_work의 mapId는 총괄 문서, targetMapId와 targetCardId는 소속 문서와 루트입니다. sourceRevision과 targetRevision은 두 문서의 최신 버전입니다. 그룹→문서 위임은 분석·조정 전용이며 worker를 점유하지 않습니다.',
-        membership: '문서 편입은 실행을 시작하지 않습니다. 실행 중인 그룹 위임의 대상이나 총괄 문서는 그룹 이동·휴지통 이동 전에 위임을 마쳐야 합니다.',
+        documentInstruction: '그룹 총괄 루트 AI는 문서별 사용자 승인 후 mindnprogress_send_group_document_instruction으로 같은 그룹의 문서 루트 AI에 지시 전문을 전달합니다. 이 전달은 AI 작업 위임이나 worker 배정이 아니며, 실제 구현 위임과 검수는 대상 문서 AI가 자기 문서의 하위 카드에서 수행합니다. 지시의 delivered·replied 상태를 업무 완료로 해석하지 마세요.',
+        documentDelegation: 'mindnprogress_delegate_ai_work는 같은 문서의 계층상 하위 업무 카드에만 사용합니다. 과거 coordination-only 문서 간 위임은 호환 이력으로만 조회·복구하며 새 문서 간 위임은 만들지 않습니다.',
+        membership: '문서 편입은 실행을 시작하지 않습니다. 전달 대기 중인 그룹 문서 지시 또는 실행 중인 그룹 위임의 대상이나 총괄 문서는 그룹 이동·휴지통 이동 전에 해당 처리를 마쳐야 합니다.',
         evidence: '업무 카드 완료 수는 요구사항 구현률이 아닙니다. 소유권 원장과 검증 근거는 총괄 문서 및 추적 카드에서 관리하세요.',
         waiting: 'waitingDetails는 최상위 카드와 하위 업무의 대기 원문·재개 조건입니다. 분류 기록의 valid=false는 기준이나 대기 내용 변경으로 재확인이 필요하다는 뜻입니다. 분류·현재 범위 차단·예정된 외부 대기는 탐색용 표시이며 사용자 실행 승인, 대기 해제 또는 업무 완료가 아닙니다. 분류 기록만으로 실행하거나 기존 대기를 삭제하지 마세요.',
       },
@@ -153,7 +157,7 @@ export function createGroupProjects({ dataDirectory, replaceFile, listMaps, read
         next = withGroupPlanningSources(next, [...(first.title || first.source || first.sourceVersion ? [first] : []), ...sources.slice(1)])
       }
       if (body.coordinatorMapId !== undefined && body.coordinatorMapId !== current.coordinatorMapId) {
-        if (hasActive(id)) throw groupProjectError('그룹 위임이 진행 중이므로 총괄 문서를 변경할 수 없습니다.', 409)
+        if (hasActive(id) || hasPendingDocumentInstruction(id)) throw groupProjectError('그룹 위임이 진행 중이거나 문서 지시가 전달 대기 중이므로 총괄 문서를 변경할 수 없습니다.', 409)
         if (typeof body.coordinatorMapId !== 'string' || !group.mapIds.includes(body.coordinatorMapId)) throw groupProjectError('총괄 문서는 그룹에 속한 문서여야 합니다.')
         const coordinator = await readMap(body.coordinatorMapId)
         if (!documentRoot(coordinator) || coordinator.trashedAt || documentRoot(coordinator).data.reference) throw groupProjectError('유효한 원본 루트가 있는 문서를 선택하세요.')
@@ -173,12 +177,22 @@ export function createGroupProjects({ dataDirectory, replaceFile, listMaps, read
   const terminalStates = new Set(['completed', 'failed', 'superseded', 'closed'])
   const active = (item) => !terminalStates.has(item.state)
   const hasActive = (id) => [...delegations.values()].some((item) => item.groupId === id && active(item))
+  const pendingDocumentInstruction = (item) => item.state === 'queued'
+  const hasPendingDocumentInstruction = (id) => [...documentInstructions.values()]
+    .some((item) => item.groupId === id && pendingDocumentInstruction(item))
   async function validateLayout(nextLayout) {
     for (const item of delegations.values()) {
       if (!item.groupId || !active(item)) continue
       const group = nextLayout.groups.find((candidate) => candidate.id === item.groupId)
       if (!group || !group.mapIds.includes(item.parentMapId) || !group.mapIds.includes(item.mapId)) {
         throw groupProjectError('이 그룹의 AI 위임이 진행 중입니다. 총괄·대상 문서의 이동이나 그룹 삭제는 위임이 끝난 뒤에 할 수 있습니다.', 409)
+      }
+    }
+    for (const item of documentInstructions.values()) {
+      if (!item.groupId || !pendingDocumentInstruction(item)) continue
+      const group = nextLayout.groups.find((candidate) => candidate.id === item.groupId)
+      if (!group || !group.mapIds.includes(item.parentMapId) || !group.mapIds.includes(item.targetMapId)) {
+        throw groupProjectError('이 그룹의 문서 지시가 전달 대기 중입니다. 총괄·대상 문서의 이동이나 그룹 삭제는 전문 전달 뒤에 할 수 있습니다.', 409)
       }
     }
   }
@@ -190,7 +204,7 @@ export function createGroupProjects({ dataDirectory, replaceFile, listMaps, read
     if (!group || (await read(group.id)).coordinatorMapId !== parentMap.id) return null
     return group.id
   }
-  return { context, update, find, read, exclusive, validateLayout, authorizeDelegation,
+  return { context, update, find, read, exclusive, validateLayout, authorizeDelegation, authorizeDocumentInstruction: authorizeDelegation,
     async forDocument(mapId) {
       const maps = await listMaps()
       const layout = await readLayout(maps.map((map) => map.id))
@@ -201,6 +215,7 @@ export function createGroupProjects({ dataDirectory, replaceFile, listMaps, read
     },
     assertCanTrash(mapId) {
       if ([...delegations.values()].some((item) => item.groupId && active(item) && [item.parentMapId, item.mapId].includes(mapId))) throw groupProjectError('그룹 AI 위임이 진행 중인 문서는 휴지통으로 이동할 수 없습니다.', 409)
+      if ([...documentInstructions.values()].some((item) => item.groupId && pendingDocumentInstruction(item) && [item.parentMapId, item.targetMapId].includes(mapId))) throw groupProjectError('그룹 문서 지시가 전달 대기 중인 문서는 휴지통으로 이동할 수 없습니다.', 409)
     },
     createDocument: (id, body, user) => exclusive(async () => {
       if (!body || typeof body !== 'object' || Array.isArray(body)) throw groupProjectError('문서 생성 정보가 필요합니다.')

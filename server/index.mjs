@@ -7,6 +7,17 @@ import { createReconstructionRequests } from './lib/documentReconstructionReques
 import { createCardLayoutRequests } from './lib/cardLayoutRequests.mjs'
 import { createGroupProjects, documentRoot, DOCUMENT_COORDINATOR_INSTRUCTION } from './lib/groupProjects.mjs'
 import { createDocumentGroupMetadata, documentGroupFields } from './lib/documentGroupMetadata.mjs'
+import {
+  buildGroupDocumentInstruction,
+  createGroupDocumentInstructionSignature,
+  groupDocumentInstructionOperationId,
+  groupDocumentInstructionPublicView,
+  groupDocumentInstructionResponseBody,
+  GROUP_DOCUMENT_INSTRUCTION_SCOPES,
+  GROUP_DOCUMENT_INSTRUCTION_TYPES,
+  isValidGroupDocumentInstructionId,
+  legacyGroupDelegationCreationAllowed,
+} from './lib/groupDocumentInstructions.mjs'
 import { createDoorayResponseIntegration } from './lib/doorayResponseIntegration.mjs'
 import { AI_EXECUTION_APPROVAL_INSTRUCTION, GROUP_APPROVAL_INSTRUCTION, GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION, AI_DELEGATION_FOLLOWUP_INSTRUCTION, AI_DELEGATION_REPORT_INSTRUCTION } from '../src/utils/aiApprovalInstructions.mjs'
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
@@ -202,6 +213,7 @@ const aiAttributionsFile = path.join(dataDirectory, '_ai-attributions.json')
 const aiConversationAttributionsFile = path.join(dataDirectory, '_ai-conversation-attributions.json')
 const aiConversationOriginsFile = path.join(dataDirectory, '_ai-conversation-origins.json')
 const aiDelegationsFile = path.join(dataDirectory, '_ai-delegations.json')
+const groupDocumentInstructionsFile = path.join(dataDirectory, '_group-document-instructions.json')
 const workspacePoolStateFile = path.join(dataDirectory, '_workspace-pool.json')
 const aiWorkspaceHistoriesFile = path.join(dataDirectory, '_ai-workspace-histories.json')
 const machineRegistryFile = path.join(dataDirectory, '_machines.json')
@@ -272,6 +284,10 @@ const aiDelegations = new Map()
 const aiDelegationActions = new Set()
 let aiDelegationWriteQueue = Promise.resolve()
 let aiDelegationPollRunning = false
+const groupDocumentInstructions = new Map()
+const groupDocumentInstructionActions = new Set()
+let groupDocumentInstructionWriteQueue = Promise.resolve()
+let groupDocumentInstructionPollRunning = false
 const aiDelegationWaitPolls = new Map()
 const workspacePoolManager = new WorkspacePoolManager({
   registryFile: workspacePoolRegistryFile,
@@ -291,6 +307,9 @@ const aiConversationRuntimeFailureGraceMs = Math.max(
   Number(process.env.MNP_AI_RUNTIME_FAILURE_GRACE_MS) || 10_000,
 )
 const aiDelegationPollIntervalMs = Math.max(100, Number(process.env.MNP_AI_DELEGATION_POLL_INTERVAL_MS) || 3_000)
+const allowLegacyGroupDelegationCreation = legacyGroupDelegationCreationAllowed(
+  process.env.MNP_ALLOW_LEGACY_GROUP_DELEGATION_CREATION,
+)
 const mapColors = ['violet', 'indigo', 'blue', 'cyan', 'teal', 'green', 'amber', 'orange', 'red', 'pink']
 const commentReactions = ['👍', '❤️', '🎉', '👀']
 const serverStartedAt = new Date().toISOString()
@@ -1474,6 +1493,14 @@ function persistAiDelegations() {
   return aiDelegationWriteQueue
 }
 
+function persistGroupDocumentInstructions() {
+  const storedInstructions = [...groupDocumentInstructions.values()]
+    .sort((first, second) => String(first.createdAt).localeCompare(String(second.createdAt)))
+  groupDocumentInstructionWriteQueue = groupDocumentInstructionWriteQueue.catch(() => {})
+    .then(() => writeStoredArray(groupDocumentInstructionsFile, storedInstructions))
+  return groupDocumentInstructionWriteQueue
+}
+
 function persistAiWorkspaceHistories() {
   const storedHistories = [...aiWorkspaceHistories.entries()]
     .sort(([firstUserId], [secondUserId]) => firstUserId.localeCompare(secondUserId))
@@ -2125,6 +2152,353 @@ ${workspaceInstruction ? `${workspaceInstruction}\n` : ''}
 ${instruction.trim()}`
 }
 
+function sendGroupDocumentInstructionResponse(response, statusCode, reasonCode, message, payload = {}) {
+  return sendJson(response, statusCode, groupDocumentInstructionResponseBody(statusCode, reasonCode, message, payload))
+}
+
+function groupDocumentInstructionReason(instruction) {
+  if (instruction.state === 'queued') return {
+    reasonCode: 'GROUP_DOCUMENT_INSTRUCTION_QUEUED',
+    message: instruction.message ?? '대상 문서 루트 AI가 현재 응답 중이어서 지시 전문을 대기열에 보관했습니다. 유휴 상태가 되면 같은 지시를 자동 전달합니다.',
+  }
+  if (instruction.state === 'delivered') return {
+    reasonCode: instruction.reasonCode ?? 'GROUP_DOCUMENT_INSTRUCTION_DELIVERED',
+    message: instruction.message ?? '그룹 문서 지시 전문을 대상 문서 루트 AI 대화에 전달했습니다. 전달 성공은 문서 업무 완료를 의미하지 않습니다.',
+  }
+  if (instruction.state === 'replied') return {
+    reasonCode: instruction.reasonCode ?? 'GROUP_DOCUMENT_INSTRUCTION_REPLIED',
+    message: instruction.message ?? '대상 문서 루트 AI가 지시 전문에 응답했습니다. 응답과 실제 카드·하위 위임 결과를 함께 검수하세요.',
+  }
+  return {
+    reasonCode: instruction.reasonCode ?? 'GROUP_DOCUMENT_INSTRUCTION_FAILED',
+    message: instruction.message ?? '그룹 문서 지시 전문을 전달하지 못했습니다.',
+  }
+}
+
+async function updateGroupDocumentInstruction(id, updates) {
+  const current = groupDocumentInstructions.get(id)
+  if (!current) return null
+  const changed = Object.entries(updates).some(([key, value]) => JSON.stringify(current[key]) !== JSON.stringify(value))
+  if (!changed) return current
+  const next = { ...current, ...updates, updatedAt: new Date().toISOString() }
+  groupDocumentInstructions.set(id, next)
+  await persistGroupDocumentInstructions()
+  broadcastEvent({ type: 'group-document-instruction-changed', instruction: groupDocumentInstructionPublicView(next) })
+  return next
+}
+
+async function groupDocumentInstructionMaps(instruction) {
+  const [parentMap, targetMap] = await Promise.all([
+    readMap(instruction.parentMapId),
+    readMap(instruction.targetMapId),
+  ])
+  const parentCard = parentMap?.nodes.find((node) => node.id === instruction.parentCardId)
+  const targetCard = targetMap?.nodes.find((node) => node.id === instruction.targetCardId)
+  return { parentMap, targetMap, parentCard, targetCard }
+}
+
+async function validateQueuedGroupDocumentInstruction(instruction) {
+  const { parentMap, targetMap, parentCard, targetCard } = await groupDocumentInstructionMaps(instruction)
+  if (!parentMap || parentMap.trashedAt || !targetMap || targetMap.trashedAt || !parentCard || !targetCard) {
+    return { valid: false, reasonCode: 'GROUP_DOCUMENT_INSTRUCTION_CARD_NOT_FOUND', message: '총괄 문서 또는 대상 문서의 루트 카드를 찾을 수 없습니다.' }
+  }
+  const groupId = await groupProjects.authorizeDocumentInstruction(parentMap, parentCard.id, targetMap, targetCard.id)
+  if (groupId !== instruction.groupId) {
+    return { valid: false, reasonCode: 'GROUP_DOCUMENT_INSTRUCTION_SCOPE_CHANGED', message: '그룹 소속, 총괄 문서 또는 대상 문서 루트가 변경되어 대기 중인 지시를 전달하지 않았습니다.' }
+  }
+  const groupContext = await groupProjects.context(groupId)
+  if (groupContext.project.version !== instruction.groupProjectVersion
+    || parentMap.version !== instruction.sourceRevision
+    || targetMap.version !== instruction.targetRevision) {
+    return { valid: false, reasonCode: 'GROUP_DOCUMENT_INSTRUCTION_REVISION_CONFLICT', message: '대기 중 그룹 기준 또는 문서 버전이 변경되어 지시를 전달하지 않았습니다. 최신 기준으로 지시 전문을 다시 검토하세요.' }
+  }
+  return { valid: true, parentMap, targetMap, parentCard, targetCard }
+}
+
+async function targetReadyForGroupDocumentInstruction(instruction, targetCard) {
+  if (instruction.strategy === 'resume') {
+    if (!isAiConversationLinked(targetCard.data, instruction.requestedConversationId)) return false
+    try {
+      const conversation = await fetchAiConversationRuntime(instruction.requestedConversationId)
+      return normalizeAiConversationRuntime(instruction.requestedConversationId, conversation).state === 'idle'
+    } catch {
+      return false
+    }
+  }
+  const workStates = await aiConversationWorkStates(instruction.targetMapId, [targetCard.id])
+  return workStates?.cards?.every((card) => ['idle', 'unlinked'].includes(card.state)) === true
+}
+
+async function linkGroupDocumentInstructionConversation({ instruction, targetMap, targetCard, targetConversationId, selection, attribution, user }) {
+  rememberAiConversationOrigin({
+    conversationId: targetConversationId,
+    mapId: targetMap.id,
+    cardId: targetCard.id,
+    startedBy: attribution.startedBy,
+    linkedAt: new Date().toISOString(),
+    homeMachineId: instruction.targetHomeMachineId,
+  })
+  aiConversationAttributions.set(conversationAttributionKey(targetMap.id, targetCard.id), {
+    mapId: targetMap.id,
+    cardId: targetCard.id,
+    conversationId: targetConversationId,
+    authorName: attribution.authorName,
+    agentId: attribution.agentId,
+    agentName: attribution.agentName,
+    modelId: attribution.modelId,
+    modelName: attribution.modelName,
+    providerId: attribution.providerId,
+    homeMachineId: instruction.targetHomeMachineId,
+    startedBy: attribution.startedBy,
+    linkedAt: new Date().toISOString(),
+    refreshedAt: new Date().toISOString(),
+  })
+  await Promise.all([persistAiAttributions(), persistAiConversationAttributions(), persistAiConversationOrigins()])
+  if (instruction.strategy !== 'new') return { mapVersion: targetMap.version, linkError: null }
+
+  const latestMap = await readMap(targetMap.id)
+  const latestTargetCard = latestMap?.nodes.find((node) => node.id === targetCard.id)
+  if (!latestMap || latestMap.trashedAt || !latestTargetCard) {
+    return { mapVersion: targetMap.version, linkError: '새 대화는 생성됐지만 대상 문서 루트가 변경되어 연결하지 못했습니다.' }
+  }
+  const conversationLink = normalizeAiConversationLink({
+    conversationId: targetConversationId,
+    homeMachineId: instruction.targetHomeMachineId,
+    agent: selection.agent,
+    model: selection.model,
+    providerId: selection.providerId,
+    mode: selection.mode,
+    thoughtLevel: selection.thoughtLevel,
+    skills: selection.enabledSkillIds.map((skillId) => ({ id: skillId, label: skillId })),
+    mcpServers: selection.mcpIds.map((mcpId) => ({ id: mcpId, label: mcpId })),
+    workspace: selection.workspace,
+    requestPreview: instruction.instructionPreview,
+    startedBy: { id: attribution.startedBy, label: users.find((candidate) => candidate.id === attribution.startedBy)?.name ?? attribution.startedBy },
+    startedAt: new Date().toISOString(),
+    linkedAt: new Date().toISOString(),
+  })
+  try {
+    const updatedMap = await saveMap(targetMap.id, {
+      nodes: latestMap.nodes.map((node) => node.id === targetCard.id ? {
+        ...node,
+        data: {
+          ...node.data,
+          aiConversationId: targetConversationId,
+          aiConversations: appendAiConversationLink(node.data, conversationLink),
+        },
+      } : node),
+      edges: latestMap.edges,
+    }, user, latestMap.title, latestMap.color, 'content')
+    broadcastEvent({
+      type: 'ai-conversation-linked', mapId: targetMap.id, nodeId: targetCard.id,
+      conversationId: targetConversationId, conversation: conversationLink,
+      sourceClientId: null, updatedAt: updatedMap.updatedAt, updatedBy: publicUser(user),
+    })
+    return { mapVersion: updatedMap.version, linkError: null }
+  } catch (error) {
+    console.warn('[Group document instruction conversation link]', error)
+    return { mapVersion: latestMap.version, linkError: '지시 대화는 생성됐지만 대상 문서 루트의 대화 목록에 연결하지 못했습니다.' }
+  }
+}
+
+async function dispatchGroupDocumentInstruction(instruction, user) {
+  if (groupDocumentInstructionActions.has(instruction.id)) return groupDocumentInstructions.get(instruction.id)
+  groupDocumentInstructionActions.add(instruction.id)
+  try {
+    const validation = await validateQueuedGroupDocumentInstruction(instruction)
+    if (!validation.valid) return updateGroupDocumentInstruction(instruction.id, {
+      state: 'expired', reasonCode: validation.reasonCode, message: validation.message,
+    })
+    const { parentMap, targetMap, targetCard } = validation
+    if (!await targetReadyForGroupDocumentInstruction(instruction, targetCard)) {
+      return updateGroupDocumentInstruction(instruction.id, {
+        state: 'queued', reasonCode: 'GROUP_DOCUMENT_INSTRUCTION_TARGET_BUSY',
+        message: '대상 문서 루트 AI가 현재 응답 중이거나 상태를 확인할 수 없어 지시 전문을 대기열에 보관했습니다. 유휴 상태가 되면 자동 전달합니다.',
+      })
+    }
+
+    const selection = aiDelegationSelectionFromSource(instruction.pendingSelection)
+    if (!selection) return updateGroupDocumentInstruction(instruction.id, {
+      state: 'failed', reasonCode: 'GROUP_DOCUMENT_INSTRUCTION_SELECTION_INVALID',
+      message: '대상 문서 루트 AI의 실행 환경을 복원할 수 없어 지시 전문을 전달하지 못했습니다.',
+    })
+    const { token: attributionToken, attribution } = issueDelegatedAttribution({
+      mapId: targetMap.id,
+      cardId: targetCard.id,
+      conversationId: instruction.strategy === 'resume' ? instruction.requestedConversationId : null,
+      selection,
+      startedBy: instruction.startedBy ?? user.id,
+      homeMachineId: instruction.targetHomeMachineId,
+    })
+    await persistAiAttributions()
+    const deliveredInstruction = buildGroupDocumentInstruction({
+      groupId: instruction.groupId,
+      parentMapId: parentMap.id,
+      targetMapId: targetMap.id,
+      targetCardId: targetCard.id,
+      targetRevision: instruction.targetRevision,
+      groupProjectVersion: instruction.groupProjectVersion,
+      instructionId: instruction.id,
+      instructionType: instruction.instructionType,
+      approvalScope: instruction.approvalScope,
+      approvalEvidence: instruction.pendingApprovalEvidence,
+      instruction: instruction.pendingInstruction,
+      editorId: attribution.startedBy,
+      attributionToken,
+      documentCoordinatorInstruction: DOCUMENT_COORDINATOR_INSTRUCTION,
+    })
+    const operationId = groupDocumentInstructionOperationId(instruction.id)
+    let dispatch
+    try {
+      dispatch = await fetchAionUiOn(instruction.targetHomeMachineId, '/api/internal/external-conversation-dispatches', {
+        method: 'POST',
+        timeoutMs: 30_000,
+        body: {
+          operationId,
+          actorConversationId: instruction.parentConversationId,
+          strategy: instruction.strategy,
+          ...(instruction.strategy === 'resume'
+            ? { targetConversationId: instruction.requestedConversationId }
+            : { create: {
+                agentId: selection.agent.id,
+                title: formatAiConversationTitle(targetMap.title, targetCard.data?.label ?? targetCard.id),
+                modelId: selection.model.id,
+                mode: selection.mode?.id ?? null,
+                thoughtLevel: selection.thoughtLevel?.id ?? null,
+                enabledSkillIds: selection.enabledSkillIds,
+                disabledBuiltinSkillIds: selection.disabledBuiltinSkillIds,
+                mcpIds: selection.mcpIds,
+                workspace: selection.workspace,
+              } }),
+          instruction: deliveredInstruction,
+        },
+      })
+    } catch (error) {
+      try {
+        dispatch = await fetchAionUiOn(instruction.targetHomeMachineId, `/api/internal/external-conversation-dispatches/${encodeURIComponent(operationId)}`)
+      } catch {
+        // 요청이 도착하지 않았거나 대상 대화가 아직 바쁘면 아래에서 대기 또는 실패로 기록합니다.
+      }
+      if (!dispatch) {
+        aiAttributions.delete(sessionTokenKey(attributionToken))
+        await persistAiAttributions()
+        if (error?.status === 409 || error?.status === 429) return updateGroupDocumentInstruction(instruction.id, {
+          state: 'queued', reasonCode: 'GROUP_DOCUMENT_INSTRUCTION_TARGET_BUSY',
+          message: '대상 문서 루트 AI가 현재 응답 중이어서 지시 전문을 대기열에 보관했습니다. 유휴 상태가 되면 자동 전달합니다.',
+        })
+        return updateGroupDocumentInstruction(instruction.id, {
+          state: 'failed', reasonCode: 'GROUP_DOCUMENT_INSTRUCTION_DISPATCH_FAILED',
+          message: 'AionUi에 그룹 문서 지시 전문을 전달하지 못했습니다.',
+        })
+      }
+    }
+
+    const targetConversationId = String(dispatch.conversationId ?? '').trim()
+    if (!validAiConversationId(targetConversationId)) {
+      aiAttributions.delete(sessionTokenKey(attributionToken))
+      await persistAiAttributions()
+      return updateGroupDocumentInstruction(instruction.id, {
+        state: 'failed', reasonCode: 'GROUP_DOCUMENT_INSTRUCTION_CONVERSATION_INVALID',
+        message: 'AionUi가 지시를 전달할 유효한 대상 대화 ID를 반환하지 않았습니다.',
+      })
+    }
+    attribution.conversationId = targetConversationId
+    if (instruction.strategy === 'new') {
+      try {
+        await protectAionUiConversationTitle(targetConversationId, formatAiConversationTitle(targetMap.title, targetCard.data?.label ?? targetCard.id), instruction.targetHomeMachineId)
+      } catch (error) {
+        console.warn('[Group document instruction conversation title protection]', error)
+      }
+    }
+    const linked = await linkGroupDocumentInstructionConversation({
+      instruction, targetMap, targetCard, targetConversationId, selection, attribution, user,
+    })
+    return updateGroupDocumentInstruction(instruction.id, {
+      state: 'delivered',
+      reasonCode: linked.linkError ? 'GROUP_DOCUMENT_INSTRUCTION_DELIVERED_WITH_LINK_WARNING' : 'GROUP_DOCUMENT_INSTRUCTION_DELIVERED',
+      message: linked.linkError
+        ? `${linked.linkError} 지시 전문은 전달됐으며 연결 상태를 확인해 주세요.`
+        : '그룹 문서 지시 전문을 대상 문서 루트 AI 대화에 전달했습니다. 전달 성공은 문서 업무 완료를 의미하지 않습니다.',
+      targetConversationId,
+      dispatchOperationId: operationId,
+      dispatchState: dispatch.state ?? 'starting',
+      turnId: dispatch.turnId ?? null,
+      deliveredAt: new Date().toISOString(),
+      mapVersion: linked.mapVersion,
+      linkError: linked.linkError,
+      instruction: instruction.pendingInstruction,
+      approvalEvidence: instruction.pendingApprovalEvidence,
+      pendingInstruction: null,
+      pendingApprovalEvidence: null,
+      pendingSelection: null,
+    })
+  } finally {
+    groupDocumentInstructionActions.delete(instruction.id)
+  }
+}
+
+async function pollGroupDocumentInstructions() {
+  if (groupDocumentInstructionPollRunning) return
+  groupDocumentInstructionPollRunning = true
+  try {
+    for (const instruction of [...groupDocumentInstructions.values()]) {
+      if (groupDocumentInstructionActions.has(instruction.id)) continue
+      if (instruction.state === 'queued') {
+        const user = users.find((candidate) => candidate.id === instruction.startedBy) ?? users[0]
+        if (user) await dispatchGroupDocumentInstruction(instruction, user)
+        continue
+      }
+      if (instruction.state !== 'delivered' || !instruction.dispatchOperationId) continue
+      try {
+        const status = await fetchAionUiOn(instruction.targetHomeMachineId, `/api/internal/external-conversation-dispatches/${encodeURIComponent(instruction.dispatchOperationId)}`)
+        if (['starting', 'waiting_resource', 'running', 'waiting_resume'].includes(status.state)) {
+          await updateGroupDocumentInstruction(instruction.id, {
+            dispatchState: status.state,
+            turnId: status.turnId ?? instruction.turnId ?? null,
+          })
+          continue
+        }
+        if (status.state === 'completed') {
+          const response = await latestAssistantResult(instruction.targetConversationId)
+          await updateGroupDocumentInstruction(instruction.id, {
+            state: 'replied',
+            reasonCode: 'GROUP_DOCUMENT_INSTRUCTION_REPLIED',
+            message: response
+              ? '대상 문서 루트 AI가 지시 전문에 응답했습니다. 응답과 실제 카드·하위 위임 결과를 함께 검수하세요.'
+              : '대상 문서 루트 AI의 지시 응답이 끝났지만 응답 원문을 캡처하지 못했습니다. 대상 대화와 실제 카드를 확인하세요.',
+            dispatchState: 'completed',
+            turnId: status.turnId ?? instruction.turnId ?? null,
+            response,
+            responseHash: response ? createHash('sha256').update(response).digest('hex') : null,
+            repliedAt: new Date().toISOString(),
+          })
+          continue
+        }
+        await updateGroupDocumentInstruction(instruction.id, {
+          state: 'failed',
+          reasonCode: status.state === 'recovery_required'
+            ? 'GROUP_DOCUMENT_INSTRUCTION_INTERRUPTED'
+            : 'GROUP_DOCUMENT_INSTRUCTION_EXECUTION_FAILED',
+          message: status.state === 'recovery_required'
+            ? 'AionCore 재시작으로 문서 AI의 지시 응답이 중단됐습니다. 대상 대화를 확인한 뒤 새 지시가 필요한지 판단하세요.'
+            : status.errorMessage ?? '대상 문서 루트 AI가 지시 전문에 응답하지 못했습니다.',
+          dispatchState: status.state ?? 'failed',
+          turnId: status.turnId ?? instruction.turnId ?? null,
+        })
+      } catch (error) {
+        if (error?.status !== 404) continue
+        await updateGroupDocumentInstruction(instruction.id, {
+          state: 'failed',
+          reasonCode: 'GROUP_DOCUMENT_INSTRUCTION_STATUS_LOST',
+          message: 'AionUi가 전달된 지시의 응답 상태를 더 이상 보유하지 않습니다. 같은 지시를 자동 재실행하지 않았습니다.',
+        })
+      }
+    }
+  } finally {
+    groupDocumentInstructionPollRunning = false
+  }
+}
+
 function delegationRecoveryInstruction(delegation, instruction, recovery = null) {
   const inspection = delegation.coordinationOnly
     ? `${DOCUMENT_COORDINATOR_INSTRUCTION}\n\n먼저 그룹 기준, 현재 문서의 실행 계약, 하위 위임 상태와 최근 대화·카드 결과를 대조하세요. 이 조정 업무에는 worker가 배정되지 않으므로 작업공간을 임의로 점유하거나 새 lease를 만들지 마세요.`
@@ -2187,6 +2561,27 @@ function delegationPublicView(delegation, includeResult = false) {
     publicDelegation.resultTurnId = result.turnId
   }
   return publicDelegation
+}
+
+async function loadGroupDocumentInstructions() {
+  const storedInstructions = await readStoredArray(groupDocumentInstructionsFile)
+  let rejectedCount = 0
+  for (const instruction of storedInstructions) {
+    if (!isValidGroupDocumentInstructionId(instruction?.id)
+      || !isValidMapId(instruction?.parentMapId)
+      || !isValidMapId(instruction?.targetMapId)
+      || typeof instruction?.parentCardId !== 'string'
+      || typeof instruction?.targetCardId !== 'string'
+      || typeof instruction?.parentConversationId !== 'string'
+      || !['queued', 'delivered', 'replied', 'failed', 'cancelled', 'expired'].includes(instruction?.state)) {
+      rejectedCount += 1
+      continue
+    }
+    groupDocumentInstructions.set(instruction.id, instruction)
+  }
+  if (rejectedCount > 0) {
+    console.warn(`[Group document instruction storage] ${rejectedCount}개 항목을 무시했으며 원본 파일은 덮어쓰지 않았습니다.`)
+  }
 }
 
 function sendAiDelegationResponse(response, statusCode, reasonCode, message, payload = {}) {
@@ -5834,6 +6229,7 @@ await loadAiConversationAttributions()
 await loadMachineRegistry()
 await loadAiConversationOrigins()
 await loadAiDelegations()
+await loadGroupDocumentInstructions()
 await loadAiWorkspaceHistories()
 await loadDistributedWorkSettings()
 documentReconstruction = await createDocumentReconstruction({
@@ -5957,6 +6353,7 @@ const groupProjects = createGroupProjects({
   dataDirectory, replaceFile: replaceFileWithRetry, listMaps, readMap, saveMap,
   readLayout: readDocumentLayout, writeLayout: writeDocumentLayout,
   delegations: aiDelegations, publicDelegation: delegationPublicView, runtimeSnapshot: aiConversationRuntimeSnapshot,
+  documentInstructions: groupDocumentInstructions, publicDocumentInstruction: groupDocumentInstructionPublicView,
 })
 const readDocumentGroups = createDocumentGroupMetadata({
   listMaps, readMap, readLayout: readDocumentLayout, readProject: groupProjects.read,
@@ -7080,6 +7477,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
 
     const aionUiConversationTranscriptRoute = url.pathname.match(/^\/api\/integrations\/aionui\/conversations\/([^/]+)\/transcript$/)
 
+    const groupDocumentInstructionsRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/group-document-instructions$/)
     const aiDelegationsRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/ai-delegations$/)
     const aiDelegationCompletionRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/ai-delegations\/complete$/)
     const aiDelegationRecoveryRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/ai-delegations\/([^/]+)\/recover$/)
@@ -7667,6 +8065,249 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       })
     }
 
+    if (groupDocumentInstructionsRoute && request.method === 'GET') {
+      const user = requireUser(request, response)
+      if (!user) return
+      if (!canEdit(user)) return sendGroupDocumentInstructionResponse(
+        response, 403, 'GROUP_DOCUMENT_INSTRUCTION_EDITOR_REQUIRED', '편집자만 그룹 문서 지시 내역을 확인할 수 있습니다.',
+      )
+      const parentMapId = decodeURIComponent(groupDocumentInstructionsRoute[1])
+      if (!isValidMapId(parentMapId)) return sendGroupDocumentInstructionResponse(
+        response, 400, 'GROUP_DOCUMENT_INSTRUCTION_MAP_INVALID', '총괄 문서 ID가 올바르지 않습니다.',
+      )
+      const targetMapId = String(url.searchParams.get('targetMapId') ?? '').trim()
+      const includeContent = url.searchParams.get('includeContent') === 'true'
+      const instructions = [...groupDocumentInstructions.values()]
+        .filter((instruction) => instruction.parentMapId === parentMapId
+          && (!targetMapId || instruction.targetMapId === targetMapId))
+        .sort((first, second) => String(second.createdAt).localeCompare(String(first.createdAt)))
+        .map((instruction) => groupDocumentInstructionPublicView(instruction, { includeContent }))
+      return sendGroupDocumentInstructionResponse(
+        response, 200, 'GROUP_DOCUMENT_INSTRUCTION_LISTED', '그룹 문서 지시 내역을 조회했습니다.',
+        { parentMapId, instructions },
+      )
+    }
+
+    if (groupDocumentInstructionsRoute && request.method === 'POST') {
+      const user = requireUser(request, response)
+      if (!user) return
+      if (!canEdit(user)) return sendGroupDocumentInstructionResponse(
+        response, 403, 'GROUP_DOCUMENT_INSTRUCTION_EDITOR_REQUIRED', '편집자만 그룹 문서 지시를 전달할 수 있습니다.',
+      )
+      const parentMapId = decodeURIComponent(groupDocumentInstructionsRoute[1])
+      const requestScope = integrationRequestScope(request)
+      const source = delegationSourceForRequest(requestScope, parentMapId)
+      if (!isValidMapId(parentMapId) || !source) return sendGroupDocumentInstructionResponse(
+        response, requestScope.conversationId ? 409 : 400,
+        requestScope.conversationId ? 'GROUP_DOCUMENT_INSTRUCTION_ORIGIN_NOT_FOUND' : 'GROUP_DOCUMENT_INSTRUCTION_SCOPE_REQUIRED',
+        requestScope.conversationId
+          ? '현재 AionUi 대화가 시작된 그룹 총괄 루트 카드를 확인할 수 없습니다.'
+          : '현재 그룹 총괄 루트 카드의 문서와 대화 범위가 필요합니다.',
+      )
+      const body = await readJsonBody(request)
+      const id = String(body.idempotencyKey ?? '').trim()
+      const targetMapId = String(body.targetMapId ?? '').trim()
+      const strategy = String(body.strategy ?? '').trim()
+      const requestedConversationId = String(body.conversationId ?? '').trim()
+      const instructionType = String(body.instructionType ?? '').trim()
+      const approvalScope = String(body.approvalScope ?? '').trim()
+      const approvalEvidence = String(body.approvalEvidence ?? '').trim()
+      const instructionText = String(body.instruction ?? '').trim()
+      const decisionReason = String(body.decisionReason ?? '').trim()
+      const sourceRevision = Number(body.sourceRevision)
+      const targetRevision = Number(body.targetRevision)
+      const groupProjectVersion = Number(body.groupProjectVersion)
+      if (!isValidGroupDocumentInstructionId(id)
+        || !isValidMapId(targetMapId) || targetMapId === parentMapId
+        || !['resume', 'new'].includes(strategy)
+        || (strategy === 'resume' && !validAiConversationId(requestedConversationId))
+        || !GROUP_DOCUMENT_INSTRUCTION_TYPES.includes(instructionType)
+        || !GROUP_DOCUMENT_INSTRUCTION_SCOPES.includes(approvalScope)
+        || !approvalEvidence || approvalEvidence.length > 10_000
+        || !instructionText || instructionText.length > 100_000
+        || !decisionReason || decisionReason.length > 1_000
+        || !Number.isInteger(sourceRevision) || sourceRevision < 1
+        || !Number.isInteger(targetRevision) || targetRevision < 1
+        || !Number.isInteger(groupProjectVersion) || groupProjectVersion < 1) {
+        return sendGroupDocumentInstructionResponse(
+          response, 400, 'GROUP_DOCUMENT_INSTRUCTION_REQUEST_INVALID', '그룹 문서 지시 값이 올바르지 않습니다.',
+        )
+      }
+      return groupProjects.exclusive(async () => {
+        const [parentMap, targetMap] = await Promise.all([readMap(parentMapId), readMap(targetMapId)])
+        const parentCard = parentMap?.nodes.find((node) => node.id === source.cardId)
+        const targetCard = documentRoot(targetMap)
+        if (!parentMap || parentMap.trashedAt || !targetMap || targetMap.trashedAt || !parentCard || !targetCard) {
+          return sendGroupDocumentInstructionResponse(
+            response, 404, 'GROUP_DOCUMENT_INSTRUCTION_CARD_NOT_FOUND', '총괄 문서 또는 대상 문서의 원본 루트 카드를 찾을 수 없습니다.',
+          )
+        }
+        const groupId = await groupProjects.authorizeDocumentInstruction(parentMap, parentCard.id, targetMap, targetCard.id)
+        if (!groupId) return sendGroupDocumentInstructionResponse(
+          response, 400, 'GROUP_DOCUMENT_INSTRUCTION_TARGET_OUTSIDE_GROUP',
+          '그룹 문서 지시는 등록된 총괄 문서의 루트 AI가 같은 그룹의 다른 문서 원본 루트 AI에만 전달할 수 있습니다.',
+        )
+        const requestSignature = createGroupDocumentInstructionSignature({
+          parentMapId,
+          parentCardId: parentCard.id,
+          targetMapId,
+          targetRevision,
+          groupProjectVersion,
+          sourceRevision,
+          strategy,
+          conversationId: requestedConversationId,
+          machineId: body.machineId,
+          instructionType,
+          approvalScope,
+          approvalEvidence,
+          instruction: instructionText,
+          decisionReason,
+          newConversation: body.newConversation,
+        })
+        const existing = groupDocumentInstructions.get(id)
+        if (existing) {
+          if (existing.requestSignature !== requestSignature) return sendGroupDocumentInstructionResponse(
+            response, 409, 'GROUP_DOCUMENT_INSTRUCTION_IDEMPOTENCY_CONFLICT',
+            '같은 idempotencyKey가 다른 그룹 문서 지시에 사용되었습니다.',
+          )
+          const reason = groupDocumentInstructionReason(existing)
+          return sendGroupDocumentInstructionResponse(response, 200, 'GROUP_DOCUMENT_INSTRUCTION_REPEATED',
+            `같은 지시 요청이 이미 접수되어 기존 상태를 반환했습니다. ${reason.message}`,
+            { instruction: groupDocumentInstructionPublicView(existing, { includeContent: true }), repeated: true })
+        }
+        const groupContext = await groupProjects.context(groupId)
+        if (parentMap.version !== sourceRevision || targetMap.version !== targetRevision
+          || groupContext.project.version !== groupProjectVersion) {
+          return sendGroupDocumentInstructionResponse(
+            response, 409, 'GROUP_DOCUMENT_INSTRUCTION_REVISION_CONFLICT',
+            '그룹 기준 또는 문서 버전이 변경되었습니다. 최신 그룹 문맥과 두 문서를 다시 확인한 뒤 지시 전문을 검토하세요.',
+            { current: { sourceRevision: parentMap.version, targetRevision: targetMap.version, groupProjectVersion: groupContext.project.version } },
+          )
+        }
+        const parentAttribution = delegationParentAttribution(request, source, parentCard, user)
+        if (!parentAttribution?.conversationId
+          || (source.conversationId && !isAiConversationLinked(parentCard.data, source.conversationId))) {
+          return sendGroupDocumentInstructionResponse(
+            response, 409, 'GROUP_DOCUMENT_INSTRUCTION_ORIGIN_LINK_MISSING',
+            '현재 AI 대화와 그룹 총괄 루트 카드의 연결을 확인할 수 없습니다.',
+          )
+        }
+
+        let targetHomeMachineId
+        try {
+          targetHomeMachineId = strategy === 'resume'
+            ? conversationHomeMachineId(requestedConversationId)
+            : resolveTargetMachineForUser(user, body.machineId).machineId
+          if (strategy === 'resume') {
+            const requestedMachineId = String(body.machineId ?? '').trim()
+            const normalizedRequestedMachineId = normalizeMachineId(requestedMachineId)
+            if (requestedMachineId && (!normalizedRequestedMachineId || normalizedRequestedMachineId !== targetHomeMachineId)) {
+              return sendGroupDocumentInstructionResponse(
+                response, 409, 'GROUP_DOCUMENT_INSTRUCTION_MACHINE_MISMATCH',
+                '기존 문서 AI 대화는 생성된 머신에서만 이어갈 수 있습니다.',
+              )
+            }
+            resolveTargetMachineForUser(user, targetHomeMachineId)
+          }
+        } catch (error) {
+          if (error instanceof SubMachinePayloadError) return sendGroupDocumentInstructionResponse(
+            response, 400, 'GROUP_DOCUMENT_INSTRUCTION_MACHINE_INVALID', error.message,
+          )
+          throw error
+        }
+
+        let selection
+        if (strategy === 'resume') {
+          const linked = aiConversationLinksFromData(targetCard.data)
+            .find((candidate) => candidate.conversationId === requestedConversationId)
+          if (!linked) return sendGroupDocumentInstructionResponse(
+            response, 400, 'GROUP_DOCUMENT_INSTRUCTION_CONVERSATION_INVALID',
+            '이어갈 대화는 대상 문서의 원본 루트 카드에 연결된 conversationId여야 합니다.',
+          )
+          try {
+            const conversation = await fetchAiConversationRuntime(requestedConversationId)
+            const recovered = aiConversationLinkFromAionUiConversation(conversation)
+            selection = aiDelegationSelectionFromSource({
+              ...recovered,
+              ...linked,
+              agent: linked.agent ?? recovered?.agent,
+              model: linked.model ?? recovered?.model,
+              mode: linked.mode ?? recovered?.mode,
+              thoughtLevel: linked.thoughtLevel ?? recovered?.thoughtLevel,
+              mcpServers: linked.mcpServers?.length ? linked.mcpServers : recovered?.mcpServers,
+              skills: linked.skills?.length ? linked.skills : recovered?.skills,
+              workspace: recovered?.workspace ?? linked.workspace,
+            })
+          } catch {
+            return sendGroupDocumentInstructionResponse(
+              response, 503, 'GROUP_DOCUMENT_INSTRUCTION_CONVERSATION_UNAVAILABLE',
+              '이어갈 대상 문서 AI 대화의 실행 환경을 확인하지 못했습니다.',
+            )
+          }
+        } else {
+          try {
+            selection = await delegationCreateSelection(targetCard, body.newConversation, parentAttribution, targetHomeMachineId)
+          } catch (error) {
+            return sendGroupDocumentInstructionResponse(
+              response, 400, 'GROUP_DOCUMENT_INSTRUCTION_SELECTION_INVALID', error.message,
+            )
+          }
+        }
+        if (!selection) return sendGroupDocumentInstructionResponse(
+          response, 409, 'GROUP_DOCUMENT_INSTRUCTION_SELECTION_UNRESOLVED',
+          '대상 문서 루트 AI의 종류와 모델 정보를 확인하지 못했습니다.',
+        )
+
+        const now = new Date().toISOString()
+        const storedInstruction = {
+          id,
+          requestSignature,
+          groupId,
+          groupProjectVersion,
+          parentMapId,
+          parentCardId: parentCard.id,
+          parentCardLabel: parentCard.data?.label ?? parentCard.id,
+          parentConversationId: parentAttribution.conversationId,
+          parentHomeMachineId: conversationHomeMachineId(parentAttribution.conversationId, parentAttribution),
+          targetMapId,
+          targetCardId: targetCard.id,
+          targetCardLabel: targetCard.data?.label ?? targetCard.id,
+          targetRevision,
+          sourceRevision,
+          targetHomeMachineId,
+          requestedConversationId: strategy === 'resume' ? requestedConversationId : null,
+          strategy,
+          instructionType,
+          approvalScope,
+          instructionPreview: instructionText.replace(/\s+/g, ' ').slice(0, 240),
+          instructionHash: createHash('sha256').update(instructionText).digest('hex'),
+          approvalEvidencePreview: approvalEvidence.replace(/\s+/g, ' ').slice(0, 240),
+          approvalEvidenceHash: createHash('sha256').update(approvalEvidence).digest('hex'),
+          decisionReason,
+          state: 'queued',
+          reasonCode: 'GROUP_DOCUMENT_INSTRUCTION_QUEUED',
+          message: '그룹 문서 지시 전문을 내구 대기열에 저장했으며 대상 문서 루트 AI에 전달을 시도합니다.',
+          pendingInstruction: instructionText,
+          pendingApprovalEvidence: approvalEvidence,
+          pendingSelection: selection,
+          startedBy: parentAttribution.startedBy ?? user.id,
+          createdAt: now,
+          updatedAt: now,
+        }
+        groupDocumentInstructions.set(id, storedInstruction)
+        await persistGroupDocumentInstructions()
+        broadcastEvent({ type: 'group-document-instruction-changed', instruction: groupDocumentInstructionPublicView(storedInstruction) })
+        const delivered = await dispatchGroupDocumentInstruction(storedInstruction, user)
+        const reason = groupDocumentInstructionReason(delivered)
+        return sendGroupDocumentInstructionResponse(
+          response, delivered.state === 'failed' || delivered.state === 'expired' ? 409 : 202,
+          reason.reasonCode,
+          reason.message,
+          { instruction: groupDocumentInstructionPublicView(delivered, { includeContent: true }), repeated: false },
+        )
+      })
+    }
+
     if (aiDelegationsRoute && request.method === 'GET') {
       const user = requireUser(request, response)
       if (!user) return
@@ -7711,6 +8352,16 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         response, 400, 'AI_DELEGATION_TARGET_MAP_INVALID', '올바르지 않은 대상 문서 ID입니다.',
       )
       const crossDocument = mapId !== parentMapId
+      if (crossDocument && !allowLegacyGroupDelegationCreation) return sendAiDelegationResponse(
+        response,
+        409,
+        'AI_DELEGATION_CROSS_DOCUMENT_REPLACED',
+        '새 교차 문서 AI 위임은 지원하지 않습니다. 그룹 총괄 문서 AI는 대상 문서 루트 AI에 그룹 문서 지시 전문을 전달해야 합니다.',
+        {
+          instructionTool: 'mindnprogress_send_group_document_instruction',
+          targetMapId: mapId,
+        },
+      )
       const runDelegation = async () => {
       const id = String(body.idempotencyKey ?? '').trim()
       const targetCardId = String(body.targetCardId ?? '').trim()
@@ -10334,6 +10985,8 @@ runtimeLifecycle.interval(() => {
 runtimeLifecycle.interval(() => refreshVisibleAiConversationRuntimes(), aiConversationRuntimePollIntervalMs, 'AI conversation runtime poll')
 
 runtimeLifecycle.interval(() => pollAiDelegations(), aiDelegationPollIntervalMs, 'AI delegation poll')
+
+runtimeLifecycle.interval(() => pollGroupDocumentInstructions(), aiDelegationPollIntervalMs, 'Group document instruction poll')
 
 runtimeLifecycle.interval(() => doorayResponses.poll(), 3_000, 'Dooray response poll')
 
