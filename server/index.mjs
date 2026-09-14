@@ -6,6 +6,7 @@ import { createDocumentMutationGate, createDocumentReconstruction, reconstructio
 import { createReconstructionRequests } from './lib/documentReconstructionRequests.mjs'
 import { createCardLayoutRequests } from './lib/cardLayoutRequests.mjs'
 import { createGroupProjects, documentRoot, DOCUMENT_COORDINATOR_INSTRUCTION } from './lib/groupProjects.mjs'
+import { createDocumentGroupMetadata, documentGroupFields } from './lib/documentGroupMetadata.mjs'
 import { createDoorayResponseIntegration } from './lib/doorayResponseIntegration.mjs'
 import { AI_EXECUTION_APPROVAL_INSTRUCTION, GROUP_APPROVAL_INSTRUCTION, GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION, AI_DELEGATION_FOLLOWUP_INSTRUCTION, AI_DELEGATION_REPORT_INSTRUCTION } from '../src/utils/aiApprovalInstructions.mjs'
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
@@ -5957,6 +5958,9 @@ const groupProjects = createGroupProjects({
   readLayout: readDocumentLayout, writeLayout: writeDocumentLayout,
   delegations: aiDelegations, publicDelegation: delegationPublicView, runtimeSnapshot: aiConversationRuntimeSnapshot,
 })
+const readDocumentGroups = createDocumentGroupMetadata({
+  listMaps, readMap, readLayout: readDocumentLayout, readProject: groupProjects.read,
+})
 
 const aiDialogPreferences = await createAiDialogPreferences({ dataDirectory, replaceFile: replaceFileWithRetry })
 const aiWorkspaceSettings = await createAiWorkspaceSettings({
@@ -9423,14 +9427,35 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       })
     }
 
+    if (request.method === 'GET' && url.pathname === '/api/document-groups') {
+      const user = requireUser(request, response)
+      if (!user) return
+      const mapIds = url.searchParams.getAll('mapId')
+      if (!mapIds.length || mapIds.length > 60 || mapIds.some((id) => id.length > 120 || !isValidMapId(id))) {
+        return sendJson(response, 400, { error: '그룹을 확인할 문서 ID를 1~60개 지정하세요.' })
+      }
+      return sendJson(response, 200, { documentGroups: await readDocumentGroups(mapIds) })
+    }
+
     if (request.method === 'GET' && url.pathname === '/api/maps') {
       const user = requireUser(request, response)
       if (!user) return
       const maps = await listMaps()
-      return sendJson(response, 200, {
-        maps,
-        documentLayout: await readDocumentLayout(maps.map((map) => map.id)),
-      })
+      const documentLayout = await readDocumentLayout(maps.map((map) => map.id))
+      let payload
+      try {
+        const documentGroups = await readDocumentGroups(maps.map((map) => map.id), { maps, layout: documentLayout })
+        const groupsByMap = new Map(documentGroups.map((context) => [context.mapId, context]))
+        payload = {
+          maps: maps.map((map) => ({ ...map, ...documentGroupFields(groupsByMap.get(map.id)) })),
+          documentLayout, documentGroups, documentGroupsStatus: 'available',
+        }
+      } catch {
+        // 총괄 부가 정보 오류 때문에 기존 문서 목록까지 열리지 않는 회귀를 막는다.
+        payload = { maps, documentLayout, documentGroupsStatus: 'unavailable',
+          documentGroupsWarning: '문서 목록은 확인했지만 그룹 부가 정보를 확인하지 못했습니다. 소속 없음으로 판단하지 말고 그룹 정보를 다시 조회하세요.' }
+      }
+      return sendJson(response, 200, payload)
     }
 
     if (request.method === 'GET' && url.pathname === '/api/shared-knowledge/audit') {
@@ -10181,9 +10206,11 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         if (!map || map.trashedAt) return sendJson(response, 404, { error: '마인드맵을 찾을 수 없습니다.' })
         const resolved = await resolveReferencesForMap(map)
         const delegationOrigin = await resolveOrRememberDelegationSource(integrationRequestScope(request), mapId, map)
+        const documentGroups = await readDocumentGroups([mapId])
         return sendJson(response, 200, {
           map: resolved.map,
-          groupProject: await groupProjects.forDocument(mapId),
+          ...documentGroupFields(documentGroups[0]),
+          documentGroups,
           referenceCommentStats: resolved.referenceCommentStats,
           unresolvedReferenceNodeIds: resolved.unresolvedReferenceNodeIds,
           ...(delegationOrigin ? { delegationOrigin } : {}),

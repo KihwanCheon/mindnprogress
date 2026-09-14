@@ -85,7 +85,7 @@ export async function createCardLayoutRequests({ dataDirectory, writeJson, readS
       const plan = validateCardLayoutPlan(record.snapshot.renderMap, body.plan)
       createCardLayoutCandidates(record.snapshot.renderMap, record.measurements, plan, record.target)
       await persist({ ...record, plan, revision: record.revision + 1, submittedAt: new Date(now()).toISOString() })
-      return { requestId: id, revision: record.revision + 1, submitted: true }
+      return { requestId: id, mapId: record.mapId, revision: record.revision + 1, submitted: true }
     }),
     preview: (id, user, options = {}) => exclusive(async () => {
       const record = recordFor(id, user); await current(record)
