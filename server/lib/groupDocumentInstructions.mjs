@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { MNP_CONTEXT_BOOTSTRAP_INSTRUCTION } from '../../src/utils/aiContextInstructions.mjs'
 
 export const GROUP_DOCUMENT_INSTRUCTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_:-]{0,95}$/
 export const GROUP_DOCUMENT_INSTRUCTION_TYPES = Object.freeze([
@@ -112,7 +113,9 @@ export function buildGroupDocumentInstruction({
 
 이 전문은 그룹 총괄 문서 AI가 소속 문서의 루트 카드 AI에 전달한 지시입니다. AI 작업 위임이나 worker 작업공간 배정이 아닙니다. 지시 수신 자체를 업무 완료로 처리하지 말고, 실제 카드와 문서 내부 위임 결과를 기준으로 진행·완료를 판단하세요.
 
-가장 먼저 MindNProgress MCP 도구 \`mindnprogress_get_context\`를 아래 값으로 한 번 성공적으로 호출한 뒤 \`mindnprogress_get_group_context\`로 최신 그룹 기준과 담당 범위를 확인하세요. \`editorId\`와 \`attributionToken\`은 이후 MindNProgress MCP 작업이 끝날 때까지 유지하세요.
+${MNP_CONTEXT_BOOTSTRAP_INSTRUCTION}
+
+그런 다음 \`mindnprogress_get_group_context\`로 최신 그룹 기준과 담당 범위를 확인하세요. 이후 그룹 기준이나 승인 범위의 최신성을 다시 확인할 때는 \`mindnprogress_get_context\`가 아니라 \`mindnprogress_get_group_context\`를 사용하세요. \`editorId\`와 \`attributionToken\`은 이후 MindNProgress MCP 작업이 끝날 때까지 유지하세요.
 
 - groupId: \`${groupId}\`
 - mapId: \`${targetMapId}\`
