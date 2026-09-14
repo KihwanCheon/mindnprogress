@@ -72,6 +72,18 @@ test('구형 Core이면 AI 실행 없이 저장 대기를 보존하고, 업데�
   assert.equal(aiDelegationReportArchived(h.stored), true)
 })
 
+test('수신자 역할을 비동기로 확인한 전문도 문자열로 확정한 뒤 저장하고 재사용한다', async () => {
+  const h = harness()
+  const content = '# 그룹 총괄 승인 절차\n' + result
+  const archive = createAiDelegationReportArchiver({ ...h.options, instruction: async () => content })
+  await archive(h.stored)
+  assert.equal(h.stored.reportArchive.content, content)
+  assert.equal(h.stored.reportArchive.contentHash, hash(content))
+  assert.equal(aiDelegationReportArchived(h.stored), true)
+  await archive(h.stored)
+  assert.equal(h.requests.length, 1)
+})
+
 test('과거 상위 수신 확인 완료 기록도 원문·턴·대화가 일치해야 자동 보충한다', async () => {
   const d = fixture()
   const legacy = { ...d, state: 'completed', reportReceipt: { method: 'parent-acknowledged', parentConversationId: 'parent',

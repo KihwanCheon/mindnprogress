@@ -7,7 +7,7 @@ import { createReconstructionRequests } from './lib/documentReconstructionReques
 import { createCardLayoutRequests } from './lib/cardLayoutRequests.mjs'
 import { createGroupProjects, documentRoot, DOCUMENT_COORDINATOR_INSTRUCTION } from './lib/groupProjects.mjs'
 import { createDoorayResponseIntegration } from './lib/doorayResponseIntegration.mjs'
-import { AI_EXECUTION_APPROVAL_INSTRUCTION, AI_DELEGATION_FOLLOWUP_INSTRUCTION, AI_DELEGATION_REPORT_INSTRUCTION } from '../src/utils/aiApprovalInstructions.mjs'
+import { AI_EXECUTION_APPROVAL_INSTRUCTION, GROUP_APPROVAL_INSTRUCTION, GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION, AI_DELEGATION_FOLLOWUP_INSTRUCTION, AI_DELEGATION_REPORT_INSTRUCTION } from '../src/utils/aiApprovalInstructions.mjs'
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { hostname, networkInterfaces, tmpdir } from 'node:os'
@@ -2104,16 +2104,14 @@ function buildDelegatedInstruction({ mapId, cardId, editorId, attributionToken, 
   const workspaceInstruction = buildWorkspaceInstruction(workspaceLease)
   return `# MindNProgress 하위 카드 위임 작업 요청
 
-가장 먼저 MindNProgress MCP 도구 \`mindnprogress_get_context\`를 아래 값으로 한 번 성공적으로 호출하세요. 사용자 중지, 취소, 시간 초과 또는 연결 종료로 응답을 받지 못한 시도는 호출 횟수에 포함하지 말고, 같은 대화를 이어갈 때 다시 호출하세요. 성공 응답을 받은 뒤에는 같은 대화에서 반복 호출하지 마세요. 상위 AI의 요청을 받았다는 사실만으로 사용자 승인이 확인된 것은 아닙니다. 아래 승인 규칙에 따라 근거와 허용 범위를 먼저 확인하고, 승인된 "상위 AI 지시"만 실제로 수행하세요. \`editorId\`와 \`attributionToken\`은 이후 MindNProgress MCP 작업이 끝날 때까지 유지하세요.
+가장 먼저 MindNProgress MCP 도구 \`mindnprogress_get_context\`를 아래 값으로 한 번 성공적으로 호출하세요. 사용자 중지, 취소, 시간 초과 또는 연결 종료로 응답을 받지 못한 시도는 호출 횟수에 포함하지 말고, 같은 대화를 이어갈 때 다시 호출하세요. 성공 응답을 받은 뒤에는 같은 대화에서 반복 호출하지 마세요. 이 요청은 상위 카드의 AI가 현재 하위 카드에 실행을 위임한 것이므로, 일반적인 다음 작업 제안에 그치지 말고 아래 "상위 AI 지시"를 실제로 수행하세요. \`editorId\`와 \`attributionToken\`은 이후 MindNProgress MCP 작업이 끝날 때까지 유지하세요.
 
 - mapId: \`${mapId}\`
 - cardId: \`${cardId}\`
 - editorId: \`${editorId}\`
 - attributionToken: \`${attributionToken}\`
 
-${AI_EXECUTION_APPROVAL_INSTRUCTION}
-
-MCP 조회 결과의 \`guide\`, \`selection.taskLinks.startupInspection\`, \`selection.aiWorkCoordination\`과 \`nextStep\`을 확인하고 따르세요. 그룹 소속이면 mindnprogress_get_group_context로 최신 기준과 두 단계 사용자 승인 범위를 확인하세요. 관련 카드를 수정하기 전에는 AI 작업 상태를 확인하고, 승인된 실행 결과만 카드 댓글과 공유 지식에 알맞게 기록하세요. 미승인 제안은 대화로만 보고하세요.
+MCP 조회 결과의 \`guide\`, \`selection.taskLinks.startupInspection\`, \`selection.aiWorkCoordination\`과 \`nextStep\`을 확인하고 따르세요. 관련 카드를 수정하기 전에는 AI 작업 상태를 확인하고, 실행 결과를 카드 댓글과 공유 지식에 알맞게 기록하세요. 상위 AI가 맡긴 범위에서 수행하고, 분석·제안만 요청받았다면 구현으로 확대하지 마세요.
 
 이 위임 실행이 사용자의 중지로 끊긴 뒤 같은 대화에서 직접 이어진 경우, 단순 질의 응답이나 중간 보고는 위임 완료가 아닙니다. 실제 위임 작업과 카드 기록, 필요한 작업공간 체크포인트까지 모두 끝낸 마지막 턴에서만 최종 답변 직전에 \`mindnprogress_complete_ai_delegation\`을 호출하세요. 중단 없이 진행된 최초 실행에는 이 완료 신호가 필요하지 않습니다.
 
@@ -2147,7 +2145,7 @@ ${reason} 원래 지시를 처음부터 반복하지 말고, 아래 복구 확�
 - 작업공간: ${delegation.coordinationOnly ? '문서 조정 전용 · worker 배정 없음' : delegation.workspaceLease?.projectRoot ?? '기존 대화 작업공간'}
 
 ${inspection}
-복구 요청은 새로운 실행 범위의 승인이 아닙니다. 이전 계획에 대한 사용자 승인 근거와 현재 허용 범위를 다시 확인하세요. 근거가 없거나 기획 기준·진행 방향·범위가 바뀌었다면 미완료 작업을 자동 반복하지 말고 수정안을 제안한 뒤 사용자 승인을 기다리세요. 분석·제안 위임의 복구는 계속 분석·제안만 허용됩니다.
+현재 상태와 아래 복구 지시를 대조하고 원래 맡긴 범위의 미완료 작업만 이어가세요. 범위를 벗어난 변경이 필요하면 상위 AI에 보고하세요. 분석·제안 위임의 복구는 계속 분석·제안만 허용됩니다.
 이미 완료된 변경이나 외부 처리는 중복 실행하지 말고 검증과 결과 보고만 하세요.
 
 # 복구 후 수행 지시
@@ -2896,7 +2894,13 @@ function aiDelegationResultSection(reportResult) {
   return `## 하위 AI 원문 미캡처\n\n이 위임의 하위 AI 원문은 MindNProgress 위임 기록에 캡처되지 않아 재전달할 수 없습니다. 다른 작업이 이어졌을 수 있는 대화의 최신 응답으로 대체하지 않았으며, 아래 작업공간·체크포인트·통합 정보만 확인된 결과입니다.\n\n`
 }
 
-function parentWakeInstruction(delegation, reportResult = aiDelegationReportResult(delegation)) {
+async function parentWakeInstruction(delegation, reportResult = aiDelegationReportResult(delegation)) {
+  const parentMapId = delegation.parentMapId ?? delegation.mapId
+  const parentProject = delegation.groupId ? null : await groupProjects.forDocument(parentMapId)
+  const groupCoordinator = Boolean(delegation.groupId) || (parentProject?.role === 'coordinator'
+    && documentRoot(await readMap(parentMapId))?.id === delegation.parentCardId)
+  const approvalInstruction = groupCoordinator ? `${AI_EXECUTION_APPROVAL_INSTRUCTION}\n\n${GROUP_APPROVAL_INSTRUCTION}\n\n` : ''
+  const followupInstruction = groupCoordinator ? GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION : AI_DELEGATION_FOLLOWUP_INSTRUCTION
   const integrationFailure = delegation.integrationStatus && delegation.integrationStatus !== 'completed'
     ? delegation.integrationError ?? delegation.workspaceError ?? delegation.integrationStatus
     : null
@@ -2924,11 +2928,9 @@ function parentWakeInstruction(delegation, reportResult = aiDelegationReportResu
 - 선택 이유: ${delegation.decisionReason}
 ${workspaceResult}
 
-${AI_EXECUTION_APPROVAL_INSTRUCTION}
+${approvalInstruction}${aiDelegationResultSection(reportResult)}${AI_DELEGATION_REPORT_INSTRUCTION}
 
-${aiDelegationResultSection(reportResult)}${AI_DELEGATION_REPORT_INSTRUCTION}
-
-${AI_DELEGATION_FOLLOWUP_INSTRUCTION}`
+${followupInstruction}`
 }
 
 function aiDelegationRecoveryKey(delegation) {
@@ -4261,7 +4263,7 @@ async function pollAiDelegations() {
           const parentWakeAttempt = Number(delegation.parentWakeAttempt ?? 0) + 1
           const wakeOperationId = boundedAionOperationId(delegation.id, `wake-${parentWakeAttempt}`)
           const wakeInstruction = aiDelegationReportArchived(delegation)
-            ? delegation.reportArchive.content : parentWakeInstruction(delegation, reportResult)
+            ? delegation.reportArchive.content : await parentWakeInstruction(delegation, reportResult)
           const reportPreparedAt = new Date().toISOString()
           // 전달 의도를 먼저 저장하여 응답 유실·재시작 뒤에도 같은 요청을 조회한다.
           await updateAiDelegation(delegation.id, {

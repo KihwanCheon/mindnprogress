@@ -6,6 +6,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { AI_EXECUTION_APPROVAL_INSTRUCTION, AI_DELEGATION_FOLLOWUP_INSTRUCTION, GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION } from '../src/utils/aiApprovalInstructions.mjs'
 
 const projectDirectory = path.resolve(import.meta.dirname, '..')
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -21,7 +22,7 @@ async function stop(child) {
   await exited
 }
 
-test('재시작 후 전달 기록을 복원하고, 실행 중인 상위 AI의 명시적 수신 확인과 유휴 시 자동 보고를 분리한다', { timeout: 45_000 }, async () => {
+for (const groupCoordinator of [false, true]) test(`재시작 후 ${groupCoordinator ? '같은 문서의 그룹 총괄' : '일반 상위'} AI의 수신·자동 보고와 전문 역할을 보존한다`, { timeout: 45_000 }, async () => {
   const directory = await mkdtemp(path.join(tmpdir(), 'mnp-report-receipt-'))
   const removeDirectory = async () => {
     if (path.dirname(path.resolve(directory)) !== path.resolve(tmpdir()) || !path.basename(directory).startsWith('mnp-report-receipt-')) throw new Error('테스트 임시 경로 검증 실패')
@@ -113,6 +114,18 @@ test('재시작 후 전달 기록을 복원하고, 실행 중인 상위 AI의 �
     } })
     assert.equal(created.status, 201, JSON.stringify(created.body))
     const mapId = created.body.map.id
+    if (groupCoordinator) {
+      const library = (await api('/api/maps')).body
+      const groupId = 'group-report-coordinator'
+      const layout = {
+        version: 1,
+        items: [...library.documentLayout.items.filter((item) => item.type !== 'map' || item.id !== mapId), { type: 'group', id: groupId }],
+        groups: [...library.documentLayout.groups, { id: groupId, name: '총괄 내부 위임', mapIds: [mapId] }],
+      }
+      const arranged = await api('/api/maps/layout', 'PATCH', { documentLayout: layout })
+      assert.equal(arranged.status, 200, JSON.stringify(arranged.body))
+      assert.equal((await api(`/api/groups/${groupId}`, 'PATCH', { baseVersion: 0, coordinatorMapId: mapId })).status, 200)
+    }
     const mapUrl = `/api/maps/${mapId}`
     const listUrl = `${mapUrl}/ai-delegations`
     const base = {
@@ -181,6 +194,9 @@ test('재시작 후 전달 기록을 복원하고, 실행 중인 상위 AI의 �
     assert.equal(dispatchRequests.length, 1, '아직 미전달인 결과만 한 번 자동 전달한다.')
     assert.equal(dispatchRequests[0].targetConversationId, 'parent-report')
     assert.match(dispatchRequests[0].instruction, /acknowledgeResultHash/)
+    assert.equal(dispatchRequests[0].instruction.includes(AI_EXECUTION_APPROVAL_INSTRUCTION), groupCoordinator)
+    assert.equal(dispatchRequests[0].instruction.includes(GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION), groupCoordinator)
+    assert.equal(dispatchRequests[0].instruction.includes(AI_DELEGATION_FOLLOWUP_INSTRUCTION), !groupCoordinator)
     assert.equal(after.find((x) => x.id === 'pending-auto').parentDispatchState, 'running')
     assert.equal(after.find((x) => x.id === 'pending-auto').reportPending, false)
     await stop(child)

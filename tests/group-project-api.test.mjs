@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { AI_EXECUTION_APPROVAL_INSTRUCTION, GROUP_APPROVAL_INSTRUCTION, GROUP_COORDINATOR_INSTRUCTION, DOCUMENT_COORDINATOR_INSTRUCTION, AI_DELEGATION_FOLLOWUP_INSTRUCTION } from '../src/utils/aiApprovalInstructions.mjs'
+import { AI_EXECUTION_APPROVAL_INSTRUCTION, GROUP_APPROVAL_INSTRUCTION, GROUP_COORDINATOR_INSTRUCTION, DOCUMENT_COORDINATOR_INSTRUCTION, AI_DELEGATION_FOLLOWUP_INSTRUCTION, GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION } from '../src/utils/aiApprovalInstructions.mjs'
 
 const projectDirectory = path.resolve(import.meta.dirname, '..')
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -30,9 +31,15 @@ async function stop(child) {
 
 test('그룹 기획 관리와 문서 루트 위임은 범위·동시 실행·복구·하위 완료 경계를 유지한다', { timeout: 60000 }, async () => {
   const directory = await mkdtemp(path.join(tmpdir(), 'mnp-group-api-'))
+  const removeDirectory = async () => {
+    if (path.dirname(path.resolve(directory)) !== path.resolve(tmpdir()) || !path.basename(directory).startsWith('mnp-group-api-')) throw new Error('테스트 임시 경로 검증 실패')
+    await rm(directory, { recursive: true, force: true })
+  }
   const conversations = new Map()
   const dispatches = new Map()
   const calls = []
+  const reports = new Map()
+  const hash = (value) => createHash('sha256').update(value).digest('hex')
   let failWake = false
   let holdRecoveryResponse = false
   let assistantResult = '문서 분석과 하위 업무 검증 결과입니다.'
@@ -49,8 +56,19 @@ test('그룹 기획 관리와 문서 루트 위임은 범위·동시 실행·복
     if (url.pathname === '/api/agents/management') return send([{ id: 'claude', name: 'Claude', agent_type: 'acp', backend: 'claude', installed: true, enabled: true, available_models: { current_model_id: 'opus', available_models: [{ value: 'opus', name: 'Opus' }] } }])
     if (['/api/providers', '/api/skills', '/api/mcp/servers'].includes(url.pathname)) return send([])
     if (url.pathname === '/api/internal/conversation-runtimes/active') return send({ conversations: [] })
-    if (url.pathname.endsWith('/capabilities')) return send({ schemaVersion: 3, explicitCompletionAfterInterruption: true })
+    if (url.pathname.endsWith('/capabilities')) return send({ schemaVersion: 3, explicitCompletionAfterInterruption: true, historyOnlyReports: true })
+    const report = url.pathname.match(/^\/api\/conversations\/([^/]+)\/external-reports$/)
+    if (report && req.method === 'POST') {
+      const messageId = `external-report-${hash(body.operationId)}`
+      if (reports.has(messageId)) assert.equal(reports.get(messageId), body.content)
+      reports.set(messageId, body.content)
+      return send({ operationId: body.operationId, conversationId: decodeURIComponent(report[1]), messageId, contentHash: hash(body.content), executionRequested: false })
+    }
     if (url.pathname === '/api/internal/external-conversation-dispatches' && req.method === 'POST') {
+      if (/-wake-\d+$/.test(body.operationId)) {
+        if (body.historyMessageId) assert.equal(reports.get(body.historyMessageId), body.instruction, '상위 재개는 먼저 기록한 전문을 재사용한다.')
+        else assert.match(body.instruction, /하위 AI 원문 미캡처|하위 AI 원문 무결성/, '원문 없는 메타데이터 보고만 기록 없이 전달한다.')
+      }
       calls.push(body)
       const id = body.strategy === 'new' ? `conversation-${calls.length}` : body.targetConversationId
       conversations.set(id, { ...(conversations.get(id) ?? {}), id, name: body.newConversation?.name ?? '문서 담당', extra: { agent_id: 'claude', current_model_id: 'opus', backend: 'claude' } })
@@ -163,7 +181,8 @@ test('그룹 기획 관리와 문서 루트 위임은 범위·동시 실행·복
     assert.equal(delegated.body.delegation.coordinationOnly, true)
     assert.equal(delegated.body.delegation.workspaceLease, null)
     assert.match(calls[0].instruction, /코드·Prefab은 직접 수정하지 마세요/)
-    assert.ok(calls[0].instruction.includes(AI_EXECUTION_APPROVAL_INSTRUCTION))
+    assert.ok(!calls[0].instruction.includes(AI_EXECUTION_APPROVAL_INSTRUCTION))
+    assert.ok(!calls[0].instruction.includes(GROUP_APPROVAL_INSTRUCTION))
     assert.ok(calls[0].instruction.includes(DOCUMENT_COORDINATOR_INSTRUCTION))
     assert.equal((await api(delegateUrl, 'POST', args, sourceHeaders)).body.repeated, true)
     assert.equal(calls.length, 1)
@@ -192,9 +211,10 @@ test('그룹 기획 관리와 문서 루트 위임은 범위·동시 실행·복
     const recoveryCall = calls.find((call) => call.operationId === operationId)
     assert.match(recoveryCall.instruction, /코드·Prefab은 직접 수정하지 마세요/)
     assert.match(recoveryCall.instruction, /worker 배정 없음/)
-    assert.ok(recoveryCall.instruction.includes(AI_EXECUTION_APPROVAL_INSTRUCTION))
+    assert.ok(!recoveryCall.instruction.includes(AI_EXECUTION_APPROVAL_INSTRUCTION))
+    assert.ok(!recoveryCall.instruction.includes(GROUP_APPROVAL_INSTRUCTION))
     assert.ok(recoveryCall.instruction.includes(DOCUMENT_COORDINATOR_INSTRUCTION))
-    assert.match(recoveryCall.instruction, /복구 요청은 새로운 실행 범위의 승인이 아닙니다/)
+    assert.match(recoveryCall.instruction, /원래 맡긴 범위의 미완료 작업만/)
     assert.match(recoveryCall.instruction, /분석·제안 위임의 복구는 계속 분석·제안만 허용/)
     assert.doesNotMatch(recoveryCall.instruction, /먼저 `\.ai-session\.json`/)
     const documentConversationId = delegated.body.delegation.targetConversationId
@@ -213,7 +233,7 @@ test('그룹 기획 관리와 문서 루트 위임은 범위·동시 실행·복
       targetCardId: leafId, sourceRevision: withLeaf.body.map.version, strategy: 'new', instruction: '하위 구현을 검증하세요.', decisionReason: '독립 하위 업무입니다.', idempotencyKey: 'nested-leaf', newConversation: { agentId: 'claude', modelId: 'opus', workspace: projectDirectory },
     }, childHeaders)
     assert.equal(leaf.status, 202, JSON.stringify(leaf.body))
-    assert.ok(calls.find((call) => call.operationId === 'nested-leaf').instruction.includes(AI_EXECUTION_APPROVAL_INSTRUCTION))
+    assert.ok(!calls.find((call) => call.operationId === 'nested-leaf').instruction.includes(AI_EXECUTION_APPROVAL_INSTRUCTION))
     dispatches.get(operationId).state = 'completed'
     await until(async () => (await api(`/api/groups/${groupId}`)).body.delegations.some((item) => item.state === 'waiting-document-work'), '하위 구현을 기다리지 않고 총괄에 완료를 보고했습니다.')
     assert.equal(calls.some((call) => /^group-first-wake-/.test(call.operationId)), false)
@@ -242,8 +262,12 @@ test('그룹 기획 관리와 문서 루트 위임은 범위·동시 실행·복
     assert.ok(wake.instruction.includes(target.id))
     assert.ok(wake.instruction.includes(coordinatorId))
     assert.ok(wake.instruction.includes(AI_EXECUTION_APPROVAL_INSTRUCTION))
-    assert.ok(wake.instruction.includes(AI_DELEGATION_FOLLOWUP_INSTRUCTION))
-    assert.ok(calls.find((call) => /^nested-leaf-wake-/.test(call.operationId)).instruction.includes(AI_DELEGATION_FOLLOWUP_INSTRUCTION))
+    assert.ok(wake.instruction.includes(GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION))
+    assert.ok(wake.instruction.includes(GROUP_APPROVAL_INSTRUCTION))
+    const documentWake = calls.find((call) => /^nested-leaf-wake-/.test(call.operationId)).instruction
+    assert.ok(documentWake.includes(AI_DELEGATION_FOLLOWUP_INSTRUCTION))
+    assert.ok(!documentWake.includes(AI_EXECUTION_APPROVAL_INSTRUCTION))
+    assert.ok(!documentWake.includes(GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION))
 
     // 사용량 제한은 완료 보고를 만들지 않고 보존한다. UI는 실행 재개와 보고 재시도를 구분한다.
     const currentVersion = (await api(`/api/maps/${target.id}`)).body.map.version
@@ -473,6 +497,6 @@ test('그룹 기획 관리와 문서 루트 위임은 범위·동시 실행·복
   } finally {
     await stop(child)
     await new Promise((resolve) => fake.close(resolve))
-    await rm(directory, { recursive: true, force: true })
+    await removeDirectory()
   }
 })

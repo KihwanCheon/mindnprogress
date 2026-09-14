@@ -92,10 +92,12 @@ export function createGroupProjects({ dataDirectory, replaceFile, listMaps, read
       delegations: [...delegations.values()].filter((item) => item.groupId === id).map((item) => ({ ...publicDelegation(item), result: item.childResultSnapshot ?? '' }))
         .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))),
       guide: {
+        approvalScope: 'group-coordinator',
+        instructionScope: 'coordinator와 approval은 그룹 총괄 전용 지침이며 documentCoordinator는 문서 담당 지침입니다. 문서 담당·하위 AI에게 같은 사용자 승인을 반복해서 요구하지 않습니다.',
         coordinator: GROUP_COORDINATOR_INSTRUCTION,
         documentCoordinator: DOCUMENT_COORDINATOR_INSTRUCTION,
         approval: GROUP_APPROVAL_INSTRUCTION,
-        sources: 'project.sources에 등록된 모든 기획서의 주소·개별 버전을 확인하세요. source와 sourceVersion은 첫 항목의 구버전 호환 별칭이며 전체 기준이 아닙니다. 추가 기획서를 기존 원본의 대체본으로 간주하거나 버전 숫자만으로 서로 다른 기획서의 우선순위를 정하지 마세요. 원본별 요구사항·변경 범위·충돌을 분석하고 변경된 실행 범위는 사용자 재승인을 받으세요.',
+        sources: 'project.sources에 등록된 모든 기획서의 주소·개별 버전을 확인하세요. source와 sourceVersion은 첫 항목의 구버전 호환 별칭이며 전체 기준이 아닙니다. 추가 기획서를 기존 원본의 대체본으로 간주하거나 버전 숫자만으로 서로 다른 기획서의 우선순위를 정하지 마세요. 원본별 요구사항·변경 범위·충돌을 분석하세요. 문서 담당은 범위 변경을 총괄에 보고하고, 그룹 총괄은 변경된 실행 범위의 사용자 재승인을 받으세요.',
         documentDelegation: 'mindnprogress_delegate_ai_work의 mapId는 총괄 문서, targetMapId와 targetCardId는 소속 문서와 루트입니다. sourceRevision과 targetRevision은 두 문서의 최신 버전입니다. 그룹→문서 위임은 분석·조정 전용이며 worker를 점유하지 않습니다.',
         membership: '문서 편입은 실행을 시작하지 않습니다. 실행 중인 그룹 위임의 대상이나 총괄 문서는 그룹 이동·휴지통 이동 전에 위임을 마쳐야 합니다.',
         evidence: '업무 카드 완료 수는 요구사항 구현률이 아닙니다. 소유권 원장과 검증 근거는 총괄 문서 및 추적 카드에서 관리하세요.',

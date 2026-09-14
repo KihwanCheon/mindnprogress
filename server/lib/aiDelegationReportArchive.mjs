@@ -36,7 +36,7 @@ export function createAiDelegationReportArchiver({ update, fetchOn, capabilities
     const operationId = archiveOperationId(delegation)
     let archive = delegation.reportArchive
     if (archive?.operationId !== operationId) {
-      const content = instruction(delegation, aiDelegationReportResult(delegation))
+      const content = await instruction(delegation, aiDelegationReportResult(delegation))
       archive = { operationId, content, contentHash: hash(content), status: 'pending', attempt: 0 }
       delegation = await update(delegation.id, { reportArchive: archive })
     }

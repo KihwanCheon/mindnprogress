@@ -548,9 +548,9 @@ async function main() {
     assert.match(toolDescription('mindnprogress_update_card'), /checklist.*완료 비율로 progress와 status를 자동 계산/)
     assert.match(toolSchema('mindnprogress_update_card')?.properties?.data?.properties?.checklist?.description ?? '', /전체 배열.*완료 비율로 progress와 status를 자동 계산/)
     assert.match(guide.guide.operationRules.join('\n'), /위임 기준.*AionUi 대화 ID.*MCP 재연결.*모든 깊이/)
-    assert.match(guide.guide.operationRules.join('\n'), /자동 재개는 다음 작업의 사용자 승인이 아닙니다/)
-    assert.match(guide.guide.operationRules.join('\n'), /이미 사용자에게 승인된 범위.*게이트가 충족된 경우에만 mindnprogress_delegate_ai_work/)
-    assert.match(guide.guide.operationRules.join('\n'), /실제 위임을 수행했다면 성공 결과를 확인한 뒤에만/)
+    assert.doesNotMatch(guide.guide.operationRules.join('\n'), /# 사용자 승인과 실행 범위|# 그룹의 두 단계 사용자 승인/)
+    assert.match(guide.guide.operationRules.join('\n'), /다음 작업을 위임하기로 판단했다면.*실제로 호출하고 성공 결과/)
+    assert.match(guide.guide.operationRules.join('\n'), /사용자 요청 또는 상위 AI가 맡긴 작업 범위 안에서만/)
     assert.match(guide.guide.operationRules.join('\n'), /waiting-integration-clean.*하위 AI 전문이 아직 전달되지 않음.*자동 시작.*재위임하지 않음/)
     assert.match(guide.guide.operationRules.join('\n'), /recovery-required.*mindnprogress_recover_ai_delegation/)
     assert.match(guide.guide.operationRules.join('\n'), /parent-wake-failed.*recovery\.recoveryAvailable=true.*사용량 또는 요청 한도.*mindnprogress_recover_ai_delegation/)
@@ -1181,8 +1181,8 @@ async function main() {
     )
     assert.match(mockAionUi.dispatchRequests[0].instruction, /MindNProgress 하위 카드 위임 작업 요청/)
     assert.match(mockAionUi.dispatchRequests[0].instruction, /실제로 수행/)
-    assert.match(mockAionUi.dispatchRequests[0].instruction, /상위 AI의 요청을 받았다는 사실만으로 사용자 승인이 확인된 것은 아닙니다/)
-    assert.match(mockAionUi.dispatchRequests[0].instruction, /승인 대기는 정상적인 종료 지점/)
+    assert.match(mockAionUi.dispatchRequests[0].instruction, /일반적인 다음 작업 제안에 그치지 말고/)
+    assert.doesNotMatch(mockAionUi.dispatchRequests[0].instruction, /# 사용자 승인과 실행 범위|승인 대기는 정상적인 종료 지점/)
     assert.match(mockAionUi.dispatchRequests[0].instruction, /한 번 성공적으로 호출/)
     assert.match(mockAionUi.dispatchRequests[0].instruction, /응답을 받지 못한 시도는 호출 횟수에 포함하지 말고/)
     assert.match(mockAionUi.dispatchRequests[0].instruction, /mindnprogress_complete_ai_delegation/)
@@ -1293,7 +1293,8 @@ async function main() {
     assert.equal(mockAionUi.dispatchRequests.length, 2)
     assert.equal(mockAionUi.dispatchRequests[1].targetConversationId, 'conversation-delegated')
     assert.match(mockAionUi.dispatchRequests[1].instruction, /원래 지시를 처음부터 반복하지 말고/)
-    assert.match(mockAionUi.dispatchRequests[1].instruction, /복구 요청은 새로운 실행 범위의 승인이 아닙니다/)
+    assert.match(mockAionUi.dispatchRequests[1].instruction, /원래 맡긴 범위의 미완료 작업만/)
+    assert.doesNotMatch(mockAionUi.dispatchRequests[1].instruction, /# 사용자 승인과 실행 범위|사용자 승인 근거/)
     const recoveryOperationId = recoveredRun.recovery.operationId
     mockAionUi.setDispatchState(recoveryOperationId, 'waiting_resource', {
       kind: 'unity_project',
@@ -1384,7 +1385,8 @@ async function main() {
     assert.equal(mockAionUi.dispatchRequests.length, 3)
     assert.equal(mockAionUi.dispatchRequests[2].targetConversationId, 'conversation-test')
     assert.match(mockAionUi.dispatchRequests[2].instruction, /하위 카드 작업을 완료하고 결과를 기록했습니다/)
-    assert.match(mockAionUi.dispatchRequests[2].instruction, /자동 재개는 다음 작업의 사용자 승인이 아닙니다/)
+    assert.match(mockAionUi.dispatchRequests[2].instruction, /다음 작업을 위임하기로 판단했다면/)
+    assert.doesNotMatch(mockAionUi.dispatchRequests[2].instruction, /# 사용자 승인과 실행 범위|자동 재개는 다음 작업의 사용자 승인이 아닙니다/)
 
     const unlinkedAttributionResponse = await fetch(`${apiBaseUrl}/api/integrations/aionui/attributions`, {
       method: 'POST',
@@ -2403,7 +2405,9 @@ async function main() {
     assert.ok(savedGroup.documents.some((document) => document.id === groupDocument.map.id))
     assert.equal(savedGroup.delegations.length, 0)
     assert.match(savedGroup.guide.approval, /전체 방향 승인은 문서별 실행의 일괄 승인이 아닙니다/)
-    assert.match(savedGroup.guide.documentCoordinator, /총괄 AI의 요청만으로 사용자 승인을 대신하지 마세요/)
+    assert.match(savedGroup.guide.documentCoordinator, /사용자의 요청 또는 상위 AI가 전달한 작업 범위를 수행/)
+    assert.doesNotMatch(savedGroup.guide.documentCoordinator, /# 사용자 승인과 실행 범위|# 그룹의 두 단계 사용자 승인/)
+    assert.equal(savedGroup.guide.approvalScope, 'group-coordinator')
     assert.equal(savedGroup.sourcesSupported, true)
     assert.equal(savedGroup.project.sources[0].source, '기획 원본 경로')
     const multipleSources = [...savedGroup.project.sources, { id: 'source-additional', title: '추가 기획', source: 'C:\\기획서\\추가 기획.pptx', sourceVersion: 'v0.2' }]
@@ -2420,6 +2424,19 @@ async function main() {
     assert.ok(groupCoordinatorContext.guide.operationRules.some((rule) => rule.includes('승인 대기는 정상적인 종료 지점')))
     assert.match(groupCoordinatorContext.nextStep, /미승인 분석·제안은 대화로 보고/)
     assert.match(groupCoordinatorContext.selection.aiWorkCoordination.childDelegation.instruction, /사용자 승인 근거와 허용 범위가 확인된 하위 작업만/)
+    const groupDocumentContext = await invoke('mindnprogress_get_context', { mapId: groupDocument.map.id, cardId: groupDocument.map.nodes.find((node) => node.data.kind === 'root').id })
+    for (const value of [groupDocumentContext.groupProject.instruction, groupDocumentContext.guide.operationRules.join('\n'), groupDocumentContext.nextStep, groupDocumentContext.selection.aiWorkCoordination.childDelegation.instruction]) {
+      assert.doesNotMatch(value, /# 사용자 승인과 실행 범위|# 그룹의 두 단계 사용자 승인|미승인 분석·제안은|사용자 승인 근거와 허용 범위가 확인된/)
+    }
+    assert.match(groupDocumentContext.selection.aiWorkCoordination.childDelegation.instruction, /다음 작업을 위임하기로 판단했다면/)
+    const coordinatorAgain = await invoke('mindnprogress_get_context', { mapId: managedGroup.coordinator.id, cardId: managedGroup.coordinator.root.id, detailLevel: 'full' })
+    assert.match(coordinatorAgain.guide.operationRules.join('\n'), /# 사용자 승인과 실행 범위/)
+    const coordinatorChild = await invoke('mindnprogress_add_card', { mapId: managedGroup.coordinator.id, parentCardId: managedGroup.coordinator.root.id, data: { label: '총괄 문서의 일반 하위 카드', kind: 'task', isWork: false } })
+    const coordinatorChildContext = await invoke('mindnprogress_get_context', { mapId: managedGroup.coordinator.id, cardId: coordinatorChild.card.id, detailLevel: 'full' })
+    assert.doesNotMatch(coordinatorChildContext.guide.operationRules.join('\n'), /# 사용자 승인과 실행 범위/)
+    assert.doesNotMatch(coordinatorChildContext.groupProject.instruction, /# 그룹의 두 단계 사용자 승인/)
+    const commonGuideAgain = await invoke('mindnprogress_read_me_first', {})
+    assert.doesNotMatch(commonGuideAgain.guide.operationRules.join('\n'), /# 사용자 승인과 실행 범위/)
     await invokeExpectError('mindnprogress_update_group_project', {
       groupId: groupTestId, baseVersion: 0, objective: '오래된 설정으로 변경',
     }, /그룹 설정이 변경/)
