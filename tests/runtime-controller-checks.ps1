@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\scripts\mnp-runtime.ps1')
 
 function Assert-MnpTest($Condition, $Message) { if (-not $Condition) { throw $Message } }
@@ -18,9 +18,36 @@ Assert-MnpTest (-not (Test-MnpSameRecord $record $other)) 'Reused PID accepted'
 $other = $record.PSObject.Copy(); $other.ParentProcessId = 91
 Assert-MnpTest (-not (Test-MnpSameRecord $record $other)) 'Changed parent accepted'
 
+# 부모 창뿐 아니라 제어 명령이 만든 실제 자식 프로세스의 콘솔도 확인한다.
 $mnpTestDirectory = Join-Path ([IO.Path]::GetTempPath()) ('mnp-runtime-controller-' + [guid]::NewGuid().ToString('N'))
 $null = [IO.Directory]::CreateDirectory($mnpTestDirectory)
 try {
+    $mnpConsoleProbe = @'
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class MnpHiddenQueryProbe {
+    [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool IsWindowVisible(IntPtr window);
+}
+"@
+$window = [MnpHiddenQueryProbe]::GetConsoleWindow()
+[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
+[Console]::Error.WriteLine('fixture-error')
+@{ handle = $window.ToInt64(); visible = [MnpHiddenQueryProbe]::IsWindowVisible($window); text = '숨김 조회 검증' } | ConvertTo-Json -Compress
+exit 7
+'@
+    $mnpProbePath = Join-Path $mnpTestDirectory 'console-probe.ps1'
+    [IO.File]::WriteAllText($mnpProbePath, $mnpConsoleProbe, (New-Object Text.UTF8Encoding($true)))
+    $mnpProbeArguments = '-NoLogo -NoProfile -NonInteractive -File "' + $mnpProbePath + '"'
+    $mnpHiddenResult = Invoke-MnpHiddenCommand (Join-Path $PSHOME 'powershell.exe') $mnpProbeArguments
+    Assert-MnpTest (-not [string]::IsNullOrWhiteSpace($mnpHiddenResult.Output)) ('Hidden probe failed: ' + ($mnpHiddenResult | ConvertTo-Json -Compress))
+    $mnpProbeResult = $mnpHiddenResult.Output | ConvertFrom-Json
+    Assert-MnpTest ($mnpProbeResult.handle -eq 0 -and -not $mnpProbeResult.visible) ('Hidden query created a console window: ' + $mnpHiddenResult.Output)
+    Assert-MnpTest ($mnpProbeResult.text -eq '숨김 조회 검증') 'Hidden query damaged UTF-8 output'
+    Assert-MnpTest ($mnpHiddenResult.ExitCode -eq 7 -and $mnpHiddenResult.Error.Trim() -eq 'fixture-error') 'Hidden query lost exit status or stderr'
+    Assert-MnpThrows { Invoke-MnpHiddenCommand $node '-e "setTimeout(() => {}, 10000)"' 1 } 'timed out'
+
     $script:context = [pscustomobject]@{ StateDirectory = $mnpTestDirectory; Task = [pscustomobject]@{ TaskName = 'test-only'; TaskPath = '\' }; Config = [pscustomobject]@{ webUrl = 'http://example.invalid' } }
     $script:snapshot = [pscustomobject]@{ Records = @([pscustomobject]@{ Role = 'api'; Process = $record }); Listeners = @() }
     $script:descriptor = $null
@@ -87,7 +114,7 @@ try {
     function Get-MnpContext { throw 'task not found' }
     Assert-MnpThrows { Invoke-MnpRuntime restart 1 1 $false $true } 'task not found'
     Assert-MnpTest ($script:calls.Count -eq 0) 'Missing task allowed stop'
-    Write-Host 'Runtime controller safety checks passed (16 cases).'
+    Write-Host 'Runtime controller safety checks passed (20 cases).'
 } finally {
     $resolved = [IO.Path]::GetFullPath($mnpTestDirectory)
     if ([IO.Path]::GetDirectoryName($resolved) -ine ([IO.Path]::GetTempPath().TrimEnd('\')) -or [IO.Path]::GetFileName($resolved) -notlike 'mnp-runtime-controller-*') { throw 'Unsafe fixture cleanup path' }

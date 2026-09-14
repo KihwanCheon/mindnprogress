@@ -9,6 +9,34 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'runtime\process-owner.ps1')
 
+function Invoke-MnpHiddenCommand([string]$Executable, [string]$Arguments, [int]$TimeoutSeconds = 15) {
+    # 부모 PowerShell에 콘솔이 없으면 & 호출이 새 콘솔을 만들 수 있다. 일회성 조회만 이 경로로 실행한다.
+    $startInfo = New-Object Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $Executable
+    $startInfo.Arguments = $Arguments
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.StandardOutputEncoding = [Text.Encoding]::UTF8
+    $startInfo.StandardErrorEncoding = [Text.Encoding]::UTF8
+    $helper = New-Object Diagnostics.Process
+    $helper.StartInfo = $startInfo
+    try {
+        if (-not $helper.Start()) { throw 'Could not start the hidden runtime query.' }
+        $output = $helper.StandardOutput.ReadToEndAsync()
+        $failure = $helper.StandardError.ReadToEndAsync()
+        if (-not $helper.WaitForExit($TimeoutSeconds * 1000)) {
+            # 직접 생성한 짧은 조회 프로세스만 정리한다. MnP 서버·예약 작업에는 사용하지 않는다.
+            $helper.Kill()
+            $helper.WaitForExit()
+            throw 'Hidden runtime query timed out.'
+        }
+        return [pscustomobject]@{ ExitCode = $helper.ExitCode; Output = $output.GetAwaiter().GetResult(); Error = $failure.GetAwaiter().GetResult() }
+    } finally { $helper.Dispose() }
+}
+
 function Get-MnpContext {
     $project = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
     $root = Split-Path $project -Parent
@@ -38,9 +66,9 @@ function Get-MnpContext {
     if ($actionDefinition.Arguments -ine $expected -or -not (Test-Path -LiteralPath $node -PathType Leaf)) {
         throw 'Scheduled task command differs from the verified launcher. No processes were stopped.'
     }
-    $settings = & $node (Join-Path $project 'scripts\runtime\config.mjs')
-    if ($LASTEXITCODE -ne 0) { throw 'Could not read local runtime configuration.' }
-    $config = $settings | ConvertFrom-Json
+    $settings = Invoke-MnpHiddenCommand $node ('"{0}"' -f (Join-Path $project 'scripts\runtime\config.mjs'))
+    if ($settings.ExitCode -ne 0) { throw 'Could not read local runtime configuration.' }
+    $config = $settings.Output | ConvertFrom-Json
     [pscustomobject]@{ Project = $project; Root = $root; Launcher = $launcher; Node = $node; Task = $task; OwnerSid = $ownerSid;
         TaskExe = $taskExe; Config = $config; Ports = @([int]$config.webPort, [int]$config.apiPort);
         StateDirectory = Join-Path $root '.mindnprogress' }
@@ -101,12 +129,13 @@ function Get-MnpSnapshot($Context, [switch]$FastPorts) {
         if ((Get-MnpProcessOwnerSid $record.Process.ProcessId) -ne $Context.OwnerSid) { throw "Cannot verify NHN ownership: $($record.Role)." }
     }
     if ($FastPorts) {
-        $listeners = @(& (Join-Path $env:SystemRoot 'System32\netstat.exe') -ano -p tcp | ForEach-Object {
+        $netstat = Invoke-MnpHiddenCommand (Join-Path $env:SystemRoot 'System32\netstat.exe') '-ano -p tcp'
+        if ($netstat.ExitCode -ne 0) { throw 'Could not verify final port ownership.' }
+        $listeners = @($netstat.Output -split '\r?\n' | ForEach-Object {
             if ($_ -match '^\s*TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$' -and $Context.Ports -contains [int]$Matches[1]) {
                 [pscustomobject]@{ LocalPort = [int]$Matches[1]; OwningProcess = [int]$Matches[2] }
             }
         })
-        if ($LASTEXITCODE -ne 0) { throw 'Could not verify final port ownership.' }
     } else {
         $listeners = @(Get-NetTCPConnection -State Listen | Where-Object { $Context.Ports -contains $_.LocalPort })
     }
