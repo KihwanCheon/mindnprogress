@@ -277,6 +277,19 @@ test('새 대화와 일반 AI 위임의 전체 경로는 선택한 서브 머신
     assert.equal(listed.body.conversations[0].homeMachineLabel, '개발 맥북')
     assert.equal(listed.body.conversations[0].accessible, true)
 
+    const openUrlResult = await request(
+      baseUrl,
+      cookie,
+      `/api/maps/${mapId}/cards/root-card/ai-conversations/${conversationId}/open-url`,
+    )
+    assert.equal(openUrlResult.response.status, 200)
+    assert.equal(openUrlResult.body.homeMachineId, 'macbook')
+    assert.equal(openUrlResult.body.homeMachineRole, 'sub')
+    const conversationUrl = new URL(openUrlResult.body.openUrl)
+    assert.equal(conversationUrl.hostname, runnerNetworkAddress)
+    assert.equal(conversationUrl.port, '7777')
+    assert.equal(conversationUrl.hash, '#/conversation/conversation-on-mac')
+
     const transcriptRequest = request(
       baseUrl,
       cookie,

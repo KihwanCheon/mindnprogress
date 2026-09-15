@@ -129,6 +129,7 @@ import {
 } from '../src/utils/aiConversations.mjs'
 import {
   AionUiExternalLaunchPayloadError,
+  createAionUiConversationWebUrl,
   createAionUiWebLaunchUrl,
   normalizeAionUiExternalLaunchPayload,
   parseMindNProgressCompletionToken,
@@ -9460,6 +9461,47 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       })
       }
       return await (crossDocument ? groupProjects.exclusive(runDelegation) : runDelegation())
+    }
+
+    const cardAiConversationOpenRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/cards\/([^/]+)\/ai-conversations\/([^/]+)\/open-url$/)
+    if (cardAiConversationOpenRoute && request.method === 'GET') {
+      const user = requireUser(request, response)
+      if (!user) return
+      if (!canEdit(user)) return sendJson(response, 403, { error: '편집자만 AI 대화를 열 수 있습니다.' })
+      const mapId = decodeURIComponent(cardAiConversationOpenRoute[1])
+      const cardId = decodeURIComponent(cardAiConversationOpenRoute[2])
+      const conversationId = decodeURIComponent(cardAiConversationOpenRoute[3])
+      if (!isValidMapId(mapId)
+        || !cardId || cardId.length > 120
+        || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$/.test(conversationId)) {
+        return sendJson(response, 400, { error: '문서, 카드 또는 대화 ID가 올바르지 않습니다.' })
+      }
+      const map = await readMap(mapId)
+      const card = map?.nodes.find((node) => node.id === cardId)
+      if (!map || map.trashedAt || !card || !isAiConversationLinked(card.data, conversationId)) {
+        return sendJson(response, 404, { error: '카드에 연결된 AI 대화를 찾을 수 없습니다.' })
+      }
+      const linkedConversation = aiConversationLinksFromData(card.data)
+        .find((link) => link.conversationId === conversationId)
+      const homeMachineId = conversationHomeMachineId(conversationId, linkedConversation)
+      if (!machineAccessibleByUser(user, homeMachineId)) {
+        return sendJson(response, 403, { error: '이 대화가 저장된 서브 머신을 사용할 권한이 없습니다.' })
+      }
+      try {
+        return sendJson(response, 200, {
+          conversationId,
+          homeMachineId,
+          homeMachineLabel: machineLabel(homeMachineId),
+          homeMachineRole: homeMachineId === machineRegistry.mainMachineId ? 'main' : 'sub',
+          openUrl: createAionUiConversationWebUrl(aionUiWebBaseUrlForMachine(homeMachineId), conversationId),
+        })
+      } catch (error) {
+        if (error instanceof SubMachinePayloadError) {
+          return sendJson(response, 503, { error: error.message })
+        }
+        console.error('[AionUi conversation open URL]', error)
+        return sendJson(response, 503, { error: 'AionUi 대화 주소를 만들지 못했습니다.' })
+      }
     }
 
     const cardAiConversationItemRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/cards\/([^/]+)\/ai-conversations\/([^/]+)$/)

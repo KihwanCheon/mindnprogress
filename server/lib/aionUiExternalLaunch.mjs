@@ -1,5 +1,6 @@
 const LAUNCH_ID_PATTERN = /^[0-9a-f]{64}$/
 const COMPLETION_TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,128}$/
+const CONVERSATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$/
 
 export class AionUiExternalLaunchPayloadError extends Error {
   constructor(message) {
@@ -110,5 +111,19 @@ export function createAionUiWebLaunchUrl(baseUrl, launchId) {
   url.pathname = '/'
   url.search = ''
   url.hash = `/guid?${new URLSearchParams({ 'external-launch': launchId }).toString()}`
+  return url.toString()
+}
+
+export function createAionUiConversationWebUrl(baseUrl, conversationId) {
+  if (!CONVERSATION_ID_PATTERN.test(String(conversationId ?? ''))) {
+    throw new Error('AIONUI_CONVERSATION_ID_INVALID')
+  }
+  const url = new URL(baseUrl)
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error('AIONUI_WEB_URL_INVALID')
+  }
+  url.pathname = '/'
+  url.search = ''
+  url.hash = `/conversation/${encodeURIComponent(conversationId)}`
   return url.toString()
 }

@@ -4129,17 +4129,32 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         console.warn('[AI conversation attribution refresh]', error)
       })
     }
-    const useWebUi = homeMachineRole === 'sub' || aionUiWebNavigation.configured || !isLoopbackHostname(window.location.hostname)
+    if (homeMachineRole === 'sub') {
+      if (!mapId || !cardId) {
+        window.alert('서브 머신 대화를 열려면 연결된 문서와 카드 정보가 필요합니다.')
+        return
+      }
+      const aionUiTab = window.open('about:blank', '_blank')
+      if (!aionUiTab) {
+        window.alert('AionUi 대화 탭을 열지 못했습니다. 브라우저의 팝업 차단을 해제한 뒤 다시 시도해 주세요.')
+        return
+      }
+      aionUiTab.opener = null
+      void apiRequest<{ openUrl: string }>(
+        `/api/maps/${encodeURIComponent(mapId)}/cards/${encodeURIComponent(cardId)}/ai-conversations/${encodeURIComponent(conversationId)}/open-url`,
+      ).then(({ openUrl }) => {
+        aionUiTab.location.replace(openUrl)
+        aionUiTab.focus()
+      }).catch((error) => {
+        aionUiTab.close()
+        window.alert(error instanceof Error ? error.message : '서브 머신의 AionUi 대화 주소를 확인하지 못했습니다.')
+      })
+      return
+    }
+    const useWebUi = aionUiWebNavigation.configured || !isLoopbackHostname(window.location.hostname)
     if (useWebUi) {
       try {
-        const targetBaseUrl = homeMachineRole === 'sub'
-          ? (() => {
-              const url = new URL(aionUiWebNavigation.baseUrl)
-              url.hostname = '127.0.0.1'
-              return url.toString()
-            })()
-          : aionUiWebNavigation.baseUrl
-        const conversationUrl = aionUiConversationWebUrl(targetBaseUrl, conversationId)
+        const conversationUrl = aionUiConversationWebUrl(aionUiWebNavigation.baseUrl, conversationId)
         const aionUiTab = window.open(conversationUrl, '_blank')
         if (!aionUiTab) {
           window.alert('AionUi 대화 탭을 열지 못했습니다. 브라우저의 팝업 차단을 해제한 뒤 다시 시도해 주세요.')
