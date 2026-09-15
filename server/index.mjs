@@ -456,6 +456,7 @@ const machineOperationQueue = new MachineOperationQueue({
   createOperationId: () => randomBytes(12).toString('base64url'),
 })
 const machinePairingStore = new MachinePairingStore()
+const runnerCallbackBaseUrls = new Map()
 const aiAttributionContinuationToken = Symbol('aiAttributionContinuationToken')
 let aiAttributionWriteQueue = Promise.resolve()
 let aiConversationAttributionWriteQueue = Promise.resolve()
@@ -750,6 +751,34 @@ function aionUiWebBaseUrlForMachine(machineId) {
   const url = new URL(aionUiWebBaseUrl)
   url.hostname = '127.0.0.1'
   return url.toString().replace(/\/+$/, '')
+}
+
+function normalizeRunnerCallbackBaseUrl(value) {
+  try {
+    const url = new URL(String(value ?? '').trim())
+    const loopback = url.hostname === '127.0.0.1' || url.hostname === '[::1]'
+    const port = Number(url.port)
+    if (url.protocol !== 'http:' || !loopback || !Number.isInteger(port) || port < 1 || port > 65_535
+      || url.username || url.password || (url.pathname !== '/' && url.pathname !== '') || url.search || url.hash) return null
+    return url.toString().replace(/\/+$/, '')
+  } catch {
+    return null
+  }
+}
+
+function noteRunnerCallbackBaseUrl(machineId, value) {
+  const normalizedMachineId = normalizeMachineId(machineId)
+  const baseUrl = normalizeRunnerCallbackBaseUrl(value)
+  if (!normalizedMachineId || !baseUrl) {
+    if (normalizedMachineId) runnerCallbackBaseUrls.delete(normalizedMachineId)
+    return null
+  }
+  runnerCallbackBaseUrls.set(normalizedMachineId, baseUrl)
+  return baseUrl
+}
+
+function runnerCallbackBaseUrlForMachine(machineId) {
+  return runnerCallbackBaseUrls.get(normalizeMachineId(machineId)) ?? null
 }
 
 function scopedAttribution(request) {
@@ -7473,7 +7502,10 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         })
         const completionBaseUrl = homeMachineId === machineRegistry.mainMachineId
           ? `http://127.0.0.1:${port}`
-          : publicBaseUrl
+          : runnerCallbackBaseUrlForMachine(homeMachineId)
+        if (!completionBaseUrl) {
+          throw new SubMachinePayloadError('서브 머신의 AionUi Runner를 최신 버전으로 다시 시작한 뒤 시도해 주세요.')
+        }
         const completionUrl = `${completionBaseUrl}/api/integrations/aionui/launches/${completionToken}/conversation`
         aiConversationLaunches.get(sessionTokenKey(completionToken)).completionUrl = completionUrl
         await persistAiAttributions()
@@ -7509,6 +7541,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         const completionToken = parseMindNProgressCompletionToken(payload.completionUrl, [
           `http://127.0.0.1:${port}`,
           publicBaseUrl,
+          ...runnerCallbackBaseUrls.values(),
         ])
         if (!completionToken) {
           return sendJson(response, 400, { error: 'AI 대화 완료 통보 주소가 올바르지 않습니다.' })
@@ -9693,6 +9726,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       if (!machine) return
       const body = await readJsonBody(request)
       const waitMs = Math.max(0, Math.min(machineOperationLongPollMs, Math.trunc(Number(body?.waitMs)) || machineOperationLongPollMs))
+      noteRunnerCallbackBaseUrl(machine.machineId, body?.callbackBaseUrl)
       await noteMachineSeen(machine.machineId)
 
       // long-poll 도중 Runner가 끊기면 깨어난 이 요청이 오퍼레이션을 가져가 버린다.
@@ -9750,6 +9784,8 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
     if (request.method === 'POST' && machineRunnerHeartbeatRoute) {
       const machine = requireRunnerMachine(request, response, machineRunnerHeartbeatRoute[1])
       if (!machine) return
+      const body = await readJsonBody(request)
+      noteRunnerCallbackBaseUrl(machine.machineId, body?.callbackBaseUrl)
       await noteMachineSeen(machine.machineId)
       return sendJson(response, 200, {
         machineId: machine.machineId,

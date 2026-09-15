@@ -26,6 +26,7 @@ import {
 } from './lib/runnerConfig.mjs'
 import { createRunnerLoop } from './lib/runnerLoop.mjs'
 import { createAionUiCaller } from './lib/aionUiClient.mjs'
+import { startCompletionRelay } from './lib/completionRelay.mjs'
 
 let config
 try {
@@ -104,12 +105,17 @@ async function mnpRequest(url, body, timeoutMs, { headers = {}, signal = null } 
 
 let longPollMs = 25_000
 const claimAbortController = new AbortController()
+let completionRelay = null
+
+async function forwardCompletion(pathname, body) {
+  return mnpRequest(`${config.apiBaseUrl}${pathname}`, body, 30_000)
+}
 
 async function claimOperations() {
   // long-poll이므로 대기 시간보다 넉넉한 타임아웃을 준다.
   const body = await mnpRequest(
     runnerClaimUrl(config),
-    { limit: config.concurrency, waitMs: longPollMs },
+    { limit: config.concurrency, waitMs: longPollMs, callbackBaseUrl: completionRelay?.baseUrl },
     longPollMs + 10_000,
     { signal: claimAbortController.signal },
   )
@@ -123,7 +129,9 @@ function reportResult(operationId, result, resultToken) {
 }
 
 async function heartbeat() {
-  const body = await mnpRequest(runnerHeartbeatUrl(config), {}, 10_000)
+  const body = await mnpRequest(runnerHeartbeatUrl(config), {
+    callbackBaseUrl: completionRelay?.baseUrl,
+  }, 10_000)
   if (Number.isInteger(body?.longPollMs) && body.longPollMs > 0) longPollMs = body.longPollMs
   return body
 }
@@ -149,7 +157,9 @@ const loop = createRunnerLoop({
   },
 })
 
+completionRelay = await startCompletionRelay({ forward: forwardCompletion })
 log(describeRunnerConfig(config))
+logVerbose(`완료 콜백 릴레이를 ${completionRelay.baseUrl}에서 시작했습니다.`)
 
 try {
   const info = await heartbeat()
@@ -179,3 +189,5 @@ process.on('SIGTERM', () => shutdown('SIGTERM'))
 
 await loop.start()
 clearInterval(heartbeatTimer)
+await completionRelay.close()
+completionRelay = null
