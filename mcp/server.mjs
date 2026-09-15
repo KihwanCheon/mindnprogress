@@ -1,4 +1,3 @@
-import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomBytes } from 'node:crypto'
@@ -24,11 +23,16 @@ import { imageCardLocalAccess } from './imageAccess.mjs'
 import { withDocumentGroupMetadata } from './documentGroupMetadata.mjs'
 import { MCP_TOOL_USAGE_DIRECTORY_NAME, createFileToolUsageRecorder } from '../server/lib/mcpToolUsage.mjs'
 import { formatAiConversationDisplay } from '../server/lib/aiConversationDisplay.mjs'
+import { createMnpApiConnectionResolver } from './apiConnection.mjs'
 
 const projectDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const dataDirectory = path.resolve(String(process.env.MNP_DATA_DIR ?? '').trim() || path.join(projectDirectory, 'server', 'data'))
 const tokenFile = path.resolve(String(process.env.MNP_TOKEN_FILE ?? '').trim() || path.join(dataDirectory, '_integration-token'))
-const apiBaseUrl = String(process.env.MNP_API_URL ?? 'http://127.0.0.1:4176').replace(/\/+$/, '')
+const apiConnectionResolver = createMnpApiConnectionResolver({
+  explicitApiBaseUrl: String(process.env.MNP_API_URL ?? '').trim(),
+  tokenFile,
+  relayFile: String(process.env.MNP_RUNNER_MCP_RELAY_FILE ?? '').trim() || undefined,
+})
 const aionUiConversationId = String(process.env.AIONUI_CONVERSATION_ID ?? '').trim()
 const toolUsageDirectory = path.resolve(String(process.env.MNP_MCP_USAGE_DIR ?? '').trim()
   || path.join(dataDirectory, MCP_TOOL_USAGE_DIRECTORY_NAME))
@@ -260,14 +264,8 @@ const productGuide = {
   ],
 }
 
-async function integrationToken() {
-  const token = (await readFile(tokenFile, 'utf8')).trim()
-  if (token.length < 32) throw new Error('MindNProgress 연동 토큰이 준비되지 않았습니다. API 서버를 다시 시작해 주세요.')
-  return token
-}
-
 async function apiRequest(pathname, init = {}) {
-  const token = await integrationToken()
+  const connection = await apiConnectionResolver.resolve()
   const {
     aiMapId,
     aiCardId,
@@ -318,11 +316,11 @@ async function apiRequest(pathname, init = {}) {
       throw error
     }
   }
-  const response = await fetch(`${apiBaseUrl}${pathname}`, {
+  const response = await fetch(`${connection.apiBaseUrl}${pathname}`, {
     ...requestInit,
     headers: {
       Accept: 'application/json',
-      Authorization: `Bearer ${token}`,
+      Authorization: `Bearer ${connection.token}`,
       ...(scopedAttributionToken ? { 'X-MNP-AI-Attribution': scopedAttributionToken } : {}),
       ...(scopedEditorId ? { 'X-MNP-AI-Editor-Id': scopedEditorId } : {}),
       ...(!scopedAttributionToken && scopedAiType && scopedAiModel

@@ -168,6 +168,7 @@ import {
   verifyMachineToken,
 } from './lib/subMachines.mjs'
 import { MachineOperationError, MachineOperationQueue } from './lib/machineOperations.mjs'
+import { authorizeRunnerMcpRequest } from './lib/runnerMcpAccess.mjs'
 import {
   MachinePairingError,
   MachinePairingStore,
@@ -6573,6 +6574,26 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
     return
   }
   const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`)
+  const runnerMcpAccess = authorizeRunnerMcpRequest({
+    request,
+    pathname: url.pathname,
+    machineRegistry,
+    conversationOrigins: aiConversationOrigins,
+    transientAttributions: aiAttributions.values(),
+    users,
+  })
+  if (runnerMcpAccess.kind === 'rejected') {
+    return sendJson(response, runnerMcpAccess.status, {
+      error: runnerMcpAccess.error,
+      code: runnerMcpAccess.code,
+    })
+  }
+  if (runnerMcpAccess.kind === 'authorized') {
+    // 머신 토큰은 검증된 대화에서만 기존 연동 권한으로 승격한다.
+    // 이후 라우트는 기존 로컬 MCP와 같은 사용자 귀속·권한 검사를 그대로 사용한다.
+    request.headers.authorization = `Bearer ${integrationToken}`
+    request.headers['x-mnp-ai-editor-id'] = runnerMcpAccess.owner.id
+  }
   let delegationActionId = null
   let releaseDocumentMutation = null
 
@@ -7692,6 +7713,15 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           await cardLayoutRequests.linkConversation(launch.cardLayoutRequestId, { id: conversationId, homeMachineId: launch.homeMachineId, linkedAt: new Date().toISOString() }, { id: launch.startedBy })
         }
         if (launch.purpose === 'shared-knowledge-review' || launch.purpose === 'document-reconstruction' || launch.purpose === 'card-layout') {
+          rememberAiConversationOrigin({
+            conversationId,
+            mapId: launch.mapId,
+            cardId: launch.cardId,
+            startedBy: launch.startedBy,
+            linkedAt: new Date().toISOString(),
+            homeMachineId: launch.homeMachineId,
+          })
+          await persistAiConversationOrigins()
           aiConversationLaunches.delete(tokenKey)
           return sendJson(response, 200, {
             conversationId,
