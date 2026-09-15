@@ -140,6 +140,16 @@ export function aiDelegationStateReason(delegation) {
         ?? 'AI 위임 작업을 완료하지 못했습니다.',
     )
   }
+  if (displayState === 'waiting-integration' && delegation?.workspaceResult?.waitingReason) {
+    const result = delegation.workspaceResult
+    const paths = result.untrackedChanges?.length ? result.untrackedChanges : result.trackedChanges ?? []
+    const label = ['integration-worktree-dirty', 'integration-untracked-collision'].includes(result.reasonCode)
+      ? '작업 완료 · 통합 정리 대기' : '작업 완료 · 통합 대기'
+    return requiredAiDelegationReason(
+      result.reasonCode ?? 'AI_DELEGATION_WAITING_INTEGRATION',
+      `${label}. ${result.waitingReason}${paths.length ? `\n충돌/변경 파일:\n${paths.join('\n')}` : ''}`,
+    )
+  }
   const configured = AI_DELEGATION_STATE_REASONS[displayState]
   if (configured) return requiredAiDelegationReason(configured.reasonCode, configured.message)
   return requiredAiDelegationReason(
@@ -461,6 +471,7 @@ export function aiDelegationAttemptHistory(delegation, reason, at = new Date().t
     reportResultTurnId: delegation.reportResultTurnId ?? null,
     reportPreparedAt: delegation.reportPreparedAt ?? null,
     reportReceipt: delegation.reportReceipt ?? null,
+    reportArchive: delegation.reportArchive ?? null,
   }]
 }
 

@@ -44,6 +44,7 @@ export function groupDelegationPresentation(item) {
   const label = item.workCompleted && item.reportStatus === 'received' && ['completed', 'waking-parent'].includes(state)
     ? '작업 완료 · 총괄 수신 완료'
     : item.workCompleted && item.reportPending && completedReportLabels[state] ? completedReportLabels[state]
+    : state === 'waiting-integration' && ['integration-worktree-dirty', 'integration-untracked-collision'].includes(item.workspaceResult?.reasonCode) ? '작업 완료 · 통합 정리 대기'
     : delegationLabels[state] ?? state
   const tone = state === 'failed' ? 'danger' : attention ? 'warning'
     : state === 'completed' ? 'success' : ['superseded', 'closed'].includes(state) ? 'muted' : 'active'
@@ -51,6 +52,13 @@ export function groupDelegationPresentation(item) {
 }
 
 export function groupDelegationReportHint(item) {
+  if ((item?.displayState ?? item?.state) === 'waiting-integration') {
+    const result = item.workspaceResult
+    if (result?.waitingReason) {
+      const paths = result.untrackedChanges?.length ? result.untrackedChanges : result.trackedChanges ?? []
+      return `${result.waitingReason}${paths.length ? ` 충돌/변경 파일: ${paths.join(', ')}` : ''}`
+    }
+  }
   if (item?.reportArchivePending) return '결과는 보존되어 있으며 상위 대화에 완료 전문을 기록하는 중입니다. AionCore 연결·업데이트 후 AI 실행 없이 자동 재시도합니다.'
   if (item?.reportStatus === 'received') return '결과 수신이 확인됐습니다. 상위 AI의 후속 작업이나 품질 검수 완료를 뜻하지 않습니다.'
   if (item?.state === 'parent-wake-failed') return '하위 실행 결과는 보존되어 있습니다. 전달 상태를 확인한 뒤 필요한 경우 결과만 재전달하세요.'

@@ -3121,9 +3121,16 @@ async function reconcileAiDelegationWorkspaceLeases() {
     if (delegation.state !== 'failed'
       || delegation.childStatus !== 'completed'
       || delegation.workspaceResult?.status !== 'quarantined'
+      || delegation.pendingRecovery
       || !delegation.workspaceLease?.leaseId) continue
+    if (activeAiDelegationsForConversation(aiDelegations.values(), {
+      mapId: delegation.mapId, targetCardId: delegation.targetCardId,
+      targetConversationId: delegation.targetConversationId, excludeId: delegation.id,
+    }).length) continue
     try {
-      const workspaceResult = await workspacePoolManager.recoverCheckpointedFinalizationFailure(
+      const workspaceResult = await workspacePoolManager.recoverUntrackedIntegrationFailure(
+        delegation.workspaceLease.leaseId,
+      ) ?? await workspacePoolManager.recoverCheckpointedFinalizationFailure(
         delegation.workspaceLease.leaseId,
       ) ?? await workspacePoolManager.recoverLegacyDirtyIntegration(delegation.workspaceLease.leaseId)
       if (workspaceResult?.status !== 'waiting-integration') continue
@@ -3136,6 +3143,11 @@ async function reconcileAiDelegationWorkspaceLeases() {
         parentTurnId: null,
         parentError: null,
         parentResource: null,
+        wakeOperationId: null,
+        reportReceipt: null, reportWaitReason: null, reportArchive: null,
+        reportPayloadHash: null, reportResultAvailability: null, reportResultHash: null,
+        reportResultTurnId: null, reportPreparedAt: null,
+        attemptHistory: aiDelegationAttemptHistory(delegation, '보존된 체크포인트와 통합 브랜치 검증 후 자동 통합 대기로 복구'),
         completedAt: null,
         legacyIntegrationRecoveredAt: new Date().toISOString(),
       })

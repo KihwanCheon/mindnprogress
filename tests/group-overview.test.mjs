@@ -38,6 +38,21 @@ test('현재 확인이 필요한 상태와 완료 결과 전달 대기를 구분
   assert.equal(groupDelegationPresentation(null).label, '위임 없음')
 })
 
+test('통합 정리 대기를 실패로 표시하지 않고 충돌 파일과 재시도 안내를 노출한다', () => {
+  const item = { state: 'waiting-integration', workspaceResult: {
+    reasonCode: 'integration-untracked-collision',
+    waitingReason: '충돌 파일을 정리하면 자동으로 통합됩니다. 재위임하지 마세요.',
+    untrackedChanges: ['Assets/번역.asset', 'Assets/번역.asset.meta'],
+  } }
+  assert.deepEqual(groupDelegationPresentation(item), { label: '작업 완료 · 통합 정리 대기', tone: 'active', attention: false })
+  assert.match(groupDelegationReportHint(item), /자동으로 통합/)
+  assert.match(groupDelegationReportHint(item), /Assets\/번역.asset.meta/)
+  assert.equal(groupDelegationPresentation({ state: 'waiting-integration' }).label, '통합 대기')
+  assert.equal(groupDelegationPresentation({ state: 'waiting-integration', workspaceResult: {
+    reasonCode: 'INTEGRATION_STATUS_RETRY', waitingReason: 'Git 조회 지연으로 재시도합니다.',
+  } }).label, '통합 대기')
+})
+
 test('보고 전달 대기·전달 중·수신 완료와 상위 실행 상태를 분리해 표시한다', () => {
   assert.equal(groupDelegationPresentation({ state: 'waiting-parent', workCompleted: true, reportPending: true }).label, '작업 완료 · 총괄에 결과 전달 대기')
   assert.equal(groupDelegationPresentation({ state: 'waking-parent', workCompleted: true, reportPending: true }).label, '작업 완료 · 총괄에 결과 전달 중')

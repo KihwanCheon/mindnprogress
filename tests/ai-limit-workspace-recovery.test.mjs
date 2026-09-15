@@ -109,7 +109,8 @@ test('응답 검증으로 격리된 미연결 실행은 네 필드와 실제 Git
   assert.equal(await git(worker, 'status', '--porcelain'), '')
 })
 
-for (const expired of [false, true]) test(`복구 API는 ${expired ? '실행 기록 만료 뒤 최초 전문으로' : '원본 실행 기록으로'} 기존 대화·lease를 찾아 미완료 확인만 전달한다`, { timeout: 80_000 }, async (t) => {
+// Git 프로세스 실행이 느린 검증 환경에서만 예산을 늘린다. 기본 제한과 기능 검증은 유지한다.
+for (const expired of [false, true]) test(`복구 API는 ${expired ? '실행 기록 만료 뒤 최초 전문으로' : '원본 실행 기록으로'} 기존 대화·lease를 찾아 미완료 확인만 전달한다`, { timeout: Number(process.env.MNP_REAL_GIT_TEST_TIMEOUT_MS) || 80_000 }, async (t) => {
   const { manager, scope, lease, worker, root, registryFile } = await fixture(t)
   const dataDirectory = path.join(root, 'server-data')
   await mkdir(dataDirectory)

@@ -81,6 +81,19 @@ test('위임 생성 라우트는 모든 명시적 응답을 공통 응답 생성
   assert.match(route, /sendAiDelegationResponse/)
 })
 
+test('통합 정리 대기는 순서 대기와 구분하고 충돌 경로와 자동 재시도를 안내한다', () => {
+  const reason = aiDelegationStateReason({ state: 'waiting-integration', workspaceResult: {
+    reasonCode: 'integration-untracked-collision',
+    waitingReason: '미추적 파일을 정리하면 자동으로 통합됩니다. 재위임하지 마세요.',
+    untrackedChanges: ['Assets/번역 자료/I2LanguagesJP.asset', 'Assets/번역 자료/I2LanguagesJP.asset.meta'],
+  } })
+  assert.equal(reason.reasonCode, 'integration-untracked-collision')
+  assert.match(reason.message, /작업 완료 · 통합 정리 대기/)
+  assert.match(reason.message, /자동으로 통합/)
+  assert.match(reason.message, /I2LanguagesJP.asset.meta/)
+  assert.match(aiDelegationStateReason({ state: 'waiting-integration' }).message, /반영 순서/)
+})
+
 test('MCP 오류 응답은 reasonCode와 message를 구조화해 보존한다', async () => {
   const source = await readFile(new URL('../mcp/server.mjs', import.meta.url), 'utf8')
   assert.match(source, /error\.reasonCode = body\?\.reasonCode \?\? body\?\.code/)
