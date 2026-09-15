@@ -9,6 +9,7 @@ import test from 'node:test'
 const fixture = `
 import React from 'react';
 import { createRoot } from 'react-dom/client';
+import { flushSync } from 'react-dom';
 import '/src/index.css';
 import { AiConversationDialog } from '/src/components/AiConversationDialog.tsx';
 import { WorkspaceSettingsDialog } from '/src/components/WorkspaceSettingsDialog.tsx';
@@ -72,7 +73,8 @@ let sequence = 0;
 window.renderDialog = (input = {}, flags = {}) => {
   Object.assign(window.audit,{calls:[],fail:false,hold:false,closed:0,opened:0,workspaceSaveFail:false,optionOverrides:null,context:{map:{id:'map-coordinator',nodes:[{id:'root',data:{kind:'root'}},{id:'child',data:{kind:'task'}}],edges:[{source:'root',target:'child'}]},groupProject:{groupId:'group-manager',role:'coordinator',coordinatorMapId:'map-coordinator'}},...flags});
   window.audit.userId=input.userId||'fixture';
-  root.render(React.createElement(AiConversationDialog,{key:++sequence,userId:'fixture',documentId:'map-coordinator',documentTitle:'총괄 문서',cardId:'root',cardTitle:'총괄 루트',purpose:'card',knowledgeSources:[],launchInWebUi:true,onClose:()=>window.audit.closed++,...input}));
+  // 준비 상태 검사에서 이전 팝업의 DOM을 새 팝업으로 오인하지 않도록 먼저 교체한다.
+  flushSync(()=>root.render(React.createElement(AiConversationDialog,{key:++sequence,userId:'fixture',documentId:'map-coordinator',documentTitle:'총괄 문서',cardId:'root',cardTitle:'총괄 루트',purpose:'card',knowledgeSources:[],launchInWebUi:true,onClose:()=>window.audit.closed++,...input})));
 };
 window.renderEditor = (editScope='document') => {
   root.render(React.createElement(WorkspaceSettingsDialog,{key:++sequence,mapId:editScope==='document'?'map-coordinator':'',groupId:editScope==='group'?'group-manager':'',name:'이름 편집',editScope,onRename:async(name)=>{window.audit.renamed=name},onClose:()=>window.audit.closed++}));
@@ -150,6 +152,61 @@ test('작업공간 확인·문서/그룹 저장·공통 메뉴·이름 편집·�
 
     const configured={mapId:'map-coordinator',groupId:'group-manager',groupName:'테스트 그룹',machineId:'fixture',machineRole:'main',documentSetting:{version:1,workspace:'/document'},groupSetting:{version:1,workspace:'/group'},source:'document',workspace:'/document',error:'',choices:[],token:'configured',needsSelection:false};
     const mixed={...configured,documentSetting:{version:0,workspace:''},groupSetting:{version:0,workspace:''},source:'none',workspace:'',needsSelection:true,token:'mixed',choices:[{workspace:'/project',reasons:['문서 루트 대화']},{workspace:'/mnp',reasons:['과거 대화']}]};
+    await t.test('대화 팝업은 내용에 맞춰 줄고 화면이 작을 때만 본문을 스크롤한다', async () => {
+      const layout = () => evaluate(`(() => {
+        const dialog=document.querySelector('.ai-dialog'), content=dialog.querySelector('.ai-dialog-content');
+        const box=dialog.getBoundingClientRect(), footer=dialog.querySelector('footer').getBoundingClientRect();
+        const inset=parseFloat(getComputedStyle(dialog.parentElement).paddingTop);
+        const contentBox=content?.getBoundingClientRect(), last=content?.lastElementChild.getBoundingClientRect();
+        return {height:box.height, top:box.top, bottom:box.bottom, viewport:innerHeight, inset,
+          footerVisible:footer.top>=box.top&&footer.bottom<=innerHeight-inset+1,
+          scrollable:content?content.scrollHeight>content.clientHeight+1:false,
+          bottomGap:contentBox?contentBox.bottom-last.bottom-parseFloat(getComputedStyle(content).paddingBottom):0};
+      })()`);
+      const fit = (result) => {
+        assert.ok(result.top>=result.inset-1&&result.bottom<=result.viewport-result.inset+1,JSON.stringify(result));
+        assert.equal(result.footerVisible,true,'하단 버튼은 팝업 안에 유지');
+      };
+      const sections = async (expanded) => {
+        await evaluate(`document.querySelectorAll('.ai-dialog details').forEach(el=>{if(el.open!==${expanded})el.querySelector('summary').click()})`);
+        await waitFor(()=>evaluate(`[...document.querySelectorAll('.ai-dialog details')].every(el=>el.open===${expanded})`));
+      };
+      const screenshots=process.env.MNP_TEST_SCREENSHOTS==='1'?await mkdtemp(path.join(tmpdir(),'mnp-dialog-height-screenshots-')):null;
+      for(const theme of ['light','dark']) {
+        await send('Emulation.setDeviceMetricsOverride',{width:1440,height:1600,deviceScaleFactor:1,mobile:false});
+        await evaluate('document.documentElement.dataset.theme='+JSON.stringify(theme));
+        await open({userId:'height-'+theme},{workspaceContext:configured});
+        await sections(false);
+        const collapsed=await layout();
+        fit(collapsed);
+        assert.ok(collapsed.height<collapsed.viewport-2*collapsed.inset-100,'내용이 적으면 화면 전체 높이를 채우지 않는다');
+        assert.equal(collapsed.scrollable,false,'내용이 맞으면 본문 스크롤이 없다');
+        assert.ok(Math.abs(collapsed.bottomGap)<=1,'마지막 항목 아래 불필요한 빈 공간이 없다');
+        if(screenshots) {
+          const shot=await send('Page.captureScreenshot',{format:'png'});
+          await writeFile(path.join(screenshots,theme+'-collapsed.png'),Buffer.from(shot.data,'base64'));
+        }
+        await send('Emulation.setDeviceMetricsOverride',{width:1440,height:2000,deviceScaleFactor:1,mobile:false});
+        assert.ok(Math.abs((await layout()).height-collapsed.height)<=1,'브라우저가 더 커져도 내용 높이는 유지');
+        await sections(true);
+        const expanded=await layout();
+        fit(expanded);
+        assert.ok(expanded.height>collapsed.height+50,'옵션을 펼치면 내용만큼 높이가 늘어난다');
+        assert.ok(Math.abs(expanded.bottomGap)<=1);
+        await sections(false);
+        assert.ok(Math.abs((await layout()).height-collapsed.height)<=1,'다시 접으면 원래 높이로 돌아온다');
+        await sections(true);
+        for(const viewport of [{width:1440,height:600,mobile:false},{width:390,height:640,mobile:true}]) {
+          await send('Emulation.setDeviceMetricsOverride',{...viewport,deviceScaleFactor:1});
+          const constrained=await layout();
+          fit(constrained);
+          assert.equal(constrained.scrollable,true,'화면보다 내용이 많으면 본문만 스크롤');
+        }
+      }
+      if(screenshots)t.diagnostic('내용 기준 높이 화면 캡처: '+screenshots);
+      await send('Emulation.setDeviceMetricsOverride',{width:1440,height:1000,deviceScaleFactor:1,mobile:false});
+      await evaluate('document.documentElement.dataset.theme="light"');
+    });
     for (const purpose of ['card','group-coordination','shared-knowledge-review','document-reconstruction','card-layout']) {
       await open({purpose,initialRequest:'검토 요청'}, {workspaceContext:mixed});
       await assertWorkspaceHintTypography();
