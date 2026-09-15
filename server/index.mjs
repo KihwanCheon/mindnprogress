@@ -457,6 +457,7 @@ const machineOperationQueue = new MachineOperationQueue({
 })
 const machinePairingStore = new MachinePairingStore()
 const runnerCallbackBaseUrls = new Map()
+const runnerObservedAddresses = new Map()
 const aiAttributionContinuationToken = Symbol('aiAttributionContinuationToken')
 let aiAttributionWriteQueue = Promise.resolve()
 let aiConversationAttributionWriteQueue = Promise.resolve()
@@ -748,9 +749,32 @@ function machineAccessibleByUser(user, machineId) {
 
 function aionUiWebBaseUrlForMachine(machineId) {
   if (!machineId || machineId === machineRegistry.mainMachineId) return aionUiWebBaseUrl
+  const observedAddress = runnerObservedAddresses.get(normalizeMachineId(machineId))
+  if (!observedAddress) {
+    throw new SubMachinePayloadError('서브 머신의 AionUi WebUI 접속 주소를 확인할 수 없습니다. Runner 연결을 확인한 뒤 다시 시도해 주세요.')
+  }
   const url = new URL(aionUiWebBaseUrl)
-  url.hostname = '127.0.0.1'
+  url.hostname = observedAddress.includes(':') ? `[${observedAddress}]` : observedAddress
   return url.toString().replace(/\/+$/, '')
+}
+
+function isLoopbackClientAddress(value) {
+  return value === '::1' || value.startsWith('127.')
+}
+
+function noteRunnerObservedAddress(machineId, request) {
+  const normalizedMachineId = normalizeMachineId(machineId)
+  if (!normalizedMachineId) return null
+
+  // 직접 접속이면 소켓 주소를 사용해 Runner가 임의로 넣은 전달 헤더를 신뢰하지 않는다.
+  // 로컬 Vite 프록시를 경유한 경우에만 프록시가 마지막에 붙인 실제 접속 주소를 사용한다.
+  const directAddress = normalizeClientAddress(request?.socket?.remoteAddress)
+  const observedAddress = directAddress && !isLoopbackClientAddress(directAddress)
+    ? directAddress
+    : requestClientAddress(request)
+  if (!observedAddress || isLoopbackClientAddress(observedAddress)) return null
+  runnerObservedAddresses.set(normalizedMachineId, observedAddress)
+  return observedAddress
 }
 
 function normalizeRunnerCallbackBaseUrl(value) {
@@ -779,6 +803,13 @@ function noteRunnerCallbackBaseUrl(machineId, value) {
 
 function runnerCallbackBaseUrlForMachine(machineId) {
   return runnerCallbackBaseUrls.get(normalizeMachineId(machineId)) ?? null
+}
+
+function clearRunnerRuntimeRouting(machineId) {
+  const normalizedMachineId = normalizeMachineId(machineId)
+  if (!normalizedMachineId) return
+  runnerCallbackBaseUrls.delete(normalizedMachineId)
+  runnerObservedAddresses.delete(normalizedMachineId)
 }
 
 function scopedAttribution(request) {
@@ -1751,6 +1782,7 @@ async function decommissionEditorMachines(editorId, { remove = false } = {}) {
       )),
   }
   for (const machineId of machineIds) {
+    clearRunnerRuntimeRouting(machineId)
     machineOperationQueue.cancelMachine(
       machineId,
       remove ? '머신 소유자 계정이 삭제되었습니다.' : '머신 소유자 계정이 비활성화되었습니다.',
@@ -7591,6 +7623,9 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         if (error instanceof AionUiExternalLaunchPayloadError) {
           return sendJson(response, 400, { error: error.message })
         }
+        if (error instanceof SubMachinePayloadError) {
+          return sendJson(response, 503, { error: error.message })
+        }
         // 완료·변경된 승인으로 시작하려는 요청은 외부 서버 장애가 아닌 승인 충돌이다.
         if (error.status === 409) return sendJson(response, 409, { error: error.message })
         console.error('[AionUi external conversation launch]', error)
@@ -9706,6 +9741,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       }
 
       const token = `mnprn_${randomBytes(32).toString('base64url')}`
+      clearRunnerRuntimeRouting(machine.machineId)
       machineRegistry = setMachineToken(machineRegistry, machine.machineId, token)
       machineOperationQueue.wake(machine.machineId)
       await persistMachineRegistry()
@@ -9727,6 +9763,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       const body = await readJsonBody(request)
       const waitMs = Math.max(0, Math.min(machineOperationLongPollMs, Math.trunc(Number(body?.waitMs)) || machineOperationLongPollMs))
       noteRunnerCallbackBaseUrl(machine.machineId, body?.callbackBaseUrl)
+      noteRunnerObservedAddress(machine.machineId, request)
       await noteMachineSeen(machine.machineId)
 
       // long-poll 도중 Runner가 끊기면 깨어난 이 요청이 오퍼레이션을 가져가 버린다.
@@ -9786,6 +9823,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       if (!machine) return
       const body = await readJsonBody(request)
       noteRunnerCallbackBaseUrl(machine.machineId, body?.callbackBaseUrl)
+      noteRunnerObservedAddress(machine.machineId, request)
       await noteMachineSeen(machine.machineId)
       return sendJson(response, 200, {
         machineId: machine.machineId,
@@ -9867,6 +9905,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         const machineId = normalizeMachineId(machineTokenRoute[1])
         machinePairingStore.revokeMachine(machineId)
         const token = `mnprn_${randomBytes(32).toString('base64url')}`
+        clearRunnerRuntimeRouting(machineId)
         try {
           machineRegistry = setMachineToken(machineRegistry, machineId, token)
         } catch (error) {
@@ -9882,6 +9921,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       if (request.method === 'DELETE') {
         const machineId = normalizeMachineId(machineTokenRoute[1])
         machinePairingStore.revokeMachine(machineId)
+        clearRunnerRuntimeRouting(machineId)
         try {
           machineRegistry = setMachineToken(machineRegistry, machineId, null)
         } catch (error) {
@@ -9946,6 +9986,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           throw error
         }
         machinePairingStore.revokeMachine(removedMachineId)
+        clearRunnerRuntimeRouting(removedMachineId)
         // 등록이 사라진 머신으로 향하던 요청은 영원히 전달될 수 없으므로 즉시 실패로 확정한다.
         machineOperationQueue.cancelMachine(removedMachineId)
         // 삭제한 머신을 기본값으로 쓰던 사용자는 조회 시 자동으로 해제되지만 저장값도 함께 정리한다.

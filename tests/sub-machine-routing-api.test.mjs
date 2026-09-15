@@ -175,7 +175,11 @@ test('새 대화와 일반 AI 위임의 전체 경로는 선택한 서브 머신
     const runnerToken = issued.body.token
     const heartbeat = await request(baseUrl, '', '/api/machines/macbook/runner/heartbeat', 'POST', {
       callbackBaseUrl: 'http://127.0.0.1:43129',
-    }, { Authorization: `Bearer ${runnerToken}` })
+    }, {
+      Authorization: `Bearer ${runnerToken}`,
+      // 실제 서브 머신이 Vite 프록시를 경유해 접속한 주소를 재현한다.
+      'X-Forwarded-For': '10.78.12.223',
+    })
     assert.equal(heartbeat.response.status, 200)
     assert.equal((await request(baseUrl, cookie, '/api/account/distributed-work', 'PUT', {
       enabled: true, defaultMachineId: 'macbook',
@@ -237,7 +241,7 @@ test('새 대화와 일반 AI 위임의 전체 경로는 선택한 서브 머신
     })
     assert.equal(launch.response.status, 201)
     assert.equal(launch.body.homeMachineId, 'macbook')
-    assert.match(launch.body.launchUrl, /^http:\/\/127\.0\.0\.1:7777\/#\/guid\?external-launch=/)
+    assert.match(launch.body.launchUrl, /^http:\/\/10\.78\.12\.223:7777\/#\/guid\?external-launch=/)
     assert.equal(relayedLaunchPayload.completionUrl, attribution.body.completionUrl)
 
     const conversationId = 'conversation-on-mac'
