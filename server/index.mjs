@@ -1582,8 +1582,11 @@ function persistGroupDocumentInstructions() {
 
 function persistAiWorkspaceHistories() {
   const storedHistories = [...aiWorkspaceHistories.entries()]
-    .sort(([firstUserId], [secondUserId]) => firstUserId.localeCompare(secondUserId))
-    .map(([userId, workspaces]) => ({ userId, workspaces }))
+    .sort(([first], [second]) => first.localeCompare(second))
+    .map(([key, workspaces]) => {
+      const [userId, machineId] = JSON.parse(key)
+      return { userId, machineId, workspaces }
+    })
   aiWorkspaceHistoryWriteQueue = aiWorkspaceHistoryWriteQueue.catch(() => {})
     .then(() => writeStoredArray(aiWorkspaceHistoriesFile, storedHistories))
   return aiWorkspaceHistoryWriteQueue
@@ -1845,11 +1848,15 @@ async function loadAiDelegations() {
 
 async function loadAiWorkspaceHistories() {
   const storedHistories = await readStoredArray(aiWorkspaceHistoriesFile)
-  for (const history of storedHistories) {
+  // 구버전 서버 이력은 메인에서만 사용했다. 서브 머신이나 계정 기본 머신으로 복제하지 않는다.
+  // 명시적 머신 기록(빈 목록 포함)이 구버전 기록보다 우선한다.
+  for (const history of [...storedHistories].sort((a, b) => Number(Boolean(a?.machineId)) - Number(Boolean(b?.machineId)))) {
     if (typeof history?.userId !== 'string' || !Array.isArray(history.workspaces)
       || !users.some((user) => user.id === history.userId)) continue
+    const machineId = Object.hasOwn(history, 'machineId') ? normalizeMachineId(history.machineId) : machineRegistry.mainMachineId
+    if (!machineId) continue
     const workspaces = normalizeAiWorkspaceHistory(history.workspaces)
-    aiWorkspaceHistories.set(history.userId, workspaces)
+    aiWorkspaceHistories.set(JSON.stringify([history.userId, machineId]), workspaces)
   }
   await persistAiWorkspaceHistories()
 }
@@ -9938,13 +9945,31 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       if (!user) return
       if (!canEdit(user)) return sendJson(response, 403, { error: '편집자만 AI 작업공간 이력을 사용할 수 있습니다.' })
 
+      if (!['GET', 'POST', 'DELETE'].includes(request.method)) return sendJson(response, 405, { error: '지원하지 않는 요청입니다.' })
+      const body = request.method === 'GET' ? {} : await readJsonBody(request)
+      if (body?.expectedUserId !== undefined && body.expectedUserId !== user.id) {
+        return sendJson(response, 409, { error: '로그인 계정이 변경되었습니다. 대화 시작 창을 다시 열어 주세요.' })
+      }
+      const queryMachineId = url.searchParams.get('machineId')
+      if (queryMachineId && body?.machineId && queryMachineId !== body.machineId) {
+        return sendJson(response, 400, { error: '작업공간 이력의 머신 정보가 일치하지 않습니다.' })
+      }
+      let machineId
+      try {
+        // 머신을 보내지 않는 구버전 클라이언트는 메인 이력만 사용한다.
+        machineId = resolveTargetMachineForUser(user, body?.machineId || queryMachineId || machineRegistry.mainMachineId).machineId
+      } catch (error) {
+        return sendJson(response, 400, { error: error.message })
+      }
+      const historyKey = JSON.stringify([user.id, machineId])
+      const result = (workspaces) => ({ userId: user.id, machineId, workspaces })
+
       if (request.method === 'GET') {
-        return sendJson(response, 200, { workspaces: aiWorkspaceHistories.get(user.id) ?? [] })
+        return sendJson(response, 200, result(aiWorkspaceHistories.get(historyKey) ?? []))
       }
 
       if (request.method === 'POST') {
-        const body = await readJsonBody(request)
-        const currentWorkspaces = aiWorkspaceHistories.get(user.id) ?? []
+        const currentWorkspaces = aiWorkspaceHistories.get(historyKey) ?? []
 
         if (typeof body?.workspace === 'string') {
           const workspace = body.workspace.trim()
@@ -9952,9 +9977,9 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
             return sendJson(response, 400, { error: '추가할 작업공간이 올바르지 않습니다.' })
           }
           const workspaces = rememberAiWorkspace(currentWorkspaces, workspace)
-          aiWorkspaceHistories.set(user.id, workspaces)
+          aiWorkspaceHistories.set(historyKey, workspaces)
           await persistAiWorkspaceHistories()
-          return sendJson(response, 200, { workspaces })
+          return sendJson(response, 200, result(workspaces))
         }
 
         if (body?.migration === true) {
@@ -9964,28 +9989,25 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
               || workspace.trim().length > AI_WORKSPACE_MAX_LENGTH)) {
             return sendJson(response, 400, { error: '가져올 작업공간 이력이 올바르지 않습니다.' })
           }
-          if (aiWorkspaceHistories.has(user.id)) return sendJson(response, 200, { workspaces: currentWorkspaces })
+          if (aiWorkspaceHistories.has(historyKey)) return sendJson(response, 200, result(currentWorkspaces))
           const workspaces = normalizeAiWorkspaceHistory(body.workspaces)
-          if (workspaces.length > 0) {
-            aiWorkspaceHistories.set(user.id, workspaces)
-            await persistAiWorkspaceHistories()
-          }
-          return sendJson(response, 200, { workspaces })
+          aiWorkspaceHistories.set(historyKey, workspaces)
+          await persistAiWorkspaceHistories()
+          return sendJson(response, 200, result(workspaces))
         }
 
         return sendJson(response, 400, { error: '추가할 작업공간이 올바르지 않습니다.' })
       }
 
       if (request.method === 'DELETE') {
-        const body = await readJsonBody(request)
         const workspace = typeof body.workspace === 'string' ? body.workspace.trim() : ''
         if (!workspace || workspace.length > AI_WORKSPACE_MAX_LENGTH) {
           return sendJson(response, 400, { error: '삭제할 작업공간이 올바르지 않습니다.' })
         }
-        const workspaces = removeAiWorkspace(aiWorkspaceHistories.get(user.id) ?? [], workspace)
-        aiWorkspaceHistories.set(user.id, workspaces)
+        const workspaces = removeAiWorkspace(aiWorkspaceHistories.get(historyKey) ?? [], workspace)
+        aiWorkspaceHistories.set(historyKey, workspaces)
         await persistAiWorkspaceHistories()
-        return sendJson(response, 200, { workspaces })
+        return sendJson(response, 200, result(workspaces))
       }
 
       return sendJson(response, 405, { error: '지원하지 않는 요청입니다.' })
@@ -10216,7 +10238,9 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         users = users.filter((candidate) => candidate.id !== editor.id)
         await invalidateUserSessions(editor.id)
         await decommissionEditorMachines(editor.id, { remove: true })
-        aiWorkspaceHistories.delete(editor.id)
+        for (const key of aiWorkspaceHistories.keys()) {
+          if (JSON.parse(key)[0] === editor.id) aiWorkspaceHistories.delete(key)
+        }
         distributedWorkSettings.delete(editor.id)
         await persistAiWorkspaceHistories()
         await persistDistributedWorkSettings()

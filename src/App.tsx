@@ -8681,8 +8681,8 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
           onClose={() => setDailyBackupPreview(null)}
         />
       )}
-      {renamingMap && activeDocument && <WorkspaceSettingsDialog mapId={activeDocument.id} name={activeDocument.title} editScope="document" onRename={renameActiveMap} onClose={() => setRenamingMap(false)} />}
-      {editingGroupSettings && <WorkspaceSettingsDialog groupId={editingGroupSettings.id} name={editingGroupSettings.name} editScope="group" onClose={() => setEditingGroupSettings(null)} onRename={async (name) => {
+      {renamingMap && activeDocument && <WorkspaceSettingsDialog userId={user.id} mapId={activeDocument.id} name={activeDocument.title} editScope="document" onRename={renameActiveMap} onClose={() => setRenamingMap(false)} />}
+      {editingGroupSettings && <WorkspaceSettingsDialog userId={user.id} groupId={editingGroupSettings.id} name={editingGroupSettings.name} editScope="group" onClose={() => setEditingGroupSettings(null)} onRename={async (name) => {
         const latest = await apiRequest<DocumentLibraryResponse>('/api/maps')
         const group = latest.documentLayout.groups.find((item) => item.id === editingGroupSettings.id)
         if (!group || group.name !== editingGroupSettings.name) throw new Error('그룹 이름이 변경되었습니다. 다시 열어 확인해 주세요.')

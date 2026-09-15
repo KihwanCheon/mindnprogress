@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import './WorkspaceSettingsDialog.css'
 import { WorkspaceHistoryList } from './WorkspaceHistoryList'
-import { normalizeAiWorkspaceHistory } from '../utils/aiWorkspaceHistory.mjs'
+import { useAiWorkspaceHistory } from './useAiWorkspaceHistory'
 
 import { jsonRequest, loadWorkspaceContext, saveWorkspaceSetting, type WorkspaceContext, type WorkspaceChoice } from '../utils/workspaceSettings'
-export function WorkspaceSettingsDialog({ mapId = '', groupId = '', machineId = '', name, editScope, initialWorkspace = '',
+export function WorkspaceSettingsDialog({ userId, mapId = '', groupId = '', machineId = '', name, editScope, initialWorkspace = '',
   workspaceHistory, onRemoveWorkspaceHistory, onRename, onConfirm, onClose }: {
-  mapId?: string; groupId?: string; machineId?: string; name: string; editScope?: 'document' | 'group'; initialWorkspace?: string
+  userId: string; mapId?: string; groupId?: string; machineId?: string; name: string; editScope?: 'document' | 'group'; initialWorkspace?: string
   workspaceHistory?: string[]; onRemoveWorkspaceHistory?: (workspace: string) => Promise<void>
   onRename?: (name: string) => Promise<void>; onConfirm?: (choice: WorkspaceChoice) => Promise<void>; onClose: () => void
 }) {
@@ -19,11 +19,11 @@ export function WorkspaceSettingsDialog({ mapId = '', groupId = '', machineId = 
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [savedNotice, setSavedNotice] = useState('')
-  const [history, setHistory] = useState<string[]>([])
+  const historyState = useAiWorkspaceHistory(userId, workspaceHistory === undefined ? context?.machineId ?? '' : '')
   const [directory, setDirectory] = useState<{ path: string; parent: string | null; entries: { name: string; path: string }[] } | null>(null)
   useEffect(() => {
     let active = true
-    setContext(null); setDirectory(null); setError('')
+    setContext(null); setDirectory(null); setWorkspace(''); setError('')
     void loadWorkspaceContext(mapId, machine, groupId).then((value) => {
       if (!active) return
       setContext(value)
@@ -31,15 +31,6 @@ export function WorkspaceSettingsDialog({ mapId = '', groupId = '', machineId = 
     }).catch((reason) => { if (active) setError(reason.message) })
     return () => { active = false }
   }, [mapId, groupId, machine, editScope, initialWorkspace])
-  useEffect(() => {
-    let active = true
-    // 최근 목록은 수동 선택용일 뿐 자동 기본값의 근거가 아니다.
-    if (workspaceHistory !== undefined) return
-    if (context?.machineRole === 'main') void jsonRequest<{ workspaces: string[] }>('/api/integrations/aionui/workspaces')
-      .then((value) => { if (active) setHistory(normalizeAiWorkspaceHistory(value.workspaces)) }).catch(() => {})
-    else setHistory([])
-    return () => { active = false }
-  }, [context?.machineRole, workspaceHistory])
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null
     dialog.current?.focus()
@@ -65,15 +56,7 @@ export function WorkspaceSettingsDialog({ mapId = '', groupId = '', machineId = 
     setError(''); setBusy(true)
     try {
       if (onRemoveWorkspaceHistory) await onRemoveWorkspaceHistory(value)
-      else {
-        const response = await fetch('/api/integrations/aionui/workspaces', {
-          method: 'DELETE', credentials: 'include', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ workspace: value }), signal: AbortSignal.timeout(5_000),
-        })
-        const result = await response.json()
-        if (!response.ok) throw new Error(result.error ?? '최근 작업공간을 삭제하지 못했습니다.')
-        setHistory(normalizeAiWorkspaceHistory(result.workspaces))
-      }
+      else await historyState.remove(value)
     } catch (reason) { setError(reason instanceof Error ? reason.message : '최근 작업공간을 삭제하지 못했습니다.') }
     finally { setBusy(false) }
   }
@@ -117,7 +100,8 @@ export function WorkspaceSettingsDialog({ mapId = '', groupId = '', machineId = 
             {context.remotePathUnchecked && <small>원격 머신의 경로입니다. 해당 머신에 존재하는 절대 경로를 입력하세요. 이 서버에서는 폴더 존재 여부를 검사할 수 없습니다.</small>}
             {directory && <div className="workspace-settings-folders"><div><button type="button" disabled={busy || directory.parent === null} onClick={() => void browse(directory.parent ?? '')}>상위</button><span>{directory.path || '드라이브'}</span><button type="button" disabled={busy || !directory.path} onClick={() => { setWorkspace(directory.path); setDirectory(null) }}>이 폴더 선택</button></div><nav>{directory.entries.map((entry) => <button key={entry.path} type="button" disabled={busy} onClick={() => void browse(entry.path)}>{entry.name}</button>)}</nav></div>}
             {context.choices.length > 0 && <div className="workspace-settings-choices"><small>문서·그룹의 대화에서 확인한 후보</small>{context.choices.map((choice) => <button type="button" key={choice.workspace} disabled={busy} onClick={() => setWorkspace(choice.workspace)}><span>{choice.workspace}</span><small>{choice.reasons.join(' / ')}</small></button>)}</div>}
-            <WorkspaceHistoryList workspaces={workspaceHistory ?? history} workspace={workspace} disabled={busy} onSelect={setWorkspace} onRemove={onRemoveWorkspaceHistory || context.machineRole === 'main' ? (value) => { void removeHistory(value) } : undefined} />
+            <WorkspaceHistoryList workspaces={workspaceHistory ?? historyState.history} workspace={workspace} disabled={busy} onSelect={setWorkspace} onRemove={(value) => { void removeHistory(value) }} />
+            {historyState.error && <small role="status">{historyState.error}</small>}
             {!editScope && <fieldset disabled={busy}><legend>선택한 경로의 적용 범위</legend>{([{ value: 'once', label: '이번 대화만 사용', available: true }, { value: 'document', label: '이 문서의 작업공간으로 설정', available: Boolean(mapId) }, { value: 'group', label: `이 그룹의 작업공간으로 설정 (${context.groupName})`, available: Boolean(context.groupId) }] as const).filter((item) => item.available).map((item) => <label key={item.value}><input type="radio" name="workspace-scope" checked={scope === item.value} onChange={() => setScope(item.value)} />{item.label}</label>)}</fieldset>}
             {scope === 'group' && !editScope && <small>별도 문서 설정이 없는 소속 문서에 적용됩니다.{context.documentSetting.workspace ? ' 현재 문서에는 별도 설정이 있어 다음 시작에도 문서 설정이 우선합니다. 이번 대화만 선택한 경로를 사용합니다.' : ''}</small>}
             {!editScope && <small>선택하면 AI 대화 시작 창으로 돌아갑니다. 나머지 옵션을 확인한 뒤 ‘AionUi에서 시작’을 눌러 주세요.</small>}

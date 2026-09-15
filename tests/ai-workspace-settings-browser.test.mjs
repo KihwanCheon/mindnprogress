@@ -33,8 +33,12 @@ window.fetch = async (url, init = {}) => {
     if (a.hold) await new Promise((resolve,reject) => {a.release=resolve; init.signal?.addEventListener('abort',()=>reject(init.signal.reason),{once:true})});
     if (a.fail) return new Response(JSON.stringify({error:'그룹 역할 조회 실패'}),{status:503});
     body = a.context;
-  } else if (url.startsWith('/api/integrations/aionui/options')) body = {...options,...a.optionOverrides,workspaceContext:a.workspaceContext || workspaceContext};
-  else if (url.startsWith('/api/integrations/aionui/workspace-context')) body = a.workspaceContext || workspaceContext;
+  } else if (url.startsWith('/api/integrations/aionui/options')) {
+    const machineId=new URL(url,location.origin).searchParams.get('machineId') || a.optionOverrides?.machineId || 'fixture';
+    const ctx=a.machineContexts?.[machineId] || a.workspaceContext || workspaceContext;
+    body = {...options,...a.optionOverrides,...(a.machineContexts?{machineId,machineRole:ctx.machineRole,machineLabel:machineId,machines:ctx.machines}:{}),workspaceContext:ctx};
+  }
+  else if (url.startsWith('/api/integrations/aionui/workspace-context')) body = a.machineContexts?.[new URL(url,location.origin).searchParams.get('machineId')] || a.workspaceContext || workspaceContext;
   else if (url === '/api/integrations/aionui/workspace-settings') {
     if (a.workspaceSaveFail) return new Response(JSON.stringify({error:'작업공간 저장 실패'}),{status:503});
     const input=JSON.parse(init.body), ctx=a.workspaceContext || workspaceContext;
@@ -42,15 +46,27 @@ window.fetch = async (url, init = {}) => {
     a.workspaceContext={...ctx,[input.scope==='group'?'groupSetting':'documentSetting']:setting,workspace:input.workspace,source:input.scope,error:'',needsSelection:false,token:ctx.token+'-saved'};
     body={setting};
   }
-  else if (url === '/api/integrations/aionui/workspaces') {
+  else if (url.startsWith('/api/integrations/aionui/workspaces?')) {
     const userId=a.userId||'fixture';
-    let history=window.workspaceHistories[userId]||[];
+    const machineId=new URL(url,location.origin).searchParams.get('machineId');
+    const key=JSON.stringify([userId,machineId]);
+    const exists=Object.hasOwn(window.workspaceHistories,key)||(machineId==='fixture'&&Object.hasOwn(window.workspaceHistories,userId));
+    let history=window.workspaceHistories[key]||(machineId==='fixture'?window.workspaceHistories[userId]:null)||[];
     if (init.method==='DELETE') {
       if(window.historyFlags.fail) return new Response(JSON.stringify({error:'테스트 이력 삭제 실패'}),{status:503});
       history=history.filter(item=>item!==JSON.parse(init.body).workspace);
-      window.workspaceHistories[userId]=history;
+      window.workspaceHistories[key]=history;
+    } else if(init.method==='POST') {
+      const input=JSON.parse(init.body);
+      if(input.workspace) history=[input.workspace,...history.filter(item=>item!==input.workspace)];
+      else if(input.migration&&!exists) history=input.workspaces;
+      window.workspaceHistories[key]=history;
     }
-    body={workspaces:history};
+    body={userId,machineId,workspaces:history};
+    if(!init.method || init.method==='GET') {
+      if(window.historyFlags.holdMachine===machineId) await new Promise(resolve=>window.historyFlags.release=resolve);
+      if(window.historyFlags.wrongMachine===machineId) body.machineId='wrong-machine';
+    }
   }
   else if (url === '/api/integrations/aionui/dialog-preferences') {
     const userId=a.userId||'fixture';
@@ -71,13 +87,14 @@ window.fetch = async (url, init = {}) => {
 };
 let sequence = 0;
 window.renderDialog = (input = {}, flags = {}) => {
+  window.audit.machineContexts=null;
   Object.assign(window.audit,{calls:[],fail:false,hold:false,closed:0,opened:0,workspaceSaveFail:false,optionOverrides:null,context:{map:{id:'map-coordinator',nodes:[{id:'root',data:{kind:'root'}},{id:'child',data:{kind:'task'}}],edges:[{source:'root',target:'child'}]},groupProject:{groupId:'group-manager',role:'coordinator',coordinatorMapId:'map-coordinator'}},...flags});
   window.audit.userId=input.userId||'fixture';
   // 준비 상태 검사에서 이전 팝업의 DOM을 새 팝업으로 오인하지 않도록 먼저 교체한다.
   flushSync(()=>root.render(React.createElement(AiConversationDialog,{key:++sequence,userId:'fixture',documentId:'map-coordinator',documentTitle:'총괄 문서',cardId:'root',cardTitle:'총괄 루트',purpose:'card',knowledgeSources:[],launchInWebUi:true,onClose:()=>window.audit.closed++,...input})));
 };
 window.renderEditor = (editScope='document') => {
-  root.render(React.createElement(WorkspaceSettingsDialog,{key:++sequence,mapId:editScope==='document'?'map-coordinator':'',groupId:editScope==='group'?'group-manager':'',name:'이름 편집',editScope,onRename:async(name)=>{window.audit.renamed=name},onClose:()=>window.audit.closed++}));
+  root.render(React.createElement(WorkspaceSettingsDialog,{key:++sequence,userId:window.audit.userId||'fixture',mapId:editScope==='document'?'map-coordinator':'',groupId:editScope==='group'?'group-manager':'',name:'이름 편집',editScope,onRename:async(name)=>{window.audit.renamed=name},onClose:()=>window.audit.closed++}));
 };
 window.fixtureReady = true;
 `
@@ -464,21 +481,86 @@ test('작업공간 확인·문서/그룹 저장·공통 메뉴·이름 편집·�
     await waitFor(()=>evaluate('Boolean(document.querySelector(".ai-workspace-history-empty"))'));
     assert.equal(await evaluate('document.querySelectorAll(".ai-workspace-history-select").length'),0,'다른 계정의 이력을 표시하지 않는다');
 
-    // 서브 머신은 기존 머신별 브라우저 이력을 사용하며 메인 이력 API를 호출하지 않는다.
+    // 서브 머신의 기존 계정·머신 캐시는 해당 머신의 서버 이력으로만 이전한다.
     await evaluate('localStorage.setItem("mindnprogress-ai-workspace-history-v2:remote-history:remote",JSON.stringify(["/remote/project"]))');
     await open({userId:'remote-history'}, {workspaceContext:{...mixed,machineId:'remote',machineRole:'sub'},optionOverrides:{machineId:'remote',machineRole:'sub',machines:[{machineId:'remote',label:'원격',role:'sub'}]}});
     await evaluate('document.querySelector(".ai-workspace-settings-button").click()');
     await waitFor(()=>evaluate('document.querySelector(".ai-workspace-history-select")?.title==="/remote/project"'));
     await evaluate('document.querySelector(".ai-workspace-history-remove").click()');
     await waitFor(()=>evaluate('Boolean(document.querySelector(".ai-workspace-history-empty"))'));
-    assert.equal(await evaluate('window.audit.calls.some(c=>c.url.endsWith("/workspaces"))'),false);
-    assert.deepEqual(await evaluate('JSON.parse(localStorage.getItem("mindnprogress-ai-workspace-history-v2:remote-history:remote"))'),[]);
+    await waitFor(()=>evaluate('window.audit.calls.some(c=>c.method==="DELETE"&&c.url.endsWith("/workspaces?machineId=remote"))'));
+    assert.deepEqual(await evaluate('window.workspaceHistories[JSON.stringify(["remote-history","remote"])]'),[]);
+    assert.deepEqual(await evaluate('JSON.parse(localStorage.getItem("mindnprogress-ai-workspace-history-v3:"+JSON.stringify(["remote-history","remote"])))'),[]);
 
     // 이름 편집에서 단독으로 열린 창도 같은 목록을 사용한다.
     await evaluate('window.audit.userId="editor-history";window.workspaceHistories["editor-history"]=["/editor/project"];window.audit.workspaceContext='+JSON.stringify(configured)+';window.renderEditor()');
     await waitFor(()=>evaluate('document.querySelector(".ai-workspace-history-select")?.title==="/editor/project"'));
     await evaluate('document.querySelector(".ai-workspace-history-remove").click()');
     await waitFor(()=>evaluate('Boolean(document.querySelector(".ai-workspace-history-empty"))'));
+
+    await t.test('머신 전환 시 경로·후보·최근 이력을 분리하고 이전 응답을 무시한다', async () => {
+      const machines=[{machineId:'fixture',label:'메인',role:'main'},{machineId:'remote-one',label:'원격 1',role:'sub'},{machineId:'remote-two',label:'원격 2',role:'sub'}];
+      const machineContexts={
+        fixture:{...configured,machines,workspace:'/main/configured'},
+        'remote-one':{...configured,machines,machineId:'remote-one',machineRole:'sub',workspace:'/remote-one/configured',token:'remote-one',remotePathUnchecked:true},
+        'remote-two':{...mixed,machines,machineId:'remote-two',machineRole:'sub',token:'remote-two',remotePathUnchecked:true,choices:[{workspace:'/remote-two/candidate',reasons:['원격 2 대화']}]},
+      };
+      await evaluate(`window.historyFlags={holdMachine:'fixture'};
+        window.workspaceHistories[JSON.stringify(['machine-history','fixture'])]=['/main/recent'];
+        window.workspaceHistories[JSON.stringify(['machine-history','remote-one'])]=['/remote-one/recent'];
+        window.workspaceHistories[JSON.stringify(['machine-history','remote-two'])]=['/remote-two/recent'];`);
+      await open({userId:'machine-history'},{machineContexts,workspaceContext:machineContexts.fixture});
+      await waitFor(()=>evaluate('typeof window.historyFlags.release==="function"'));
+      const switchMachine=async (machineId) => {
+        await evaluate(`(()=>{const select=document.querySelector('.ai-machine-select select');select.value=${JSON.stringify(machineId)};select.dispatchEvent(new Event('change',{bubbles:true}))})()`);
+        await waitFor(()=>evaluate(`document.querySelector('.ai-machine-select select')?.value===${JSON.stringify(machineId)}&&!document.querySelector('.ai-dialog footer .primary')?.disabled`));
+      };
+      await switchMachine('remote-one');
+      assert.equal(await evaluate('document.querySelector(".ai-workspace-input-row input").value'),'/remote-one/configured');
+      await evaluate('document.querySelector(".ai-workspace-settings-button").click()');
+      await waitFor(()=>evaluate('document.querySelector(".ai-workspace-history-select")?.title==="/remote-one/recent"'));
+      await evaluate('window.historyFlags.holdMachine=null;window.historyFlags.release()');
+      await delay(150);
+      assert.deepEqual(await evaluate('[...document.querySelectorAll(".ai-workspace-history-select")].map(el=>el.title)'),['/remote-one/recent'],'이전 머신의 늦은 응답이 현재 목록을 바꾸지 않는다');
+      await evaluate('document.querySelector(".ai-workspace-history-select").click()');
+      await waitFor(()=>evaluate('document.querySelector(".workspace-settings-path input").value==="/remote-one/recent"'));
+      await evaluate('document.querySelector(".workspace-settings-dialog footer .primary").click()');
+      await waitFor(()=>evaluate('!document.querySelector(".workspace-settings-dialog")'));
+      assert.equal(await evaluate('document.querySelector(".ai-workspace-input-row input").value'),'/remote-one/recent');
+
+      await switchMachine('remote-two');
+      assert.equal(await evaluate('document.querySelector(".ai-workspace-input-row input").value'),'','기준 없는 머신에 이전 머신의 선택값을 사용하지 않는다');
+      await evaluate('document.querySelector(".ai-workspace-settings-button").click()');
+      await waitFor(()=>evaluate('document.querySelector(".ai-workspace-history-select")?.title==="/remote-two/recent"'));
+      assert.equal(await evaluate('document.querySelector(".workspace-settings-choices").textContent.includes("/remote-two/candidate")'),true);
+      assert.equal(await evaluate('document.querySelector(".workspace-settings-dialog").textContent.includes("/remote-one/")'),false);
+      await evaluate('document.querySelector(".ai-workspace-history-remove").click()');
+      await waitFor(()=>evaluate('window.workspaceHistories[JSON.stringify(["machine-history","remote-two"])].length===0'));
+      assert.deepEqual(await evaluate('window.workspaceHistories[JSON.stringify(["machine-history","remote-one"])]'),['/remote-one/recent']);
+      await evaluate('document.querySelector(".workspace-settings-dialog header button").click()');
+      await switchMachine('remote-one');
+      await evaluate(`(()=>{const input=document.querySelector('.ai-workspace-input-row input');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'/remote-one/new');input.dispatchEvent(new Event('input',{bubbles:true}))})()`);
+      await evaluate('document.querySelector(".ai-dialog footer .primary").click()');
+      await waitFor(()=>evaluate('window.workspaceHistories[JSON.stringify(["machine-history","remote-one"])][0]==="/remote-one/new"'));
+      assert.deepEqual(await evaluate('window.workspaceHistories[JSON.stringify(["machine-history","fixture"])]'),['/main/recent']);
+
+      // 문서 이름 편집에서 열리는 공통 작업공간 팝업도 머신을 바꿀 때 이력을 다시 조회한다.
+      await evaluate('window.audit.workspaceContext=window.audit.machineContexts.fixture;window.renderEditor()');
+      await waitFor(()=>evaluate('Boolean(document.querySelector(".workspace-settings-dialog select"))'));
+      await evaluate(`(()=>{const select=document.querySelector('.workspace-settings-dialog select');select.value='remote-one';select.dispatchEvent(new Event('change',{bubbles:true}))})()`);
+      await waitFor(()=>evaluate('document.querySelector(".ai-workspace-history-select")?.title==="/remote-one/new"'));
+      await evaluate(`(()=>{const select=document.querySelector('.workspace-settings-dialog select');select.value='remote-two';select.dispatchEvent(new Event('change',{bubbles:true}))})()`);
+      await waitFor(()=>evaluate('document.querySelector(".workspace-settings-dialog select")?.value==="remote-two"&&Boolean(document.querySelector(".ai-workspace-history-empty"))'));
+      assert.equal(await evaluate('document.querySelector(".workspace-settings-path input").value'),'');
+
+      // 잘못된 계정·머신 응답은 캐시에 저장하거나 목록에 반영하지 않는다.
+      await evaluate('window.historyFlags={wrongMachine:"fixture"};window.workspaceHistories["mismatched-history"]=["/wrong-scope/project"]');
+      await open({userId:'mismatched-history'},{workspaceContext:configured});
+      await waitFor(()=>evaluate('document.querySelector(".ai-workspace-field [role=status]")?.textContent.includes("응답이 다릅니다")'));
+      await evaluate('document.querySelector(".ai-workspace-settings-button").click()');
+      await waitFor(()=>evaluate('Boolean(document.querySelector(".ai-workspace-history-empty"))'));
+      assert.equal(await evaluate('document.querySelector(".workspace-settings-dialog").textContent.includes("/wrong-scope/project")'),false);
+    });
 
   } finally {
     if (send && socket?.readyState === WebSocket.OPEN) await send('Browser.close').catch(() => {})
