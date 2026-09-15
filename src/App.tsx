@@ -53,7 +53,7 @@ import { parseGroupDeepLink } from './utils/groupDeepLink.mjs'
 import { collectDragDescendantOwners, dragRootIds, hierarchyReparentPairs } from './utils/hierarchyDrag.mjs'
 import { blockingNodes, createsDependencyCycle, dependentNodes, prerequisiteNodes } from './utils/dependencies'
 import { collapsedDocumentGroupsStorageKey, initialCollapsedDocumentGroupIds, normalizeCollapsedDocumentGroupIds } from './utils/documentGroupCollapse.mjs'
-import { isPhoneViewport, PHONE_VIEWPORT_QUERY, resolveDocumentNodeSelection } from './utils/documentSelection.mjs'
+import { isPhoneViewport, PHONE_VIEWPORT_QUERY, resolveDocumentNodeSelection, synchronizeNodeSelection } from './utils/documentSelection.mjs'
 import { createsKnowledgeCycle, isHierarchyEdge, isKnowledgeEdge, knowledgePolicyOf } from './utils/knowledgeEdges'
 import { isSameDoorayKnowledgeUrl, normalizedDoorayKnowledgeUrl, taskUrlProvider } from './utils/externalLinks'
 import { splitImageFileName, uniqueImageFileName } from './utils/imageFileNames.mjs'
@@ -181,13 +181,6 @@ function rootStateOf(nodes: MindMapNode[], edges: MindMapEdge[]) {
     progress: Number.isFinite(progress) ? Math.round(Math.max(0, Math.min(100, progress))) : null,
     status: root?.data.status ?? null,
   }
-}
-
-function synchronizeNodeSelection(nodes: MindMapNode[], selectedId: string | null) {
-  return nodes.map((node) => {
-    const selected = node.id === selectedId
-    return Boolean(node.selected) === selected ? node : { ...node, selected }
-  })
 }
 
 const CLIENT_ID_KEY = 'mindnprogress-client-id'
@@ -4479,7 +4472,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         kind: parent ? 'task' : 'branch',
       },
     }
-    setNodes((current) => [...current, node])
+    setNodes((current) => synchronizeNodeSelection([...current, node], id))
     if (parent) {
       setEdges((current) => [...current, {
         id: `edge-${parent.id}-${id}`,

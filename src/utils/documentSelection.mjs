@@ -12,3 +12,10 @@ export function resolveDocumentNodeSelection(nodes, preferredNodeId, phoneViewpo
   if (phoneViewport) return null
   return nodes[0]?.id ?? null
 }
+
+export function synchronizeNodeSelection(nodes, selectedId) {
+  return nodes.map((node) => {
+    const selected = node.id === selectedId
+    return Boolean(node.selected) === selected ? node : { ...node, selected }
+  })
+}

@@ -4,6 +4,7 @@ import {
   isPhoneViewport,
   PHONE_VIEWPORT_QUERY,
   resolveDocumentNodeSelection,
+  synchronizeNodeSelection,
 } from '../src/utils/documentSelection.mjs'
 
 const nodes = [{ id: 'root' }, { id: 'work' }]
@@ -29,4 +30,18 @@ test('휴대폰 판별은 기존 모바일 UI 경계와 같은 미디어 쿼리�
 
   assert.equal(matches, true)
   assert.equal(receivedQuery, PHONE_VIEWPORT_QUERY)
+})
+
+test('자식 카드를 추가해 선택하면 기존 부모 하이라이트를 해제하고 자식 하나만 하이라이트한다', () => {
+  const parent = { id: 'parent', selected: true, label: '부모' }
+  const sibling = { id: 'sibling', selected: false, label: '형제' }
+  const child = { id: 'child', label: '새 자식' }
+  const selected = synchronizeNodeSelection([parent, sibling, child], child.id)
+
+  assert.deepEqual(selected.map((node) => [node.id, Boolean(node.selected)]), [
+    ['parent', false],
+    ['sibling', false],
+    ['child', true],
+  ])
+  assert.equal(selected[1], sibling, '선택 상태가 바뀌지 않은 카드는 불필요하게 복제하지 않는다')
 })

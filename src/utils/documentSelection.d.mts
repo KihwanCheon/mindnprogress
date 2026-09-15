@@ -9,3 +9,8 @@ export function resolveDocumentNodeSelection(
   preferredNodeId: string | null | undefined,
   phoneViewport: boolean,
 ): string | null
+
+export function synchronizeNodeSelection<T extends { id: string; selected?: boolean }>(
+  nodes: ReadonlyArray<T>,
+  selectedId: string | null,
+): T[]
