@@ -64,6 +64,7 @@ setTimeout(() => process.exit(99), 10000).unref();
     $null = [IO.Directory]::CreateDirectory($mnpFixtureScripts)
     $mnpStartIcon = Join-Path $mnpFixture 'MindNProgress_Start.vbs'
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\scripts\runtime\entrypoints\MindNProgress_Start.vbs') -Destination $mnpStartIcon
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\scripts\runtime\entrypoints\MindNProgress_Start.bat') -Destination (Join-Path $mnpFixture 'MindNProgress_Start.bat')
     $mnpController = @'
 param([string]$Action, [switch]$AllowLegacyStop, [switch]$OpenBrowser)
 $ErrorActionPreference = 'Stop'
