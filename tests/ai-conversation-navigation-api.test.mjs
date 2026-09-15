@@ -65,31 +65,68 @@ test('AionUi 대화 조회와 화면 선택은 연결된 카드 및 같은 계�
   const mapId = 'map-conversation-navigation'
   const cardId = 'card-navigation'
   const conversationId = 'conversation-navigation'
+  const legacyConversationId = 'conversation-legacy'
+  const cardOwnerConversationId = 'conversation-card-owner'
+  const attributionConversationId = 'conversation-attribution-owner'
+  const viewerConversationId = 'conversation-viewer-owner'
+  const inactiveConversationId = 'conversation-inactive-owner'
+  const linkedAt = '2026-09-15T00:00:00.000Z'
+  const linkedCard = (id, label, linkedConversationId, startedBy = null) => ({
+    id,
+    type: 'mind',
+    position: { x: 0, y: 0 },
+    data: {
+      label,
+      kind: id === cardId ? 'root' : 'task',
+      progress: 0,
+      status: 'planned',
+      aiConversationId: linkedConversationId,
+      aiConversations: [{
+        conversationId: linkedConversationId,
+        linkedAt,
+        ...(startedBy ? { startedBy: { id: startedBy, label: startedBy } } : {}),
+      }],
+    },
+  })
   await writeFile(path.join(dataDirectory, `${mapId}.json`), JSON.stringify({
     id: mapId,
     title: '대화 탐색 문서',
-    nodes: [{
-      id: cardId,
-      type: 'mind',
-      position: { x: 0, y: 0 },
-      data: {
-        label: '대화 탐색 카드',
-        kind: 'root',
-        progress: 0,
-        status: 'planned',
-        aiConversationId: conversationId,
-        aiConversations: [{ conversationId, linkedAt: '2026-09-15T00:00:00.000Z' }],
-      },
-    }],
+    nodes: [
+      linkedCard(cardId, '대화 탐색 카드', conversationId, 'user-admin'),
+      linkedCard('card-legacy', '레거시 카드', legacyConversationId),
+      linkedCard('card-owner-link', '카드 소유자 기록', cardOwnerConversationId, 'user-admin'),
+      linkedCard('card-owner-attribution', '귀속 소유자 기록', attributionConversationId),
+      linkedCard('card-viewer', '열람자 소유 카드', viewerConversationId, 'user-public-viewer'),
+      linkedCard('card-inactive', '비활성 소유 카드', inactiveConversationId, 'user-inactive'),
+    ],
     edges: [],
     version: 1,
-    updatedAt: '2026-09-15T00:00:00.000Z',
+    updatedAt: linkedAt,
   }))
-  await writeFile(path.join(dataDirectory, '_ai-conversation-origins.json'), JSON.stringify([{
-    conversationId,
+  await writeFile(path.join(dataDirectory, '_ai-conversation-origins.json'), JSON.stringify([
+    { conversationId, mapId, cardId, startedBy: 'user-admin', linkedAt },
+    { conversationId: legacyConversationId, mapId, cardId: 'card-legacy', linkedAt },
+    { conversationId: cardOwnerConversationId, mapId, cardId: 'card-owner-link', linkedAt },
+    { conversationId: attributionConversationId, mapId, cardId: 'card-owner-attribution', linkedAt },
+    { conversationId: viewerConversationId, mapId, cardId: 'card-viewer', startedBy: 'user-public-viewer', linkedAt },
+    { conversationId: inactiveConversationId, mapId, cardId: 'card-inactive', startedBy: 'user-inactive', linkedAt },
+  ]))
+  await writeFile(path.join(dataDirectory, '_ai-conversation-attributions.json'), JSON.stringify([{
     mapId,
-    cardId,
-    linkedAt: '2026-09-15T00:00:00.000Z',
+    cardId: 'card-owner-attribution',
+    conversationId: attributionConversationId,
+    authorName: '테스트 AI',
+    startedBy: 'user-admin',
+    linkedAt,
+  }]))
+  await writeFile(path.join(dataDirectory, '_users.json'), JSON.stringify([{
+    id: 'user-inactive',
+    name: '비활성 편집자',
+    email: 'inactive@mind.local',
+    role: 'editor',
+    active: false,
+    salt: '00',
+    passwordHash: '00'.repeat(64),
   }]))
 
   const port = 45_000 + Math.floor(Math.random() * 5_000)
@@ -116,11 +153,12 @@ test('AionUi 대화 조회와 화면 선택은 연결된 카드 및 같은 계�
     const token = (await readFile(path.join(dataDirectory, '_integration-token'), 'utf8')).trim()
     const headers = { Authorization: `Bearer ${token}` }
     const accountHeaders = { ...headers, 'X-MNP-AI-Editor-Id': 'user-admin' }
-    const remoteAccountHeaders = {
-      ...accountHeaders,
+    const remoteHeaders = {
+      ...headers,
       'X-MNP-Selection-Device-Address': '10.77.15.55',
     }
-    const endpoint = `${baseUrl}/api/integrations/aionui/conversations/${conversationId}/mindnprogress`
+    const endpointFor = (id) => `${baseUrl}/api/integrations/aionui/conversations/${id}/mindnprogress`
+    const endpoint = endpointFor(conversationId)
 
     const unauthorized = await fetch(endpoint)
     assert.equal(unauthorized.status, 401)
@@ -138,7 +176,7 @@ test('AionUi 대화 조회와 화면 선택은 연결된 카드 및 같은 계�
       message: 'MindNProgress 카드에 연결된 대화를 찾을 수 없습니다.',
     })
 
-    let lookup = await (await fetch(endpoint, { headers: accountHeaders })).json()
+    let lookup = await (await fetch(endpoint, { headers })).json()
     assert.deepEqual(lookup, {
       conversationId,
       exists: true,
@@ -156,25 +194,40 @@ test('AionUi 대화 조회와 화면 선택은 연결된 카드 및 같은 계�
       message: 'MindNProgress에 연결된 대화입니다.',
     })
 
-    const missingAccount = await fetch(`${endpoint}/select`, { method: 'POST', headers })
+    const matchingHeaderLookup = await fetch(endpoint, { headers: accountHeaders })
+    assert.equal(matchingHeaderLookup.status, 200)
+
+    const mismatchingHeaderLookup = await fetch(endpoint, {
+      headers: { ...headers, 'X-MNP-AI-Editor-Id': 'user-public-viewer' },
+    })
+    assert.equal(mismatchingHeaderLookup.status, 403)
+    assert.equal((await mismatchingHeaderLookup.json()).code, 'MNP_SELECTION_ACCOUNT_MISMATCH')
+
+    const missingAccount = await fetch(`${endpointFor(legacyConversationId)}/select`, { method: 'POST', headers })
     assert.equal(missingAccount.status, 400)
     assert.equal((await missingAccount.json()).code, 'MNP_SELECTION_ACCOUNT_REQUIRED')
 
-    const unavailableAccount = await fetch(`${endpoint}/select`, {
+    const trustedLegacyAccount = await fetch(`${endpointFor(legacyConversationId)}/select`, {
       method: 'POST',
-      headers: { ...headers, 'X-MNP-AI-Editor-Id': 'user-unknown' },
+      headers: accountHeaders,
     })
-    assert.equal(unavailableAccount.status, 403)
-    assert.equal((await unavailableAccount.json()).code, 'MNP_SELECTION_ACCOUNT_UNAVAILABLE')
+    assert.equal(trustedLegacyAccount.status, 409)
+    assert.equal((await trustedLegacyAccount.json()).code, 'MNP_MATCHING_VIEW_NOT_CONNECTED')
+
+    for (const unavailableConversationId of [viewerConversationId, inactiveConversationId]) {
+      const unavailableAccount = await fetch(`${endpointFor(unavailableConversationId)}/select`, { method: 'POST', headers })
+      assert.equal(unavailableAccount.status, 403)
+      assert.equal((await unavailableAccount.json()).code, 'MNP_SELECTION_ACCOUNT_UNAVAILABLE')
+    }
 
     const invalidDevice = await fetch(`${endpoint}/select`, {
       method: 'POST',
-      headers: { ...accountHeaders, 'X-MNP-Selection-Device-Address': 'not-an-ip-address' },
+      headers: { ...headers, 'X-MNP-Selection-Device-Address': 'not-an-ip-address' },
     })
     assert.equal(invalidDevice.status, 400)
     assert.equal((await invalidDevice.json()).code, 'MNP_SELECTION_DEVICE_ADDRESS_INVALID')
 
-    const noMatchingView = await fetch(`${endpoint}/select`, { method: 'POST', headers: accountHeaders })
+    const noMatchingView = await fetch(`${endpoint}/select`, { method: 'POST', headers })
     assert.equal(noMatchingView.status, 409)
     assert.equal((await noMatchingView.json()).code, 'MNP_MATCHING_VIEW_NOT_CONNECTED')
 
@@ -200,25 +253,32 @@ test('AionUi 대화 조회와 화면 선택은 연결된 카드 및 같은 계�
     await readUntil(remoteReader, /"type":"connected"/)
     await readUntil(otherAccountReader, /"type":"connected"/)
 
-    lookup = await (await fetch(endpoint, { headers: accountHeaders })).json()
+    lookup = await (await fetch(endpoint, { headers })).json()
     assert.equal(lookup.selectionAvailable, true)
     assert.equal(lookup.matchingViewCount, 1)
     assert.equal(lookup.localSelectionAvailable, true)
     assert.equal(lookup.localViewCount, 1)
 
-    const remoteLookup = await (await fetch(endpoint, { headers: remoteAccountHeaders })).json()
+    for (const serverOwnedConversationId of [cardOwnerConversationId, attributionConversationId]) {
+      const fallbackLookup = await (await fetch(endpointFor(serverOwnedConversationId), { headers })).json()
+      assert.equal(fallbackLookup.selectionAvailable, true)
+      assert.equal(fallbackLookup.matchingViewCount, 1)
+    }
+
+    const remoteLookup = await (await fetch(endpoint, { headers: remoteHeaders })).json()
     assert.equal(remoteLookup.selectionAvailable, true)
     assert.equal(remoteLookup.matchingViewCount, 1)
 
     const remoteSelectionResponse = await fetch(`${endpoint}/select`, {
       method: 'POST',
-      headers: remoteAccountHeaders,
+      headers: remoteHeaders,
     })
     assert.equal(remoteSelectionResponse.status, 200)
     const remoteSelection = await remoteSelectionResponse.json()
     assert.equal(remoteSelection.selected, true)
     assert.equal(remoteSelection.deliveredClientCount, 1)
     assert.deepEqual(remoteSelection.target, lookup.target)
+    assert.doesNotMatch(JSON.stringify(remoteSelection), /user-admin|10\.77\.15\.55|selectionDeviceKey|recordedStartedBy/)
 
     const remoteEvents = await readUntil(remoteReader, new RegExp(remoteSelection.requestedAt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
     assert.match(remoteEvents, /"type":"ai-conversation-selection-requested"/)
@@ -235,10 +295,21 @@ test('AionUi 대화 조회와 화면 선택은 연결된 카드 및 같은 계�
     assert.match(localEvents, new RegExp(`"cardId":"${cardId}"`))
     assert.doesNotMatch(localEvents, new RegExp(remoteSelection.requestedAt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
 
+    const mismatchingSelection = await fetch(`${endpoint}/select`, {
+      method: 'POST',
+      headers: { ...headers, 'X-MNP-AI-Editor-Id': 'user-public-viewer' },
+    })
+    assert.equal(mismatchingSelection.status, 403)
+    const mismatchingSelectionBody = await mismatchingSelection.json()
+    assert.equal(mismatchingSelectionBody.code, 'MNP_SELECTION_ACCOUNT_MISMATCH')
+    assert.doesNotMatch(JSON.stringify(mismatchingSelectionBody), /user-admin|user-public-viewer/)
+
     const unexpectedRemoteEvents = await readFor(remoteReader, 250)
-    assert.doesNotMatch(unexpectedRemoteEvents, new RegExp(localSelection.requestedAt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    assert.doesNotMatch(unexpectedRemoteEvents, /"type":"ai-conversation-selection-requested"/)
     const otherAccountEvents = await readFor(otherAccountReader, 250)
     assert.doesNotMatch(otherAccountEvents, /"type":"ai-conversation-selection-requested"/)
+    const unexpectedLocalEvents = await readFor(localReader, 250)
+    assert.doesNotMatch(unexpectedLocalEvents, /"type":"ai-conversation-selection-requested"/)
 
     await localReader.cancel()
     await remoteReader.cancel()

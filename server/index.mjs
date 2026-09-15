@@ -635,6 +635,7 @@ function rememberAiConversationOrigin(value) {
     const enriched = {
       ...existing,
       homeMachineId: existing.homeMachineId || origin.homeMachineId,
+      startedBy: existing.startedBy || origin.startedBy,
       ...(origin.workspace ? { workspace: origin.workspace } : {}),
       ...(origin.workspacePoolId ? { workspacePoolId: origin.workspacePoolId } : {}),
     }
@@ -645,7 +646,7 @@ function rememberAiConversationOrigin(value) {
   return origin
 }
 
-async function resolveAiConversationNavigationTarget(conversationId) {
+async function resolveAiConversationNavigation(conversationId) {
   const normalizedConversationId = String(conversationId ?? '').trim()
   const origin = aiConversationOrigins.get(normalizedConversationId)
   if (!origin) return null
@@ -653,12 +654,25 @@ async function resolveAiConversationNavigationTarget(conversationId) {
   if (!map || map.trashedAt) return null
   const card = map.nodes.find((node) => node.id === origin.cardId)
   if (!card || !isAiConversationLinked(card.data, normalizedConversationId)) return null
+  const conversationLink = aiConversationLinksFromData(card.data)
+    .find((link) => link.conversationId === normalizedConversationId)
+  const persistentAttribution = aiConversationAttributions.get(conversationAttributionKey(map.id, card.id))
+  const attributedStartedBy = persistentAttribution?.conversationId === normalizedConversationId
+    ? String(persistentAttribution.startedBy ?? '').trim().slice(0, 120) || null
+    : null
+  const recordedStartedBy = String(origin.startedBy ?? '').trim().slice(0, 120)
+    || String(conversationLink?.startedBy?.id ?? '').trim().slice(0, 120)
+    || attributedStartedBy
+    || null
   return {
-    mapId: map.id,
-    documentTitle: map.title,
-    cardId: card.id,
-    cardTitle: String(card.data?.label ?? '').trim() || '제목 없는 카드',
-    archived: Boolean(map.archivedAt),
+    target: {
+      mapId: map.id,
+      documentTitle: map.title,
+      cardId: card.id,
+      cardTitle: String(card.data?.label ?? '').trim() || '제목 없는 카드',
+      archived: Boolean(map.archivedAt),
+    },
+    recordedStartedBy,
   }
 }
 
@@ -673,8 +687,9 @@ function aiConversationSelectionDeviceKey(address) {
     : null
 }
 
-function aiConversationSelectionIdentity(request) {
-  const editorId = integrationRequestScope(request).editorId
+function aiConversationSelectionIdentity(request, recordedStartedBy = null) {
+  const claimedEditorId = integrationRequestScope(request).editorId
+  const editorId = recordedStartedBy || claimedEditorId || null
   const account = editorId
     ? users.find((candidate) => candidate.id === editorId && candidate.active !== false && canEdit(candidate)) ?? null
     : null
@@ -685,6 +700,7 @@ function aiConversationSelectionIdentity(request) {
   return {
     editorId,
     account,
+    accountMismatch: Boolean(recordedStartedBy && claimedEditorId && recordedStartedBy !== claimedEditorId),
     deviceKey: aiConversationSelectionDeviceKey(deviceAddress),
     invalidForwardedAddress: Boolean(forwardedAddressValue && !deviceAddress),
   }
@@ -6798,8 +6814,27 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       if ((request.method === 'POST') !== selectionRequested) {
         return sendJson(response, 405, { error: '지원하지 않는 요청입니다.' })
       }
-      const target = await resolveAiConversationNavigationTarget(conversationId)
-      const selectionIdentity = aiConversationSelectionIdentity(request)
+      const navigation = await resolveAiConversationNavigation(conversationId)
+      const target = navigation?.target ?? null
+      const selectionIdentity = aiConversationSelectionIdentity(request, navigation?.recordedStartedBy)
+      if (selectionIdentity.accountMismatch) {
+        return sendJson(response, 403, {
+          error: '요청에 포함된 MindNProgress 계정이 대화 연결 기록의 계정과 일치하지 않습니다.',
+          code: 'MNP_SELECTION_ACCOUNT_MISMATCH',
+        })
+      }
+      if (selectionIdentity.invalidForwardedAddress) {
+        return sendJson(response, 400, {
+          error: 'AionUi 사용 디바이스의 접속 주소가 올바르지 않습니다.',
+          code: 'MNP_SELECTION_DEVICE_ADDRESS_INVALID',
+        })
+      }
+      if (!selectionIdentity.deviceKey) {
+        return sendJson(response, 400, {
+          error: 'AionUi와 MindNProgress가 같은 디바이스인지 확인할 수 없습니다.',
+          code: 'MNP_SELECTION_DEVICE_REQUIRED',
+        })
+      }
       if (!selectionRequested) {
         const localViewCount = localEventClientCount()
         const matchingViewCount = matchingAiConversationSelectionClientCount(selectionIdentity)
@@ -6816,9 +6851,15 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
             : 'MindNProgress 카드에 연결된 대화를 찾을 수 없습니다.',
         })
       }
+      if (!target) {
+        return sendJson(response, 404, {
+          error: 'MindNProgress 카드에 연결된 대화를 찾을 수 없습니다.',
+          code: 'MNP_AI_CONVERSATION_NOT_FOUND',
+        })
+      }
       if (!selectionIdentity.editorId) {
         return sendJson(response, 400, {
-          error: '같은 계정을 확인할 MindNProgress 사용자 ID가 필요합니다.',
+          error: '대화 연결 기록에서 MindNProgress 계정을 확인할 수 없습니다.',
           code: 'MNP_SELECTION_ACCOUNT_REQUIRED',
         })
       }
@@ -6826,24 +6867,6 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         return sendJson(response, 403, {
           error: '선택을 요청한 MindNProgress 계정을 사용할 수 없거나 편집 권한이 없습니다.',
           code: 'MNP_SELECTION_ACCOUNT_UNAVAILABLE',
-        })
-      }
-      if (selectionIdentity.invalidForwardedAddress) {
-        return sendJson(response, 400, {
-          error: 'AionUi 사용 디바이스의 접속 주소가 올바르지 않습니다.',
-          code: 'MNP_SELECTION_DEVICE_ADDRESS_INVALID',
-        })
-      }
-      if (!selectionIdentity.deviceKey) {
-        return sendJson(response, 400, {
-          error: 'AionUi와 MindNProgress가 같은 디바이스인지 확인할 수 없습니다.',
-          code: 'MNP_SELECTION_DEVICE_REQUIRED',
-        })
-      }
-      if (!target) {
-        return sendJson(response, 404, {
-          error: 'MindNProgress 카드에 연결된 대화를 찾을 수 없습니다.',
-          code: 'MNP_AI_CONVERSATION_NOT_FOUND',
         })
       }
       const requestedAt = new Date().toISOString()

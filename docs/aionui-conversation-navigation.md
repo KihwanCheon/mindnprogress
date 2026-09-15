@@ -10,11 +10,24 @@ AionUi 백엔드는 현재 대화가 MindNProgress 카드에 연결되어 있는
 
 ```http
 Authorization: Bearer {integration-token}
-X-MNP-AI-Editor-Id: {현재 AionUi 사용자와 연결된 MindNProgress 사용자 ID}
 X-MNP-Selection-Device-Address: {AionUi 브라우저의 원본 접속 IP 주소}
 ```
 
-`X-MNP-AI-Editor-Id`는 활성화된 MindNProgress 편집자 또는 관리자 계정이어야 한다. AionUi 백엔드는 인증된 현재 사용자에 대응하는 ID를 서버 측에서 정해야 하며 브라우저가 보낸 임의 값을 그대로 전달하면 안 된다.
+선택 계정의 기준은 AionUi 계정이 아니라 MnP가 보유한 대화 연결 기록이다. MnP는 연결이 가리키는 문서·카드를 확인한 뒤 다음 순서로 `startedBy`를 해석한다.
+
+1. `_ai-conversation-origins.json`의 해당 대화 원본
+2. 해당 카드 `aiConversations`의 동일 대화 링크
+3. 문서·카드·대화 ID가 모두 일치하는 영속 대화 귀속 정보
+
+결정된 사용자는 현재도 활성 상태인 MnP 편집자 또는 관리자여야 한다. 계정 ID는 응답에 포함하지 않는다.
+
+`X-MNP-AI-Editor-Id`는 선택 필수값이 아니다. AionCore가 인증 사용자와 MnP 계정 사이의 별도 신뢰 가능한 매핑을 보유한 경우에만 일치 확인용으로 보낼 수 있다.
+
+```http
+X-MNP-AI-Editor-Id: {신뢰 가능한 매핑으로 확인한 MnP 사용자 ID}
+```
+
+MnP 대화 연결 기록과 이 헤더가 모두 있으면 두 값이 같아야 한다. 다르면 조회와 선택 모두 `403 MNP_SELECTION_ACCOUNT_MISMATCH`로 거부한다. 연결 기록에 계정이 없을 때는 신뢰 가능한 헤더를 대체값으로 사용할 수 있지만, 현재 AionCore처럼 그런 매핑이 없다면 헤더를 생략해야 한다. 브라우저 입력, 프롬프트 문자열, AionUi 계정 ID 또는 이메일 추정값을 사용하면 안 된다.
 
 `X-MNP-Selection-Device-Address`도 AionUi 백엔드가 요청 소켓 또는 신뢰하는 프록시 체인에서 구한 원본 브라우저 주소를 사용한다. AionUi 백엔드가 사용자 디바이스에서 직접 실행되어 MindNProgress를 호출한다면 이 헤더를 생략할 수 있고, 이때 MindNProgress는 요청 소켓 주소를 사용한다. 중앙 AionUi 서버가 외부 브라우저 요청을 중계한다면 반드시 이 헤더를 보낸다.
 
@@ -28,7 +41,7 @@ GET /api/integrations/aionui/conversations/{conversationId}/mindnprogress
 
 카드에 연결된 대화는 `exists: true`와 현재 문서·카드 정보를 반환한다. 연결되지 않은 대화도 예상 가능한 조회 결과이므로 HTTP 200과 `exists: false`, `target: null`을 반환한다. AionUi 아이콘 표시 여부는 `exists`로 판단한다.
 
-`selectionAvailable`은 대화 연결이 존재하고 현재 요청의 계정·디바이스와 일치하는 MindNProgress SSE 화면이 하나 이상 연결되어 있음을 뜻한다. `matchingViewCount`는 그 화면 수다. 기존 `localSelectionAvailable`과 `localViewCount`는 이전 AionUi 구현과의 응답 호환을 위해 유지하지만 새 코드의 선택 가능 여부 판정에는 사용하지 않는다.
+`selectionAvailable`은 대화 연결이 존재하고 서버 기록에서 결정한 계정·현재 요청 디바이스와 일치하는 MindNProgress SSE 화면이 하나 이상 연결되어 있음을 뜻한다. `matchingViewCount`는 그 화면 수다. `X-MNP-AI-Editor-Id`가 없어도 서버 기록에 유효한 `startedBy`가 있으면 두 값을 계산한다. 기존 `localSelectionAvailable`과 `localViewCount`는 이전 AionUi 구현과의 응답 호환을 위해 유지하지만 새 코드의 선택 가능 여부 판정에는 사용하지 않는다.
 
 ```json
 {
@@ -57,17 +70,18 @@ POST /api/integrations/aionui/conversations/{conversationId}/mindnprogress/selec
 
 MindNProgress는 현재 SSE 연결 가운데 다음 조건을 모두 만족하는 화면에만 선택 이벤트를 보낸다.
 
-- SSE 화면의 로그인 계정 ID가 `X-MNP-AI-Editor-Id`와 같다.
+- SSE 화면의 로그인 계정 ID가 MnP의 대화 연결 기록에서 결정한 계정과 같다.
 - SSE 화면과 AionUi 브라우저의 정규화된 원본 접속 주소가 같다.
 
 성공 응답은 `selected: true`, 선택 대상, 실제 이벤트를 받은 `deliveredClientCount`를 포함한다. MnP 화면은 이벤트를 받으면 문서와 카드 상세를 열고 카드 노드 선택 상태도 마우스로 클릭했을 때와 동일하게 갱신한다.
 
 주요 실패 응답은 다음과 같다.
 
-- `400 MNP_SELECTION_ACCOUNT_REQUIRED`: MnP 사용자 ID가 없음
+- `400 MNP_SELECTION_ACCOUNT_REQUIRED`: 대화 연결 기록과 신뢰 가능한 선택 헤더 어디에서도 MnP 계정을 결정할 수 없음
 - `400 MNP_SELECTION_DEVICE_ADDRESS_INVALID`: 전달한 원본 접속 주소가 IP 주소가 아님
 - `400 MNP_SELECTION_DEVICE_REQUIRED`: 비교할 디바이스 주소를 확인할 수 없음
 - `403 MNP_SELECTION_ACCOUNT_UNAVAILABLE`: 계정이 없거나 비활성 또는 편집 권한 없음
+- `403 MNP_SELECTION_ACCOUNT_MISMATCH`: 선택 헤더와 MnP 대화 연결 기록의 계정이 다름. GET과 POST 모두 해당
 - `404 MNP_AI_CONVERSATION_NOT_FOUND`: 연결된 문서·카드를 찾을 수 없음
 - `409 MNP_MATCHING_VIEW_NOT_CONNECTED`: 같은 계정·디바이스의 MnP 화면이 현재 연결되어 있지 않음
 
