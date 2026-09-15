@@ -8,10 +8,19 @@ import { buildDoorayExecutionHandoff, currentDoorayExecution, doorayExecutionTar
 
 const activeStates = new Set(['routing', 'reviewing', 'waiting-target'])
 const finishableStates = new Set(['proposal', 'needs-input', 'needs-approval', 'approved', 'failed'])
+const maxAutomaticRestartRecoveries = 3
 const digest = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const text = (value) => typeof value === 'string' ? value : ''
 const clip = (value, limit = 3000) => text(value).length > limit ? `${value.slice(0, limit)}\n[이후 내용 생략]` : text(value)
 const error = (message, status = 400) => Object.assign(new Error(message), { status, doorayResponseError: true })
+const restartInterruptedDispatch = (dispatch) => dispatch?.state === 'recovery_required'
+  || (dispatch?.state === 'failed' && text(dispatch.errorMessage).trim() === 'interrupted_by_restart')
+const storedRestartInterruption = (job) => job?.status === 'failed' && job.operation?.dispatchAttempted === true
+  && ['router', 'review'].includes(job.operation.kind) && text(job.error).trim() === 'interrupted_by_restart'
+  && Number(job.restartRecovery?.count ?? 0) < maxAutomaticRestartRecoveries && !job.restartRecovery?.exhausted
+const finishRestartRecovery = (job) => job.restartRecovery?.active ? {
+  restartRecovery: { ...job.restartRecovery, active: false, completedAt: new Date().toISOString() },
+} : {}
 
 export async function readDoorayResponseSource(item, config, requesterOptions) {
   const { request } = createDoorayRequester(config, requesterOptions)
@@ -170,7 +179,8 @@ export function publicDoorayResponse(job) {
     createdAt: job.createdAt, updatedAt: job.updatedAt, conversationId: handoff?.conversationId ?? job.review?.conversationId ?? job.router?.conversationId ?? null,
     homeMachineId: handoff?.machineId ?? job.review?.machineId ?? job.settings.machineId,
     homeMachineRole: handoff?.homeMachineRole ?? job.operation?.settings?.machineRole ?? job.settings.machineRole ?? 'main',
-    canRetry: job.status === 'failed' && Boolean(job.operation?.conversationId || job.operation?.dispatchAttempted),
+    canRetry: job.status === 'failed' && !job.restartRecovery?.exhausted && Boolean(job.operation?.conversationId || job.operation?.dispatchAttempted),
+    recoveringAfterRestart: Boolean(job.restartRecovery?.active && !job.completedAt),
     completedAt: job.completedAt ?? null, archiveStatus: job.archiveStatus ?? null, archiveError: job.archiveError ?? '',
     handedOffAt: job.handoff && job.handoff.attempt === job.attempt ? job.handoff.sentAt ?? null : null,
     decision: job.decision ?? null, proposalRevision: doorayProposalRevision(job), approval: job.approval
@@ -371,28 +381,48 @@ export function createDoorayResponseService(deps) {
       dispatch = await deps.dispatch(operation)
     }
     if (dispatch.conversationId !== operation.conversationId) throw error('AI 실행의 대화가 저장된 대상과 다릅니다.', 409)
-    if (['waiting_resume', 'recovery_required', 'failed'].includes(dispatch.state)) throw error(dispatch.errorMessage || 'AI 대화가 중지되었거나 실행에 실패했습니다. 연결된 대화에서 확인해 주세요.', 409)
+    let result = null
+    if (restartInterruptedDispatch(dispatch)) {
+      result = parseDoorayAiResult(await deps.messages(operation), operation.id)
+      if (!result) {
+        const count = Number(job.restartRecovery?.count ?? 0)
+        const now = new Date().toISOString()
+        if (count >= maxAutomaticRestartRecoveries) {
+          await patch(user.id, job.id, { status: 'failed',
+            error: `AI 제안이 서버 재시작으로 ${maxAutomaticRestartRecoveries}회 중단되었습니다. 제안 대화를 확인하거나 추가 정보를 입력해 새 제안을 요청해 주세요.`,
+            restartRecovery: { ...job.restartRecovery, count, active: false, exhausted: true, failedAt: now } })
+          return
+        }
+        await patch(user.id, job.id, { operation: null, attempt: (job.attempt ?? 0) + 1, error: '',
+          restartRecovery: { ...job.restartRecovery, count: count + 1, active: true, exhausted: false,
+            startedAt: job.restartRecovery?.startedAt ?? now, retriedAt: now, previousOperationId: operation.id } })
+        return
+      }
+    }
+    if (['waiting_resume', 'failed'].includes(dispatch.state)) throw error(dispatch.errorMessage || 'AI 대화가 중지되었거나 실행에 실패했습니다. 연결된 대화에서 확인해 주세요.', 409)
     if (['starting', 'waiting_resource', 'running'].includes(dispatch.state)) return
-    if (dispatch.state !== 'completed') throw error('AI 실행 상태를 확인할 수 없습니다.', 409)
-    const result = parseDoorayAiResult(await deps.messages(operation), operation.id)
+    if (dispatch.state !== 'completed' && !result) throw error('AI 실행 상태를 확인할 수 없습니다.', 409)
+    result ??= parseDoorayAiResult(await deps.messages(operation), operation.id)
     if (!result) throw error('이번 요청의 AI 결과를 확인하지 못했습니다. 대화에서 답변을 확인한 후 상태를 다시 확인해 주세요.', 409)
     if (operation.kind === 'review') {
       if (!text(result.proposal).trim()) throw error('AI가 대응 제안을 반환하지 않았습니다.', 409)
-      await patch(user.id, job.id, { ...readDoorayDecision(result.decision, 'proposal'), proposal: result.proposal, error: '' })
+      await patch(user.id, job.id, { ...readDoorayDecision(result.decision, 'proposal'), proposal: result.proposal, error: '', ...finishRestartRecovery(job) })
       return
     }
     if (result.action === 'inspect') {
       const maps = await deps.loadMaps()
       const ids = Array.isArray(result.inspectMapIds) ? [...new Set(result.inspectMapIds)].filter((id) => maps.some((map) => map.id === id)).slice(0, 3) : []
       if (job.round >= 2 || !ids.length) {
-        await patch(user.id, job.id, { status: 'needs-input', decision: null, proposal: text(result.proposal) || '담당 범위를 확정하지 못했습니다. 관련 문서나 카드를 지정해 주세요.' })
+        await patch(user.id, job.id, { status: 'needs-input', decision: null,
+          proposal: text(result.proposal) || '담당 범위를 확정하지 못했습니다. 관련 문서나 카드를 지정해 주세요.', ...finishRestartRecovery(job) })
       } else {
         await patch(user.id, job.id, { operation: null, round: job.round + 1, inspectedMapIds: ids })
       }
     } else if (result.action === 'clarify') {
       const outcome = readDoorayDecision(result.decision, 'needs-input')
       if (outcome.status === 'needs-approval' && !text(result.proposal).trim()) throw error('승인할 제안 본문이 없습니다.', 409)
-      await patch(user.id, job.id, { ...outcome, proposal: text(result.proposal) || text(result.reason) || '담당 문서·카드에 대한 추가 정보가 필요합니다.' })
+      await patch(user.id, job.id, { ...outcome,
+        proposal: text(result.proposal) || text(result.reason) || '담당 문서·카드에 대한 추가 정보가 필요합니다.', ...finishRestartRecovery(job) })
     } else {
       const route = validateDoorayRoute(result, await deps.loadMaps())
       await patch(user.id, job.id, { route, operation: null, status: 'reviewing' })
@@ -405,7 +435,13 @@ export function createDoorayResponseService(deps) {
     try {
       const user = await deps.user(userId)
       if (!user) return
-      const job = (await read(userId)).jobs.find((entry) => entry.id === id)
+      let job = (await read(userId)).jobs.find((entry) => entry.id === id)
+      if (storedRestartInterruption(job)) {
+        const now = new Date().toISOString()
+        job = await patch(userId, id, { status: job.operation.kind === 'review' ? 'reviewing' : 'routing', error: '',
+          restartRecovery: { ...job.restartRecovery, count: Number(job.restartRecovery?.count ?? 0), active: true,
+            exhausted: false, startedAt: job.restartRecovery?.startedAt ?? now, detectedAt: now } })
+      }
       if (job?.route && ['reviewing', 'waiting-target'].includes(job.status)) {
         targetKey = `${job.route.mapId}:${job.route.cardId}`
         if (reviewOwners.has(targetKey) && reviewOwners.get(targetKey) !== id) {
@@ -422,7 +458,12 @@ export function createDoorayResponseService(deps) {
         const user = await deps.user(userId)
         if (latest && user && await resetIfDeleted(user, latest).catch(() => false)) return
       }
-      await patch(userId, id, { status: 'failed', error: failure.message ?? 'AI 대응 처리에 실패했습니다.' }).catch(() => {})
+      const latest = (await read(userId)).jobs.find((entry) => entry.id === id)
+      const restartRecovery = latest?.restartRecovery?.active
+        ? { ...latest.restartRecovery, active: false, failedAt: new Date().toISOString() }
+        : latest?.restartRecovery
+      await patch(userId, id, { status: 'failed', error: failure.message ?? 'AI 대응 처리에 실패했습니다.',
+        ...(restartRecovery ? { restartRecovery } : {}) }).catch(() => {})
     } finally {
       if (targetKey && reviewOwners.get(targetKey) === id) {
         const latest = (await read(userId)).jobs.find((entry) => entry.id === id)
@@ -617,6 +658,7 @@ export function createDoorayResponseService(deps) {
       await update(userId, (state) => {
         const job = state.jobs.find((entry) => entry.id === id)
         if (!job) throw error('AI 대응 요청을 찾을 수 없습니다.', 404)
+        if (job.restartRecovery?.exhausted) throw error('재시작 자동 복구 한도를 넘었습니다. 추가 정보를 입력해 새 제안을 요청해 주세요.', 409)
         if (job.status !== 'failed' || !(job.operation?.conversationId || job.operation?.dispatchAttempted)) throw error('상태를 다시 확인할 실행이 없습니다.', 409)
         job.status = job.operation.kind === 'router' ? 'routing' : 'reviewing'
         job.error = ''
@@ -640,7 +682,8 @@ export function createDoorayResponseService(deps) {
         const sessions = current.conversationPolicy === 'dedicated' ? current.sessions : [...(current.sessions ?? []), ...conversations(current)]
         Object.assign(current, { hint: hint.trim(), history, approvalHistory, approval: null, decision: null, sessions, router: current.conversationPolicy === 'dedicated' ? current.router : null,
           conversationPolicy: 'dedicated', status: 'routing', attempt: (current.attempt ?? 0) + 1,
-          round: 0, inspectedMapIds: [], route: null, review: null, operation: null, proposal: '', error: '', updatedAt: new Date().toISOString() })
+          round: 0, inspectedMapIds: [], route: null, review: null, operation: null, proposal: '', error: '', restartRecovery: null,
+          updatedAt: new Date().toISOString() })
         return current
       })
       void tick(userId, id)
@@ -654,7 +697,9 @@ export function createDoorayResponseService(deps) {
         const tasks = []
         for (const file of files.filter((file) => /^[a-zA-Z0-9_-]+\.json$/.test(file))) {
           const userId = file.slice(0, -5)
-          for (const job of (await read(userId)).jobs.filter((job) => activeStates.has(job.status))) tasks.push([userId, job.id, Boolean(job.operation?.kind === 'review'), job.createdAt])
+          for (const job of (await read(userId)).jobs.filter((job) => activeStates.has(job.status) || storedRestartInterruption(job))) {
+            tasks.push([userId, job.id, Boolean(job.operation?.kind === 'review'), job.createdAt])
+          }
         }
         tasks.sort((a, b) => Number(b[2]) - Number(a[2]) || a[3].localeCompare(b[3]))
         // 특정 계정의 긴 요청이 다른 계정의 상태 갱신을 막지 않도록 제한된 동시성으로 실행한다.

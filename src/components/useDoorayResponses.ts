@@ -17,6 +17,7 @@ export type Options = { machineId: string; machineRole?: 'main' | 'sub'; machine
 export type DoorayResponseJob = {
   id: string; itemKey: string; postId: string; subject: string; sourceUrl: string; status: string; proposal: string; error: string
   createdAt: string; updatedAt: string; conversationId: string | null; homeMachineRole: 'main' | 'sub'; canRetry: boolean
+  recoveringAfterRestart?: boolean
   completedAt?: string | null; archiveStatus?: 'pending' | 'done' | 'warning' | null; archiveError?: string
   decision?: DoorayDecision | null; proposalRevision?: string; approval?: DoorayApproval | null; approvalHistory?: DoorayApproval[]
   route: { action: string; mapId: string; cardId: string; documentTitle: string; cardTitle: string; reason: string; requestSummary: string } | null
@@ -150,3 +151,5 @@ export function useDoorayResponses(clientId: string, userId: string) {
   }
   return { jobs, error, notice, selectedId, setSelectedId, open, setOpen, showCompleted, setShowCompleted, pendingKeys, settings, saveSettings, request, retry, refine, complete, approve, load, requestJson }
 }
+export const doorayResponseStatusLabel = (job: Pick<DoorayResponseJob, 'status' | 'recoveringAfterRestart'>) =>
+  job.recoveringAfterRestart ? '재시작 후 제안 복구 중' : doorayResponseStatus[job.status] ?? job.status

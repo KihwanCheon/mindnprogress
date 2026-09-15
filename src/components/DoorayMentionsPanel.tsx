@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './DoorayMentionsPanel.css'
 import { DoorayResponseInbox } from './DoorayResponseInbox'
 import type { DoorayHandoffLaunch } from './DoorayResponseHandoff'
-import { doorayResponseStatus, useDoorayResponses, type DoorayResponseJob } from './useDoorayResponses'
+import { doorayResponseStatusLabel, useDoorayResponses, type DoorayResponseJob } from './useDoorayResponses'
 
 export type DoorayMentionKind = 'mention-comment' | 'mention-body' | 'assigned' | 'cc' | 'related-comment'
 
@@ -810,7 +810,7 @@ export function DoorayMentionsPanel({ clientId, userId, aiRequestOpen = false, o
                         <button type="button" className="dooray-response-request" disabled={responses.pendingKeys.has(item.key)}
                           onClick={() => void responses.request(item.key)}>
                           {responses.pendingKeys.has(item.key) ? '요청 준비 중…' : 'AI 대응 제안'}
-                          {responses.jobs.find((job) => job.itemKey === item.key) && ` · ${doorayResponseStatus[responses.jobs.find((job) => job.itemKey === item.key)!.status] ?? ''}`}
+                          {responses.jobs.find((job) => job.itemKey === item.key) && ` · ${doorayResponseStatusLabel(responses.jobs.find((job) => job.itemKey === item.key)!)}`}
                         </button>
                       </div>
                     </li>

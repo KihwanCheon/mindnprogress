@@ -94,7 +94,7 @@ async function fixture(t, overrides = {}) {
     messages: async (op) => [assistant({ requestId: op.id, ...(op.kind === 'router' ? route : { proposal: '변경 범위와 검증 조건 제안' }) })],
     ...overrides,
   }
-  return { deps, counts, operations, service: createDoorayResponseService(deps) }
+  return { directory, deps, counts, operations, service: createDoorayResponseService(deps) }
 }
 async function until(service, userId, expected, max = 50) {
   for (let i = 0; i < max; i++) {
@@ -130,6 +130,114 @@ test('서버 재시작 후 기존 실행을 조회하고 새 AI 실행을 중복
   assert.equal(job.route.cardId, 'task1')
   assert.equal(counts.create, 2)
   assert.equal(counts.dispatch, 2)
+})
+
+test('재시작으로 중단됐어도 현재 실행의 구조화 결과가 남아 있으면 재전송 없이 회수한다', async (t) => {
+  const { service, deps, counts } = await fixture(t)
+  const originalGetDispatch = deps.getDispatch
+  let interruptedOperationId = ''
+  deps.getDispatch = async (op) => {
+    if (op.kind === 'router' && !interruptedOperationId) interruptedOperationId = op.id
+    if (op.id === interruptedOperationId) {
+      return { conversationId: op.conversationId, state: 'recovery_required', errorMessage: 'interrupted_by_restart' }
+    }
+    return originalGetDispatch(op)
+  }
+
+  await service.start({ id: 'user1' }, item)
+  const [job] = await until(service, 'user1', 'proposal')
+  assert.equal(job.proposal, '변경 범위와 검증 조건 제안')
+  assert.equal(job.recoveringAfterRestart, false)
+  assert.equal(counts.dispatch, 2, '완료 결과가 남은 라우터는 재전송하지 않아야 한다')
+})
+
+test('재시작 중단 실행에 구조화 결과가 없으면 같은 전용 대화에 새 실행 ID로 제안을 재요청한다', async (t) => {
+  const { service, deps, counts, operations } = await fixture(t)
+  const originalGetDispatch = deps.getDispatch
+  const originalMessages = deps.messages
+  let interruptedOperationId = ''
+  deps.getDispatch = async (op) => {
+    if (op.kind === 'router' && !interruptedOperationId) interruptedOperationId = op.id
+    if (op.id === interruptedOperationId) {
+      return { conversationId: op.conversationId, state: 'recovery_required', errorMessage: 'interrupted_by_restart' }
+    }
+    return originalGetDispatch(op)
+  }
+  deps.messages = async (op) => op.id === interruptedOperationId
+    ? [{ position: 'left', type: 'text', content: '승인 기록이 없어 아직 실행할 수 없습니다.' }]
+    : originalMessages(op)
+
+  await service.start({ id: 'user1' }, item)
+  const [job] = await until(service, 'user1', 'proposal')
+  assert.equal(job.proposal, '변경 범위와 검증 조건 제안')
+  assert.equal(job.recoveringAfterRestart, false)
+  assert.equal(counts.create, 2, '라우터와 담당 AI 전용 대화만 생성해야 한다')
+  assert.equal(counts.dispatch, 3, '중단된 라우터만 한 번 재전송해야 한다')
+  assert.equal(operations.size, 3)
+})
+
+test('이미 failed로 저장된 interrupted_by_restart 제안을 재시도 버튼 없이 자동 복구한다', async (t) => {
+  const { directory, service, deps, counts } = await fixture(t)
+  const originalDispatch = deps.dispatch
+  let dispatched
+  const dispatchedPromise = new Promise((resolve) => { dispatched = resolve })
+  deps.dispatch = async (op) => {
+    const result = await originalDispatch(op)
+    if (op.kind === 'router') dispatched()
+    return result
+  }
+  await service.start({ id: 'user1' }, item)
+  await dispatchedPromise
+  await new Promise(setImmediate)
+
+  const file = path.join(directory, 'user1.json')
+  const stored = await deps.read(file)
+  const interruptedOperationId = stored.jobs[0].operation.id
+  stored.jobs[0].status = 'failed'
+  stored.jobs[0].error = 'interrupted_by_restart'
+  await deps.write(file, stored)
+
+  const originalGetDispatch = deps.getDispatch
+  const originalMessages = deps.messages
+  deps.getDispatch = async (op) => op.id === interruptedOperationId
+    ? { conversationId: op.conversationId, state: 'recovery_required', errorMessage: 'interrupted_by_restart' }
+    : originalGetDispatch(op)
+  deps.messages = async (op) => op.id === interruptedOperationId
+    ? [{ position: 'left', type: 'text', content: '승인 후에만 진행할 수 있습니다.' }]
+    : originalMessages(op)
+
+  const restarted = createDoorayResponseService(deps)
+  const [job] = await until(restarted, 'user1', 'proposal')
+  assert.equal(job.proposal, '변경 범위와 검증 조건 제안')
+  assert.equal(job.recoveringAfterRestart, false)
+  assert.equal(counts.dispatch, 3)
+})
+
+test('사용자가 중단한 waiting_resume는 재시작 자동 복구 대상으로 해석하지 않는다', async (t) => {
+  const { service, deps, counts } = await fixture(t)
+  deps.getDispatch = async (op) => ({ conversationId: op.conversationId, state: 'waiting_resume', errorMessage: '사용자가 중단한 실행입니다.' })
+  await service.start({ id: 'user1' }, item)
+  const [failed] = await until(service, 'user1', 'failed')
+  assert.equal(failed.recoveringAfterRestart, false)
+  assert.equal(counts.dispatch, 1)
+  for (let i = 0; i < 3; i++) await service.poll()
+  assert.equal((await service.list('user1'))[0].status, 'failed')
+  assert.equal(counts.dispatch, 1)
+})
+
+test('재시작 중단이 3회 반복되면 자동 재전송을 중단하고 조치 방법을 안내한다', async (t) => {
+  const { service, deps, counts } = await fixture(t)
+  deps.getDispatch = async (op) => ({ conversationId: op.conversationId, state: 'recovery_required', errorMessage: 'interrupted_by_restart' })
+  deps.messages = async () => [{ position: 'left', type: 'text', content: '구조화되지 않은 중간 답변' }]
+
+  await service.start({ id: 'user1' }, item)
+  const [failed] = await until(service, 'user1', 'failed')
+  assert.match(failed.error, /3회/)
+  assert.equal(failed.canRetry, false)
+  assert.equal(failed.recoveringAfterRestart, false)
+  assert.equal(counts.create, 1)
+  assert.equal(counts.dispatch, 4)
+  await assert.rejects(service.retry('user1', failed.id), /복구 한도/)
 })
 
 test('AI 전송 응답 유실은 같은 실행 ID로 상태를 확인하여 회수한다', async (t) => {

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { availableAiRuntimeOptionId } from '../utils/aiRuntimeSelections.mjs'
-import { doorayResponseStatus, type Options, type DoorayResponseJob, type useDoorayResponses } from './useDoorayResponses'
+import { doorayResponseStatusLabel, type Options, type DoorayResponseJob, type useDoorayResponses } from './useDoorayResponses'
 import './DoorayResponseInbox.css'
 import { DoorayResponseHandoff, type DoorayHandoffLaunch } from './DoorayResponseHandoff'
 import { DoorayResponseDecision } from './DoorayResponseDecision'
@@ -105,10 +105,10 @@ export function DoorayResponseInbox({ response, onOpenConversation, onOpenCard, 
         {response.pendingKeys.size > 0 && <p role="status">선택한 Dooray 원문을 확인하고 AI 요청을 준비하는 중…</p>}
         {visibleJobs.length > 0 ? <>
           <label className="dooray-response-picker">대응 기록<select value={job?.id ?? ''} onChange={(event) => response.setSelectedId(event.target.value)}>
-            {visibleJobs.map((entry) => <option key={entry.id} value={entry.id}>{doorayResponseStatus[entry.status] ?? entry.status} · {entry.subject}</option>)}
+            {visibleJobs.map((entry) => <option key={entry.id} value={entry.id}>{doorayResponseStatusLabel(entry)} · {entry.subject}</option>)}
           </select></label>
           {job && <article aria-live="polite">
-            <div className="dooray-response-heading"><strong>{doorayResponseStatus[job.status] ?? job.status}</strong><a href={job.sourceUrl} target="_blank" rel="noopener noreferrer">Dooray 원문</a></div>
+            <div className="dooray-response-heading"><strong>{doorayResponseStatusLabel(job)}</strong><a href={job.sourceUrl} target="_blank" rel="noopener noreferrer">Dooray 원문</a></div>
             {job.route && <>
               <p><strong>{job.route.requestSummary}</strong></p>
               <button type="button" className="dooray-response-target" onClick={() => onOpenCard(job.route!.mapId, job.route!.cardId)}>{job.route.documentTitle} → {job.route.cardTitle}</button>
