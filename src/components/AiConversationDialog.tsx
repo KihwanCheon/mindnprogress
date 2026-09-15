@@ -102,12 +102,12 @@ function storeRuntimeSelections(value: ReturnType<typeof normalizeAiRuntimeSelec
   }
 }
 
-function readMcpSelections() {
+function readMcpSelections(fallback = new Set<string>()) {
   try {
     const value = JSON.parse(localStorage.getItem(mcpSelectionsStorageKey) ?? '[]') as unknown
     return new Set(Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string') : [])
   } catch {
-    return new Set<string>()
+    return new Set(fallback)
   }
 }
 
@@ -234,7 +234,8 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
           setThoughtLevel(availableAiRuntimeOptionId(initialAgent.thoughtLevels, savedAgentSelection.thoughtLevel, initialAgent.defaultThoughtLevel))
         }
         setSelectedSkillIds(new Set())
-        setSelectedMcpIds(new Set(body.mcpServers.filter((server) => server.required || savedMcpIds.has(server.id)).map((server) => server.id)))
+        // 현재 머신에 없는 ID도 보존한다. 표시와 실행 대상은 해당 머신의 목록에서만 고른다.
+        setSelectedMcpIds(savedMcpIds)
       })
       .catch((loadError) => {
         if (controller.signal.aborted) return
@@ -248,14 +249,6 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
     if (!options || !agentId) return
     persistRuntimeSelection(agentId, { modelId, mode, thoughtLevel })
   }, [agentId, mode, modelId, options, persistRuntimeSelection, thoughtLevel])
-
-  useEffect(() => {
-    if (!options) return
-    const selectedIds = options.mcpServers
-      .filter((server) => !server.required && selectedMcpIds.has(server.id))
-      .map((server) => server.id)
-    localStorage.setItem(mcpSelectionsStorageKey, JSON.stringify(selectedIds))
-  }, [options, selectedMcpIds])
 
   const selectedAgent = useMemo(() => options?.agents.find((agent) => agent.id === agentId) ?? null, [agentId, options])
   const selectedModel = selectedAgent?.models.find((model) => model.id === modelId)
@@ -287,6 +280,19 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
     setWorkspace(value)
     setWorkspaceExplicit(true)
     setWorkspaceSavedScope(null)
+  }
+
+  const toggleMcpSelection = (id: string) => {
+    if (loading || launching || !options || options.machineId !== machineId) return
+    const server = options.mcpServers.find((item) => item.id === id)
+    if (!server || server.required) return
+    // 옵션 로딩·머신 전환·연결 실패는 사용자 선택 변경이 아니다. 체크 조작에서만 저장한다.
+    const next = readMcpSelections(selectedMcpIds)
+    if (selectedMcpIds.has(id)) next.delete(id)
+    else next.add(id)
+    setSelectedMcpIds(next)
+    try { localStorage.setItem(mcpSelectionsStorageKey, JSON.stringify([...next])) }
+    catch { /* 저장소를 사용할 수 없어도 현재 대화의 선택은 유지한다. */ }
   }
 
   const changeMachine = (value: string) => {
@@ -644,7 +650,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
               <div className="ai-capability-list ai-mcp-capability-list" aria-label="사용할 MCP 도구 선택">
                 {options.mcpServers.map((server) => (
                   <label key={server.id} title={server.description}>
-                    <input type="checkbox" checked={server.required || selectedMcpIds.has(server.id)} disabled={server.required} onChange={() => toggleSelection(setSelectedMcpIds, server.id)} />
+                    <input type="checkbox" checked={server.required || selectedMcpIds.has(server.id)} disabled={server.required || launching} onChange={() => toggleMcpSelection(server.id)} />
                     <span>
                       <strong>{server.name}{server.required ? ' · 필수' : ''}</strong>
                       <small>{server.toolCount > 0 ? `${server.toolCount}개 도구` : server.description || '도구 정보 없음'}</small>

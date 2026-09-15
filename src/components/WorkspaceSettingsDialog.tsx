@@ -20,6 +20,10 @@ export function WorkspaceSettingsDialog({ userId, mapId = '', groupId = '', mach
   const [error, setError] = useState('')
   const [savedNotice, setSavedNotice] = useState('')
   const historyState = useAiWorkspaceHistory(userId, workspaceHistory === undefined ? context?.machineId ?? '' : '')
+  const busyRef = useRef(busy)
+  const onCloseRef = useRef(onClose)
+  busyRef.current = busy
+  onCloseRef.current = onClose
   const [directory, setDirectory] = useState<{ path: string; parent: string | null; entries: { name: string; path: string }[] } | null>(null)
   useEffect(() => {
     let active = true
@@ -35,7 +39,7 @@ export function WorkspaceSettingsDialog({ userId, mapId = '', groupId = '', mach
     const previous = document.activeElement as HTMLElement | null
     dialog.current?.focus()
     const keydown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); if (!busy) onClose() }
+      if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); if (!busyRef.current) onCloseRef.current() }
       if (event.key === 'Tab') {
         const elements = [...(dialog.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex="0"]') ?? [])]
         const first = elements[0], last = elements.at(-1)
@@ -45,7 +49,8 @@ export function WorkspaceSettingsDialog({ userId, mapId = '', groupId = '', mach
     }
     window.addEventListener('keydown', keydown, true)
     return () => { window.removeEventListener('keydown', keydown, true); previous?.focus() }
-  }, [busy, onClose])
+    // 부모 화면이 단축키 상태로 다시 렌더링되어도 입력 포커스를 팝업 컨테이너로 되돌리지 않는다.
+  }, [])
   async function browse(value: string) {
     setError(''); setBusy(true)
     try { setDirectory(await jsonRequest(`/api/integrations/aionui/directories?${new URLSearchParams({ path: value })}`)) }

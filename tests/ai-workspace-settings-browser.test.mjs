@@ -36,7 +36,8 @@ window.fetch = async (url, init = {}) => {
   } else if (url.startsWith('/api/integrations/aionui/options')) {
     const machineId=new URL(url,location.origin).searchParams.get('machineId') || a.optionOverrides?.machineId || 'fixture';
     const ctx=a.machineContexts?.[machineId] || a.workspaceContext || workspaceContext;
-    body = {...options,...a.optionOverrides,...(a.machineContexts?{machineId,machineRole:ctx.machineRole,machineLabel:machineId,machines:ctx.machines}:{}),workspaceContext:ctx};
+    body = {...options,...a.optionOverrides,...(a.machineContexts?{machineId,machineRole:ctx.machineRole,machineLabel:machineId,machines:ctx.machines}:{}),...(a.machineMcpServers?{mcpServers:a.machineMcpServers[machineId]||[]}:{}),workspaceContext:ctx};
+    if(a.optionsFail) return new Response(JSON.stringify({...body,mcpServers:[],error:'테스트 머신 연결 실패'}),{status:503});
   }
   else if (url.startsWith('/api/integrations/aionui/workspace-context')) body = a.machineContexts?.[new URL(url,location.origin).searchParams.get('machineId')] || a.workspaceContext || workspaceContext;
   else if (url === '/api/integrations/aionui/workspace-settings') {
@@ -88,7 +89,7 @@ window.fetch = async (url, init = {}) => {
 let sequence = 0;
 window.renderDialog = (input = {}, flags = {}) => {
   window.audit.machineContexts=null;
-  Object.assign(window.audit,{calls:[],fail:false,hold:false,closed:0,opened:0,workspaceSaveFail:false,optionOverrides:null,context:{map:{id:'map-coordinator',nodes:[{id:'root',data:{kind:'root'}},{id:'child',data:{kind:'task'}}],edges:[{source:'root',target:'child'}]},groupProject:{groupId:'group-manager',role:'coordinator',coordinatorMapId:'map-coordinator'}},...flags});
+  Object.assign(window.audit,{calls:[],fail:false,hold:false,closed:0,opened:0,workspaceSaveFail:false,optionOverrides:null,machineMcpServers:null,optionsFail:false,context:{map:{id:'map-coordinator',nodes:[{id:'root',data:{kind:'root'}},{id:'child',data:{kind:'task'}}],edges:[{source:'root',target:'child'}]},groupProject:{groupId:'group-manager',role:'coordinator',coordinatorMapId:'map-coordinator'}},...flags});
   window.audit.userId=input.userId||'fixture';
   // 준비 상태 검사에서 이전 팝업의 DOM을 새 팝업으로 오인하지 않도록 먼저 교체한다.
   flushSync(()=>root.render(React.createElement(AiConversationDialog,{key:++sequence,userId:'fixture',documentId:'map-coordinator',documentTitle:'총괄 문서',cardId:'root',cardTitle:'총괄 루트',purpose:'card',knowledgeSources:[],launchInWebUi:true,onClose:()=>window.audit.closed++,...input})));
@@ -96,6 +97,16 @@ window.renderDialog = (input = {}, flags = {}) => {
 window.renderEditor = (editScope='document') => {
   root.render(React.createElement(WorkspaceSettingsDialog,{key:++sequence,userId:window.audit.userId||'fixture',mapId:editScope==='document'?'map-coordinator':'',groupId:editScope==='group'?'group-manager':'',name:'이름 편집',editScope,onRename:async(name)=>{window.audit.renamed=name},onClose:()=>window.audit.closed++}));
 };
+function WorkspaceModifierFocusHarness() {
+  const [modifierDown,setModifierDown]=React.useState(false);
+  React.useEffect(()=>{
+    const update=(event)=>setModifierDown(event.ctrlKey||event.metaKey);
+    window.addEventListener('keydown',update);window.addEventListener('keyup',update);
+    return()=>{window.removeEventListener('keydown',update);window.removeEventListener('keyup',update)};
+  },[]);
+  return React.createElement('div',{'data-modifier-down':modifierDown},React.createElement(WorkspaceSettingsDialog,{userId:'focus-account',mapId:'map-coordinator',machineId:'fixture',name:'포커스 검증',initialWorkspace:'',onClose:()=>window.audit.closed++}));
+}
+window.renderWorkspaceModifierFocusHarness=()=>root.render(React.createElement(WorkspaceModifierFocusHarness));
 window.fixtureReady = true;
 `
 
@@ -169,6 +180,75 @@ test('작업공간 확인·문서/그룹 저장·공통 메뉴·이름 편집·�
 
     const configured={mapId:'map-coordinator',groupId:'group-manager',groupName:'테스트 그룹',machineId:'fixture',machineRole:'main',documentSetting:{version:1,workspace:'/document'},groupSetting:{version:1,workspace:'/group'},source:'document',workspace:'/document',error:'',choices:[],token:'configured',needsSelection:false};
     const mixed={...configured,documentSetting:{version:0,workspace:''},groupSetting:{version:0,workspace:''},source:'none',workspace:'',needsSelection:true,token:'mixed',choices:[{workspace:'/project',reasons:['문서 루트 대화']},{workspace:'/mnp',reasons:['과거 대화']}]};
+    await t.test('작업공간 경로 입력 중 Ctrl 상태의 부모 재렌더링에도 포커스와 입력 대상을 유지한다', async () => {
+      await evaluate('window.audit.workspaceContext='+JSON.stringify(mixed)+';window.renderWorkspaceModifierFocusHarness()');
+      await waitFor(()=>evaluate('Boolean(document.querySelector(".workspace-settings-path input"))'));
+      await evaluate('document.querySelector(".workspace-settings-path input").focus()');
+      assert.equal(await evaluate('document.activeElement===document.querySelector(".workspace-settings-path input")'),true);
+      await send('Input.dispatchKeyEvent',{type:'rawKeyDown',key:'Control',code:'ControlLeft',windowsVirtualKeyCode:17,nativeVirtualKeyCode:17,modifiers:2});
+      await waitFor(()=>evaluate('Boolean(document.querySelector("[data-modifier-down=true]"))'));
+      assert.equal(await evaluate('document.activeElement===document.querySelector(".workspace-settings-path input")'),true,'Ctrl 재렌더링 뒤에도 경로 입력 포커스 유지');
+      await send('Input.insertText',{text:'C:\\Git\\붙여넣기-검증'});
+      assert.equal(await evaluate('document.querySelector(".workspace-settings-path input").value'),'C:\\Git\\붙여넣기-검증');
+      await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Control',code:'ControlLeft',windowsVirtualKeyCode:17,nativeVirtualKeyCode:17});
+      assert.equal(await evaluate('document.activeElement===document.querySelector(".workspace-settings-path input")'),true,'Ctrl 해제 뒤에도 경로 입력 포커스 유지');
+    });
+    await t.test('MCP 마지막 선택은 팝업 재진입·머신 전환·빈 목록·연결 실패에도 유지한다', async () => {
+      const machines=[{machineId:'fixture',label:'메인',role:'main'},{machineId:'remote',label:'서브',role:'sub'},{machineId:'empty',label:'도구 없음',role:'sub'}];
+      const machineContexts=Object.fromEntries(machines.map(machine=>[machine.machineId,{...configured,machineId:machine.machineId,machineRole:machine.role,machines}]));
+      const machineMcpServers={
+        fixture:[{id:'required',name:'필수 MCP',required:true},{id:'main-option',name:'메인 선택 MCP',required:false},{id:'shared-option',name:'공통 선택 MCP',required:false}],
+        remote:[{id:'required',name:'필수 MCP',required:true},{id:'remote-option',name:'서브 선택 MCP',required:false},{id:'shared-option',name:'공통 선택 MCP',required:false}],
+        empty:[],
+      };
+      const flags={machineContexts,machineMcpServers,workspaceContext:machineContexts.fixture};
+      const stored=()=>evaluate('JSON.parse(localStorage.getItem("mindnprogress-ai-mcp-selections")||"[]").sort()');
+      const checked=()=>evaluate('[...document.querySelectorAll(".ai-mcp-section input")].map(el=>({checked:el.checked,disabled:el.disabled}))');
+      const toggle=async(index)=>{await evaluate(`document.querySelectorAll('.ai-mcp-section input')[${index}].click()`);await delay(50);};
+      const switchMachine=async(machineId)=>{
+        await evaluate(`(()=>{const select=document.querySelector('.ai-machine-select select');select.value=${JSON.stringify(machineId)};select.dispatchEvent(new Event('change',{bubbles:true}))})()`);
+        await waitFor(()=>evaluate(`document.querySelector('.ai-machine-select select')?.value===${JSON.stringify(machineId)}&&!document.querySelector('.ai-dialog footer .primary')?.disabled`));
+      };
+      await evaluate('localStorage.setItem("mindnprogress-ai-mcp-selections",JSON.stringify(["main-option"]))');
+      await open({userId:'mcp-history'},flags);
+      assert.deepEqual(await checked(),[{checked:true,disabled:true},{checked:true,disabled:false},{checked:false,disabled:false}]);
+      await toggle(2);
+      assert.deepEqual(await stored(),['main-option','shared-option']);
+      await open({userId:'mcp-history'},flags);
+      assert.equal((await checked())[2].checked,true,'닫고 다시 열어도 마지막 선택 복원');
+
+      await switchMachine('remote');
+      assert.deepEqual(await stored(),['main-option','shared-option'],'서브에 없는 메인 MCP 선택을 삭제하지 않는다');
+      assert.deepEqual(await checked(),[{checked:true,disabled:true},{checked:false,disabled:false},{checked:true,disabled:false}]);
+      await toggle(1);
+      assert.deepEqual(await stored(),['main-option','remote-option','shared-option']);
+      await toggle(2);
+      assert.deepEqual(await stored(),['main-option','remote-option'],'사용자가 공통 MCP를 해제한 결과만 저장');
+      await switchMachine('empty');
+      assert.deepEqual(await stored(),['main-option','remote-option'],'빈 도구 목록은 사용자의 전체 해제가 아니다');
+      await switchMachine('fixture');
+      assert.deepEqual(await checked(),[{checked:true,disabled:true},{checked:true,disabled:false},{checked:false,disabled:false}]);
+
+      await evaluate('window.renderDialog({userId:"mcp-history"},'+JSON.stringify({...flags,optionsFail:true})+')');
+      await waitFor(()=>evaluate('document.querySelector(".ai-dialog-message.error")?.textContent.includes("테스트 머신 연결 실패")'));
+      assert.deepEqual(await stored(),['main-option','remote-option'],'연결 실패 응답으로 선택 이력을 초기화하지 않는다');
+      await open({userId:'mcp-history'},flags);
+      await switchMachine('remote');
+      assert.equal((await checked())[1].checked,true,'실패 후 다시 열어도 서브 선택 복원');
+      await toggle(1);
+      await switchMachine('fixture');
+      await toggle(1);
+      assert.deepEqual(await stored(),[],'사용자가 모든 선택을 해제한 빈 값은 기억한다');
+      await open({userId:'mcp-history'},flags);
+      assert.deepEqual(await checked(),[{checked:true,disabled:true},{checked:false,disabled:false},{checked:false,disabled:false}]);
+
+      await toggle(1);
+      await send('Page.reload');
+      await waitFor(()=>evaluate('window.fixtureReady'));
+      await open({userId:'mcp-history'},flags);
+      assert.equal((await checked())[1].checked,true,'브라우저 새로고침 후에도 선택 복원');
+      await evaluate('localStorage.removeItem("mindnprogress-ai-mcp-selections")');
+    });
     await t.test('대화 팝업은 내용에 맞춰 줄고 화면이 작을 때만 본문을 스크롤한다', async () => {
       const layout = () => evaluate(`(() => {
         const dialog=document.querySelector('.ai-dialog'), content=dialog.querySelector('.ai-dialog-content');

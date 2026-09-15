@@ -4854,7 +4854,13 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       return
     }
 
-    const syncBoxSelectionArmed = (event: KeyboardEvent) => setBoxSelectionArmed(event.ctrlKey || event.metaKey)
+    const syncBoxSelectionArmed = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null
+      const modalOpen = Boolean(document.querySelector('[role="dialog"][aria-modal="true"]'))
+      const editing = Boolean(target?.closest('input, textarea, select, [contenteditable="true"]'))
+      // 팝업·입력 중 Ctrl/Meta는 복사·붙여넣기용이다. 뒤쪽 캔버스의 범위 선택을 준비하지 않는다.
+      setBoxSelectionArmed(!modalOpen && !editing && (event.ctrlKey || event.metaKey))
+    }
     const disarmBoxSelection = () => setBoxSelectionArmed(false)
 
     window.addEventListener('keydown', syncBoxSelectionArmed)
