@@ -60,7 +60,7 @@ async function readFor(reader, durationMs) {
   return received
 }
 
-test('AionUi 대화 조회와 화면 선택은 연결된 카드 및 로컬 MnP 화면에만 적용된다', { timeout: 30_000 }, async () => {
+test('AionUi 대화 조회와 화면 선택은 연결된 카드 및 같은 계정·디바이스의 MnP 화면에만 적용된다', { timeout: 30_000 }, async () => {
   const dataDirectory = await mkdtemp(path.join(tmpdir(), 'mindnprogress-ai-conversation-navigation-'))
   const mapId = 'map-conversation-navigation'
   const cardId = 'card-navigation'
@@ -109,28 +109,36 @@ test('AionUi 대화 조회와 화면 선택은 연결된 카드 및 로컬 MnP �
   })
   const localController = new AbortController()
   const remoteController = new AbortController()
+  const otherAccountController = new AbortController()
 
   try {
     await waitForServer(baseUrl)
     const token = (await readFile(path.join(dataDirectory, '_integration-token'), 'utf8')).trim()
     const headers = { Authorization: `Bearer ${token}` }
+    const accountHeaders = { ...headers, 'X-MNP-AI-Editor-Id': 'user-admin' }
+    const remoteAccountHeaders = {
+      ...accountHeaders,
+      'X-MNP-Selection-Device-Address': '10.77.15.55',
+    }
     const endpoint = `${baseUrl}/api/integrations/aionui/conversations/${conversationId}/mindnprogress`
 
     const unauthorized = await fetch(endpoint)
     assert.equal(unauthorized.status, 401)
 
-    const missingResponse = await fetch(`${baseUrl}/api/integrations/aionui/conversations/not-linked/mindnprogress`, { headers })
+    const missingResponse = await fetch(`${baseUrl}/api/integrations/aionui/conversations/not-linked/mindnprogress`, { headers: accountHeaders })
     assert.equal(missingResponse.status, 200)
     assert.deepEqual(await missingResponse.json(), {
       conversationId: 'not-linked',
       exists: false,
       target: null,
+      selectionAvailable: false,
+      matchingViewCount: 0,
       localSelectionAvailable: false,
       localViewCount: 0,
       message: 'MindNProgress 카드에 연결된 대화를 찾을 수 없습니다.',
     })
 
-    let lookup = await (await fetch(endpoint, { headers })).json()
+    let lookup = await (await fetch(endpoint, { headers: accountHeaders })).json()
     assert.deepEqual(lookup, {
       conversationId,
       exists: true,
@@ -141,59 +149,104 @@ test('AionUi 대화 조회와 화면 선택은 연결된 카드 및 로컬 MnP �
         cardTitle: '대화 탐색 카드',
         archived: false,
       },
+      selectionAvailable: false,
+      matchingViewCount: 0,
       localSelectionAvailable: false,
       localViewCount: 0,
       message: 'MindNProgress에 연결된 대화입니다.',
     })
 
-    const noLocalView = await fetch(`${endpoint}/select`, { method: 'POST', headers })
-    assert.equal(noLocalView.status, 409)
-    assert.equal((await noLocalView.json()).code, 'MNP_LOCAL_VIEW_NOT_CONNECTED')
+    const missingAccount = await fetch(`${endpoint}/select`, { method: 'POST', headers })
+    assert.equal(missingAccount.status, 400)
+    assert.equal((await missingAccount.json()).code, 'MNP_SELECTION_ACCOUNT_REQUIRED')
 
-    const remoteSelection = await fetch(`${endpoint}/select`, {
+    const unavailableAccount = await fetch(`${endpoint}/select`, {
       method: 'POST',
-      headers: { ...headers, 'X-Forwarded-For': '10.77.15.55' },
+      headers: { ...headers, 'X-MNP-AI-Editor-Id': 'user-unknown' },
     })
-    assert.equal(remoteSelection.status, 403)
-    assert.equal((await remoteSelection.json()).code, 'MNP_LOCAL_SELECTION_REQUIRED')
+    assert.equal(unavailableAccount.status, 403)
+    assert.equal((await unavailableAccount.json()).code, 'MNP_SELECTION_ACCOUNT_UNAVAILABLE')
+
+    const invalidDevice = await fetch(`${endpoint}/select`, {
+      method: 'POST',
+      headers: { ...accountHeaders, 'X-MNP-Selection-Device-Address': 'not-an-ip-address' },
+    })
+    assert.equal(invalidDevice.status, 400)
+    assert.equal((await invalidDevice.json()).code, 'MNP_SELECTION_DEVICE_ADDRESS_INVALID')
+
+    const noMatchingView = await fetch(`${endpoint}/select`, { method: 'POST', headers: accountHeaders })
+    assert.equal(noMatchingView.status, 409)
+    assert.equal((await noMatchingView.json()).code, 'MNP_MATCHING_VIEW_NOT_CONNECTED')
 
     const localStream = await fetch(`${baseUrl}/api/events?clientId=local-navigation`, {
-      headers,
+      headers: accountHeaders,
       signal: localController.signal,
     })
     const remoteStream = await fetch(`${baseUrl}/api/events?clientId=remote-navigation`, {
-      headers: { ...headers, 'X-Forwarded-For': '10.77.15.55' },
+      headers: { ...accountHeaders, 'X-Forwarded-For': '10.77.15.55' },
       signal: remoteController.signal,
+    })
+    const otherAccountStream = await fetch(`${baseUrl}/api/events?clientId=other-account-navigation`, {
+      headers: { ...headers, 'X-Forwarded-For': '10.77.15.55' },
+      signal: otherAccountController.signal,
     })
     assert.equal(localStream.status, 200)
     assert.equal(remoteStream.status, 200)
+    assert.equal(otherAccountStream.status, 200)
     const localReader = localStream.body.getReader()
     const remoteReader = remoteStream.body.getReader()
+    const otherAccountReader = otherAccountStream.body.getReader()
     await readUntil(localReader, /"type":"connected"/)
     await readUntil(remoteReader, /"type":"connected"/)
+    await readUntil(otherAccountReader, /"type":"connected"/)
 
-    lookup = await (await fetch(endpoint, { headers })).json()
+    lookup = await (await fetch(endpoint, { headers: accountHeaders })).json()
+    assert.equal(lookup.selectionAvailable, true)
+    assert.equal(lookup.matchingViewCount, 1)
     assert.equal(lookup.localSelectionAvailable, true)
     assert.equal(lookup.localViewCount, 1)
 
-    const selectionResponse = await fetch(`${endpoint}/select`, { method: 'POST', headers })
-    assert.equal(selectionResponse.status, 200)
-    const selection = await selectionResponse.json()
-    assert.equal(selection.selected, true)
-    assert.equal(selection.deliveredClientCount, 1)
-    assert.deepEqual(selection.target, lookup.target)
+    const remoteLookup = await (await fetch(endpoint, { headers: remoteAccountHeaders })).json()
+    assert.equal(remoteLookup.selectionAvailable, true)
+    assert.equal(remoteLookup.matchingViewCount, 1)
 
-    const localEvents = await readUntil(localReader, /"type":"ai-conversation-selection-requested"/)
+    const remoteSelectionResponse = await fetch(`${endpoint}/select`, {
+      method: 'POST',
+      headers: remoteAccountHeaders,
+    })
+    assert.equal(remoteSelectionResponse.status, 200)
+    const remoteSelection = await remoteSelectionResponse.json()
+    assert.equal(remoteSelection.selected, true)
+    assert.equal(remoteSelection.deliveredClientCount, 1)
+    assert.deepEqual(remoteSelection.target, lookup.target)
+
+    const remoteEvents = await readUntil(remoteReader, new RegExp(remoteSelection.requestedAt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    assert.match(remoteEvents, /"type":"ai-conversation-selection-requested"/)
+    assert.match(remoteEvents, new RegExp(`"mapId":"${mapId}"`))
+    assert.match(remoteEvents, new RegExp(`"cardId":"${cardId}"`))
+
+    const localSelectionResponse = await fetch(`${endpoint}/select`, { method: 'POST', headers: accountHeaders })
+    assert.equal(localSelectionResponse.status, 200)
+    const localSelection = await localSelectionResponse.json()
+    assert.equal(localSelection.deliveredClientCount, 1)
+
+    const localEvents = await readUntil(localReader, new RegExp(localSelection.requestedAt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
     assert.match(localEvents, new RegExp(`"mapId":"${mapId}"`))
     assert.match(localEvents, new RegExp(`"cardId":"${cardId}"`))
-    const remoteEvents = await readFor(remoteReader, 250)
-    assert.doesNotMatch(remoteEvents, /"type":"ai-conversation-selection-requested"/)
+    assert.doesNotMatch(localEvents, new RegExp(remoteSelection.requestedAt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+
+    const unexpectedRemoteEvents = await readFor(remoteReader, 250)
+    assert.doesNotMatch(unexpectedRemoteEvents, new RegExp(localSelection.requestedAt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    const otherAccountEvents = await readFor(otherAccountReader, 250)
+    assert.doesNotMatch(otherAccountEvents, /"type":"ai-conversation-selection-requested"/)
 
     await localReader.cancel()
     await remoteReader.cancel()
+    await otherAccountReader.cancel()
   } finally {
     localController.abort()
     remoteController.abort()
+    otherAccountController.abort()
     await stopProcess(server)
     await rm(dataDirectory, { recursive: true, force: true })
   }

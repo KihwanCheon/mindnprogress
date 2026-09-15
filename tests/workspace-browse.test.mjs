@@ -4,7 +4,11 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { listWorkspaceDirectory, listWorkspaceRoots } from '../server/lib/workspaceBrowse.mjs'
-import { isLocalLoopbackRequest } from '../server/lib/localLoopbackRedirect.mjs'
+import {
+  isLocalLoopbackRequest,
+  normalizeClientAddress,
+  requestClientAddress,
+} from '../server/lib/localLoopbackRedirect.mjs'
 
 async function createWorkspaceTree() {
   const root = await mkdtemp(path.join(tmpdir(), 'mnp-browse-'))
@@ -87,4 +91,23 @@ test('작업공간 탐색은 같은 PC 요청만 허용한다', () => {
 
   for (const [name, request] of allow) assert.equal(isLocalLoopbackRequest(request), true, name)
   for (const [name, request] of deny) assert.equal(isLocalLoopbackRequest(request), false, name)
+})
+
+test('선택 디바이스 비교용 접속 주소를 정규화한다', () => {
+  assert.equal(normalizeClientAddress('::ffff:10.77.15.55'), '10.77.15.55')
+  assert.equal(normalizeClientAddress('2001:0DB8:0:0:0:0:0:1'), '2001:db8::1')
+  assert.equal(normalizeClientAddress('not-an-ip-address'), '')
+
+  assert.equal(requestClientAddress({
+    headers: { 'x-forwarded-for': '198.51.100.20, 10.77.15.55' },
+    socket: { remoteAddress: '127.0.0.1' },
+  }), '10.77.15.55')
+  assert.equal(requestClientAddress({
+    headers: { 'x-real-ip': '10.77.15.56' },
+    socket: { remoteAddress: '127.0.0.1' },
+  }), '10.77.15.56')
+  assert.equal(requestClientAddress({
+    headers: {},
+    socket: { remoteAddress: '::ffff:127.0.0.1' },
+  }), '127.0.0.1')
 })

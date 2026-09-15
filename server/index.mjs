@@ -133,7 +133,12 @@ import {
   normalizeAionUiExternalLaunchPayload,
   parseMindNProgressCompletionToken,
 } from './lib/aionUiExternalLaunch.mjs'
-import { isLocalLoopbackRequest, localLoopbackRedirectLocation } from './lib/localLoopbackRedirect.mjs'
+import {
+  isLocalLoopbackRequest,
+  localLoopbackRedirectLocation,
+  normalizeClientAddress,
+  requestClientAddress,
+} from './lib/localLoopbackRedirect.mjs'
 import { listWorkspaceDirectory, listWorkspaceRoots } from './lib/workspaceBrowse.mjs'
 import { assertDoorayExecutionWorkspace, sameExecutionWorkspace } from './lib/doorayExecutionWorkspace.mjs'
 import {
@@ -659,6 +664,37 @@ async function resolveAiConversationNavigationTarget(conversationId) {
 
 function localEventClientCount() {
   return [...eventClients.values()].filter((client) => client.localLoopback).length
+}
+
+function aiConversationSelectionDeviceKey(address) {
+  const normalizedAddress = normalizeClientAddress(address)
+  return normalizedAddress
+    ? createHash('sha256').update(`mindnprogress-ai-selection-device:${normalizedAddress}`).digest('base64url')
+    : null
+}
+
+function aiConversationSelectionIdentity(request) {
+  const editorId = integrationRequestScope(request).editorId
+  const account = editorId
+    ? users.find((candidate) => candidate.id === editorId && candidate.active !== false && canEdit(candidate)) ?? null
+    : null
+  const forwardedAddressValue = String(request.headers['x-mnp-selection-device-address'] ?? '').trim()
+  const deviceAddress = forwardedAddressValue
+    ? normalizeClientAddress(forwardedAddressValue)
+    : requestClientAddress(request)
+  return {
+    editorId,
+    account,
+    deviceKey: aiConversationSelectionDeviceKey(deviceAddress),
+    invalidForwardedAddress: Boolean(forwardedAddressValue && !deviceAddress),
+  }
+}
+
+function matchingAiConversationSelectionClientCount(identity) {
+  if (!identity.account || !identity.deviceKey) return 0
+  return [...eventClients.values()].filter((client) => (
+    client.user.id === identity.account.id && client.selectionDeviceKey === identity.deviceKey
+  )).length
 }
 
 function conversationHomeMachineId(conversationId, fallbackLink = null) {
@@ -6751,12 +6787,16 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         return sendJson(response, 405, { error: '지원하지 않는 요청입니다.' })
       }
       const target = await resolveAiConversationNavigationTarget(conversationId)
+      const selectionIdentity = aiConversationSelectionIdentity(request)
       if (!selectionRequested) {
         const localViewCount = localEventClientCount()
+        const matchingViewCount = matchingAiConversationSelectionClientCount(selectionIdentity)
         return sendJson(response, 200, {
           conversationId,
           exists: Boolean(target),
           target,
+          selectionAvailable: Boolean(target) && matchingViewCount > 0,
+          matchingViewCount,
           localSelectionAvailable: Boolean(target) && localViewCount > 0,
           localViewCount,
           message: target
@@ -6764,10 +6804,28 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
             : 'MindNProgress 카드에 연결된 대화를 찾을 수 없습니다.',
         })
       }
-      if (!isLocalLoopbackRequest(request)) {
+      if (!selectionIdentity.editorId) {
+        return sendJson(response, 400, {
+          error: '같은 계정을 확인할 MindNProgress 사용자 ID가 필요합니다.',
+          code: 'MNP_SELECTION_ACCOUNT_REQUIRED',
+        })
+      }
+      if (!selectionIdentity.account) {
         return sendJson(response, 403, {
-          error: 'MindNProgress 화면 자동 선택은 127.0.0.1에서 호출할 때만 허용됩니다.',
-          code: 'MNP_LOCAL_SELECTION_REQUIRED',
+          error: '선택을 요청한 MindNProgress 계정을 사용할 수 없거나 편집 권한이 없습니다.',
+          code: 'MNP_SELECTION_ACCOUNT_UNAVAILABLE',
+        })
+      }
+      if (selectionIdentity.invalidForwardedAddress) {
+        return sendJson(response, 400, {
+          error: 'AionUi 사용 디바이스의 접속 주소가 올바르지 않습니다.',
+          code: 'MNP_SELECTION_DEVICE_ADDRESS_INVALID',
+        })
+      }
+      if (!selectionIdentity.deviceKey) {
+        return sendJson(response, 400, {
+          error: 'AionUi와 MindNProgress가 같은 디바이스인지 확인할 수 없습니다.',
+          code: 'MNP_SELECTION_DEVICE_REQUIRED',
         })
       }
       if (!target) {
@@ -6783,11 +6841,14 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         mapId: target.mapId,
         cardId: target.cardId,
         requestedAt,
-      }, (client) => client.localLoopback)
+      }, (client) => (
+        client.user.id === selectionIdentity.account.id
+        && client.selectionDeviceKey === selectionIdentity.deviceKey
+      ))
       if (deliveredClientCount === 0) {
         return sendJson(response, 409, {
-          error: '127.0.0.1로 열린 MindNProgress 화면이 연결되어 있지 않습니다.',
-          code: 'MNP_LOCAL_VIEW_NOT_CONNECTED',
+          error: '같은 계정과 디바이스로 열린 MindNProgress 화면이 연결되어 있지 않습니다.',
+          code: 'MNP_MATCHING_VIEW_NOT_CONNECTED',
           conversationId,
           target,
         })
@@ -6798,7 +6859,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         target,
         deliveredClientCount,
         requestedAt,
-        message: '로컬 MindNProgress 화면에서 문서와 카드를 선택했습니다.',
+        message: '같은 계정과 디바이스의 MindNProgress 화면에서 문서와 카드를 선택했습니다.',
       })
     }
 
@@ -10148,6 +10209,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         mapId,
         user: publicUser(user),
         localLoopback: isLocalLoopbackRequest(request),
+        selectionDeviceKey: aiConversationSelectionDeviceKey(requestClientAddress(request)),
       })
       broadcastPresence(mapId)
       void runtimeLifecycle.track(() => refreshAiConversationRuntimeLibrary())

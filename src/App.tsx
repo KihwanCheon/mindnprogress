@@ -3568,12 +3568,12 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         const event = JSON.parse(message.data) as MapChangeEvent | PresenceEvent | CursorEvent | CommentChangeEvent | AiConversationLinkedEvent | AiConversationRuntimeEvent | AiConversationRuntimeSnapshotEvent | AiConversationRuntimeSummaryEvent | AiConversationRuntimeSummarySnapshotEvent | AiConversationSelectionRequestedEvent | NotificationEvent | NotificationsReadEvent | NotificationsRemovedEvent | HeartbeatEvent | { type: 'connected' }
         if (event.type === 'heartbeat') return
         if (event.type === 'ai-conversation-selection-requested') {
-          if (!isLoopbackHostname(window.location.hostname)) return
           setSelectedGroupId(null)
           setViewMode('mindmap')
           setTrashOpen(false)
           if (event.mapId === activeMapId) {
             pendingSelection.current = null
+            setNodes((current) => synchronizeNodeSelection(current, event.cardId))
             setSelectedId(event.cardId)
           } else {
             pendingSelection.current = event.cardId
@@ -3753,7 +3753,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       window.removeEventListener('focus', handleFocus)
       eventSource?.close()
     }
-  }, [activeMapId, mode, reconcileRemoteMap, refreshResolvedReferences, user.id, user.publicAccess])
+  }, [activeMapId, mode, reconcileRemoteMap, refreshResolvedReferences, setNodes, user.id, user.publicAccess])
 
   useEffect(() => {
     const timer = window.setInterval(() => {

@@ -1,4 +1,5 @@
 import { networkInterfaces } from 'node:os'
+import { isIP } from 'node:net'
 
 function headerValue(headers, name) {
   const value = headers?.[name]
@@ -11,6 +12,28 @@ function normalizeAddress(value) {
   const zoneIndex = normalized.indexOf('%')
   if (zoneIndex >= 0) normalized = normalized.slice(0, zoneIndex)
   return normalized
+}
+
+export function normalizeClientAddress(value) {
+  const address = normalizeAddress(value)
+  const version = isIP(address)
+  if (version === 4) return address
+  if (version !== 6) return ''
+  try {
+    return new URL(`http://[${address}]/`).hostname.slice(1, -1)
+  } catch {
+    return ''
+  }
+}
+
+export function requestClientAddress(request) {
+  const headers = request?.headers ?? {}
+  const forwardedChain = headerValue(headers, 'x-forwarded-for').split(',').map((item) => item.trim()).filter(Boolean)
+  return normalizeClientAddress(
+    forwardedChain.at(-1)
+      || headerValue(headers, 'x-real-ip').trim()
+      || request?.socket?.remoteAddress,
+  )
 }
 
 function isLoopbackAddress(value) {
