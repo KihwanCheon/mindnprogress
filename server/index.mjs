@@ -528,6 +528,7 @@ async function replaceFileWithRetry(temporaryFile, targetFile) {
 
 function broadcastEvent(payload, predicate = () => true) {
   const message = `data: ${JSON.stringify(payload)}\n\n`
+  let deliveredClientCount = 0
   for (const [client, clientInfo] of eventClients) {
     if (!predicate(clientInfo)) continue
     if (client.destroyed || client.writableEnded) {
@@ -536,10 +537,12 @@ function broadcastEvent(payload, predicate = () => true) {
     }
     try {
       client.write(message)
+      deliveredClientCount += 1
     } catch {
       removeEventClient(client)
     }
   }
+  return deliveredClientCount
 }
 
 function broadcastNotification(notification) {
@@ -635,6 +638,27 @@ function rememberAiConversationOrigin(value) {
   }
   aiConversationOrigins.set(origin.conversationId, origin)
   return origin
+}
+
+async function resolveAiConversationNavigationTarget(conversationId) {
+  const normalizedConversationId = String(conversationId ?? '').trim()
+  const origin = aiConversationOrigins.get(normalizedConversationId)
+  if (!origin) return null
+  const map = await readMap(origin.mapId)
+  if (!map || map.trashedAt) return null
+  const card = map.nodes.find((node) => node.id === origin.cardId)
+  if (!card || !isAiConversationLinked(card.data, normalizedConversationId)) return null
+  return {
+    mapId: map.id,
+    documentTitle: map.title,
+    cardId: card.id,
+    cardTitle: String(card.data?.label ?? '').trim() || '제목 없는 카드',
+    archived: Boolean(map.archivedAt),
+  }
+}
+
+function localEventClientCount() {
+  return [...eventClients.values()].filter((client) => client.localLoopback).length
 }
 
 function conversationHomeMachineId(conversationId, fallbackLink = null) {
@@ -6710,6 +6734,74 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       return sendJson(response, 200, await resolveAiConversationDisplay(scope.conversationId))
     }
 
+    const aionUiMindNProgressConversationRoute = url.pathname.match(/^\/api\/integrations\/aionui\/conversations\/([^/]+)\/mindnprogress(\/select)?$/)
+    if (aionUiMindNProgressConversationRoute && (request.method === 'GET' || request.method === 'POST')) {
+      if (!hasValidIntegrationBearer(request)) {
+        return sendJson(response, 401, { error: '올바른 MindNProgress 연동 토큰이 필요합니다.' })
+      }
+      const conversationId = decodeURIComponent(aionUiMindNProgressConversationRoute[1])
+      if (!validAiConversationId(conversationId)) {
+        return sendJson(response, 400, {
+          error: '확인할 AionUi 대화 ID가 올바르지 않습니다.',
+          code: 'MNP_AI_CONVERSATION_ID_INVALID',
+        })
+      }
+      const selectionRequested = Boolean(aionUiMindNProgressConversationRoute[2])
+      if ((request.method === 'POST') !== selectionRequested) {
+        return sendJson(response, 405, { error: '지원하지 않는 요청입니다.' })
+      }
+      const target = await resolveAiConversationNavigationTarget(conversationId)
+      if (!selectionRequested) {
+        const localViewCount = localEventClientCount()
+        return sendJson(response, 200, {
+          conversationId,
+          exists: Boolean(target),
+          target,
+          localSelectionAvailable: Boolean(target) && localViewCount > 0,
+          localViewCount,
+          message: target
+            ? 'MindNProgress에 연결된 대화입니다.'
+            : 'MindNProgress 카드에 연결된 대화를 찾을 수 없습니다.',
+        })
+      }
+      if (!isLocalLoopbackRequest(request)) {
+        return sendJson(response, 403, {
+          error: 'MindNProgress 화면 자동 선택은 127.0.0.1에서 호출할 때만 허용됩니다.',
+          code: 'MNP_LOCAL_SELECTION_REQUIRED',
+        })
+      }
+      if (!target) {
+        return sendJson(response, 404, {
+          error: 'MindNProgress 카드에 연결된 대화를 찾을 수 없습니다.',
+          code: 'MNP_AI_CONVERSATION_NOT_FOUND',
+        })
+      }
+      const requestedAt = new Date().toISOString()
+      const deliveredClientCount = broadcastEvent({
+        type: 'ai-conversation-selection-requested',
+        conversationId,
+        mapId: target.mapId,
+        cardId: target.cardId,
+        requestedAt,
+      }, (client) => client.localLoopback)
+      if (deliveredClientCount === 0) {
+        return sendJson(response, 409, {
+          error: '127.0.0.1로 열린 MindNProgress 화면이 연결되어 있지 않습니다.',
+          code: 'MNP_LOCAL_VIEW_NOT_CONNECTED',
+          conversationId,
+          target,
+        })
+      }
+      return sendJson(response, 200, {
+        selected: true,
+        conversationId,
+        target,
+        deliveredClientCount,
+        requestedAt,
+        message: '로컬 MindNProgress 화면에서 문서와 카드를 선택했습니다.',
+      })
+    }
+
     if (request.method === 'POST' && url.pathname === '/api/integrations/aionui/conversation-attribution/resolve') {
       if (!hasValidIntegrationBearer(request)) {
         return sendJson(response, 401, { error: '올바른 MindNProgress 연동 토큰이 필요합니다.' })
@@ -10051,7 +10143,12 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         'X-Accel-Buffering': 'no',
       })
       response.write(`data: ${JSON.stringify({ type: 'connected', user: publicUser(user), clientId, mapId })}\n\n`)
-      eventClients.set(response, { clientId, mapId, user: publicUser(user) })
+      eventClients.set(response, {
+        clientId,
+        mapId,
+        user: publicUser(user),
+        localLoopback: isLocalLoopbackRequest(request),
+      })
       broadcastPresence(mapId)
       void runtimeLifecycle.track(() => refreshAiConversationRuntimeLibrary())
         .then((summaries) => {

@@ -801,6 +801,13 @@ type AiConversationRuntimeSummarySnapshotEvent = {
   type: 'ai-conversation-runtime-summary-snapshot'
   summaries: { mapId: string; activeCount: number }[]
 }
+type AiConversationSelectionRequestedEvent = {
+  type: 'ai-conversation-selection-requested'
+  conversationId: string
+  mapId: string
+  cardId: string
+  requestedAt: string
+}
 type NotificationEvent = { type: 'notification'; notification: UserNotification }
 type NotificationsReadEvent = { type: 'notifications-read'; userId: string; notificationId: string | null; readAt: string }
 type NotificationsRemovedEvent = { type: 'notifications-removed'; userId: string; notificationIds: string[] }
@@ -3558,8 +3565,22 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     const handleEventMessage = (message: MessageEvent<string>) => {
       lastEventAt = Date.now()
       try {
-        const event = JSON.parse(message.data) as MapChangeEvent | PresenceEvent | CursorEvent | CommentChangeEvent | AiConversationLinkedEvent | AiConversationRuntimeEvent | AiConversationRuntimeSnapshotEvent | AiConversationRuntimeSummaryEvent | AiConversationRuntimeSummarySnapshotEvent | NotificationEvent | NotificationsReadEvent | NotificationsRemovedEvent | HeartbeatEvent | { type: 'connected' }
+        const event = JSON.parse(message.data) as MapChangeEvent | PresenceEvent | CursorEvent | CommentChangeEvent | AiConversationLinkedEvent | AiConversationRuntimeEvent | AiConversationRuntimeSnapshotEvent | AiConversationRuntimeSummaryEvent | AiConversationRuntimeSummarySnapshotEvent | AiConversationSelectionRequestedEvent | NotificationEvent | NotificationsReadEvent | NotificationsRemovedEvent | HeartbeatEvent | { type: 'connected' }
         if (event.type === 'heartbeat') return
+        if (event.type === 'ai-conversation-selection-requested') {
+          if (!isLoopbackHostname(window.location.hostname)) return
+          setSelectedGroupId(null)
+          setViewMode('mindmap')
+          setTrashOpen(false)
+          if (event.mapId === activeMapId) {
+            pendingSelection.current = null
+            setSelectedId(event.cardId)
+          } else {
+            pendingSelection.current = event.cardId
+            setActiveMapId(event.mapId)
+          }
+          return
+        }
         if (event.type === 'presence') {
           if (event.mapId === activeMapId) setPresenceClients(event.clients)
           return
