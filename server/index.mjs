@@ -24,6 +24,7 @@ import { AI_EXECUTION_APPROVAL_INSTRUCTION, GROUP_APPROVAL_INSTRUCTION, GROUP_AI
 import { MNP_CONTEXT_BOOTSTRAP_INSTRUCTION } from '../src/utils/aiContextInstructions.mjs'
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { readFileSync } from 'node:fs'
 import { hostname, networkInterfaces, tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -194,6 +195,12 @@ import {
   integrationWorktreeDirtyMessage,
   integrationWorktreeDirtyReasonCode,
 } from './lib/workspacePool.mjs'
+import {
+  AI_CONVERSATION_REQUEST_MAX_LENGTH,
+  loadAiDelegationInstructionTemplate,
+  renderAiConversationPrompt,
+  renderAiDelegationInstruction,
+} from './lib/aiDelegationInstructions.mjs'
 
 const serverDirectory = path.dirname(fileURLToPath(import.meta.url))
 const projectDirectory = path.resolve(serverDirectory, '..')
@@ -207,6 +214,7 @@ installRuntimeShutdown(async () => {
     eventClients.clear()
   })
 })
+const aiDelegationInstructionConfig = loadAiDelegationInstructionTemplate({ readFileSyncImpl: readFileSync })
 const dataDirectory = path.resolve(String(process.env.MNP_DATA_DIR ?? '').trim() || path.join(serverDirectory, 'data'))
 let documentReconstruction = null
 const historyDirectory = path.join(dataDirectory, '_history')
@@ -2212,28 +2220,17 @@ function issueDelegatedAttribution({ mapId, cardId, conversationId, selection, s
 
 function buildDelegatedInstruction({ mapId, cardId, editorId, attributionToken, instruction, workspaceLease }) {
   const workspaceInstruction = buildWorkspaceInstruction(workspaceLease)
-  return `# MindNProgress 하위 카드 위임 작업 요청
-
-${MNP_CONTEXT_BOOTSTRAP_INSTRUCTION}
-
-이 요청은 상위 카드의 AI가 현재 하위 카드에 실행을 위임한 것이므로, 일반적인 다음 작업 제안에 그치지 말고 아래 "상위 AI 지시"를 실제로 수행하세요. \`editorId\`와 \`attributionToken\`은 이후 MindNProgress MCP 작업이 끝날 때까지 유지하세요.
-
-- mapId: \`${mapId}\`
-- cardId: \`${cardId}\`
-- editorId: \`${editorId}\`
-- attributionToken: \`${attributionToken}\`
-
-MCP 조회 결과의 \`guide\`, \`selection.taskLinks.startupInspection\`, \`selection.aiWorkCoordination\`과 \`nextStep\`을 확인하고 따르세요. 관련 카드를 수정하기 전에는 AI 작업 상태를 확인하고, 실행 결과를 카드 댓글과 공유 지식에 알맞게 기록하세요. 상위 AI가 맡긴 범위에서 수행하고, 분석·제안만 요청받았다면 구현으로 확대하지 마세요.
-
-이 위임 실행이 사용자의 중지로 끊긴 뒤 같은 대화에서 직접 이어진 경우, 단순 질의 응답이나 중간 보고는 위임 완료가 아닙니다. 실제 위임 작업과 카드 기록, 필요한 작업공간 체크포인트까지 모두 끝낸 마지막 턴에서만 최종 답변 직전에 \`mindnprogress_complete_ai_delegation\`을 호출하세요. 중단 없이 진행된 최초 실행에는 이 완료 신호가 필요하지 않습니다.
-
-MCP 도구를 사용할 수 없거나 문서 또는 카드를 찾지 못하면 임의로 추측하지 말고 확인 가능한 범위만 수행한 뒤 제약을 명확히 남기세요.
-
-${workspaceInstruction ? `${workspaceInstruction}\n` : ''}
-
-# 상위 AI 지시
-
-${instruction.trim()}`
+  return renderAiDelegationInstruction(aiDelegationInstructionConfig.template, {
+    requestTitle: 'MindNProgress 하위 카드 위임 작업 요청',
+    mapId,
+    cardId,
+    editorId,
+    attributionToken,
+    approvalInstruction: '',
+    workspaceInstruction,
+    instructionHeading: '상위 AI 지시',
+    instruction: `이 요청은 상위 카드의 AI가 현재 하위 카드에 실행을 위임한 것이므로, 일반적인 다음 작업 제안에 그치지 말고 아래 지시를 실제로 수행하세요.\n\n${instruction.trim()}`,
+  })
 }
 
 function sendGroupDocumentInstructionResponse(response, statusCode, reasonCode, message, payload = {}) {
@@ -7371,6 +7368,9 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       const providerId = String(body.providerId ?? '').trim().slice(0, 120)
       const mapId = String(body.mapId ?? '').trim().slice(0, 120)
       const cardId = String(body.cardId ?? '').trim().slice(0, 120)
+      const promptRequest = typeof body.request === 'string' && body.request.trim()
+        ? body.request.trim()
+        : 'MNP 작업 요청을 확인하세요.'
       const purpose = body.purpose === undefined ? 'card' : String(body.purpose).trim()
       let doorayApprovalContext = null
       if (purpose === 'dooray-response') {
@@ -7384,6 +7384,9 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       }
       if (!agentId || !modelId || (!doorayApprovalContext && (!isValidMapId(mapId) || !cardId))) {
         return sendJson(response, 400, { error: 'AI 종류, 모델, 문서와 카드를 모두 지정해 주세요.' })
+      }
+      if (promptRequest.length > AI_CONVERSATION_REQUEST_MAX_LENGTH) {
+        return sendJson(response, 400, { error: 'AI 대화 요청이 너무 깁니다.' })
       }
       if (!isAiConversationPurpose(purpose)) {
         return sendJson(response, 400, { error: 'AI 대화 용도가 올바르지 않습니다.' })
@@ -7441,6 +7444,14 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         const attributionToken = randomBytes(32).toString('base64url')
         const completionToken = randomBytes(32).toString('base64url')
         const expiresAt = Date.now() + aiAttributionDurationMs
+        const prompt = renderAiConversationPrompt(aiDelegationInstructionConfig.template, {
+          mapId,
+          cardId,
+          editorId: user.id,
+          attributionToken,
+          approvalInstruction: AI_EXECUTION_APPROVAL_INSTRUCTION,
+          instruction: promptRequest,
+        })
         for (const [tokenKey, attribution] of aiAttributions) {
           if (attribution.expiresAt <= Date.now()) aiAttributions.delete(tokenKey)
         }
@@ -7487,6 +7498,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         return sendJson(response, 201, {
           attributionToken,
           completionUrl,
+          prompt,
           authorName,
           editorId: user.id,
           homeMachineId,
