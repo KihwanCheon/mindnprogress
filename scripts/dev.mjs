@@ -1,11 +1,12 @@
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { loadLocalEnvironment } from './local-environment.mjs'
 import { supervise } from './runtime/supervisor.mjs'
+import { loadMindNProgressEnvironment } from './local-environment.mjs'
 
 const projectDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-loadLocalEnvironment()
+const loadedConfigFiles = loadMindNProgressEnvironment()
+console.log(`[Mind & Progress] 설정 파일: ${loadedConfigFiles.length > 0 ? loadedConfigFiles.join(', ') : '없음'}`)
 const viteEntry = path.join(projectDirectory, 'node_modules', 'vite', 'bin', 'vite.js')
 const watchServer = process.argv.includes('--watch')
 const serverEntry = path.join(projectDirectory, 'server', 'index.mjs')
