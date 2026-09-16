@@ -21,6 +21,7 @@ MindNProgress_*.zip
 *.partial.zip
 .staging-*/
 .verify-*/
+.mindnprogress/
 
 # Editor directories and files
 .vscode/*
