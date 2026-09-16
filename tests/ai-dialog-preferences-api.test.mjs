@@ -14,7 +14,8 @@ test('접힘 상태 API는 로그인 계정만 수정하고 다른 세션·서�
   await new Promise(resolve => probe.close(resolve))
   const start = () => spawn(process.execPath, ['server/index.mjs'], { cwd: path.resolve(import.meta.dirname, '..'), windowsHide: true, stdio: 'ignore', env: {
     ...process.env, MNP_DATA_DIR: directory, MNP_API_HOST: '127.0.0.1', MNP_API_PORT: String(port), MNP_WEB_PORT: String(port),
-    MNP_WORKSPACE_POOL_REGISTRY: path.join(directory, 'no-pool.json'), MNP_ADMIN_EMAIL: 'dialog-admin@mind.local', MNP_ADMIN_PASSWORD: 'dialog-test-password',
+    MNP_WORKSPACE_POOL_REGISTRY: path.join(directory, 'no-pool.json'), MNP_PUBLIC_VIEWER_ENABLED: 'true',
+    MNP_ADMIN_EMAIL: 'dialog-admin@mind.local', MNP_ADMIN_PASSWORD: 'dialog-test-password',
   } })
   let server = start()
   const stop = async () => { if (server.exitCode === null) { const done = new Promise(resolve => server.once('exit', resolve)); server.kill(); await done } }

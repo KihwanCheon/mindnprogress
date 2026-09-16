@@ -25,7 +25,8 @@ test('배치 HTTP·MCP·실제 브라우저는 원본을 보존하고 승인한 
   const probe = createServer(); await new Promise((resolve) => probe.listen(0, '127.0.0.1', resolve)); const port = probe.address().port; await new Promise((resolve) => probe.close(resolve))
   const base = `http://127.0.0.1:${port}`
   const env = { ...process.env, MNP_DATA_DIR: directory, MNP_TOKEN_FILE: path.join(directory, '_integration-token'), MNP_API_HOST: '127.0.0.1', MNP_API_PORT: String(port), MNP_WEB_PORT: String(port), MNP_API_URL: base,
-    MNP_ADMIN_EMAIL: 'layout-test@mind.local', MNP_ADMIN_PASSWORD: 'TestOnly!2026', MNP_WORKSPACE_POOL_REGISTRY: path.join(directory, 'no-pool.json'), MNP_MCP_USAGE_DISABLED: '1', AIONUI_CONVERSATION_ID: '',
+    MNP_ADMIN_EMAIL: 'layout-test@mind.local', MNP_ADMIN_PASSWORD: 'TestOnly!2026', MNP_WORKSPACE_POOL_REGISTRY: path.join(directory, 'no-pool.json'),
+    MNP_PUBLIC_VIEWER_ENABLED: 'true', MNP_MCP_USAGE_DISABLED: '1', AIONUI_CONVERSATION_ID: '',
     MNP_AIONUI_URL: `http://127.0.0.1:${fake.address().port}`, MNP_AIONUI_DISCOVERY_FILE: path.join(directory, 'no-discovery.json') }
   let child; let stderr = ''; let mcp
   const stop = async () => { if (child?.exitCode === null) { const done = new Promise((resolve) => child.once('exit', resolve)); child.kill(); await done } }

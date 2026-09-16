@@ -160,12 +160,12 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
     assert.equal((await api(`/api/groups/${groupId}`)).body.documents.length, 2)
 
     const viewerResponse = await fetch(baseUrl + '/api/auth/viewer-access', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
-    const cookie = viewerResponse.headers.get('set-cookie')?.split(';')[0]
-    assert.ok(cookie)
-    const viewerGet = await fetch(`${baseUrl}/api/groups/${groupId}`, { headers: { Cookie: cookie } })
-    assert.equal(viewerGet.status, 200)
-    const viewerWrite = await fetch(`${baseUrl}/api/groups/${groupId}`, { method: 'PATCH', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ baseVersion: 2, objective: '뷰어 변경' }) })
-    assert.equal(viewerWrite.status, 403)
+    assert.equal(viewerResponse.status, 403)
+    assert.equal((await viewerResponse.json()).code, 'PUBLIC_VIEWER_DISABLED')
+    const viewerGet = await fetch(`${baseUrl}/api/groups/${groupId}`)
+    assert.equal(viewerGet.status, 401)
+    const viewerWrite = await fetch(`${baseUrl}/api/groups/${groupId}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ baseVersion: 2, objective: '뷰어 변경' }) })
+    assert.equal(viewerWrite.status, 401)
 
     const attribution = await api('/api/integrations/aionui/attributions', 'POST', { agentId: 'claude', modelId: 'opus', mapId: coordinatorId, cardId: coordinatorRoot, purpose: 'group-coordination', workspace: projectDirectory, workspaceConfirmed: true })
     assert.equal(attribution.status, 201, JSON.stringify(attribution.body))
@@ -341,7 +341,7 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
     dispatches.set('usage-run', missingChildDispatch)
     assert.equal((await humanAction('recover', { ...await actionBody(), confirmApprovedScope: false })).status, 400)
     assert.equal((await humanAction('recover', { ...await actionBody(), expectedUpdatedAt: '오래된 값' })).status, 409)
-    assert.ok([401, 403].includes((await humanAction('recover', await actionBody(), cookie)).status))
+    assert.equal((await humanAction('recover', await actionBody(), '')).status, 401)
     assert.equal((await humanAction('refresh', await actionBody())).body.executionRequested, false)
     // 원래 상위 AI가 한도에 막혀도 같은 카드에 연결된 새 대화가 복구할 수 있다.
     const recoveryAttribution = await api('/api/integrations/aionui/attributions', 'POST', { agentId: 'claude', modelId: 'opus', mapId: coordinatorId, cardId: coordinatorRoot, purpose: 'group-coordination', workspace: projectDirectory, workspaceConfirmed: true })
@@ -451,7 +451,7 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
       // 자동 폴링의 완료 관측과 결과 캡처 사이에 updatedAt이 한 번 더 바뀔 수 있다.
       refreshed = await api(`${delegateUrl}/passive-run/refresh`, 'POST', { expectedUpdatedAt: (await latestPassive()).updatedAt }, sourceHeaders)
     }
-    assert.equal(refreshed.status, 200)
+    assert.equal(refreshed.status, 200, JSON.stringify(refreshed.body))
     assert.equal(refreshed.body.delegation.workCompleted, true)
     assert.equal(refreshed.body.delegation.reportPending, true)
     await pause(400)
@@ -587,8 +587,8 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
     assert.deepEqual(waitingDetail.item, waitingItem)
     const reviewBody = { baseVersion: beforeReviewContext.project.version, baseWaitingReviewVersion: 0, waitingReview: { mapId: reviewDocument.id, cardId: waitingNode.id, waitingId: waitingItem.id, expectedFingerprint: waitingDetail.fingerprint, category: 'external', impact: 'deferred' } }
     const freshViewer = await fetch(baseUrl + '/api/auth/viewer-access', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
-    const freshViewerCookie = freshViewer.headers.get('set-cookie').split(';')[0]
-    assert.equal((await fetch(`${baseUrl}/api/groups/${reviewGroupId}`, { method: 'PATCH', headers: { Cookie: freshViewerCookie, 'Content-Type': 'application/json' }, body: JSON.stringify(reviewBody) })).status, 403)
+    assert.equal(freshViewer.status, 403)
+    assert.equal((await fetch(`${baseUrl}/api/groups/${reviewGroupId}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(reviewBody) })).status, 401)
     const callsBeforeReview = calls.length
     const reviewed = await api(`/api/groups/${reviewGroupId}`, 'PATCH', reviewBody)
     assert.equal(reviewed.status, 200, JSON.stringify(reviewed.body))

@@ -101,12 +101,13 @@ test('보관·전환 HTTP/MCP 경로는 임시 서버에서 원본·댓글·이�
   assert.equal((await api('/api/document-reconstructions/apply', 'POST', { plan, previewHash: preview.body.previewHash })).body.code, 'RECONSTRUCTION_LAYOUT_REVIEW_REQUIRED')
   preview = await verifiedPreview(plan)
   const viewerLogin = await fetch(base + '/api/auth/viewer-access', { method: 'POST' })
-  assert.equal(viewerLogin.status, 200)
-  const viewerHeaders = { Cookie: viewerLogin.headers.get('set-cookie').split(';')[0], 'Content-Type': 'application/json' }
-  assert.equal((await api('/api/document-reconstructions/requests', 'POST', requestBody, viewerHeaders)).status, 403)
-  assert.equal((await api(`/api/document-reconstructions/requests/${requestId}/proposal`, 'POST', { baseRevision: 1, plan }, viewerHeaders)).status, 403)
-  assert.equal((await api('/api/document-reconstructions/apply', 'POST', { plan, previewHash: preview.body.previewHash }, viewerHeaders)).status, 403)
-  assert.equal((await api(`/api/maps/${source.id}/archive`, 'PATCH', { baseVersion: source.version, baseLifecycleVersion: 0, archived: true }, viewerHeaders)).status, 403)
+  assert.equal(viewerLogin.status, 403)
+  assert.equal((await viewerLogin.json()).code, 'PUBLIC_VIEWER_DISABLED')
+  const viewerHeaders = { 'Content-Type': 'application/json' }
+  assert.equal((await api('/api/document-reconstructions/requests', 'POST', requestBody, viewerHeaders)).status, 401)
+  assert.equal((await api(`/api/document-reconstructions/requests/${requestId}/proposal`, 'POST', { baseRevision: 1, plan }, viewerHeaders)).status, 401)
+  assert.equal((await api('/api/document-reconstructions/apply', 'POST', { plan, previewHash: preview.body.previewHash }, viewerHeaders)).status, 401)
+  assert.equal((await api(`/api/maps/${source.id}/archive`, 'PATCH', { baseVersion: source.version, baseLifecycleVersion: 0, archived: true }, viewerHeaders)).status, 401)
   const applied = await api('/api/document-reconstructions/apply', 'POST', { plan, previewHash: preview.body.previewHash })
   assert.equal(applied.status, 200, JSON.stringify(applied.body))
   const nextId = applied.body.operation.targetMapIds[0]
@@ -118,7 +119,7 @@ test('보관·전환 HTTP/MCP 경로는 임시 서버에서 원본·댓글·이�
   const nextReference = (await api(`/api/maps/${guideId}`)).body
   assert.deepEqual(nextReference.unresolvedReferenceNodeIds, [])
   assert.deepEqual(nextReference.map.nodes[1].data.reference, { mapId: nextId, nodeId: 'task-next' })
-  assert.equal((await api('/api/maps/archive', 'GET', undefined, viewerHeaders)).body.maps[0].id, source.id)
+  assert.equal((await api('/api/maps/archive')).body.maps[0].id, source.id)
   assert.equal((await api(`/api/maps/${source.id}`)).body.map.version, source.version)
   assert.equal((await api(`/api/maps/${source.id}/comments?nodeId=task`)).body.comments[0].summary, '[진행] 원문 댓글')
   const readImage = await fetch(`${base}/api/maps/${source.id}/images/${image.assetId}`, { headers })

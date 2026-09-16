@@ -235,6 +235,7 @@ const webPort = Number(process.env.MNP_WEB_PORT ?? 4175)
 const configuredAionUiBaseUrl = String(process.env.MNP_AIONUI_URL ?? '').trim()
 const configuredAionUiBaseUrls = configuredAionUiBaseUrl ? [configuredAionUiBaseUrl.replace(/\/+$/, '')] : []
 const configuredAionUiWebBaseUrl = String(process.env.MNP_AIONUI_WEB_URL ?? '').trim()
+const publicViewerEnabled = ['1', 'true', 'yes', 'on'].includes(String(process.env.MNP_PUBLIC_VIEWER_ENABLED ?? '').trim().toLowerCase())
 const fallbackAionUiBaseUrls = ['http://127.0.0.1:1986', 'http://127.0.0.1:5830']
 const aionUiDiscoveryFile = path.resolve(
   String(process.env.MNP_AIONUI_DISCOVERY_FILE ?? '').trim() || path.join(tmpdir(), 'aionui-backend.json'),
@@ -911,7 +912,9 @@ function getSignedInUser(request) {
     if (session.persistent) void persistSessions().catch((error) => console.error('[Session cleanup]', error))
     return null
   }
-  return users.find((user) => user.id === session.userId && user.active !== false) ?? null
+  return users.find((user) => user.id === session.userId
+    && user.active !== false
+    && (publicViewerEnabled || !isPublicViewer(user))) ?? null
 }
 
 function getCurrentUser(request) {
@@ -6781,6 +6784,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         publicBaseUrl,
         aionUiWebBaseUrl,
         aionUiWebConfigured: Boolean(configuredAionUiWebBaseUrl),
+        publicViewerEnabled,
       })
     }
 
@@ -7024,6 +7028,12 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
     }
 
     if (request.method === 'POST' && url.pathname === '/api/auth/viewer-access') {
+      if (!publicViewerEnabled) {
+        return sendJson(response, 403, {
+          error: '비로그인 읽기 전용 보기는 현재 설정에서 비활성화되어 있습니다.',
+          code: 'PUBLIC_VIEWER_DISABLED',
+        })
+      }
       const viewer = users.find((candidate) => candidate.id === 'user-public-viewer' && isPublicViewer(candidate) && candidate.active !== false)
       if (!viewer) return sendJson(response, 503, { error: '공개 뷰어 계정이 준비되지 않았습니다.' })
       const token = randomBytes(32).toString('base64url')
