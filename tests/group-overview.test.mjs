@@ -52,6 +52,9 @@ test('통합 정리 대기를 실패로 표시하지 않고 충돌 파일과 재
   assert.equal(groupDelegationPresentation({ state: 'waiting-integration', workspaceResult: {
     reasonCode: 'INTEGRATION_STATUS_RETRY', waitingReason: 'Git 조회 지연으로 재시도합니다.',
   } }).label, '통합 대기')
+  assert.equal(groupDelegationPresentation({ state: 'waiting-integration', workspaceResult: {
+    reasonCode: 'unity-workspace-busy', waitingReason: 'Unity 안정화를 기다립니다.',
+  } }).label, '작업 완료 · Unity 안정화 대기')
 })
 
 test('보고 전달 대기·전달 중·수신 완료와 상위 실행 상태를 분리해 표시한다', () => {

@@ -94,6 +94,15 @@ test('통합 정리 대기는 순서 대기와 구분하고 충돌 경로와 자
   assert.match(aiDelegationStateReason({ state: 'waiting-integration' }).message, /반영 순서/)
 })
 
+test('Unity 안정화 대기는 일반 통합 순서 대기와 구분한다', () => {
+  const reason = aiDelegationStateReason({ state: 'waiting-integration', workspaceResult: {
+    reasonCode: 'unity-workspace-busy',
+    waitingReason: 'fork3 Unity가 안정 상태가 아니어서 작업공간 회수를 기다립니다.',
+  } })
+  assert.equal(reason.reasonCode, 'unity-workspace-busy')
+  assert.match(reason.message, /작업 완료 · Unity 안정화 대기/)
+})
+
 test('MCP 오류 응답은 reasonCode와 message를 구조화해 보존한다', async () => {
   const source = await readFile(new URL('../mcp/server.mjs', import.meta.url), 'utf8')
   assert.match(source, /error\.reasonCode = body\?\.reasonCode \?\? body\?\.code/)

@@ -12,6 +12,7 @@ import {
   integrationStatusRetryReasonCode,
   normalizeCheckpointCommitMessage,
 } from '../server/lib/workspacePool.mjs'
+import { unityEditorStateBusyReasons } from '../server/lib/unityWorkspaceReadiness.mjs'
 
 const execFileAsync = promisify(execFile)
 const checkpointCommitMessage = {
@@ -47,6 +48,24 @@ test('작업공간 지침은 기존 대화에도 재배정 정보를 명확하�
   assert.match(instruction, /직접 커밋하지 마세요/)
   assert.match(instruction, /commitMessage/)
   assert.match(instruction, /mindnprogress_checkpoint_ai_workspace.*operation\.action=confirm-no-changes/)
+  assert.match(instruction, /플랫폼별 컴파일은 한 번에 하나씩/)
+  assert.match(instruction, /ready_for_tools=true/)
+})
+
+test('Unity 준비 판정은 ready_for_tools 최종 신호와 개별 busy 상태를 모두 반영한다', () => {
+  assert.deepEqual(unityEditorStateBusyReasons({
+    activity: { phase: 'idle' },
+    advice: { ready_for_tools: false },
+  }), ['unity-not-ready-for-tools'])
+  assert.deepEqual(unityEditorStateBusyReasons({
+    compilation: { is_compiling: true },
+    activity: { phase: 'compiling' },
+    advice: { ready_for_tools: false },
+  }), ['compiling'])
+  assert.deepEqual(unityEditorStateBusyReasons({
+    activity: { phase: 'idle' },
+    advice: { ready_for_tools: true },
+  }), [])
 })
 
 test('체크포인트 커밋 메시지는 실제 변경 구조와 금지 항목을 검증한다', () => {
@@ -96,6 +115,160 @@ test('회수 기준 커밋 객체가 없으면 두 번 fetch한 뒤 worker 전�
   )
   assert.equal(commands.filter(({ cwd, args }) => cwd === workerRoot && args[0] === 'fetch').length, 2)
   assert.equal(commands.some(({ cwd, args }) => cwd === workerRoot && args[0] === 'switch'), false)
+})
+
+test('Unity가 busy이면 완료 worker의 브랜치를 바꾸지 않고 안정화 후 회수한다', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'mnp-unity-release-before-'))
+  try {
+    const integrationRoot = path.join(root, 'main')
+    const workerRoot = path.join(root, 'fork3')
+    await Promise.all([mkdir(integrationRoot), mkdir(workerRoot)])
+    const workspace = {
+      id: 'fork3', root: workerRoot,
+      assetsPath: `${workerRoot}/Assets`, unityInstanceHash: 'hash-fork3',
+    }
+    const lease = {
+      workspaceId: 'fork3', jobId: 'job-unity-before', leaseId: 'lease-unity-before',
+      baseBranch: 'japan-master', headCommit: 'worker456', status: 'finalizing',
+    }
+    let branch = 'mnp/integrate/job-unity-before'
+    let head = 'integrated789'
+    let switchCount = 0
+    let unityReady = false
+    const manager = new WorkspacePoolManager({
+      registryFile: path.join(root, 'workspaces.json'),
+      stateFile: path.join(root, 'state.json'),
+      workspaceReadinessProbe: async () => ({
+        ready: unityReady, applicable: true, running: true,
+        reasons: unityReady ? [] : ['unity-window-busy'],
+      }),
+      workspaceReadinessOptions: { stableSamples: 1, pollMs: 0, maxWaitMs: 0 },
+      gitRunner: async (cwd, args) => {
+        if (cwd === integrationRoot && args[0] === 'cat-file') return ''
+        if (cwd === workerRoot && ['fetch', 'cat-file'].includes(args[0])) return ''
+        if (cwd === workerRoot && args[0] === 'switch') {
+          switchCount += 1
+          branch = args[2]
+          head = args[3]
+          return ''
+        }
+        if (cwd === workerRoot && args[0] === 'branch') return branch
+        if (cwd === workerRoot && args[0] === 'rev-parse') return head
+        if (cwd === workerRoot && args[0] === 'status') return ''
+        throw new Error(`unexpected git command: ${cwd} ${args.join(' ')}`)
+      },
+    })
+    manager.registry = { integration: { root: integrationRoot }, workspaces: [workspace] }
+    manager.state = {
+      integrationLeaseId: lease.leaseId,
+      leases: { [lease.leaseId]: lease },
+      workspaces: { fork3: { status: 'finalizing' } },
+    }
+    manager.persist = async () => {}
+    manager.writeResult = async (_lease, fields) => fields
+
+    await assert.rejects(
+      () => manager.completeLease(lease, workspace, {
+        status: 'completed', headCommit: lease.headCommit,
+        integratedCommit: 'main789', completedAt: '2026-09-16T08:00:00.000Z',
+      }),
+      (error) => error.reasonCode === 'unity-workspace-busy'
+        && error.phase === 'before-idle-switch',
+    )
+    assert.equal(switchCount, 0)
+    assert.equal(lease.pendingIdleRelease.switched, false)
+
+    await manager.waitForIntegration(lease, workspace, {
+      childStatus: 'completed',
+      headCommit: lease.headCommit,
+      integratedCommit: 'main789',
+      reasonCode: 'unity-workspace-busy',
+      waitingReason: 'fork3 Unity가 안정 상태가 아니어서 작업공간 회수를 기다립니다.',
+      unityWorkspacePhase: 'before-idle-switch',
+      unityWorkspaceReadiness: { ready: false, reasons: ['unity-window-busy'] },
+    })
+    assert.equal(manager.state.integrationLeaseId, null)
+    unityReady = true
+    const completed = await manager.finalize(lease.leaseId, { childStatus: 'completed' })
+    assert.equal(completed.status, 'completed')
+    assert.equal(switchCount, 1)
+    assert.equal(manager.state.workspaces.fork3.status, 'idle')
+    assert.equal(lease.pendingIdleRelease, undefined)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('브랜치 전환 후 Unity가 busy가 되면 같은 전환을 반복하지 않고 안정화만 재확인한다', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'mnp-unity-release-after-'))
+  try {
+    const integrationRoot = path.join(root, 'main')
+    const workerRoot = path.join(root, 'fork3')
+    await Promise.all([mkdir(integrationRoot), mkdir(workerRoot)])
+    const workspace = {
+      id: 'fork3', root: workerRoot,
+      assetsPath: `${workerRoot}/Assets`, unityInstanceHash: 'hash-fork3',
+    }
+    const lease = {
+      workspaceId: 'fork3', jobId: 'job-unity-after', leaseId: 'lease-unity-after',
+      baseBranch: 'japan-master', headCommit: 'worker456', status: 'finalizing',
+    }
+    let branch = 'mnp/integrate/job-unity-after'
+    let head = 'integrated789'
+    let switchCount = 0
+    let probeCount = 0
+    const readiness = [
+      { ready: true, applicable: true, running: true, reasons: [] },
+      { ready: false, applicable: true, running: true, reasons: ['asset-import'] },
+      { ready: true, applicable: true, running: true, reasons: [] },
+    ]
+    const manager = new WorkspacePoolManager({
+      registryFile: path.join(root, 'workspaces.json'),
+      stateFile: path.join(root, 'state.json'),
+      workspaceReadinessProbe: async () => readiness[Math.min(probeCount++, readiness.length - 1)],
+      workspaceReadinessOptions: { stableSamples: 1, pollMs: 0, maxWaitMs: 0 },
+      gitRunner: async (cwd, args) => {
+        if (cwd === integrationRoot && args[0] === 'cat-file') return ''
+        if (cwd === workerRoot && ['fetch', 'cat-file'].includes(args[0])) return ''
+        if (cwd === workerRoot && args[0] === 'switch') {
+          switchCount += 1
+          branch = args[2]
+          head = args[3]
+          return ''
+        }
+        if (cwd === workerRoot && args[0] === 'branch') return branch
+        if (cwd === workerRoot && args[0] === 'rev-parse') return head
+        if (cwd === workerRoot && args[0] === 'status') return ''
+        throw new Error(`unexpected git command: ${cwd} ${args.join(' ')}`)
+      },
+    })
+    manager.registry = { integration: { root: integrationRoot } }
+    manager.state = {
+      integrationLeaseId: lease.leaseId,
+      leases: { [lease.leaseId]: lease },
+      workspaces: { fork3: { status: 'finalizing' } },
+    }
+    manager.persist = async () => {}
+    manager.writeResult = async (_lease, fields) => fields
+
+    await assert.rejects(
+      () => manager.completeLease(lease, workspace, {
+        status: 'completed', headCommit: lease.headCommit,
+        integratedCommit: 'main789', completedAt: '2026-09-16T08:00:00.000Z',
+      }),
+      (error) => error.reasonCode === 'unity-workspace-busy'
+        && error.phase === 'after-idle-switch',
+    )
+    assert.equal(switchCount, 1)
+    assert.equal(lease.pendingIdleRelease.switched, true)
+
+    const completed = await manager.completeLease(lease, workspace, lease.pendingIdleRelease.resultFields)
+    assert.equal(completed.status, 'completed')
+    assert.equal(switchCount, 1)
+    assert.equal(manager.state.workspaces.fork3.status, 'idle')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test('실행 중인 풀에서 idle worker만 main 추적 기준으로 동기화한다', async () => {

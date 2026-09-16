@@ -45,6 +45,7 @@ export function groupDelegationPresentation(item) {
   const label = item.workCompleted && item.reportStatus === 'received' && ['completed', 'waking-parent'].includes(state)
     ? '작업 완료 · 총괄 수신 완료'
     : item.workCompleted && item.reportPending && completedReportLabels[state] ? completedReportLabels[state]
+    : state === 'waiting-integration' && item.workspaceResult?.reasonCode === 'unity-workspace-busy' ? '작업 완료 · Unity 안정화 대기'
     : state === 'waiting-integration' && ['integration-worktree-dirty', 'integration-untracked-collision'].includes(item.workspaceResult?.reasonCode) ? '작업 완료 · 통합 정리 대기'
     : delegationLabels[state] ?? state
   const tone = state === 'failed' ? 'danger' : attention ? 'warning'

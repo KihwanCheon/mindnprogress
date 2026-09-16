@@ -147,8 +147,10 @@ export function aiDelegationStateReason(delegation) {
   if (displayState === 'waiting-integration' && delegation?.workspaceResult?.waitingReason) {
     const result = delegation.workspaceResult
     const paths = result.untrackedChanges?.length ? result.untrackedChanges : result.trackedChanges ?? []
-    const label = ['integration-worktree-dirty', 'integration-untracked-collision'].includes(result.reasonCode)
-      ? '작업 완료 · 통합 정리 대기' : '작업 완료 · 통합 대기'
+    const label = result.reasonCode === 'unity-workspace-busy'
+      ? '작업 완료 · Unity 안정화 대기'
+      : ['integration-worktree-dirty', 'integration-untracked-collision'].includes(result.reasonCode)
+        ? '작업 완료 · 통합 정리 대기' : '작업 완료 · 통합 대기'
     return requiredAiDelegationReason(
       result.reasonCode ?? 'AI_DELEGATION_WAITING_INTEGRATION',
       `${label}. ${result.waitingReason}${paths.length ? `\n충돌/변경 파일:\n${paths.join('\n')}` : ''}`,
