@@ -34,12 +34,57 @@ function normalizeDoorayBaseUrl(value) {
   }
 }
 
+function isRecord(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+// Dooray MCP 설정은 키 이름을 DOORAY_API_KEY 또는 DOORAY_API_TOKEN 으로 쓴다.
+function readDoorayApiKey(source) {
+  if (!isRecord(source)) return ''
+  return String(source.DOORAY_API_KEY ?? source.DOORAY_API_TOKEN ?? '').trim()
+}
+
+// Claude 설정과 AionUi 는 MCP 목록 모양이 다르다. 둘 다 {name, env} 목록으로 맞춘다.
+// Claude: { mcpServers: { 이름: { env } } } / AionUi: [{ name, transport: { env } }]
+function mcpEntriesFrom(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map((server) => ({
+        name: String(server?.name ?? '').trim(),
+        env: isRecord(server?.transport?.env) ? server.transport.env : {},
+      }))
+      .filter((entry) => entry.name)
+  }
+  if (!isRecord(value)) return []
+  return Object.entries(value).map(([name, server]) => ({
+    name,
+    env: isRecord(server?.env) ? server.env : {},
+  }))
+}
+
+// 등록 이름은 환경마다 다르다(docker-dooray-mcp, dooray-mcp 등). 지정한 이름을
+// 먼저 보고, 없으면 이름에 dooray 가 들어간 항목에서 키를 찾는다.
+function pickDoorayMcpEnv(value, serverName) {
+  const entries = mcpEntriesFrom(value)
+  const ordered = [
+    ...entries.filter((entry) => entry.name === serverName),
+    ...entries.filter((entry) => entry.name !== serverName && /dooray/i.test(entry.name))
+      .sort((first, second) => first.name.localeCompare(second.name)),
+  ]
+  for (const entry of ordered) {
+    if (readDoorayApiKey(entry.env)) return entry
+  }
+  return { name: '', env: {} }
+}
+
 export async function loadDoorayApiConfig({
   env = process.env,
   homeDirectory = homedir(),
   readText = (filePath) => readFile(filePath, 'utf8'),
+  // AionUi 에 등록된 MCP 목록. 넘기지 않으면 이 출처는 건너뛴다.
+  listMcpServers = null,
 } = {}) {
-  const environmentApiKey = String(env.MNP_DOORAY_API_KEY ?? env.DOORAY_API_KEY ?? '').trim()
+  const environmentApiKey = String(env.MNP_DOORAY_API_KEY ?? '').trim() || readDoorayApiKey(env)
   const environmentBaseUrl = String(env.MNP_DOORAY_BASE_URL ?? env.DOORAY_BASE_URL ?? '').trim()
   if (environmentApiKey) {
     return {
@@ -52,30 +97,52 @@ export async function loadDoorayApiConfig({
   const configFile = path.resolve(
     String(env.MNP_DOORAY_CONFIG_FILE ?? '').trim() || path.join(homeDirectory, '.claude.json'),
   )
-  let parsed
+  const serverName = String(env.MNP_DOORAY_MCP_SERVER_NAME ?? '').trim() || defaultDoorayMcpServerName
+
+  function resolved(entry, source) {
+    return {
+      apiKey: readDoorayApiKey(entry.env),
+      baseUrl: normalizeDoorayBaseUrl(environmentBaseUrl || String(entry.env.DOORAY_BASE_URL ?? '').trim()),
+      source,
+      configFile,
+      serverName: entry.name,
+    }
+  }
+
+  // 설정 파일이 없는 것은 오류가 아니다. AionUi 쪽 등록만 있는 환경도 있다.
+  let parsed = null
+  let configReadable = true
   try {
     parsed = JSON.parse(await readText(configFile))
   } catch (error) {
-    if (error?.code === 'ENOENT') {
-      return {
-        apiKey: '',
-        baseUrl: normalizeDoorayBaseUrl(environmentBaseUrl),
-        source: 'unavailable',
-        configFile,
-      }
+    if (error?.code !== 'ENOENT') {
+      throw new DoorayTaskError('CONFIG_INVALID', 'Dooray MCP 설정 파일을 읽지 못했습니다.', 503)
     }
-    throw new DoorayTaskError('CONFIG_INVALID', 'Dooray MCP 설정 파일을 읽지 못했습니다.', 503)
+    configReadable = false
   }
 
-  const serverName = String(env.MNP_DOORAY_MCP_SERVER_NAME ?? '').trim() || defaultDoorayMcpServerName
-  const connectorEnv = parsed?.mcpServers?.[serverName]?.env ?? {}
-  const apiKey = String(connectorEnv.DOORAY_API_KEY ?? '').trim()
-  const baseUrl = environmentBaseUrl || String(connectorEnv.DOORAY_BASE_URL ?? '').trim()
+  if (configReadable) {
+    const fromConfig = pickDoorayMcpEnv(parsed?.mcpServers, serverName)
+    if (fromConfig.name) return resolved(fromConfig, 'claude-config')
+  }
+
+  // AionUi 에 등록된 MCP 도 같은 토큰을 들고 있다. 설정 파일에서 찾지 못하면
+  // 여기서 읽는다. AionUi 가 꺼져 있는 것은 흔한 상황이라 실패해도 넘어간다.
+  if (listMcpServers) {
+    try {
+      const fromAionUi = pickDoorayMcpEnv(await listMcpServers(), serverName)
+      if (fromAionUi.name) return resolved(fromAionUi, 'aionui-mcp')
+    } catch {
+      // AionUi 미실행·연결 실패는 unavailable 로 처리한다.
+    }
+  }
+
   return {
-    apiKey,
-    baseUrl: normalizeDoorayBaseUrl(baseUrl),
-    source: apiKey ? 'claude-config' : 'unavailable',
+    apiKey: '',
+    baseUrl: normalizeDoorayBaseUrl(environmentBaseUrl),
+    source: 'unavailable',
     configFile,
+    serverName: '',
   }
 }
 

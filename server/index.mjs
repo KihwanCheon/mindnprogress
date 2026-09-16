@@ -944,7 +944,17 @@ async function readJsonBody(request) {
 }
 
 function getDoorayApiConfig() {
-  doorayApiConfigPromise ??= loadDoorayApiConfig()
+  // 키를 찾지 못한 결과는 캐시하지 않는다. AionUi 가 나중에 떠도 계속
+  // unavailable 로 남는 것을 막는다.
+  doorayApiConfigPromise ??= loadDoorayApiConfig({
+    listMcpServers: () => fetchAionUiOn(machineRegistry.mainMachineId, '/api/mcp/servers'),
+  }).then((config) => {
+    if (!config.apiKey) doorayApiConfigPromise = null
+    return config
+  }).catch((error) => {
+    doorayApiConfigPromise = null
+    throw error
+  })
   return doorayApiConfigPromise
 }
 
