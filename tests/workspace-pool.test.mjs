@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -12,7 +13,7 @@ import {
   integrationStatusRetryReasonCode,
   normalizeCheckpointCommitMessage,
 } from '../server/lib/workspacePool.mjs'
-import { unityEditorStateBusyReasons } from '../server/lib/unityWorkspaceReadiness.mjs'
+import { unityEditorStateBusyReasons, unityMcpSnapshot } from '../server/lib/unityWorkspaceReadiness.mjs'
 
 const execFileAsync = promisify(execFile)
 const checkpointCommitMessage = {
@@ -66,6 +67,48 @@ test('Unity 준비 판정은 ready_for_tools 최종 신호와 개별 busy 상태
     activity: { phase: 'idle' },
     advice: { ready_for_tools: true },
   }), [])
+})
+
+test('Unity MCP 조회는 SDK 요청이 멈춰도 강제 제한 안에 종료한다', async () => {
+  const server = createServer(() => {})
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  try {
+    const address = server.address()
+    const startedAt = Date.now()
+    await assert.rejects(
+      () => unityMcpSnapshot({ root: 'C:\\Dev\\Game_Worker02\\client', unityInstanceHash: 'hash-fork2' }, {
+        endpoint: `http://127.0.0.1:${address.port}/mcp`,
+        timeoutMs: 50,
+      }),
+      (error) => error.code === 'UNITY_MCP_PROBE_TIMEOUT',
+    )
+    assert.ok(Date.now() - startedAt < 1_000)
+  } finally {
+    server.closeAllConnections?.()
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test('대기 제한 뒤 얻은 정상 표본은 busy로 저장하지 않고 안정 횟수까지 확인한다', async () => {
+  let probeCount = 0
+  const manager = new WorkspacePoolManager({
+    registryFile: path.join(tmpdir(), 'mnp-unity-ready-after-deadline-workspaces.json'),
+    stateFile: path.join(tmpdir(), 'mnp-unity-ready-after-deadline-state.json'),
+    workspaceReadinessProbe: async () => {
+      probeCount += 1
+      return { ready: true, applicable: true, running: true, reasons: [] }
+    },
+    workspaceReadinessOptions: { stableSamples: 3, pollMs: 0, maxWaitMs: 0 },
+  })
+
+  const readiness = await manager.waitForUnityWorkspaceReady({
+    id: 'fork2', root: 'C:\\Dev\\Game_Worker02\\client', unityInstanceHash: 'hash-fork2',
+  }, 'before-idle-switch')
+  assert.equal(readiness.ready, true)
+  assert.equal(probeCount, 3)
 })
 
 test('체크포인트 커밋 메시지는 실제 변경 구조와 금지 항목을 검증한다', () => {

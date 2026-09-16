@@ -40,15 +40,15 @@ export function unityEditorStateBusyReasons(state) {
   return reasons
 }
 
-async function unityMcpSnapshot(workspace, {
+export async function unityMcpSnapshot(workspace, {
   endpoint = process.env.MNP_UNITY_MCP_URL || defaultUnityMcpUrl,
   timeoutMs = Math.max(500, Number(process.env.MNP_UNITY_MCP_PROBE_TIMEOUT_MS) || 1_500),
 } = {}) {
   const instance = String(workspace?.unityInstanceHash ?? '').trim()
   if (!instance) return null
 
+  const effectiveTimeoutMs = Math.max(1, Number(timeoutMs) || 1_500)
   const timeoutController = new AbortController()
-  const timer = setTimeout(() => timeoutController.abort(new Error('Unity MCP 상태 조회 시간이 초과됐습니다.')), timeoutMs)
   const probeFetch = (input, init = {}) => fetch(input, {
     ...init,
     signal: init.signal
@@ -65,31 +65,47 @@ async function unityMcpSnapshot(workspace, {
       maxRetries: 0,
     },
   })
+  let timer = null
   try {
-    await client.connect(transport)
-    const selected = await client.callTool({
-      name: 'set_active_instance',
-      arguments: { instance },
-    })
-    if (selected?.isError) throw new Error('Unity MCP가 대상 인스턴스를 선택하지 못했습니다.')
+    const snapshot = (async () => {
+      await client.connect(transport)
+      const selected = await client.callTool({
+        name: 'set_active_instance',
+        arguments: { instance },
+      })
+      if (selected?.isError) throw new Error('Unity MCP가 대상 인스턴스를 선택하지 못했습니다.')
 
-    const project = jsonText(await client.readResource({ uri: 'mcpforunity://project/info' }))?.data
-    if (!project?.projectRoot || normalizedPath(project.projectRoot) !== normalizedPath(workspace.root)) {
-      throw new Error('Unity MCP 대상 프로젝트가 작업공간과 일치하지 않습니다.')
-    }
-    const state = jsonText(await client.readResource({ uri: 'mcpforunity://editor/state' }))?.data
-    if (!state) throw new Error('Unity MCP 편집기 상태가 비어 있습니다.')
-    const reasons = unityEditorStateBusyReasons(state)
-    return {
-      available: true,
-      busy: reasons.length > 0,
-      reasons,
-      observedAtUnixMs: Number(state.observed_at_unix_ms) || null,
-      instanceId: state.unity?.instance_id ?? instance,
-    }
+      const project = jsonText(await client.readResource({ uri: 'mcpforunity://project/info' }))?.data
+      if (!project?.projectRoot || normalizedPath(project.projectRoot) !== normalizedPath(workspace.root)) {
+        throw new Error('Unity MCP 대상 프로젝트가 작업공간과 일치하지 않습니다.')
+      }
+      const state = jsonText(await client.readResource({ uri: 'mcpforunity://editor/state' }))?.data
+      if (!state) throw new Error('Unity MCP 편집기 상태가 비어 있습니다.')
+      const reasons = unityEditorStateBusyReasons(state)
+      return {
+        available: true,
+        busy: reasons.length > 0,
+        reasons,
+        observedAtUnixMs: Number(state.observed_at_unix_ms) || null,
+        instanceId: state.unity?.instance_id ?? instance,
+      }
+    })()
+    const deadline = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        const error = new Error(`Unity MCP 상태 조회가 ${effectiveTimeoutMs}ms 안에 끝나지 않았습니다.`)
+        error.code = 'UNITY_MCP_PROBE_TIMEOUT'
+        timeoutController.abort(error)
+        reject(error)
+      }, effectiveTimeoutMs)
+    })
+    return await Promise.race([snapshot, deadline])
   } finally {
-    clearTimeout(timer)
-    await client.close().catch(() => {})
+    if (timer) clearTimeout(timer)
+    // SDK 내부 요청 제한이나 close가 지연돼도 준비 상태 판정의 강제 제한을 넘기지 않는다.
+    // Promise.race가 snapshot의 후속 rejection도 관찰하므로 늦은 실패가 unhandled rejection이 되지 않는다.
+    try {
+      void client.close().catch(() => {})
+    } catch {}
   }
 }
 

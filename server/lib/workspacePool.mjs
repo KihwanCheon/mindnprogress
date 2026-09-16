@@ -576,7 +576,9 @@ export class WorkspacePoolManager {
       } else {
         consecutiveReady = 0
       }
-      if (Date.now() - startedAt >= maxWaitMs) {
+      // 제한 시간이 지난 순간 정상 표본을 얻었다면 그 표본을 busy로 뒤집지 않는다.
+      // 시작된 정상 연속 판정은 끝까지 확인하고, 그 사이 다시 busy가 관측될 때만 대기로 돌린다.
+      if (consecutiveReady === 0 && Date.now() - startedAt >= maxWaitMs) {
         throw new UnityWorkspaceBusyError(workspace, phase, lastReadiness)
       }
       await delay(pollMs)
