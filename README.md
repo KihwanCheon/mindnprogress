@@ -192,6 +192,15 @@ npm run restore -- --archive "/path/to/MindNProgress_2026-07-30_120000.zip"
 
 ## 설치 및 실행
 
+### macOS에서 더블클릭 실행
+
+`MindNProgress.command`를 실행하면 필요한 경우 패키지를 설치하고 빌드한 뒤 기본 브라우저를 엽니다. 터미널에서 처음 실행할 때는 다음과 같이 실행 권한을 설정합니다.
+
+```bash
+chmod +x MindNProgress.command
+./MindNProgress.command
+```
+
 ### Windows Git 개발 환경 일괄 설치
 
 MnP Suite Windows Git 설치 패키지는 업무 PC에 MindNProgress, AionUi와 AionCore 개발 환경을 한 번에 준비합니다. 현재 검증된 배포본은 [`MnPSuite-Windows-Git-Installer-20260902-v17.zip`](https://github.com/mabobsa/MindNProgress/releases/download/mnp-suite-installer-20260902-v17/MnPSuite-Windows-Git-Installer-20260902-v17.zip)이며, SHA-256은 `F877753340CE64069AF9250F445DA828B6DD82234E6019E3C2D90CA0F571B478`입니다. 배포 파일명은 `MnPSuite-Windows-Git-Installer-YYYYMMDD-vN.zip` 형식을 사용하며, 압축을 푼 뒤 루트의 `Install-MnPSuite.bat`을 실행합니다. 저장소에서 직접 사용할 때는 [`installer/windows`](installer/windows/README.md)의 같은 파일을 실행하면 됩니다.
