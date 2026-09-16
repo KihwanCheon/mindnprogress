@@ -183,8 +183,8 @@ test('기간을 지정해 Dooray 참조를 수집하고 확인 상태를 저장�
       }),
     })
     assert.equal(preferencesResponse.status, 200)
-    const storedPreferences = (await preferencesResponse.json()).preferences
-    assert.deepEqual(storedPreferences, {
+    const quickPreferences = (await preferencesResponse.json()).preferences
+    assert.deepEqual(quickPreferences, {
       since: '2026-09-08',
       until: '2026-09-10',
       quickRangeId: 'two-days',
@@ -200,7 +200,31 @@ test('기간을 지정해 Dooray 참조를 수집하고 확인 상태를 저장�
       `${baseUrl}/api/integrations/dooray/mentions`,
       { headers },
     )).json()
-    assert.deepEqual(preferencesReloaded.preferences, storedPreferences)
+    assert.deepEqual(preferencesReloaded.preferences, quickPreferences)
+
+    const customPreferencesResponse = await fetch(`${baseUrl}/api/integrations/dooray/mentions/preferences`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({
+        ...quickPreferences,
+        since: '2026-09-04',
+        until: '2026-09-06',
+        quickRangeId: null,
+      }),
+    })
+    assert.equal(customPreferencesResponse.status, 200)
+    const storedPreferences = (await customPreferencesResponse.json()).preferences
+    assert.deepEqual(storedPreferences, {
+      ...quickPreferences,
+      since: '2026-09-04',
+      until: '2026-09-06',
+      quickRangeId: null,
+    })
+    const customPreferencesReloaded = await (await fetch(
+      `${baseUrl}/api/integrations/dooray/mentions`,
+      { headers },
+    )).json()
+    assert.deepEqual(customPreferencesReloaded.preferences, storedPreferences)
 
     // 새로 초대된 프로젝트는 목록에는 보이지만 자동 선택하지 않는다.
     state.projects.push({ id: 'p2', code: 'new-project', name: '새 프로젝트' })
