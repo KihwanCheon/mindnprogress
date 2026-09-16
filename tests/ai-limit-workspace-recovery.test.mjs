@@ -68,7 +68,9 @@ for (const dirty of [false, true]) test(`한도 중단은 ${dirty ? '미커밋 �
   }
   await assert.rejects(() => restarted.finalize(lease.leaseId, { childStatus: 'failed', childError: 'too many requests' }))
   await restarted.reactivateQuarantinedLease(lease.leaseId, { ...scope, failureCategory: 'rate-limit' })
-  assert.equal(restarted.state.leases[lease.leaseId].recoveryHistory.length, 2)
+  await assert.rejects(() => restarted.finalize(lease.leaseId, { childStatus: 'failed', childError: 'Selected model is at capacity. Please try a different model.' }))
+  await restarted.reactivateQuarantinedLease(lease.leaseId, { ...scope, failureCategory: 'model-capacity' })
+  assert.equal(restarted.state.leases[lease.leaseId].recoveryHistory.length, 3)
 })
 
 test('구버전에서 변경 없이 반납한 한도 중단은 풀에서 복구용 lease를 한 번만 배정한다', async (t) => {

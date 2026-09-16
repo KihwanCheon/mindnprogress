@@ -1,6 +1,6 @@
 export function completedReplacementDelegations(delegation, delegations) {
   const parentMapId = delegation?.parentMapId ?? delegation?.mapId
-  const failedCleanLimit = ['waiting-usage-limit', 'waiting-rate-limit'].includes(delegation?.state)
+  const failedCleanLimit = ['waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity'].includes(delegation?.state)
     && (!delegation?.workspaceLease?.leaseId
       || ['failed-clean', 'cancelled'].includes(delegation?.workspaceResult?.status))
   const completedReportFailure = !delegation?.groupId

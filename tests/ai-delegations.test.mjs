@@ -34,6 +34,8 @@ test('CLI 한도 오류 문구와 변경 없이 반납된 과거 위임도 복�
     assert.equal(retryableExternalLimitCategory(message), 'usage-limit', message)
   }
   assert.equal(retryableExternalLimitCategory('rate_limit_exceeded'), 'rate-limit')
+  assert.equal(retryableExternalLimitCategory('Selected model is at capacity. Please try a different model.'), 'model-capacity')
+  assert.equal(retryableExternalLimitCategory('선택한 모델의 실행 용량이 부족합니다.'), 'model-capacity')
   assert.equal(retryableExternalLimitCategory('컴파일러의 배열 인덱스 초과'), null)
   assert.equal(aiDelegationRecoveryAvailability({
     state: 'waiting-usage-limit', childStatus: 'failed', childError: 'usage limit exceeded',
@@ -95,6 +97,21 @@ test('사용량 또는 요청 한도로 격리된 parent-wake-failed 위임은 �
     recommendedAction: 'resume-existing',
     recoveryTool: 'mindnprogress_recover_ai_delegation',
   })
+  assert.deepEqual(aiDelegationRecoveryAvailability({
+    ...base,
+    state: 'failed',
+    workspaceResult: { ...base.workspaceResult, childError: 'Selected model is at capacity. Please try a different model.' },
+  }), {
+    failurePhase: 'child',
+    failureCategory: 'model-capacity',
+    recoveryAvailable: true,
+    recommendedAction: 'resume-existing',
+    recoveryTool: 'mindnprogress_recover_ai_delegation',
+  })
+  assert.equal(aiDelegationDisplayState({
+    state: 'failed', childStatus: 'failed', childError: '하위 AI 작업이 완료되지 않아 변경을 통합하지 않았습니다.',
+    workspaceResult: { childError: 'Selected model is at capacity. Please try a different model.' },
+  }), 'waiting-model-capacity')
 })
 
 test('작업 실패 원인이 외부 한도가 아니거나 상위 통지만 실패한 위임은 하위 작업을 재실행하지 않는다', () => {

@@ -598,6 +598,7 @@ async function main() {
     assert.doesNotMatch(guide.guide.operationRules.join('\n'), /# 사용자 승인과 실행 범위|# 그룹의 두 단계 사용자 승인/)
     assert.match(toolDescription('mindnprogress_list_ai_delegations'), /recovery\.failureCategory.*recoveryAvailable.*recommendedAction.*recoveryTool/)
     assert.match(toolDescription('mindnprogress_recover_ai_delegation'), /parent-wake-failed.*recoveryAvailable=true.*사용량·요청 한도/)
+    assert.match(toolDescription('mindnprogress_recover_ai_delegation'), /waiting-model-capacity/)
     assert.match(guide.guide.operationRules.join('\n'), /mindnprogress_update_card.*responseMode.*full.*기본값.*AI 대화 상세 목록.*affected/)
     assert.match(guide.guide.operationRules.join('\n'), /댓글 summary는 \[진행\].*\[차단\].*\[결과\]/)
     assert.match(guide.guide.commentRules.detail, /작업을 이어가거나 결과를 검증/)

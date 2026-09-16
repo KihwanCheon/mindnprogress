@@ -1894,7 +1894,7 @@ async function loadAiDelegations() {
         : {}),
     }
     if (['failed', 'parent-wake-failed'].includes(normalized.state) && aiDelegationLimitState(normalized)) {
-      normalized.attemptHistory = aiDelegationAttemptHistory(delegation, '사용량 제한 대기 상태로 복원')
+      normalized.attemptHistory = aiDelegationAttemptHistory(delegation, '재시도 가능한 외부 제한 대기 상태로 복원')
       normalized.state = aiDelegationLimitState(normalized)
     }
     if (JSON.stringify(normalized) !== JSON.stringify(delegation)) repairedCount += 1
@@ -2654,11 +2654,14 @@ function delegationRecoveryInstruction(delegation, instruction, recovery = null,
   const inspection = delegation.coordinationOnly
     ? `${DOCUMENT_COORDINATOR_INSTRUCTION}\n\n먼저 그룹 기준, 현재 문서의 실행 계약, 하위 위임 상태와 최근 대화·카드 결과를 대조하세요. 이 조정 업무에는 worker가 배정되지 않으므로 작업공간을 임의로 점유하거나 새 lease를 만들지 마세요.`
     : '먼저 `.ai-session.json`, 현재 브랜치, Git 변경과 최근 대화·카드 결과를 서로 대조하세요. 다른 작업공간으로 이동하거나 새 lease를 만들지 마세요.'
-  const externalLimitRecovery = ['usage-limit', 'rate-limit'].includes(recovery?.failureCategory)
+  const externalLimitRecovery = ['usage-limit', 'rate-limit', 'model-capacity'].includes(recovery?.failureCategory)
   const userStopRecovery = recovery?.failureCategory === 'user-stop'
-  const title = externalLimitRecovery ? '외부 사용량 제한 해제 후 위임 복구' : userStopRecovery ? '사용자 중지 후 위임 재개' : '재시작 후 위임 복구'
+  const title = recovery?.failureCategory === 'model-capacity'
+    ? '모델 실행 용량 확보 후 위임 복구'
+    : externalLimitRecovery ? '외부 사용량 제한 해제 후 위임 복구'
+      : userStopRecovery ? '사용자 중지 후 위임 재개' : '재시작 후 위임 복구'
   const reason = externalLimitRecovery
-    ? `이전 실행은 ${recovery.failureCategory === 'rate-limit' ? '요청 한도' : '사용량 한도'}로 중단됐고, 사용자가 한도 해제를 확인한 뒤 같은 대화와 작업공간의 재개를 요청했습니다.`
+    ? `이전 실행은 ${recovery.failureCategory === 'rate-limit' ? '요청 한도' : recovery.failureCategory === 'model-capacity' ? '선택 모델의 실행 용량 부족' : '사용량 한도'}로 중단됐고, 사용자가 원인 해소를 확인한 뒤 같은 대화와 작업공간의 재개를 요청했습니다.`
     : userStopRecovery ? '사용자가 중지했던 기존 위임을 같은 대화에서 다시 이어가도록 요청했습니다.'
       : 'AionCore 또는 MindNProgress 재시작으로 이전 실행의 메모리 상태가 끊겼습니다.'
   return `# ${title}
@@ -3755,7 +3758,7 @@ async function refreshSuspendedAiDelegation(delegation) {
       completedAt: new Date().toISOString(), attemptHistory: aiDelegationAttemptHistory(delegation, '기존 결과 전달 완료 확인'),
     })
   }
-  if (!['waiting-usage-limit', 'waiting-rate-limit', 'parent-wake-failed', 'failed'].includes(delegation.state)) return delegation
+  if (!['waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity', 'parent-wake-failed', 'failed'].includes(delegation.state)) return delegation
   const limitState = aiDelegationLimitState({ ...delegation, childStatus: status.state, childError: status.errorMessage ?? null })
   if (limitState) {
     // 새 사용량 중단의 worker만 한 번 안전하게 보존한다. 이후에는 상태 조회만 한다.
@@ -4272,7 +4275,7 @@ async function drainWaitingWorkspaceDelegations() {
       'waiting-workspace',
       'waiting-integration-clean',
       'waiting-integration',
-      'waiting-usage-limit', 'waiting-rate-limit',
+      'waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity',
     ].includes(delegation.state) || delegation.pendingRecovery)
     .map((delegation) => delegation.id))
   for (const delegationId of aiDelegationWaitPolls.keys()) {
@@ -4561,7 +4564,7 @@ async function pollAiDelegations() {
     await drainWaitingWorkspaceDelegations()
     const active = [...aiDelegations.values()].filter((delegation) =>
       [
-        'waiting-integration-clean', 'waiting-usage-limit', 'waiting-rate-limit',
+        'waiting-integration-clean', 'waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity',
         'starting', 'waiting-resource', 'running', 'waiting-child-resume', 'waiting-document-work',
         'recovery-required',
         'waiting-integration', 'integration-starting', 'integration-waiting-resource',
@@ -4586,14 +4589,16 @@ async function pollAiDelegations() {
         scheduleAiDelegationWaitPoll(delegation)
         continue
       }
-      if (['waiting-usage-limit', 'waiting-rate-limit'].includes(delegation.state)) {
+      if (['waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity'].includes(delegation.state)) {
         if (!aiDelegationWaitPollDue(aiDelegationWaitPolls.get(delegation.id), delegation)) continue
         try { await refreshSuspendedAiDelegation(delegation) } catch { /* 확인 실패 시 보존하고 다음 조회를 기다린다. */ }
         try {
           const current = aiDelegations.get(delegation.id)
-          if (['waiting-usage-limit', 'waiting-rate-limit'].includes(current?.state)) await ensureAiDelegationNotification(current, {
+          if (['waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity'].includes(current?.state)) await ensureAiDelegationNotification(current, {
             kind: 'limit', dedupeKey: `ai-delegation-limit:${delegation.id}:${delegation.childOperationId ?? delegation.id}`,
-            message: 'AI 한도로 작업이 중단되었습니다. 작업과 변경은 보존되어 있으며, 한도 해제 후 카드 세부 정보의 AI 작업 복구에서 이어갈 수 있습니다.',
+            message: current.state === 'waiting-model-capacity'
+              ? '선택한 AI 모델의 실행 용량 부족으로 작업이 중단되었습니다. 작업과 변경은 보존되어 있으며, 용량 확보 후 카드 세부 정보의 AI 작업 복구에서 이어갈 수 있습니다.'
+              : 'AI 한도로 작업이 중단되었습니다. 작업과 변경은 보존되어 있으며, 한도 해제 후 카드 세부 정보의 AI 작업 복구에서 이어갈 수 있습니다.',
           })
         } catch (error) { console.warn('[AI delegation limit notification]', error) }
         scheduleAiDelegationWaitPoll(delegation)
@@ -8119,7 +8124,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         })
       }
       const recoveryAvailability = aiDelegationRecoveryAvailability(delegation)
-      const retryableParentWakeFailure = ['parent-wake-failed', 'failed', 'waiting-usage-limit', 'waiting-rate-limit'].includes(delegation.state)
+      const retryableParentWakeFailure = ['parent-wake-failed', 'failed', 'waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity'].includes(delegation.state)
         && recoveryAvailability?.recoveryAvailable === true
         && recoveryAvailability.recommendedAction === 'resume-existing'
       if (!['recovery-required', 'integration-recovery-required', 'waiting-child-resume'].includes(delegation.state)

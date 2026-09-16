@@ -13,6 +13,10 @@ const AI_DELEGATION_STATE_REASONS = Object.freeze({
     reasonCode: 'AI_DELEGATION_WAITING_RATE_LIMIT',
     message: 'AI 요청 한도가 해제되기를 기다리고 있습니다. 기존 작업과 작업공간이 보존되므로 새 위임을 만들지 마세요.',
   },
+  'waiting-model-capacity': {
+    reasonCode: 'AI_DELEGATION_WAITING_MODEL_CAPACITY',
+    message: '선택한 AI 모델의 실행 용량이 확보되기를 기다리고 있습니다. 기존 작업과 작업공간이 보존되므로 새 위임을 만들지 마세요.',
+  },
   'waiting-document-work': {
     reasonCode: 'AI_DELEGATION_WAITING_DOCUMENT_WORK',
     message: '문서 조정 결과는 준비됐지만 하위 업무 완료를 기다리고 있습니다.',
@@ -161,6 +165,7 @@ export function aiDelegationStateReason(delegation) {
 export const ACTIVE_AI_DELEGATION_STATES = new Set([
   'waiting-usage-limit',
   'waiting-rate-limit',
+  'waiting-model-capacity',
   'waiting-document-work',
   'waiting-workspace',
   'waiting-integration-clean',
@@ -410,12 +415,15 @@ export function retryableExternalLimitCategory(error) {
     return 'usage-limit'
   }
   if (/rate.?limit|too many requests|요청.{0,12}(제한|한도|초과)/iu.test(message)) return 'rate-limit'
+  if (/(?:selected\s+)?model.{0,40}(?:at|over)\s+capacity|model.{0,40}capacity.{0,40}(?:unavailable|exhausted|full)|모델.{0,20}(?:용량|수용량).{0,20}(?:부족|초과|가득|없|대기)/iu.test(message)) {
+    return 'model-capacity'
+  }
   return null
 }
 
 export function aiDelegationRecoveryAvailability(delegation) {
   if (delegation?.pendingRecovery) return { failurePhase: 'dispatch', failureCategory: 'unknown', recoveryAvailable: false, recommendedAction: 'refresh-status', recoveryTool: 'mindnprogress_refresh_ai_delegation' }
-  if (!['parent-wake-failed', 'failed', 'waiting-usage-limit', 'waiting-rate-limit', 'recovery-required', 'integration-recovery-required', 'waiting-child-resume'].includes(delegation?.state)) return null
+  if (!['parent-wake-failed', 'failed', 'waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity', 'recovery-required', 'integration-recovery-required', 'waiting-child-resume'].includes(delegation?.state)) return null
   if (['recovery-required', 'integration-recovery-required', 'waiting-child-resume'].includes(delegation.state)) {
     return { failurePhase: 'child', failureCategory: delegation.state === 'waiting-child-resume' ? 'user-stop' : 'restart', recoveryAvailable: true, recommendedAction: 'resume-existing', recoveryTool: 'mindnprogress_recover_ai_delegation' }
   }
@@ -452,8 +460,13 @@ export function aiDelegationRecoveryAvailability(delegation) {
 
 export function aiDelegationLimitState(delegation) {
   if (aiDelegationSucceeded(delegation) || delegation?.childStatus !== 'failed') return null
-  const category = retryableExternalLimitCategory(delegation.childError ?? delegation.workspaceResult?.childError)
-  return category === 'usage-limit' ? 'waiting-usage-limit' : category === 'rate-limit' ? 'waiting-rate-limit' : null
+  // 작업공간 종료 결과가 실제 하위 실행 오류를 보존하고, 상위 childError에는
+  // "통합하지 않았습니다" 같은 일반 요약이 들어갈 수 있으므로 원인을 먼저 읽는다.
+  const category = retryableExternalLimitCategory(delegation.workspaceResult?.childError ?? delegation.childError)
+  return category === 'usage-limit' ? 'waiting-usage-limit'
+    : category === 'rate-limit' ? 'waiting-rate-limit'
+      : category === 'model-capacity' ? 'waiting-model-capacity'
+        : null
 }
 
 export function aiDelegationAttemptHistory(delegation, reason, at = new Date().toISOString()) {
@@ -490,7 +503,7 @@ export function aiDelegationClosureAvailability(delegation) {
   if (delegation.state === 'parent-wake-failed' && aiDelegationSucceeded(delegation)) {
     return { closeAvailable: true, reason: 'completed-child-report-abandonment' }
   }
-  if (['waiting-usage-limit', 'waiting-rate-limit'].includes(delegation.state)) {
+  if (['waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity'].includes(delegation.state)) {
     const workspaceSafe = !delegation.workspaceLease?.leaseId
       || ['failed-clean', 'cancelled'].includes(delegation.workspaceResult?.status)
     return {
@@ -502,7 +515,7 @@ export function aiDelegationClosureAvailability(delegation) {
 }
 
 export function aiDelegationCanBeSupersededBy(delegation, replacement) {
-  const failedCleanLimit = ['waiting-usage-limit', 'waiting-rate-limit'].includes(delegation?.state)
+  const failedCleanLimit = ['waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity'].includes(delegation?.state)
   const completedReportFailure = !delegation?.groupId
     && delegation?.state === 'parent-wake-failed'
     && aiDelegationSucceeded(delegation)

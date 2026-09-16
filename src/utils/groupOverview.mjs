@@ -14,6 +14,7 @@ export function groupProjectDraftAfterRefresh(current, previousBase, incoming) {
 const delegationLabels = {
   'recovery-dispatch-pending': '복구 요청 전달 확인 대기',
   'waiting-usage-limit': '사용량 회복 대기', 'waiting-rate-limit': '요청 제한 해제 대기',
+  'waiting-model-capacity': '모델 실행 용량 대기',
   'parent-wake-failed': '총괄 보고 실패 · 확인 필요',
   running: '문서 AI 실행 중', 'waiting-document-work': '하위 업무·문서 검수 대기',
   starting: '실행 준비', 'running-child': '문서 AI 실행 중', 'waiting-child': '문서 AI 실행 중',
@@ -27,7 +28,7 @@ const delegationLabels = {
   'integration-waiting-resume': '통합 재개 대기', resuming: '재개 중',
 }
 const attentionStates = new Set([
-  'waiting-usage-limit', 'waiting-rate-limit', 'parent-wake-failed', 'failed',
+  'waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity', 'parent-wake-failed', 'failed',
   'recovery-required', 'integration-recovery-required', 'waiting-child-resume',
   'integration-waiting-resume', 'recovery-dispatch-pending',
 ])

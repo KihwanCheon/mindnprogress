@@ -305,7 +305,7 @@ export function GroupOverview({ groupId, name, membershipKey, editable, clientId
                 {delegation.displayState && <button disabled={aiDisabled} onClick={() => void delegationAction(delegation, 'refresh')}>상태 다시 확인</button>}
                 {delegation.displayState && delegation.recovery?.recoveryAvailable && <button disabled={aiDisabled} onClick={() => void delegationAction(delegation, 'recover')}>승인 범위 작업 재개</button>}
                 {delegation.coordinationOnly && (delegation.state === 'waiting-document-work' || (delegation.state === 'recovery-required' && delegation.result)) && <button disabled={aiDisabled} onClick={() => void delegationAction(delegation, 'finalize-coordination')}>대기 유지하고 조정 종료</button>}
-                {['waiting-usage-limit', 'waiting-rate-limit'].includes(delegation.state) && completedReplacement(delegation) && <button disabled={aiDisabled} onClick={() => void delegationAction(delegation, 'supersede')}>후속 성공으로 종료</button>}
+                {['waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity'].includes(delegation.state) && completedReplacement(delegation) && <button disabled={aiDisabled} onClick={() => void delegationAction(delegation, 'supersede')}>후속 성공으로 종료</button>}
                 {delegation.recovery?.reportRetryAvailable && <button disabled={aiDisabled} onClick={() => void delegationAction(delegation, 'retry-report')}>결과 전달 재시도</button>}
               </div></div>}
             </div>

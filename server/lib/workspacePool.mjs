@@ -1281,9 +1281,9 @@ export class WorkspacePoolManager {
     return this.runExclusive(async () => {
       const normalizedLeaseId = String(leaseId ?? '').trim()
       const normalizedConversationId = String(conversationId ?? '').trim()
-      if (!dispatchRecovery && !['usage-limit', 'rate-limit'].includes(String(failureCategory ?? '').trim())) {
+      if (!dispatchRecovery && !['usage-limit', 'rate-limit', 'model-capacity'].includes(String(failureCategory ?? '').trim())) {
         throw new WorkspacePoolUnavailableError(
-          '외부 사용량 또는 요청 한도로 확인된 격리 lease만 재활성화할 수 있습니다.',
+          '외부 사용량·요청 한도 또는 모델 용량 부족으로 확인된 격리 lease만 재활성화할 수 있습니다.',
           [],
           'QUARANTINED_LEASE_FAILURE_NOT_RETRYABLE',
         )
