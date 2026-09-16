@@ -273,6 +273,7 @@ npm run dev
 | `MNP_API_PORT` | `4176` | API 및 빌드된 정적 파일 제공 포트 |
 | `MNP_WEB_PORT` | `4175` | 공유 URL 자동 생성에 사용할 웹 포트 |
 | `MNP_PUBLIC_URL` | 로컬 IPv4 자동 감지 | 문서·카드 공유 URL의 기준 주소 |
+| `MNP_PUBLIC_INTERFACE` | 없음 | 자동 감지에 우선 사용할 네트워크 인터페이스 이름. 정확한 이름을 먼저 찾고 일부 일치로 보완하며, `MNP_PUBLIC_URL`이 있으면 그 값이 우선 |
 | `MNP_CONFIG_DIR` | `~/.mnp` | `mnp.conf`를 읽을 저장소 밖 MindNProgress 설정 폴더 |
 | `MNP_DEV_ALLOWED_HOSTS` | 없음 | Vite 개발 서버가 추가로 허용할 호스트. 쉼표로 구분하며 `MNP_PUBLIC_URL`의 호스트는 자동 포함 |
 | `MNP_PUBLIC_VIEWER_ENABLED` | `false` | 로그인 없이 읽기 전용으로 보는 공개 뷰어 활성화 여부. `true`일 때만 첫 화면 링크와 공개 뷰어 세션을 허용 |

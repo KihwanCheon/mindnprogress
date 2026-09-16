@@ -28,6 +28,7 @@ import { readFileSync } from 'node:fs'
 import { hostname, networkInterfaces, tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { selectPublicIpv4 } from './lib/publicNetwork.mjs'
 import { applyProgressRollup } from './lib/progressRollup.mjs'
 import { detectReleasedWaitingItems } from './lib/waitingItems.mjs'
 import { resolveAttributionWithoutToken, resolveScopedAttribution } from './lib/attributionScope.mjs'
@@ -332,15 +333,13 @@ const commentReactions = ['👍', '❤️', '🎉', '👀']
 const serverStartedAt = new Date().toISOString()
 
 function detectedPublicIpv4() {
-  const virtualInterfacePattern = /(?:vethernet|wsl|docker|hyper-v|vmware|virtualbox|loopback|터널)/i
   const candidates = Object.entries(networkInterfaces()).flatMap(([name, addresses]) =>
     (addresses ?? [])
       .filter((address) => (address.family === 'IPv4' || address.family === 4)
         && !address.internal
         && !address.address.startsWith('169.254.'))
       .map((address) => ({ name, address: address.address })))
-  candidates.sort((first, second) => Number(virtualInterfacePattern.test(first.name)) - Number(virtualInterfacePattern.test(second.name)))
-  return candidates[0]?.address ?? '127.0.0.1'
+  return selectPublicIpv4(candidates, process.env.MNP_PUBLIC_INTERFACE)
 }
 
 function resolvePublicBaseUrl() {

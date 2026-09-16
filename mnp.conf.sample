@@ -38,6 +38,10 @@ MNP_WEB_PORT=4175
 # 이 호스트는 Vite 개발 서버의 허용 호스트에도 자동으로 추가된다.
 # MNP_PUBLIC_URL=https://mnp.example.com
 
+# MNP_PUBLIC_URL을 비워 둔 경우 자동 감지에 우선 사용할 네트워크 인터페이스 이름.
+# 정확한 이름을 먼저 찾고 없으면 일부 일치로 찾으며, 찾지 못하면 기존 자동 감지로 돌아간다.
+# MNP_PUBLIC_INTERFACE=Ethernet
+
 # 원격 브라우저에서 'AI 대화 열기'가 여는 AionUi WebUI 주소.
 # 호스트 루트여야 한다. 서브패스(예: /aionui/)로는 대화 링크가 동작하지 않는다.
 # 비워 두면 MNP_PUBLIC_URL과 같은 호스트의 7777 포트를 쓴다.
