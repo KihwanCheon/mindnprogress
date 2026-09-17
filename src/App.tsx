@@ -66,6 +66,7 @@ import { revisionReasonLabel, shouldRefreshMapContentForAction } from './utils/m
 import { mapContentsEqual, reconcileRemoteMapContent } from './utils/mapDocumentSync.mjs'
 import { mergeMapContent } from './utils/mergeMapContent.mjs'
 import { nextOverlappingNodeId, nodeOverlapPresentation } from './utils/nodeOverlap.mjs'
+import { viewportForNodeVisibility } from './utils/nodeViewportVisibility.mjs'
 import { computeProgressRollups } from './utils/progressRollup.mjs'
 import { snapAspectResizeToGrid, snapFreeResizeToGrid } from './utils/resizeGrid.mjs'
 import type { ResizeSnapRequest } from './utils/resizeGrid.mjs'
@@ -2565,6 +2566,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
   const nodeLinkCopyTimer = useRef<number | null>(null)
   const doorayUrlCommitTimer = useRef<number | null>(null)
   const pendingSelection = useRef<string | null>(null)
+  const pendingAiConversationSelectionReveal = useRef<{ mapId: string; cardId: string } | null>(null)
   const pendingDeepLink = useRef(initialDeepLink)
   const lastLoadedMapId = useRef<string | null>(null)
   const selectedIdRef = useRef<string | null>(selectedId)
@@ -2947,6 +2949,53 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     pendingSelection.current = cardId
     setActiveMapId(mapId)
   }, [activeMapId, parentsById, setNodes])
+  useEffect(() => {
+    const request = pendingAiConversationSelectionReveal.current
+    if (!request
+      || request.mapId !== activeMapId
+      || loadedMapId !== activeMapId
+      || viewMode !== 'mindmap'
+      || !nodesInitialized) return
+    const target = nodes.find((node) => node.id === request.cardId)
+    if (!target) {
+      pendingAiConversationSelectionReveal.current = null
+      return
+    }
+
+    const ancestorIds = new Set<string>()
+    const remaining = [...(parentsById.get(request.cardId) ?? [])]
+    while (remaining.length > 0) {
+      const ancestorId = remaining.pop() as string
+      if (ancestorIds.has(ancestorId)) continue
+      ancestorIds.add(ancestorId)
+      remaining.push(...(parentsById.get(ancestorId) ?? []))
+    }
+    setNodeSearchTerm('')
+    setNodeFilter('all')
+    setAssigneeFilter('all')
+    setCollapsedNodeIds((current) => {
+      const next = new Set(current)
+      ancestorIds.forEach((ancestorId) => next.delete(ancestorId))
+      return next.size === current.size ? current : next
+    })
+
+    const frame = window.requestAnimationFrame(() => {
+      if (pendingAiConversationSelectionReveal.current !== request) return
+      pendingAiConversationSelectionReveal.current = null
+      focusedNodeIdRef.current = null
+      const bounds = canvasWrapRef.current?.getBoundingClientRect()
+      if (!bounds) return
+      const [x, y, zoom] = reactFlowStore.getState().transform
+      const { width, height } = nodeDimensions(target)
+      const nextViewport = viewportForNodeVisibility({
+        viewport: { x, y, zoom },
+        node: { x: target.position.x, y: target.position.y, width, height },
+        viewportSize: { width: bounds.width, height: bounds.height },
+      })
+      if (nextViewport) void setViewport(nextViewport, { duration: 420 })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [activeMapId, loadedMapId, nodes, nodesInitialized, parentsById, reactFlowStore, setViewport, viewMode])
   const collapsibleNodeIds = useMemo(() => new Set(nodes.filter((node) => (childrenById.get(node.id)?.length ?? 0) > 0).map((node) => node.id)), [childrenById, nodes])
   const descendantCounts = useMemo(() => {
     const result = new Map<string, number>()
@@ -3658,6 +3707,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         const event = JSON.parse(message.data) as MapChangeEvent | PresenceEvent | CursorEvent | CommentChangeEvent | AiConversationLinkedEvent | AiConversationRuntimeEvent | AiConversationRuntimeSnapshotEvent | AiConversationRuntimeSummaryEvent | AiConversationRuntimeSummarySnapshotEvent | AiConversationSelectionRequestedEvent | NotificationEvent | NotificationsReadEvent | NotificationsRemovedEvent | HeartbeatEvent | { type: 'connected' }
         if (event.type === 'heartbeat') return
         if (event.type === 'ai-conversation-selection-requested') {
+          pendingAiConversationSelectionReveal.current = { mapId: event.mapId, cardId: event.cardId }
           setSelectedGroupId(null)
           setViewMode('mindmap')
           setTrashOpen(false)
