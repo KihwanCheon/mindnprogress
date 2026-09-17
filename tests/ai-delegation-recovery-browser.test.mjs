@@ -11,7 +11,7 @@ import { createRoot } from 'react-dom/client';
 import { AiDelegationRecovery } from '/src/components/AiDelegationRecovery.tsx';
 const root = createRoot(document.getElementById('root'));
 const originalFetch = window.fetch.bind(window);
-window.audit = { calls: [], confirm: true, fail: false };
+window.audit = { calls: [], confirm: true, fail: false, focus: null };
 window.confirm = () => window.audit.confirm;
 const item = { id:'limited',mapId:'child-map',parentMapId:'parent-map',parentCardId:'parent',targetCardId:'child',targetCardLabel:'하위 작업',state:'waiting-usage-limit',createdAt:'2026-09-11',updatedAt:'current',recovery:{recoveryAvailable:true},childError:'사용량 초과' };
 const replacement = {...item,id:'replacement',state:'completed',createdAt:'2026-09-12',updatedAt:'replacement-current',workCompleted:true,recovery:null,childError:null};
@@ -27,6 +27,7 @@ window.fetch = async (url, init = {}) => {
 };
 let sequence = 0;
 window.renderRecovery = (props={}) => root.render(React.createElement(AiDelegationRecovery,{key:++sequence,mapId:'child-map',cardId:'child',...props}));
+window.failedRecovery = () => {item.state='failed';item.recovery={recoveryAvailable:true};item.childError='모델 용량 초과';window.renderRecovery()};
 window.reportOnly = () => {item.state='parent-wake-failed';item.childError=null;item.parentError='보고 사용량 초과';item.workCompleted=true;item.reportPending=true;item.recovery={recoveryAvailable:false,reportRetryAvailable:true};item.closure={closeAvailable:true,reason:'completed-child-report-abandonment'};window.renderRecovery()};
 window.waitingReport = () => {item.state='waiting-parent';item.childError=null;item.parentError=null;item.workCompleted=true;item.reportPending=true;item.reportStatus='waiting';item.reportWaitReason='parent-busy';item.recovery=null;item.closure=null;window.renderRecovery()};
 window.deliveringReport = () => {item.state='waking-parent';item.reportStatus='delivering';window.renderRecovery()};
@@ -88,7 +89,9 @@ test('하위 카드 복구 화면은 AI 없이 재개·보고 재시도를 구�
     const ready = () => waitFor(() => evaluate('Boolean(document.querySelector("button")) && !document.querySelector("button").disabled'))
     await send('Page.navigate', { url: `http://127.0.0.1:${server.httpServer.address().port}/recovery-check` })
     await waitFor(() => evaluate('window.fixtureReady'))
-    await evaluate('window.renderRecovery()'); await ready()
+    await evaluate('window.renderRecovery({focusRequestId:7,onFocusHandled:id=>window.audit.focus=id})'); await ready()
+    await waitFor(() => evaluate('window.audit.focus===7'))
+    assert.equal(await evaluate('document.activeElement?.classList.contains("ai-delegation-recovery")'), true)
     assert.equal(await evaluate('document.body.textContent.includes("다른 카드 작업")'), false)
     assert.equal(await evaluate('window.audit.calls.filter(c=>c.method==="POST").length'), 0)
     assert.match(await evaluate('Array.from(document.querySelectorAll("button")).find(b=>b.textContent==="상태 다시 확인").title'), /새 AI 실행은 요청하지 않습니다/)
@@ -135,6 +138,8 @@ test('하위 카드 복구 화면은 AI 없이 재개·보고 재시도를 구�
     assert.ok(last.url.endsWith('/close'))
     assert.equal(last.body.confirmClosedWithoutCompletion, true)
     assert.equal(last.body.confirmResultReportDiscarded, true)
+    await evaluate('window.failedRecovery()'); await ready()
+    assert.equal(await evaluate('Array.from(document.querySelectorAll("button")).some(b=>b.textContent==="기존 작업 재개")'), true)
     await evaluate('window.waitingReport()'); await ready()
     assert.match(await evaluate('document.body.textContent'), /총괄에 결과 전달 대기/)
     assert.match(await evaluate('document.body.textContent'), /상위 AI가 작업 중/)

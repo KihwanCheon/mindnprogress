@@ -1,5 +1,6 @@
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react'
 import type { MindNodeData } from '../types/mindMap'
+import { AiDelegationAttentionBadge } from './AiDelegationAttentionBadge'
 import { AiConversationRuntimeBadge } from './AiConversationRuntimeBadge'
 import { AssigneeTooltip } from './AssigneeTooltip'
 import { DoorayTaskNode } from './DoorayTaskNode'
@@ -75,7 +76,7 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
   return (
     <>
       <NodeOverlapBadge data={data} />
-      <article className={`mind-node ${data.kind} status-${displayStatus} ${isCompleted ? 'completed' : ''} ${selected ? 'selected' : ''}`}>
+      <article className={`mind-node ${data.kind} status-${displayStatus} ${isCompleted ? 'completed' : ''} ${data.aiDelegationAttention ? `has-ai-delegation-attention attention-${data.aiDelegationAttention.kind}` : ''} ${selected ? 'selected' : ''}`}>
       <Handle type="target" position={Position.Left} isConnectable={isConnectable} />
       {([
         ['top', Position.Top],
@@ -117,6 +118,7 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
           {data.collapsed && <b>{data.hiddenDescendantCount}</b>}
         </button>
       )}
+      <AiDelegationAttentionBadge attention={data.aiDelegationAttention} onOpen={data.onOpenAiDelegationRecovery} />
       <div className="node-topline">
         <span className={`node-status-badge ${displayStatus}`}>
           <span className="node-status-icon" aria-hidden="true">{statusIcon[displayStatus]}</span>

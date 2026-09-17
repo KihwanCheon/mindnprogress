@@ -86,6 +86,13 @@ export type AiConversationRuntime = {
   activeConversationIds?: string[]
 }
 
+export type AiDelegationAttention = {
+  kind: 'recovery' | 'report'
+  count: number
+  label: string
+  title: string
+}
+
 export type AiConversationOptionSnapshot = { id: string; label: string }
 
 export type AiConversationLink = {
@@ -160,6 +167,7 @@ export type MindNodeData = {
   collapsed?: boolean
   hiddenDescendantCount?: number
   aiConversationRuntime?: AiConversationRuntime
+  aiDelegationAttention?: AiDelegationAttention
   overlapStack?: {
     count: number
     titles: string[]
@@ -168,4 +176,5 @@ export type MindNodeData = {
   onToggleCollapse?: () => void
   onOpenWaitingItems?: () => void
   onOpenDependencies?: () => void
+  onOpenAiDelegationRecovery?: () => void
 }

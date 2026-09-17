@@ -2,6 +2,8 @@ export type AiDelegationSummary = {
   id: string
   state: string
   displayState?: string
+  reasonCode?: string
+  message?: string
   mapId: string
   parentMapId?: string | null
   groupId?: string | null
@@ -17,6 +19,7 @@ export type AiDelegationSummary = {
   childError?: string | null
   parentDispatchState?: string | null
   parentError?: string | null
+  recoveryDispatchError?: string | null
   result?: string
   resultAvailability?: 'captured' | 'unavailable' | 'integrity-failed'
   workCompleted?: boolean

@@ -36,8 +36,14 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   return body as T
 }
 
-export function AiDelegationRecovery({ mapId, cardId }: { mapId: string; cardId: string }) {
+export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHandled }: {
+  mapId: string
+  cardId: string
+  focusRequestId?: number
+  onFocusHandled?: (requestId: number) => void
+}) {
   const [items, setItems] = useState<Delegation[]>([])
+  const [loaded, setLoaded] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
@@ -45,13 +51,17 @@ export function AiDelegationRecovery({ mapId, cardId }: { mapId: string; cardId:
   const [closeDraft, setCloseDraft] = useState<{ id: string; reason: CloseReason; note: string } | null>(null)
   const mounted = useRef(true)
   const acting = useRef(false)
+  const sectionRef = useRef<HTMLElement | null>(null)
   const listUrl = `/api/maps/${encodeURIComponent(mapId)}/ai-delegations`
   const refresh = useCallback(async (signal?: AbortSignal) => {
     const data = await request<{ delegations: Delegation[] }>(listUrl, { signal })
     const relevant = data.delegations.filter((item) =>
       item.mapId === mapId && item.targetCardId === cardId
       || (item.parentMapId ?? item.mapId) === mapId && item.parentCardId === cardId)
-    if (mounted.current) setItems(relevant)
+    if (mounted.current) {
+      setItems(relevant)
+      setLoaded(true)
+    }
   }, [listUrl, mapId, cardId])
 
   useEffect(() => {
@@ -148,9 +158,21 @@ export function AiDelegationRecovery({ mapId, cardId }: { mapId: string; cardId:
     }
   }
 
-  const pending = items.filter((item) => !['completed', 'failed', 'superseded', 'closed'].includes(item.state))
+  const pending = items.filter((item) =>
+    !['completed', 'failed', 'superseded', 'closed'].includes(item.state)
+    || item.recovery?.recoveryAvailable
+    || item.recovery?.reportRetryAvailable)
+  useEffect(() => {
+    if (!focusRequestId || (!loaded && !error && !notice)) return
+    const frame = window.requestAnimationFrame(() => {
+      sectionRef.current?.scrollIntoView({ block: 'start' })
+      sectionRef.current?.focus({ preventScroll: true })
+      onFocusHandled?.(focusRequestId)
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [error, focusRequestId, loaded, notice, onFocusHandled, pending.length])
   if (!pending.length && !error && !notice) return null
-  return <section className="ai-delegation-recovery" aria-label="AI 작업 복구">
+  return <section ref={sectionRef} className="ai-delegation-recovery" aria-label="AI 작업 복구" tabIndex={-1}>
     <div className="ai-delegation-recovery-heading">
       <strong>AI 작업 복구</strong>
       <small>{pending.length ? `미종료 위임 ${pending.length}건` : '상태 확인'}</small>

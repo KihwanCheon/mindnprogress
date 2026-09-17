@@ -45,7 +45,9 @@ import { DoorayMentionsPanel } from './components/DoorayMentionsPanel'
 import { ImagePreviewDialog } from './components/ImagePreviewDialog'
 import { SharedKnowledgeReviewDialog, type SharedKnowledgeReviewApplied } from './components/SharedKnowledgeReviewDialog'
 import { DashboardView, KanbanView, TimelineView } from './components/WorkViews'
-import type { AiConversationLink, AiConversationRuntime, ChecklistItem, KnowledgePolicy, MindDoorayLinkData, MindDoorayTaskData, MindDoorayWikiData, MindImageData, MindMapEdgeData, MindNodeData, TeamMember, WaitingItem } from './types/mindMap'
+import type { AiConversationLink, AiConversationRuntime, AiDelegationAttention, ChecklistItem, KnowledgePolicy, MindDoorayLinkData, MindDoorayTaskData, MindDoorayWikiData, MindImageData, MindMapEdgeData, MindNodeData, TeamMember, WaitingItem } from './types/mindMap'
+import { aiDelegationAttentionByCard } from './utils/aiDelegationAttention.mjs'
+import type { AiDelegationSummary } from './utils/aiDelegationManagement.mjs'
 import { resolveAiConversationTarget, type AiConversationExplicitTarget } from './utils/aiConversationLaunch.mjs'
 import { applyBoxSelection, boxSelectionNodeIds, boxSelectionRect, isBoxSelectionDrag } from './utils/boxSelection.mjs'
 import { copyTextToClipboard } from './utils/clipboardText.mjs'
@@ -2382,6 +2384,8 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
   const [liveCursors, setLiveCursors] = useState<Record<string, LiveCursor>>({})
   const [aiConversationRuntimes, setAiConversationRuntimes] = useState<Record<string, AiConversationRuntime>>({})
   const [aiConversationActiveCounts, setAiConversationActiveCounts] = useState<Record<string, number>>({})
+  const [aiDelegationAttentions, setAiDelegationAttentions] = useState<Record<string, AiDelegationAttention>>({})
+  const [aiDelegationRecoveryFocus, setAiDelegationRecoveryFocus] = useState<{ cardId: string; requestId: number } | null>(null)
   const [mergeNotice, setMergeNotice] = useState('')
   const [comments, setComments] = useState<NodeComment[]>([])
   const [commentStats, setCommentStats] = useState<NodeCommentStats>({})
@@ -2837,6 +2841,16 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     })
   }, [])
 
+  const openAiDelegationRecovery = useCallback((nodeId: string) => {
+    setNodes((current) => synchronizeNodeSelection(current, nodeId))
+    setSelectedId(nodeId)
+    if (isPhoneViewport()) setMobileInspectorOpen(true)
+    setAiDelegationRecoveryFocus((current) => ({
+      cardId: nodeId,
+      requestId: (current?.requestId ?? 0) + 1,
+    }))
+  }, [setNodes])
+
   const activeDocument = [...documents, ...archivedDocuments].find((document) => document.id === activeMapId) ?? null
   const activeRootState = useMemo(() => rootStateOf(nodes, edges), [edges, nodes])
   const teamMembers = useMemo<TeamMember[]>(() => assigneeUsers.map((assignee) => ({
@@ -3128,6 +3142,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         commentCount: (node.data.reference ? referenceCommentStats[node.id] : commentStats[node.id])?.total ?? 0,
         unresolvedCommentCount: (node.data.reference ? referenceCommentStats[node.id] : commentStats[node.id])?.unresolved ?? 0,
         aiConversationRuntime: aiConversationRuntimes[node.id],
+        aiDelegationAttention: node.data.reference ? undefined : aiDelegationAttentions[node.id],
         overlapStack: overlapStack ? { count: overlapStack.ids.length, titles: overlapStack.titles } : undefined,
         onCycleOverlap: overlapStack ? () => {
           const nextId = nextOverlappingNodeId(overlapStack.ids, selectedIdRef.current)
@@ -3146,6 +3161,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         }),
         onOpenWaitingItems: () => openWaitingItems(node.id),
         onOpenDependencies: () => openDependencies(node.id),
+        onOpenAiDelegationRecovery: () => openAiDelegationRecovery(node.id),
       },
       className: [
         node.className,
@@ -3158,7 +3174,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         overlapWarningIds.has(node.id) ? 'overlap-warning' : '',
       ].filter(Boolean).join(' '),
     }
-  }), [activeMapId, aiConversationRuntimes, beginHistoryTransaction, collapsedHiddenNodeIds, collapsedNodeIds, collapsibleNodeIds, commentStats, descendantCounts, dropTargetId, endHistoryTransaction, filterActive, filterMatchedNodeIds, filterVisibleNodeIds, hoveredKnowledgeConnectionIssue, knowledgeConnection, knowledgeConnectionTargetId, mode, nodes, normalizedNodeSearch, openDependencies, openWaitingItems, overlapStackByRepresentativeId, overlapWarningIds, progressRollups, referenceCommentStats, searchContextNodeIds, searchMatchedNodeIds, setNodes, teamMembers, unresolvedReferenceNodeIds])
+  }), [activeMapId, aiConversationRuntimes, aiDelegationAttentions, beginHistoryTransaction, collapsedHiddenNodeIds, collapsedNodeIds, collapsibleNodeIds, commentStats, descendantCounts, dropTargetId, endHistoryTransaction, filterActive, filterMatchedNodeIds, filterVisibleNodeIds, hoveredKnowledgeConnectionIssue, knowledgeConnection, knowledgeConnectionTargetId, mode, nodes, normalizedNodeSearch, openAiDelegationRecovery, openDependencies, openWaitingItems, overlapStackByRepresentativeId, overlapWarningIds, progressRollups, referenceCommentStats, searchContextNodeIds, searchMatchedNodeIds, setNodes, teamMembers, unresolvedReferenceNodeIds])
   const visibleFlowNodeIds = useMemo(() => new Set(flowNodes.filter((node) => !node.hidden).map((node) => node.id)), [flowNodes])
   visibleFlowNodeIdsRef.current = visibleFlowNodeIds
   const visibleFlowNodeIdsKey = useMemo(() => [...visibleFlowNodeIds].sort().join('\u0000'), [visibleFlowNodeIds])
@@ -3497,6 +3513,45 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       })
       .catch(() => undefined)
   }, [activeMapId, rebaselineHistory, setNodes])
+
+  useEffect(() => {
+    setAiDelegationAttentions({})
+    if (!activeMapId || mode !== 'editor' || documentArchived) return
+
+    const controller = new AbortController()
+    let inFlight = false
+    const refresh = async () => {
+      if (controller.signal.aborted || inFlight) return
+      inFlight = true
+      try {
+        const result = await apiRequest<{ delegations: AiDelegationSummary[] }>(
+          `/api/maps/${encodeURIComponent(activeMapId)}/ai-delegations`,
+          { signal: controller.signal },
+        )
+        if (!controller.signal.aborted) {
+          setAiDelegationAttentions(aiDelegationAttentionByCard(result.delegations, activeMapId))
+        }
+      } catch {
+        // 일시적인 조회 실패로 이미 확인한 복구 표시를 지우지 않는다.
+      } finally {
+        inFlight = false
+      }
+    }
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') void refresh()
+    }
+
+    void refresh()
+    const timer = window.setInterval(refreshWhenVisible, 5_000)
+    window.addEventListener('focus', refreshWhenVisible)
+    document.addEventListener('visibilitychange', refreshWhenVisible)
+    return () => {
+      controller.abort()
+      window.clearInterval(timer)
+      window.removeEventListener('focus', refreshWhenVisible)
+      document.removeEventListener('visibilitychange', refreshWhenVisible)
+    }
+  }, [activeMapId, documentArchived, mode])
 
   useEffect(() => {
     setAiConversationRuntimes({})
@@ -7984,6 +8039,10 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                 {mode === 'editor' && !documentArchived && <AiDelegationRecovery
                   key={`${selectedCommentMapId}:${selectedCommentNodeId ?? selectedNode.id}`}
                   mapId={selectedCommentMapId} cardId={selectedCommentNodeId ?? selectedNode.id}
+                  focusRequestId={aiDelegationRecoveryFocus?.cardId === (selectedCommentNodeId ?? selectedNode.id)
+                    ? aiDelegationRecoveryFocus.requestId
+                    : undefined}
+                  onFocusHandled={(requestId) => setAiDelegationRecoveryFocus((current) => current?.requestId === requestId ? null : current)}
                 />}
                 {selectedNode.data.reference && (
                   <div className="task-link-field reference-source-field">
