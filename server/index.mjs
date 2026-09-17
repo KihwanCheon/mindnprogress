@@ -2664,6 +2664,20 @@ function delegationRecoveryInstruction(delegation, instruction, recovery = null,
     ? `이전 실행은 ${recovery.failureCategory === 'rate-limit' ? '요청 한도' : recovery.failureCategory === 'model-capacity' ? '선택 모델의 실행 용량 부족' : '사용량 한도'}로 중단됐고, 사용자가 원인 해소를 확인한 뒤 같은 대화와 작업공간의 재개를 요청했습니다.`
     : userStopRecovery ? '사용자가 중지했던 기존 위임을 같은 대화에서 다시 이어가도록 요청했습니다.'
       : 'AionCore 또는 MindNProgress 재시작으로 이전 실행의 메모리 상태가 끊겼습니다.'
+  const workspaceLease = delegation.workspaceLease
+  const workspaceSummary = delegation.coordinationOnly
+    ? '- 현재 작업공간 배정: 문서 조정 전용 · worker 배정 없음'
+    : workspaceLease
+      ? `- 현재 workspaceId: \`${workspaceLease.workspaceId ?? '미확인'}\`
+- 현재 jobId: \`${workspaceLease.jobId ?? '미확인'}\`
+- 현재 leaseId: \`${workspaceLease.leaseId ?? '미확인'}\`
+- 현재 projectRoot: \`${workspaceLease.projectRoot ?? '미확인'}\`
+- 현재 branch: \`${workspaceLease.branch ?? '미확인'}\`
+- 현재 baseCommit: \`${workspaceLease.baseCommit ?? '미확인'}\``
+      : '- 현재 작업공간 배정: 기존 대화 작업공간 · 등록된 worker lease 없음'
+  const workspaceRecoveryRule = delegation.coordinationOnly
+    ? ''
+    : '\n복구 작업에서도 이번 전문의 `# 할당된 작업공간`에 기재된 현재 배정만 사용하세요. 대화 기록에 남은 이전 경로·브랜치·lease를 복구 후보로 사용하지 마세요.'
   return `# ${title}
 
 ${reason} 원래 지시를 처음부터 반복하지 말고, 아래 복구 확인 절차에 따라 미완료 부분만 이어서 수행하세요.
@@ -2671,9 +2685,9 @@ ${reason} 원래 지시를 처음부터 반복하지 말고, 아래 복구 확�
 - 위임 ID: ${delegation.id}
 - 대상 카드: ${delegation.targetCardLabel} (${delegation.targetCardId})
 - 대상 대화: ${conversationDisplayLabel}
-- 작업공간: ${delegation.coordinationOnly ? '문서 조정 전용 · worker 배정 없음' : delegation.workspaceLease?.projectRoot ?? '기존 대화 작업공간'}
+${workspaceSummary}
 
-${inspection}
+${inspection}${workspaceRecoveryRule}
 현재 상태와 아래 복구 지시를 대조하고 원래 맡긴 범위의 미완료 작업만 이어가세요. 범위를 벗어난 변경이 필요하면 상위 AI에 보고하세요. 분석·제안 위임의 복구는 계속 분석·제안만 허용됩니다.
 이미 완료된 변경이나 외부 처리는 중복 실행하지 말고 검증과 결과 보고만 하세요.
 

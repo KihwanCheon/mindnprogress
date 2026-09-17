@@ -42,6 +42,9 @@ test('작업공간 지침은 기존 대화에도 재배정 정보를 명확하�
     unityInstanceHash: '35b9a6e8409bd02a',
   })
   assert.match(instruction, /workspaceId: `fork2`/)
+  assert.match(instruction, /현재 작업공간 배정의 최신본/)
+  assert.match(instruction, /모든 작업공간 배정 전문은 더 이상 배정 근거로 사용하지 마세요/)
+  assert.match(instruction, /workspaceId.*jobId.*leaseId.*projectRoot.*branch.*baseCommit.*조합만 현재 유효합니다/)
   assert.match(instruction, /projectRoot: `C:\\Dev\\Game_Worker02\\client`/)
   assert.match(instruction, /sharedRoot: `C:\\Dev\\Game_Workspaces`/)
   assert.match(instruction, /다른 등록 작업공간으로 이동하거나/)
@@ -49,8 +52,15 @@ test('작업공간 지침은 기존 대화에도 재배정 정보를 명확하�
   assert.match(instruction, /직접 커밋하지 마세요/)
   assert.match(instruction, /commitMessage/)
   assert.match(instruction, /mindnprogress_checkpoint_ai_workspace.*operation\.action=confirm-no-changes/)
+  assert.match(instruction, /MNP_WORKSPACE_ASSIGNMENT_MISMATCH/)
+  assert.match(instruction, /파일 수정, 브랜치 전환, 새 작업공간 탐색 또는 기존 변경 정리를 하지 말고/)
   assert.match(instruction, /플랫폼별 컴파일은 한 번에 하나씩/)
   assert.match(instruction, /ready_for_tools=true/)
+  assert.match(instruction, /구체적인 busy 상태가 남아 있으면 완료 보고하지 마세요/)
+  assert.match(instruction, /stale_status.*한 번만 추가 확인하세요/)
+  assert.match(instruction, /무한 반복하지 말고/)
+  assert.match(instruction, /서버 측에서 안정 상태를 별도로 다시 판정합니다/)
+  assert.doesNotMatch(instruction, /ready_for_tools=true.*연속으로 확인될 때까지 기다리세요/)
 })
 
 test('Unity 준비 판정은 ready_for_tools 최종 신호와 개별 busy 상태를 모두 반영한다', () => {
