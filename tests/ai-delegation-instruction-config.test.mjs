@@ -42,6 +42,21 @@ test('사용자 설정이 없으면 저장소 기본 템플릿을 사용한다',
   assert.doesNotMatch(loaded.template, /kwOpenApi-worktrees|<작업메인클론>/)
 })
 
+test('기본 템플릿은 작업공간 참조·TidyFirst·다양한 개발도구·AionUi 협업을 지시한다', () => {
+  const loaded = loadAiDelegationInstructionTemplate({ env: { MNP_CONFIG_DIR: '/tmp/mnp-config-that-does-not-exist' }, homeDirectory: '/tmp/test-home' })
+  assert.match(loaded.template, /AGENTS\.md/)
+  assert.match(loaded.template, /CLAUDE\.md/)
+  assert.match(loaded.template, /TidyFirst/)
+  assert.match(loaded.template, /mise.*mvn.*fnm/)
+  assert.match(loaded.template, /AionUi/)
+  assert.match(loaded.template, /스킬/)
+})
+
+test('기본 템플릿 길이는 감량 전 기준(4236자)보다 짧다', () => {
+  const loaded = loadAiDelegationInstructionTemplate({ env: { MNP_CONFIG_DIR: '/tmp/mnp-config-that-does-not-exist' }, homeDirectory: '/tmp/test-home' })
+  assert.ok(loaded.template.length < 4236, `템플릿 길이 ${loaded.template.length}자가 감량 전 기준(4236자) 이상입니다.`)
+})
+
 test('템플릿 변수를 런타임 값으로 치환한다', () => {
   const rendered = renderAiDelegationInstruction(
     '{{requestTitle}} {{mapId}} {{cardId}} {{editorId}} {{attributionToken}} {{approvalInstruction}} {{workspaceInstruction}} {{instructionHeading}} {{instruction}}',
