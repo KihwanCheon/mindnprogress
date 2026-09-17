@@ -5,10 +5,6 @@ import path from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { promisify } from 'node:util'
 import { aiDelegationWorkspaceLeaseMatches, retryableExternalLimitCategory } from './aiDelegations.mjs'
-import {
-  probeUnityWorkspaceReadiness,
-  unityWorkspaceReadinessDefaults,
-} from './unityWorkspaceReadiness.mjs'
 
 const execFileAsync = promisify(execFile)
 const idleDriftReason = '작업공간에 소유자를 확정할 수 없는 변경이 있습니다.'
@@ -22,7 +18,6 @@ export const integrationWorktreeDirtyReasonCode = 'integration-worktree-dirty'
 export const integrationUntrackedCollisionReasonCode = 'integration-untracked-collision'
 export const integrationUntrackedCollisionMessage = '통합 작업공간의 미추적 파일이 반영할 경로와 충돌합니다. 충돌 파일을 정리하면 자동으로 통합됩니다. 재위임하지 마세요.'
 export const integrationStatusRetryReasonCode = 'INTEGRATION_STATUS_RETRY'
-export const unityWorkspaceBusyReasonCode = 'unity-workspace-busy'
 const conversationBindableLeaseStatuses = new Set(['leased', 'checkpoint-required'])
 const conversationReusableLeaseStatuses = new Set(['leased', 'checkpoint-required', 'finalizing'])
 const conversationRebindOnlyLeaseStatuses = new Set([
@@ -206,21 +201,6 @@ async function defaultGitRunner(cwd, args, { timeoutMs = 0 } = {}) {
   }
 }
 
-export class UnityWorkspaceBusyError extends IntegrationWorkspaceBusyError {
-  constructor(workspace, phase, readiness) {
-    super([])
-    this.name = 'UnityWorkspaceBusyError'
-    this.reasonCode = unityWorkspaceBusyReasonCode
-    this.phase = phase
-    this.readiness = readiness
-    this.keepIntegrationLock = false
-    const reasons = Array.isArray(readiness?.reasons) && readiness.reasons.length
-      ? ` (${readiness.reasons.join(', ')})`
-      : ''
-    this.message = `${workspace.id} Unity가 안정 상태가 아니어서 작업공간 회수를 기다립니다.${reasons}`
-  }
-}
-
 class IntegrationUntrackedCollisionError extends IntegrationWorkspaceBusyError {
   constructor(paths) {
     super()
@@ -372,25 +352,14 @@ ${sharedRoot ? `- sharedRoot: \`${sharedRoot}\`\n` : ''}- branch: \`${lease.bran
 
 이 작업에서는 위 \`projectRoot\`만 수정하세요. 다른 등록 작업공간으로 이동하거나 브랜치를 바꾸거나 lease를 직접 해제하지 마세요. \`.ai-session.json\`의 값이 위 정보와 일치하는지 먼저 확인하세요.${sharedRoot ? ` 공통 규칙과 지식은 \`sharedRoot\`에서 읽기 전용으로 사용하고, 제안은 \`knowledge-inbox/${lease.jobId}.md\`에 기록하세요.` : ''}
 
-Unity Play Mode, 재임포트, 동적 폰트·Atlas 생성 등의 검증은 어떤 tracked 파일이든 자동으로 바꿀 수 있습니다. 구현 수정을 마친 뒤 각 검증을 시작하기 전에 \`mindnprogress_checkpoint_ai_workspace\`를 호출하세요. 의도한 변경이 있으면 \`operation.action=commit-changes\`에 변경 경로와 실제 변경을 설명하는 \`commitMessage\`를 함께 전달합니다. \`summary\`에는 \`[김용민]\` prefix나 \`[MnP]\` 출처를 넣지 말고, \`background\`·\`cause\`·\`changes\`에는 이번 체크포인트의 실제 변경을 작성하며 \`scope\`는 필요한 경우에만 작성하세요. MindNProgress가 현재 문서·카드 제목과 안정적인 ID를 조회해 커밋 본문의 \`[MnP]\` 섹션을 자동으로 추가합니다. 파일 변경이 전혀 없는 조사·검증 작업은 같은 도구의 \`operation.action=confirm-no-changes\`로 확인하세요. 검증 후 보완했다면 새 변경에 맞는 메시지로 다시 체크포인트를 만들고 검증하세요. 플랫폼별 컴파일은 한 번에 하나씩 실행하고 매 실행 사이에 Unity 편집기가 안정 상태인지 확인하세요. 최종 응답 전에는 Play Mode를 종료하고 테스트·컴파일·도메인 리로드·에셋 갱신이 실제로 끝났는지 확인하세요. Play Mode·컴파일·에셋 갱신·도메인 리로드·테스트 실행 등의 구체적인 busy 상태가 남아 있으면 완료 보고하지 마세요. \`mcpforunity://editor/state\`의 \`data.advice.ready_for_tools=true\`는 정상 안정 신호이므로 가능하면 연속으로 확인하세요. 다만 Unity가 정상 응답하고 구체적인 busy 상태가 모두 해제됐는데 \`stale_status\`만 남아 있다면 한 번만 추가 확인하세요. 동일한 상태가 계속되면 무한 반복하지 말고 마지막 관측 상태, \`stale_status\` 경고와 구체적인 busy 신호가 없었다는 사실을 결과에 남긴 뒤 완료 보고를 진행하세요. MindNProgress는 완료 수신 후 통합과 작업공간 회수 전에 서버 측에서 안정 상태를 별도로 다시 판정합니다. Git으로 직접 커밋하지 마세요. 완료 시 MindNProgress는 명시적 체크포인트만 main에 통합하고 그 이후의 자동 변경은 복구 자료로 보존한 뒤 worker에서 제거합니다.`
+Unity Play Mode, 재임포트, 동적 폰트·Atlas 생성 등의 검증은 어떤 tracked 파일이든 자동으로 바꿀 수 있습니다. 구현 수정을 마친 뒤 각 검증을 시작하기 전에 \`mindnprogress_checkpoint_ai_workspace\`를 호출하세요. 의도한 변경이 있으면 \`operation.action=commit-changes\`에 변경 경로와 실제 변경을 설명하는 \`commitMessage\`를 함께 전달합니다. \`summary\`에는 \`[김용민]\` prefix나 \`[MnP]\` 출처를 넣지 말고, \`background\`·\`cause\`·\`changes\`에는 이번 체크포인트의 실제 변경을 작성하며 \`scope\`는 필요한 경우에만 작성하세요. MindNProgress가 현재 문서·카드 제목과 안정적인 ID를 조회해 커밋 본문의 \`[MnP]\` 섹션을 자동으로 추가합니다. 파일 변경이 전혀 없는 조사·검증 작업은 같은 도구의 \`operation.action=confirm-no-changes\`로 확인하세요. 검증 후 보완했다면 새 변경에 맞는 메시지로 다시 체크포인트를 만들고 검증하세요. Git으로 직접 커밋하지 마세요. 완료 시 MindNProgress는 명시적 체크포인트만 main에 통합하고 그 이후의 자동 변경은 복구 자료로 보존한 뒤 worker에서 제거합니다.`
 }
 
 export class WorkspacePoolManager {
-  constructor({
-    registryFile,
-    stateFile,
-    gitRunner = defaultGitRunner,
-    workspaceReadinessProbe = probeUnityWorkspaceReadiness,
-    workspaceReadinessOptions = {},
-  } = {}) {
+  constructor({ registryFile, stateFile, gitRunner = defaultGitRunner } = {}) {
     this.registryFile = path.resolve(String(registryFile ?? '').trim())
     this.stateFile = path.resolve(String(stateFile ?? '').trim())
     this.git = gitRunner
-    this.workspaceReadinessProbe = workspaceReadinessProbe
-    this.workspaceReadinessOptions = {
-      ...unityWorkspaceReadinessDefaults,
-      ...workspaceReadinessOptions,
-    }
     this.registry = null
     this.state = null
     this.queue = Promise.resolve()
@@ -550,43 +519,6 @@ export class WorkspacePoolManager {
     if (Array.isArray(lease.commits) && lease.commits.length > 0) return false
     if (Array.isArray(lease.checkpoints) && lease.checkpoints.length > 0) return false
     return !Array.isArray(result.unmergedFiles) || result.unmergedFiles.length === 0
-  }
-
-  async waitForUnityWorkspaceReady(workspace, phase) {
-    if (!workspace?.unityInstanceHash && !workspace?.assetsPath) {
-      return { ready: true, applicable: false, reason: 'unity-metadata-unavailable' }
-    }
-    const stableSamples = Math.max(1, Number(this.workspaceReadinessOptions.stableSamples) || 1)
-    const pollMs = Math.max(0, Number(this.workspaceReadinessOptions.pollMs) || 0)
-    const maxWaitMs = Math.max(0, Number(this.workspaceReadinessOptions.maxWaitMs) || 0)
-    const startedAt = Date.now()
-    let consecutiveReady = 0
-    let lastReadiness = null
-    while (true) {
-      try {
-        lastReadiness = await this.workspaceReadinessProbe(workspace, { phase })
-      } catch (error) {
-        lastReadiness = {
-          ready: false,
-          applicable: true,
-          reasons: ['unity-readiness-probe-failed'],
-          diagnostics: { error: error?.message ?? String(error) },
-        }
-      }
-      if (lastReadiness?.ready === true) {
-        if (lastReadiness.applicable === false || lastReadiness.running === false) return lastReadiness
-        consecutiveReady += 1
-        if (consecutiveReady >= stableSamples) return lastReadiness
-      } else {
-        consecutiveReady = 0
-      }
-      // 제한 시간이 지난 순간 정상 표본을 얻었다면 그 표본을 busy로 뒤집지 않는다.
-      // 시작된 정상 연속 판정은 끝까지 확인하고, 그 사이 다시 busy가 관측될 때만 대기로 돌린다.
-      if (consecutiveReady === 0 && Date.now() - startedAt >= maxWaitMs) {
-        throw new UnityWorkspaceBusyError(workspace, phase, lastReadiness)
-      }
-      await delay(pollMs)
-    }
   }
 
   recoverablePreparationFailureState(current) {
@@ -811,7 +743,6 @@ export class WorkspacePoolManager {
 
       const synchronized = []
       for (const { workspace, previousCommit } of preflight) {
-        await this.waitForUnityWorkspaceReady(workspace, 'before-idle-sync')
         const idleBranch = await this.switchWorkspaceToIdleCommit(workspace, baseBranch, baseCommit)
         const [actualBranch, actualCommit, actualTree, trackedStatus] = await Promise.all([
           this.git(workspace.root, ['branch', '--show-current']),
@@ -870,7 +801,6 @@ export class WorkspacePoolManager {
     // 사용량 대기는 작업 소유권을 유지한다. 다른 위임의 배정 과정에서 회수하지 않는다.
     if (retryableExternalLimitCategory(lease?.result?.childError)) return false
     if (!this.recoverableCleanFailureLease(lease)) return false
-    if (lease.pendingIdleRelease) return this.continuePendingIdleRelease(lease, workspace)
 
     const sessionFile = path.join(workspace.root, '.ai-session.json')
     const session = await readJson(sessionFile, null)
@@ -893,25 +823,26 @@ export class WorkspacePoolManager {
       throw new Error('격리된 작업공간의 Git 기준선이 기존 lease와 달라 자동 회수하지 않았습니다.')
     }
 
+    const idleBranch = await this.switchWorkspaceToIdleCommit(workspace, idleBaseBranch, idleCommit)
+    await rm(sessionFile, { force: true })
     const recoveredAt = new Date().toISOString()
-    lease.pendingIdleRelease = {
-      kind: 'failed-clean-recovery',
-      baseBranch: idleBaseBranch,
+    const result = await this.writeResult(lease, {
+      ...lease.result,
+      status: 'failed-clean',
+      recoveredFromQuarantine: true,
+      recoveredAt,
+    })
+    lease.status = 'cancelled'
+    lease.result = result
+    this.state.workspaces[workspace.id] = {
+      status: 'idle',
       idleCommit,
-      idleBranch: `mnp/idle/${workspace.id}`,
-      switched: false,
-      archiveDrift: false,
-      finalLeaseStatus: 'cancelled',
-      resultFields: {
-        ...lease.result,
-        status: 'failed-clean',
-        recoveredFromQuarantine: true,
-        recoveredAt,
-      },
-      preparedAt: recoveredAt,
+      idleBranch,
+      lastJobId: lease.jobId,
+      lastLeaseId: lease.leaseId,
+      updatedAt: recoveredAt,
     }
     await this.persist()
-    await this.continuePendingIdleRelease(lease, workspace)
     return true
   }
 
@@ -1807,9 +1738,6 @@ export class WorkspacePoolManager {
     untrackedChanges = [],
     keepIntegrationLock = false,
     recoveredFromQuarantine = false,
-    integratedCommit = null,
-    unityWorkspacePhase = null,
-    unityWorkspaceReadiness = null,
   } = {}) {
     const updatedAt = new Date().toISOString()
     const result = await this.writeResult(lease, {
@@ -1817,7 +1745,7 @@ export class WorkspacePoolManager {
       childStatus: childStatus ?? null,
       childError: childError ?? null,
       headCommit: headCommit ?? lease.headCommit ?? lease.result?.headCommit ?? null,
-      integratedCommit,
+      integratedCommit: null,
       integrationBaseCommit: lease.integrationBaseCommit ?? lease.result?.integrationBaseCommit ?? null,
       integrationBranch: lease.integrationBranch ?? lease.result?.integrationBranch ?? null,
       integrationHeadCommit: lease.integrationHeadCommit ?? null,
@@ -1827,8 +1755,6 @@ export class WorkspacePoolManager {
       trackedChanges,
       untrackedChanges,
       recoveredFromQuarantine,
-      ...(unityWorkspacePhase ? { unityWorkspacePhase } : {}),
-      ...(unityWorkspaceReadiness ? { unityWorkspaceReadiness } : {}),
       updatedAt,
     })
     lease.status = 'waiting-integration'
@@ -1977,31 +1903,6 @@ export class WorkspacePoolManager {
       const workspace = this.registry.workspaces.find((candidate) => candidate.id === lease.workspaceId)
       const integration = this.registry.integration
       if (!workspace || !integration) throw new WorkspacePoolIntegrationError('작업공간 registry 항목을 찾지 못했습니다.')
-      if (lease.pendingIdleRelease) {
-        try {
-          return await this.continuePendingIdleRelease(lease, workspace)
-        } catch (error) {
-          if (error instanceof UnityWorkspaceBusyError) {
-            return this.waitForIntegration(lease, workspace, {
-              childStatus: childStatus ?? lease.pendingIdleRelease.resultFields?.childStatus ?? null,
-              childError: childError ?? lease.pendingIdleRelease.resultFields?.childError ?? null,
-              headCommit: lease.pendingIdleRelease.resultFields?.headCommit ?? lease.headCommit ?? null,
-              integratedCommit: lease.pendingIdleRelease.resultFields?.integratedCommit ?? null,
-              reasonCode: error.reasonCode,
-              waitingReason: error.message,
-              keepIntegrationLock: false,
-              unityWorkspacePhase: error.phase,
-              unityWorkspaceReadiness: error.readiness,
-            })
-          }
-          throw await this.quarantineIntegrationFailure(lease, workspace, error, {
-            childStatus: childStatus ?? lease.pendingIdleRelease.resultFields?.childStatus ?? null,
-            childError: childError ?? lease.pendingIdleRelease.resultFields?.childError ?? null,
-            headCommit: lease.pendingIdleRelease.resultFields?.headCommit ?? lease.headCommit ?? null,
-            integratedCommit: lease.pendingIdleRelease.resultFields?.integratedCommit ?? null,
-          })
-        }
-      }
       if (lease.status === 'waiting-integration'
         && lease.result?.reasonCode === integrationUntrackedCollisionReasonCode) {
         let paths
@@ -2236,11 +2137,8 @@ export class WorkspacePoolManager {
             waitingReason: error.message,
             trackedChanges: error.trackedChanges,
             untrackedChanges: error.untrackedChanges ?? [],
-            keepIntegrationLock: error.keepIntegrationLock ?? Boolean(lease.integrationBranch),
+            keepIntegrationLock: Boolean(lease.integrationBranch),
             recoveredFromQuarantine: lease.result?.recoveredFromQuarantine === true,
-            integratedCommit: lease.pendingIdleRelease?.resultFields?.integratedCommit ?? integratedCommit,
-            unityWorkspacePhase: error.phase ?? null,
-            unityWorkspaceReadiness: error.readiness ?? null,
           })
         }
         throw await this.quarantineIntegrationFailure(lease, workspace, error, {
@@ -2350,11 +2248,8 @@ export class WorkspacePoolManager {
             waitingReason: error.message,
             trackedChanges: error.trackedChanges,
             untrackedChanges: error.untrackedChanges ?? [],
-            keepIntegrationLock: error.keepIntegrationLock ?? true,
+            keepIntegrationLock: true,
             recoveredFromQuarantine: lease.result?.recoveredFromQuarantine === true,
-            integratedCommit: lease.pendingIdleRelease?.resultFields?.integratedCommit ?? null,
-            unityWorkspacePhase: error.phase ?? null,
-            unityWorkspaceReadiness: error.readiness ?? null,
           })
         }
         throw await this.quarantineIntegrationFailure(lease, workspace, error, {
@@ -2461,75 +2356,36 @@ export class WorkspacePoolManager {
     const integration = this.registry.integration
     const idleCommit = resultFields.integratedCommit
       ?? await this.git(integration.root, ['rev-parse', 'HEAD'])
-    lease.pendingIdleRelease ??= {
-      kind: 'completed',
-      baseBranch: lease.baseBranch,
-      idleCommit,
-      idleBranch: `mnp/idle/${workspace.id}`,
-      switched: false,
-      archiveDrift: true,
-      finalLeaseStatus: 'completed',
-      resultFields,
-      preparedAt: new Date().toISOString(),
-    }
-    await this.persist()
-    return this.continuePendingIdleRelease(lease, workspace)
-  }
-
-  async continuePendingIdleRelease(lease, workspace) {
-    const pending = lease.pendingIdleRelease
-    if (!pending) throw new Error('계속할 작업공간 회수 정보가 없습니다.')
-    let idleBranch = pending.idleBranch ?? `mnp/idle/${workspace.id}`
-    if (!pending.switched) {
-      await this.waitForUnityWorkspaceReady(workspace, 'before-idle-switch')
-      idleBranch = await this.switchWorkspaceToIdleCommit(workspace, pending.baseBranch, pending.idleCommit)
-      pending.idleBranch = idleBranch
-      pending.switched = true
-      pending.switchedAt = new Date().toISOString()
-      await this.persist()
-    } else {
-      const [actualBranch, actualCommit] = await Promise.all([
-        this.git(workspace.root, ['branch', '--show-current']),
-        this.git(workspace.root, ['rev-parse', 'HEAD']),
-      ])
-      if (actualBranch !== idleBranch || actualCommit !== pending.idleCommit) {
-        throw new Error('Unity 안정화 대기 중 작업공간 브랜치 또는 HEAD가 변경되어 자동 회수를 중단했습니다.')
-      }
-    }
-    await this.waitForUnityWorkspaceReady(workspace, 'after-idle-switch')
+    const idleBranch = await this.switchWorkspaceToIdleCommit(workspace, lease.baseBranch, idleCommit)
     await rm(path.join(workspace.root, '.ai-session.json'), { force: true })
     let drift = null
     const postSwitchDirty = await this.git(workspace.root, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])
     if (postSwitchDirty) {
-      if (!pending.archiveDrift) {
-        throw new Error('작업공간 회수 후 Unity 또는 외부 도구가 변경을 만들었으므로 자동 회수를 중단했습니다.')
-      }
       drift = await this.archiveAndRestoreDrift(workspace, {
         reason: '완료된 worker를 최신 main 기준으로 회수한 후 발생한 Unity 자동 변경',
         phase: 'idle-release',
         jobId: lease.jobId,
         leaseId: lease.leaseId,
-        idleCommit: pending.idleCommit,
+        idleCommit,
       })
     }
     const lastDriftArchive = drift?.archiveRoot ?? lease.lastDriftArchive ?? null
     const result = await this.writeResult(lease, {
-      ...pending.resultFields,
+      ...resultFields,
       driftArchive: lastDriftArchive,
     })
-    lease.status = pending.finalLeaseStatus
+    lease.status = 'completed'
     lease.result = result
     if (this.state.integrationLeaseId === lease.leaseId) this.state.integrationLeaseId = null
     this.state.workspaces[workspace.id] = {
       status: 'idle',
-      idleCommit: pending.idleCommit,
+      idleCommit,
       idleBranch,
       lastJobId: lease.jobId,
       lastLeaseId: lease.leaseId,
       lastDriftArchive,
       updatedAt: result.completedAt,
     }
-    delete lease.pendingIdleRelease
     await this.persist()
     return result
   }
@@ -2540,24 +2396,26 @@ export class WorkspacePoolManager {
       this.git(integration.root, ['rev-parse', 'HEAD']),
       this.git(integration.root, ['branch', '--show-current']),
     ])
+    const idleBranch = await this.switchWorkspaceToIdleCommit(workspace, idleBaseBranch, idleCommit)
+    await rm(path.join(workspace.root, '.ai-session.json'), { force: true })
     const completedAt = new Date().toISOString()
-    lease.pendingIdleRelease ??= {
-      kind: 'failed-clean',
-      baseBranch: idleBaseBranch,
+    const result = await this.writeResult(lease, {
+      status: 'failed-clean',
+      ...resultFields,
+      completedAt,
+    })
+    lease.status = 'cancelled'
+    lease.result = result
+    this.state.workspaces[workspace.id] = {
+      status: 'idle',
       idleCommit,
-      idleBranch: `mnp/idle/${workspace.id}`,
-      switched: false,
-      archiveDrift: false,
-      finalLeaseStatus: 'cancelled',
-      resultFields: {
-        status: 'failed-clean',
-        ...resultFields,
-        completedAt,
-      },
-      preparedAt: completedAt,
+      idleBranch,
+      lastJobId: lease.jobId,
+      lastLeaseId: lease.leaseId,
+      updatedAt: completedAt,
     }
     await this.persist()
-    return this.continuePendingIdleRelease(lease, workspace)
+    return result
   }
 
   async quarantineIntegrationFailure(lease, workspace, error, resultFields = {}) {
@@ -2601,24 +2459,25 @@ export class WorkspacePoolManager {
           this.git(this.registry.integration.root, ['rev-parse', 'HEAD']),
           this.git(this.registry.integration.root, ['branch', '--show-current']),
         ])
-        const completedAt = new Date().toISOString()
-        lease.pendingIdleRelease = {
-          kind: 'cancelled',
-          baseBranch: idleBaseBranch,
+        const idleBranch = await this.switchWorkspaceToIdleCommit(workspace, idleBaseBranch, idleCommit)
+        await rm(path.join(workspace.root, '.ai-session.json'), { force: true })
+        const result = await this.writeResult(lease, {
+          status: 'cancelled',
+          error: reason,
+          completedAt: new Date().toISOString(),
+        })
+        lease.status = 'cancelled'
+        lease.result = result
+        this.state.workspaces[workspace.id] = {
+          status: 'idle',
           idleCommit,
-          idleBranch: `mnp/idle/${workspace.id}`,
-          switched: false,
-          archiveDrift: false,
-          finalLeaseStatus: 'cancelled',
-          resultFields: {
-            status: 'cancelled',
-            error: reason,
-            completedAt,
-          },
-          preparedAt: completedAt,
+          idleBranch,
+          lastJobId: lease.jobId,
+          lastLeaseId: leaseId,
+          updatedAt: result.completedAt,
         }
         await this.persist()
-        return this.continuePendingIdleRelease(lease, workspace)
+        return result
       } catch (error) {
         const quarantineReason = error?.message ?? String(error)
         const result = await this.writeResult(lease, {
