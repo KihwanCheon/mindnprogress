@@ -7,6 +7,10 @@
 - editorId: `{{editorId}}`
 - attributionToken: `{{attributionToken}}`
 
+{{taskContext}}
+
+커밋할 때는 AI 서명(`Co-Authored-By` 등)을 넣지 말고, 위 정보를 그대로 커밋 메시지 하단에 footer로 남기세요. 나중에 커밋 로그만 보고도 이 세션을 찾아 이어서 작업할 수 있어야 합니다.
+
 {{approvalInstruction}}
 
 ## 1. 실행 컨텍스트 확인

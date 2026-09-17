@@ -6,6 +6,7 @@ import test from 'node:test'
 import {
   AI_DELEGATION_INSTRUCTION_FILE_NAME,
   bundledAiDelegationInstructionPath,
+  buildTaskContextBlock,
   loadAiDelegationInstructionTemplate,
   renderAiConversationPrompt,
   renderAiDelegationInstruction,
@@ -57,9 +58,61 @@ test('기본 템플릿 길이는 감량 전 기준(4236자)보다 짧다', () =>
   assert.ok(loaded.template.length < 4236, `템플릿 길이 ${loaded.template.length}자가 감량 전 기준(4236자) 이상입니다.`)
 })
 
+test('기본 템플릿은 taskContext 자리를 두고 커밋 서명 대신 footer를 남기라고 지시한다', () => {
+  const loaded = loadAiDelegationInstructionTemplate({ env: { MNP_CONFIG_DIR: '/tmp/mnp-config-that-does-not-exist' }, homeDirectory: '/tmp/test-home' })
+  assert.match(loaded.template, /\{\{taskContext\}\}/)
+  assert.match(loaded.template, /서명.*(넣지|없이|대신)/)
+})
+
+test('buildTaskContextBlock: Dooray 제목·모드·추론깊이가 모두 있으면 세 줄을 순서대로 만든다', () => {
+  const block = buildTaskContextBlock({
+    cardTitle: 'mnp 지시문 정비',
+    cardId: 'node-abc123',
+    doorayLink: { title: '지시문 정비 요청', url: 'https://example.dooray.com/task/1/2' },
+    agentLabel: 'Claude Code',
+    modelLabel: 'Sonnet 5',
+    modeLabel: 'code',
+    thoughtLevelLabel: 'high',
+    roleLabel: '카드 담당',
+  })
+  assert.equal(block, [
+    '- Dooray: 지시문 정비 요청(https://example.dooray.com/task/1/2)',
+    '- mnp: mnp 지시문 정비(node-abc123)',
+    '- AI: 모델: Claude Code(Sonnet 5), 모드: code, 추론깊이: high, 역할: 카드 담당',
+  ].join('\n'))
+})
+
+test('buildTaskContextBlock: 카드에 taskUrl(출처)이 없으면 Dooray 줄을 만들지 않는다', () => {
+  const block = buildTaskContextBlock({
+    cardTitle: '카드 제목',
+    cardId: 'node-x',
+    doorayLink: null,
+    agentLabel: 'Codex CLI',
+    modelLabel: 'GPT-5.6 Sol',
+    roleLabel: '하위 카드 위임 실행',
+  })
+  assert.equal(block, [
+    '- mnp: 카드 제목(node-x)',
+    '- AI: 모델: Codex CLI(GPT-5.6 Sol), 역할: 하위 카드 위임 실행',
+  ].join('\n'))
+  assert.doesNotMatch(block, /Dooray/)
+})
+
+test('buildTaskContextBlock: Dooray URL은 있으나 캐시된 제목이 없으면 URL만 남긴다', () => {
+  const block = buildTaskContextBlock({
+    cardTitle: '카드 제목',
+    cardId: 'node-y',
+    doorayLink: { title: null, url: 'https://example.dooray.com/task/1/9' },
+    agentLabel: 'Claude Code',
+    modelLabel: 'Sonnet 5',
+    roleLabel: '카드 담당',
+  })
+  assert.match(block, /^- Dooray: https:\/\/example\.dooray\.com\/task\/1\/9$/m)
+})
+
 test('템플릿 변수를 런타임 값으로 치환한다', () => {
   const rendered = renderAiDelegationInstruction(
-    '{{requestTitle}} {{mapId}} {{cardId}} {{editorId}} {{attributionToken}} {{approvalInstruction}} {{workspaceInstruction}} {{instructionHeading}} {{instruction}}',
+    '{{requestTitle}} {{mapId}} {{cardId}} {{editorId}} {{attributionToken}} {{approvalInstruction}} {{taskContext}} {{workspaceInstruction}} {{instructionHeading}} {{instruction}}',
     {
       requestTitle: 'MindNProgress 작업 요청',
       mapId: 'map-test',
@@ -67,12 +120,13 @@ test('템플릿 변수를 런타임 값으로 치환한다', () => {
       editorId: 'editor-test',
       attributionToken: 'token-test',
       approvalInstruction: '승인 규칙',
+      taskContext: '- mnp: 카드(card-test)',
       workspaceInstruction: '',
       instructionHeading: '편집자 요청',
       instruction: '하위 작업',
     },
   )
-  assert.equal(rendered, 'MindNProgress 작업 요청 map-test card-test editor-test token-test 승인 규칙  편집자 요청 하위 작업')
+  assert.equal(rendered, 'MindNProgress 작업 요청 map-test card-test editor-test token-test 승인 규칙 - mnp: 카드(card-test)  편집자 요청 하위 작업')
   assert.throws(() => renderAiDelegationInstruction('{{unknown}}', {}), /알 수 없는 위임 지시문 변수/)
 })
 

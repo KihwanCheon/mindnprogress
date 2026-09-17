@@ -198,6 +198,7 @@ import {
 } from './lib/workspacePool.mjs'
 import {
   AI_CONVERSATION_REQUEST_MAX_LENGTH,
+  buildTaskContextBlock,
   loadAiDelegationInstructionTemplate,
   renderAiConversationPrompt,
   renderAiDelegationInstruction,
@@ -2227,8 +2228,49 @@ function issueDelegatedAttribution({ mapId, cardId, conversationId, selection, s
   return { token, attribution }
 }
 
-function buildDelegatedInstruction({ mapId, cardId, editorId, attributionToken, instruction, workspaceLease }) {
+const AI_CONVERSATION_ROLE_LABELS = {
+  card: '카드 담당',
+  'group-coordination': '그룹 총괄',
+  'shared-knowledge-review': '지식 정리 검토',
+  'document-reconstruction': '문서 재구성',
+  'card-layout': '카드 배치 제안',
+  'dooray-response': 'Dooray 승인 확인',
+}
+
+function aiConversationRoleLabel(purpose) {
+  return AI_CONVERSATION_ROLE_LABELS[purpose] ?? '카드 담당'
+}
+
+function doorayLinkForCard(card) {
+  const url = typeof card?.data?.taskUrl === 'string' ? card.data.taskUrl.trim() : ''
+  if (!url) return null
+  const externalLink = card?.data?.externalLink?.url === url ? card.data.externalLink : null
+  return { url, title: externalLink?.title ?? null }
+}
+
+function buildAiTaskContext({ card, agentLabel, modelLabel, modeLabel, thoughtLevelLabel, roleLabel }) {
+  return buildTaskContextBlock({
+    cardTitle: card?.data?.label ?? card?.id ?? '',
+    cardId: card?.id ?? '',
+    doorayLink: doorayLinkForCard(card),
+    agentLabel,
+    modelLabel,
+    modeLabel,
+    thoughtLevelLabel,
+    roleLabel,
+  })
+}
+
+function buildDelegatedInstruction({ mapId, cardId, editorId, attributionToken, instruction, workspaceLease, targetCard, selection }) {
   const workspaceInstruction = buildWorkspaceInstruction(workspaceLease)
+  const taskContext = buildAiTaskContext({
+    card: targetCard,
+    agentLabel: selection?.agent?.label ?? '',
+    modelLabel: selection?.model?.label ?? '',
+    modeLabel: selection?.mode?.label ?? null,
+    thoughtLevelLabel: selection?.thoughtLevel?.label ?? null,
+    roleLabel: '하위 카드 위임 실행',
+  })
   return renderAiDelegationInstruction(aiDelegationInstructionConfig.template, {
     requestTitle: 'MindNProgress 하위 카드 위임 작업 요청',
     mapId,
@@ -2236,6 +2278,7 @@ function buildDelegatedInstruction({ mapId, cardId, editorId, attributionToken, 
     editorId,
     attributionToken,
     approvalInstruction: '',
+    taskContext,
     workspaceInstruction,
     instructionHeading: '상위 AI 지시',
     instruction: `이 요청은 상위 카드의 AI가 현재 하위 카드에 실행을 위임한 것이므로, 일반적인 다음 작업 제안에 그치지 말고 아래 지시를 실제로 수행하세요.\n\n${instruction.trim()}`,
@@ -2845,6 +2888,8 @@ async function dispatchPreparedAiDelegation({
     attributionToken,
     instruction,
     workspaceLease,
+    targetCard,
+    selection,
   })
   const delegatedConversationTitle = strategy === 'new'
     ? formatAiConversationTitle(map.title, targetCard.data?.label ?? targetCard.id)
@@ -7453,12 +7498,23 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         const attributionToken = randomBytes(32).toString('base64url')
         const completionToken = randomBytes(32).toString('base64url')
         const expiresAt = Date.now() + aiAttributionDurationMs
+        const selectionSnapshot = aiConversationSelectionSnapshot(body, agent, model, normalizedSkills, normalizedMcpServers)
+        const card = mapId && map ? map.nodes.find((node) => node.id === cardId) : null
+        const taskContext = buildAiTaskContext({
+          card,
+          agentLabel: agentName,
+          modelLabel: modelName,
+          modeLabel: selectionSnapshot.mode?.label ?? null,
+          thoughtLevelLabel: selectionSnapshot.thoughtLevel?.label ?? null,
+          roleLabel: aiConversationRoleLabel(purpose),
+        })
         const prompt = renderAiConversationPrompt(aiDelegationInstructionConfig.template, {
           mapId,
           cardId,
           editorId: user.id,
           attributionToken,
           approvalInstruction: AI_EXECUTION_APPROVAL_INSTRUCTION,
+          taskContext,
           instruction: promptRequest,
         })
         for (const [tokenKey, attribution] of aiAttributions) {
@@ -7478,7 +7534,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           cardId,
           homeMachineId,
           startedBy: user.id,
-          selection: aiConversationSelectionSnapshot(body, agent, model, normalizedSkills, normalizedMcpServers),
+          selection: selectionSnapshot,
           createdAt: Date.now(),
           expiresAt,
         })
@@ -8223,6 +8279,8 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         attributionToken,
         instruction: requestedInstruction,
         workspaceLease,
+        targetCard,
+        selection,
       })
 
       let dispatch
@@ -9154,6 +9212,8 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         attributionToken,
         instruction: crossDocument ? `${DOCUMENT_COORDINATOR_INSTRUCTION}\n\n${instruction}` : instruction,
         workspaceLease,
+        targetCard,
+        selection,
       })
 
       const delegatedConversationTitle = strategy === 'new'

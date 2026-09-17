@@ -55,6 +55,7 @@ export function renderAiDelegationInstruction(template, values = {}) {
     editorId: values.editorId,
     attributionToken: values.attributionToken,
     approvalInstruction: values.approvalInstruction,
+    taskContext: values.taskContext,
     workspaceInstruction: values.workspaceInstruction,
     instructionHeading: values.instructionHeading,
     instruction: values.instruction,
@@ -73,4 +74,28 @@ export function renderAiConversationPrompt(template, values = {}) {
     instructionHeading: '편집자 요청',
     workspaceInstruction: values.workspaceInstruction ?? '',
   })
+}
+
+export function buildTaskContextBlock({
+  cardTitle,
+  cardId,
+  doorayLink = null,
+  agentLabel,
+  modelLabel,
+  modeLabel = null,
+  thoughtLevelLabel = null,
+  roleLabel,
+} = {}) {
+  const lines = []
+  if (doorayLink?.url) {
+    lines.push(`- Dooray: ${doorayLink.title ? `${doorayLink.title}(${doorayLink.url})` : doorayLink.url}`)
+  }
+  lines.push(`- mnp: ${cardTitle}(${cardId})`)
+  const aiDetails = [
+    `모델: ${agentLabel}(${modelLabel})`,
+    ...(modeLabel ? [`모드: ${modeLabel}`] : []),
+    ...(thoughtLevelLabel ? [`추론깊이: ${thoughtLevelLabel}`] : []),
+  ].join(', ')
+  lines.push(`- AI: ${aiDetails}, 역할: ${roleLabel}`)
+  return lines.join('\n')
 }
