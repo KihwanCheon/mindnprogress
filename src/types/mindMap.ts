@@ -86,10 +86,12 @@ export type AiConversationRuntime = {
   activeConversationIds?: string[]
 }
 
-export type AiDelegationAttention = {
-  kind: 'recovery' | 'report'
+export type AiDelegationCardStatus = {
+  kind: 'active' | 'recovery' | 'report'
   count: number
-  label: string
+  activeCount: number
+  recoveryCount: number
+  reportCount: number
   title: string
 }
 
@@ -167,7 +169,7 @@ export type MindNodeData = {
   collapsed?: boolean
   hiddenDescendantCount?: number
   aiConversationRuntime?: AiConversationRuntime
-  aiDelegationAttention?: AiDelegationAttention
+  aiDelegationStatus?: AiDelegationCardStatus
   overlapStack?: {
     count: number
     titles: string[]

@@ -45,8 +45,8 @@ import { DoorayMentionsPanel } from './components/DoorayMentionsPanel'
 import { ImagePreviewDialog } from './components/ImagePreviewDialog'
 import { SharedKnowledgeReviewDialog, type SharedKnowledgeReviewApplied } from './components/SharedKnowledgeReviewDialog'
 import { DashboardView, KanbanView, TimelineView } from './components/WorkViews'
-import type { AiConversationLink, AiConversationRuntime, AiDelegationAttention, ChecklistItem, KnowledgePolicy, MindDoorayLinkData, MindDoorayTaskData, MindDoorayWikiData, MindImageData, MindMapEdgeData, MindNodeData, TeamMember, WaitingItem } from './types/mindMap'
-import { aiDelegationAttentionByCard } from './utils/aiDelegationAttention.mjs'
+import type { AiConversationLink, AiConversationRuntime, AiDelegationCardStatus, ChecklistItem, KnowledgePolicy, MindDoorayLinkData, MindDoorayTaskData, MindDoorayWikiData, MindImageData, MindMapEdgeData, MindNodeData, TeamMember, WaitingItem } from './types/mindMap'
+import { aiDelegationStatusByCard } from './utils/aiDelegationStatus.mjs'
 import type { AiDelegationSummary } from './utils/aiDelegationManagement.mjs'
 import { resolveAiConversationTarget, type AiConversationExplicitTarget } from './utils/aiConversationLaunch.mjs'
 import { applyBoxSelection, boxSelectionNodeIds, boxSelectionRect, isBoxSelectionDrag } from './utils/boxSelection.mjs'
@@ -2384,7 +2384,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
   const [liveCursors, setLiveCursors] = useState<Record<string, LiveCursor>>({})
   const [aiConversationRuntimes, setAiConversationRuntimes] = useState<Record<string, AiConversationRuntime>>({})
   const [aiConversationActiveCounts, setAiConversationActiveCounts] = useState<Record<string, number>>({})
-  const [aiDelegationAttentions, setAiDelegationAttentions] = useState<Record<string, AiDelegationAttention>>({})
+  const [aiDelegationStatuses, setAiDelegationStatuses] = useState<Record<string, AiDelegationCardStatus>>({})
   const [aiDelegationRecoveryFocus, setAiDelegationRecoveryFocus] = useState<{ cardId: string; requestId: number } | null>(null)
   const [mergeNotice, setMergeNotice] = useState('')
   const [comments, setComments] = useState<NodeComment[]>([])
@@ -3142,7 +3142,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         commentCount: (node.data.reference ? referenceCommentStats[node.id] : commentStats[node.id])?.total ?? 0,
         unresolvedCommentCount: (node.data.reference ? referenceCommentStats[node.id] : commentStats[node.id])?.unresolved ?? 0,
         aiConversationRuntime: aiConversationRuntimes[node.id],
-        aiDelegationAttention: node.data.reference ? undefined : aiDelegationAttentions[node.id],
+        aiDelegationStatus: node.data.reference ? undefined : aiDelegationStatuses[node.id],
         overlapStack: overlapStack ? { count: overlapStack.ids.length, titles: overlapStack.titles } : undefined,
         onCycleOverlap: overlapStack ? () => {
           const nextId = nextOverlappingNodeId(overlapStack.ids, selectedIdRef.current)
@@ -3174,7 +3174,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         overlapWarningIds.has(node.id) ? 'overlap-warning' : '',
       ].filter(Boolean).join(' '),
     }
-  }), [activeMapId, aiConversationRuntimes, aiDelegationAttentions, beginHistoryTransaction, collapsedHiddenNodeIds, collapsedNodeIds, collapsibleNodeIds, commentStats, descendantCounts, dropTargetId, endHistoryTransaction, filterActive, filterMatchedNodeIds, filterVisibleNodeIds, hoveredKnowledgeConnectionIssue, knowledgeConnection, knowledgeConnectionTargetId, mode, nodes, normalizedNodeSearch, openAiDelegationRecovery, openDependencies, openWaitingItems, overlapStackByRepresentativeId, overlapWarningIds, progressRollups, referenceCommentStats, searchContextNodeIds, searchMatchedNodeIds, setNodes, teamMembers, unresolvedReferenceNodeIds])
+  }), [activeMapId, aiConversationRuntimes, aiDelegationStatuses, beginHistoryTransaction, collapsedHiddenNodeIds, collapsedNodeIds, collapsibleNodeIds, commentStats, descendantCounts, dropTargetId, endHistoryTransaction, filterActive, filterMatchedNodeIds, filterVisibleNodeIds, hoveredKnowledgeConnectionIssue, knowledgeConnection, knowledgeConnectionTargetId, mode, nodes, normalizedNodeSearch, openAiDelegationRecovery, openDependencies, openWaitingItems, overlapStackByRepresentativeId, overlapWarningIds, progressRollups, referenceCommentStats, searchContextNodeIds, searchMatchedNodeIds, setNodes, teamMembers, unresolvedReferenceNodeIds])
   const visibleFlowNodeIds = useMemo(() => new Set(flowNodes.filter((node) => !node.hidden).map((node) => node.id)), [flowNodes])
   visibleFlowNodeIdsRef.current = visibleFlowNodeIds
   const visibleFlowNodeIdsKey = useMemo(() => [...visibleFlowNodeIds].sort().join('\u0000'), [visibleFlowNodeIds])
@@ -3515,7 +3515,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
   }, [activeMapId, rebaselineHistory, setNodes])
 
   useEffect(() => {
-    setAiDelegationAttentions({})
+    setAiDelegationStatuses({})
     if (!activeMapId || mode !== 'editor' || documentArchived) return
 
     const controller = new AbortController()
@@ -3529,7 +3529,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
           { signal: controller.signal },
         )
         if (!controller.signal.aborted) {
-          setAiDelegationAttentions(aiDelegationAttentionByCard(result.delegations, activeMapId))
+          setAiDelegationStatuses(aiDelegationStatusByCard(result.delegations, activeMapId))
         }
       } catch {
         // 일시적인 조회 실패로 이미 확인한 복구 표시를 지우지 않는다.

@@ -1,4 +1,4 @@
-import type { AiConversationRuntime } from '../types/mindMap'
+import type { AiConversationRuntime, AiDelegationCardStatus } from '../types/mindMap'
 import './AiConversationRuntimeBadge.css'
 
 function AiConversationTypingDots() {
@@ -39,5 +39,20 @@ export function AiConversationRuntimeBadge({ runtime }: { runtime?: AiConversati
       )}
       <span>{label}</span>
     </span>
+  )
+}
+
+export function AiDelegationStatusBadge({ status }: { status?: AiDelegationCardStatus }) {
+  if (!status) return null
+  const recoveryRequired = status.recoveryCount > 0 || status.reportCount > 0
+  const label = recoveryRequired ? 'AI 위임 복구 필요' : 'AI 위임 중'
+  return (
+    <strong
+      className={`ai-delegation-status-badge ${recoveryRequired ? 'recovery-required' : 'active'}`}
+      title={status.title}
+      aria-label={`${label}. ${status.title}`}
+    >
+      {label}
+    </strong>
   )
 }

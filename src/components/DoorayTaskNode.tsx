@@ -3,7 +3,6 @@ import { Handle, NodeResizer, Position } from '@xyflow/react'
 import type { MindNodeData } from '../types/mindMap'
 import { normalizedDoorayKnowledgeUrl } from '../utils/externalLinks'
 import { beginResizeGesture, finishResizeGesture, updateResizeGesture, type ResizeGesture } from '../utils/resizeGesture'
-import { AiDelegationAttentionBadge } from './AiDelegationAttentionBadge'
 import { NodeOverlapBadge } from './NodeOverlapBadge'
 import './DoorayTaskNode.css'
 
@@ -73,7 +72,7 @@ export function DoorayTaskNode({ data, selected, isConnectable }: {
           resizeGesture.current = null
         }}
       />
-      <article className={`mind-node dooray-task-node ${closed ? 'closed' : ''} ${data.aiDelegationAttention ? `has-ai-delegation-attention attention-${data.aiDelegationAttention.kind}` : ''} ${selected ? 'selected' : ''}`} title={tooltip}>
+      <article className={`mind-node dooray-task-node ${closed ? 'closed' : ''} ${selected ? 'selected' : ''}`} title={tooltip}>
         {waitingItems.length > 0 && (
           <button
             type="button"
@@ -99,7 +98,6 @@ export function DoorayTaskNode({ data, selected, isConnectable }: {
             {data.collapsed && <b>{data.hiddenDescendantCount}</b>}
           </button>
         )}
-        <AiDelegationAttentionBadge attention={data.aiDelegationAttention} onOpen={data.onOpenAiDelegationRecovery} />
         <Handle type="target" position={Position.Left} isConnectable={isConnectable} />
         {([
           ['top', Position.Top],

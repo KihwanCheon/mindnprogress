@@ -4611,8 +4611,8 @@ async function pollAiDelegations() {
           if (['waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity'].includes(current?.state)) await ensureAiDelegationNotification(current, {
             kind: 'limit', dedupeKey: `ai-delegation-limit:${delegation.id}:${delegation.childOperationId ?? delegation.id}`,
             message: current.state === 'waiting-model-capacity'
-              ? '선택한 AI 모델의 실행 용량 부족으로 작업이 중단되었습니다. 작업과 변경은 보존되어 있으며, 용량 확보 후 카드 세부 정보의 AI 작업 복구에서 이어갈 수 있습니다.'
-              : 'AI 한도로 작업이 중단되었습니다. 작업과 변경은 보존되어 있으며, 한도 해제 후 카드 세부 정보의 AI 작업 복구에서 이어갈 수 있습니다.',
+              ? '선택한 AI 모델의 실행 용량 부족으로 작업이 중단되었습니다. 작업과 변경은 보존되어 있으며, 용량 확보 후 카드 세부 정보의 AI 위임 영역에서 이어갈 수 있습니다.'
+              : 'AI 한도로 작업이 중단되었습니다. 작업과 변경은 보존되어 있으며, 한도 해제 후 카드 세부 정보의 AI 위임 영역에서 이어갈 수 있습니다.',
           })
         } catch (error) { console.warn('[AI delegation limit notification]', error) }
         scheduleAiDelegationWaitPoll(delegation)

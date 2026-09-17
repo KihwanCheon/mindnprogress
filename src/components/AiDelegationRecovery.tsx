@@ -56,8 +56,7 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
   const refresh = useCallback(async (signal?: AbortSignal) => {
     const data = await request<{ delegations: Delegation[] }>(listUrl, { signal })
     const relevant = data.delegations.filter((item) =>
-      item.mapId === mapId && item.targetCardId === cardId
-      || (item.parentMapId ?? item.mapId) === mapId && item.parentCardId === cardId)
+      (item.parentMapId ?? item.mapId) === mapId && item.parentCardId === cardId)
     if (mounted.current) {
       setItems(relevant)
       setLoaded(true)
@@ -162,6 +161,20 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
     !['completed', 'failed', 'superseded', 'closed'].includes(item.state)
     || item.recovery?.recoveryAvailable
     || item.recovery?.reportRetryAvailable)
+  const recoveryCount = pending.filter((item) => item.recovery?.recoveryAvailable || item.recovery?.reportRetryAvailable).length
+  const activeCount = pending.length - recoveryCount
+  const sectionTitle = recoveryCount > 0
+    ? activeCount > 0 ? 'AI 위임 현황 및 복구' : 'AI 작업 복구'
+    : 'AI 위임 진행 현황'
+  const sectionCount = [
+    activeCount > 0 ? `진행 중 ${activeCount}건` : '',
+    recoveryCount > 0 ? `복구 필요 ${recoveryCount}건` : '',
+  ].filter(Boolean).join(' · ') || '상태 확인'
+  const sectionSummary = recoveryCount > 0
+    ? activeCount > 0
+      ? '진행 중인 AI 위임을 확인하고, 중단된 작업 재개나 결과 전달 등 필요한 후속 조치를 할 수 있습니다.'
+      : '중단된 작업을 재개하거나 저장된 결과를 다시 전달하고, 복구할 수 없는 기록을 완료로 표시하지 않고 정리할 수 있습니다.'
+    : '진행 중인 AI 위임의 현재 상태를 확인할 수 있습니다.'
   useEffect(() => {
     if (!focusRequestId || (!loaded && !error && !notice)) return
     const frame = window.requestAnimationFrame(() => {
@@ -172,12 +185,12 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
     return () => window.cancelAnimationFrame(frame)
   }, [error, focusRequestId, loaded, notice, onFocusHandled, pending.length])
   if (!pending.length && !error && !notice) return null
-  return <section ref={sectionRef} className="ai-delegation-recovery" aria-label="AI 작업 복구" tabIndex={-1}>
+  return <section ref={sectionRef} className="ai-delegation-recovery" aria-label={sectionTitle} tabIndex={-1}>
     <div className="ai-delegation-recovery-heading">
-      <strong>AI 작업 복구</strong>
-      <small>{pending.length ? `미종료 위임 ${pending.length}건` : '상태 확인'}</small>
+      <strong>{sectionTitle}</strong>
+      <small>{sectionCount}</small>
     </div>
-    <p className="ai-delegation-recovery-summary">중단 작업을 이어가거나, 복구할 수 없는 기록을 완료로 표시하지 않고 정리할 수 있습니다.</p>
+    <p className="ai-delegation-recovery-summary">{sectionSummary}</p>
     {pending.map((item) => {
       const candidates = completedReplacementDelegations(item, items)
       const selectedReplacementId = replacementIds[item.id] ?? candidates[0]?.id ?? ''

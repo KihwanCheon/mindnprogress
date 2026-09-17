@@ -26,16 +26,17 @@ window.fetch = async (url, init = {}) => {
   return new Response(JSON.stringify({map:{version:url.includes('parent-map') ? 7 : 9}}));
 };
 let sequence = 0;
-window.renderRecovery = (props={}) => root.render(React.createElement(AiDelegationRecovery,{key:++sequence,mapId:'child-map',cardId:'child',...props}));
+window.renderChildRecovery = (props={}) => root.render(React.createElement(AiDelegationRecovery,{key:++sequence,mapId:'child-map',cardId:'child',...props}));
+window.renderRecovery = (props={}) => root.render(React.createElement(AiDelegationRecovery,{key:++sequence,mapId:'parent-map',cardId:'parent',...props}));
 window.failedRecovery = () => {item.state='failed';item.recovery={recoveryAvailable:true};item.childError='모델 용량 초과';window.renderRecovery()};
 window.reportOnly = () => {item.state='parent-wake-failed';item.childError=null;item.parentError='보고 사용량 초과';item.workCompleted=true;item.reportPending=true;item.recovery={recoveryAvailable:false,reportRetryAvailable:true};item.closure={closeAvailable:true,reason:'completed-child-report-abandonment'};window.renderRecovery()};
 window.waitingReport = () => {item.state='waiting-parent';item.childError=null;item.parentError=null;item.workCompleted=true;item.reportPending=true;item.reportStatus='waiting';item.reportWaitReason='parent-busy';item.recovery=null;item.closure=null;window.renderRecovery()};
 window.deliveringReport = () => {item.state='waking-parent';item.reportStatus='delivering';window.renderRecovery()};
-window.receivedReport = () => {item.state='completed';item.reportPending=false;item.reportStatus='received';window.renderRecovery()};
+window.receivedReport = () => {item.state='completed';item.reportPending=false;item.reportStatus='received';item.recovery=null;item.closure=null;window.renderRecovery()};
 window.fixtureReady = true;
 `
 
-test('하위 카드 복구 화면은 AI 없이 재개·보고 재시도를 구분하고 다른 카드 요청을 보내지 않는다', { skip: process.env.MNP_BROWSER_TEST !== '1', timeout: 60000 }, async () => {
+test('상위 카드 복구 화면은 하위 카드를 제외하고 AI 없이 재개·보고 재시도를 구분한다', { skip: process.env.MNP_BROWSER_TEST !== '1', timeout: 60000 }, async () => {
   const { createServer } = await import('vite')
   const react = (await import('@vitejs/plugin-react')).default
   const directory = await mkdtemp(path.join(tmpdir(), 'mnp-recovery-browser-'))
@@ -89,6 +90,9 @@ test('하위 카드 복구 화면은 AI 없이 재개·보고 재시도를 구�
     const ready = () => waitFor(() => evaluate('Boolean(document.querySelector("button")) && !document.querySelector("button").disabled'))
     await send('Page.navigate', { url: `http://127.0.0.1:${server.httpServer.address().port}/recovery-check` })
     await waitFor(() => evaluate('window.fixtureReady'))
+    await evaluate('window.renderChildRecovery()')
+    await waitFor(() => evaluate('window.audit.calls.some(c=>c.url==="/api/maps/child-map/ai-delegations")'))
+    assert.equal(await evaluate('Boolean(document.querySelector(".ai-delegation-recovery"))'), false)
     await evaluate('window.renderRecovery({focusRequestId:7,onFocusHandled:id=>window.audit.focus=id})'); await ready()
     await waitFor(() => evaluate('window.audit.focus===7'))
     assert.equal(await evaluate('document.activeElement?.classList.contains("ai-delegation-recovery")'), true)
