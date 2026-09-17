@@ -312,6 +312,7 @@ export function createAiDelegationRequestSignature({
   decisionReason,
   sourceRevision,
   newConversation,
+  role,
 }) {
   const normalizedMachineId = String(machineId ?? '').trim()
   const requested = newConversation && typeof newConversation === 'object'
@@ -339,6 +340,7 @@ export function createAiDelegationRequestSignature({
     decisionReason,
     sourceRevision,
     newConversation: strategy === 'new' ? requested : null,
+    role: role || null,
   })).digest('hex')
 }
 

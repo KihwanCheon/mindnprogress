@@ -1773,6 +1773,7 @@ async function main() {
     conversationId: z.string().min(1).max(120).optional().describe('resume일 때 이어갈 대상 카드의 conversationId'),
     machineId: z.string().regex(/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/).optional().describe('new일 때 풀 lease 없는 일반 작업을 실행할 머신 ID. 생략하면 편집자의 기본 머신을 사용합니다. resume은 기존 대화의 homeMachineId로 고정되며, 등록된 Unity 작업공간 pool 위임은 현재 메인 머신만 지원합니다.'),
     instruction: z.string().min(1).max(100000).describe('같은 문서의 하위 AI가 제안에 그치지 않고 실제로 수행할 작업 범위·허용 작업·제외 범위·완료 조건. 분석·제안만 맡기는 경우 구현·추가 위임 금지를 명시합니다.'),
+    role: z.string().min(1).max(200).optional().describe('하위 AI가 맡을 역할·페르소나(예: 시니어 엔지니어, 리뷰어, QA, 또는 ~/.claude/agents에 정의된 서브에이전트 이름). 생략하면 일반적인 하위 위임 실행으로 표기됩니다.'),
     decisionReason: z.string().min(1).max(1000).describe('이 기존 대화를 선택했거나 새 대화가 필요하다고 판단한 근거'),
     sourceRevision: z.number().int().positive().describe('get_context 또는 get_document에서 확인한 현재 문서 version'),
     idempotencyKey: z.string().regex(AI_DELEGATION_ID_PATTERN).describe('같은 위임의 중복 실행을 막는 안정적인 키. 영문·숫자로 시작하고 영문·숫자·밑줄·하이픈·콜론을 사용해 sourceRevision과 targetCardId를 포함하는 형식을 권장'),

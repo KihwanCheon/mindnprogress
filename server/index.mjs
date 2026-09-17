@@ -2261,7 +2261,7 @@ function buildAiTaskContext({ card, agentLabel, modelLabel, modeLabel, thoughtLe
   })
 }
 
-function buildDelegatedInstruction({ mapId, cardId, editorId, attributionToken, instruction, workspaceLease, targetCard, selection }) {
+function buildDelegatedInstruction({ mapId, cardId, editorId, attributionToken, instruction, workspaceLease, targetCard, selection, role }) {
   const workspaceInstruction = buildWorkspaceInstruction(workspaceLease)
   const taskContext = buildAiTaskContext({
     card: targetCard,
@@ -2269,7 +2269,7 @@ function buildDelegatedInstruction({ mapId, cardId, editorId, attributionToken, 
     modelLabel: selection?.model?.label ?? '',
     modeLabel: selection?.mode?.label ?? null,
     thoughtLevelLabel: selection?.thoughtLevel?.label ?? null,
-    roleLabel: '하위 카드 위임 실행',
+    roleLabel: role || '하위 카드 위임 실행',
   })
   return renderAiDelegationInstruction(aiDelegationInstructionConfig.template, {
     requestTitle: 'MindNProgress 하위 카드 위임 작업 요청',
@@ -2846,6 +2846,7 @@ async function dispatchPreparedAiDelegation({
   expectsWorkspacePool = false,
   parentHomeMachineId = conversationHomeMachineId(parentAttribution?.conversationId),
   targetHomeMachineId = machineRegistry.mainMachineId,
+  role = queuedDelegation?.role ?? null,
 }) {
   if (!await aionCoreSupportsExplicitCompletionAfterInterruption(targetHomeMachineId)) {
     throw aiDelegationDispatchError(
@@ -2890,6 +2891,7 @@ async function dispatchPreparedAiDelegation({
     workspaceLease,
     targetCard,
     selection,
+    role,
   })
   const delegatedConversationTitle = strategy === 'new'
     ? formatAiConversationTitle(map.title, targetCard.data?.label ?? targetCard.id)
@@ -3113,6 +3115,7 @@ async function dispatchPreparedAiDelegation({
     linkError,
     startedBy: attribution.startedBy,
     workspaceLease,
+    role,
     ...(reservedDelegation ? { resumesDelegationId: reservedDelegation.id } : {}),
     createdAt: queuedDelegation?.createdAt ?? now,
     updatedAt: now,
@@ -8281,6 +8284,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         workspaceLease,
         targetCard,
         selection,
+        role: delegation.role,
       })
 
       let dispatch
@@ -8711,6 +8715,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       const instruction = String(body.instruction ?? '').trim()
       const decisionReason = String(body.decisionReason ?? '').trim()
       const sourceRevision = Number(body.sourceRevision)
+      const role = typeof body.role === 'string' ? body.role.trim().slice(0, 200) : ''
       if (!isValidAiDelegationId(id)
         || !targetCardId || targetCardId.length > 120
         || !['resume', 'new'].includes(strategy)
@@ -8768,6 +8773,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         decisionReason,
         sourceRevision,
         newConversation: body.newConversation,
+        role,
       })
       const existingDelegation = aiDelegations.get(id)
       if (existingDelegation) {
@@ -8880,6 +8886,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
             workspaceError: workspaceRecoveryError,
             linkError: null,
             startedBy: parentAttribution.startedBy ?? user.id,
+            role,
             createdAt: now,
             updatedAt: now,
             recoveredAt: now,
@@ -9076,6 +9083,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           pendingInstruction: instruction,
           pendingSelection: selection,
           pendingWorkspaceHint: workspacePoolHint,
+          role,
           ...(resumedDelegation ? { resumesDelegationId: resumedDelegation.id } : {}),
           workspaceWaitStartedAt: now,
           workspaceWaitObservedAt: now,
@@ -9164,6 +9172,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
               pendingInstruction: instruction,
               pendingSelection: selection,
               pendingWorkspaceHint: workspacePoolHint,
+              role,
               ...(resumedDelegation ? { resumesDelegationId: resumedDelegation.id } : {}),
               workspaceWaitStartedAt: now,
               workspaceWaitReasonCode: 'CAPACITY_EXHAUSTED',
@@ -9214,6 +9223,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         workspaceLease,
         targetCard,
         selection,
+        role,
       })
 
       const delegatedConversationTitle = strategy === 'new'
@@ -9414,6 +9424,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         linkError,
         startedBy: attribution.startedBy,
         workspaceLease,
+        role,
         ...(resumedDelegation ? { resumesDelegationId: resumedDelegation.id } : {}),
         createdAt: now,
         updatedAt: now,
