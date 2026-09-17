@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { completedReplacementDelegations } from '../src/utils/aiDelegationManagement.mjs'
+import { completedReplacementDelegations, delegationHierarchyPathNodeIds, delegationPreviewEdgeState } from '../src/utils/aiDelegationManagement.mjs'
 
 const delegation = (id, state, createdAt, overrides = {}) => ({
   id, state, createdAt, updatedAt: createdAt,
@@ -24,4 +24,34 @@ test('그룹 위임과 변경이 보존된 한도 중단에는 일반 문서 종
   })
   assert.deepEqual(completedReplacementDelegations(grouped, [{ ...completed, groupId: 'group-a' }]), [])
   assert.deepEqual(completedReplacementDelegations(quarantined, [completed]), [])
+})
+
+test('위임 미리보기는 상위 카드에서 대상 카드까지 연결된 모든 계층 경로를 유지한다', () => {
+  const edges = [
+    { source: 'parent', target: 'path-a' },
+    { source: 'path-a', target: 'target' },
+    { source: 'parent', target: 'path-b' },
+    { source: 'path-b', target: 'target' },
+    { source: 'parent', target: 'other-branch' },
+    { source: 'other-root', target: 'target' },
+  ]
+  assert.deepEqual(
+    [...delegationHierarchyPathNodeIds('parent', 'target', edges)].sort(),
+    ['parent', 'path-a', 'path-b', 'target'],
+  )
+})
+
+test('연결 경로가 없으면 위임 상위 카드와 대상 카드만 유지한다', () => {
+  assert.deepEqual(
+    [...delegationHierarchyPathNodeIds('parent', 'target', [{ source: 'parent', target: 'other' }])].sort(),
+    ['parent', 'target'],
+  )
+})
+
+test('위임 미리보기는 경로의 계층선만 유지하고 다른 계층선과 지식선은 흐리게 한다', () => {
+  const pathNodeIds = new Set(['parent', 'middle', 'target'])
+  assert.equal(delegationPreviewEdgeState({ source: 'parent', target: 'middle' }, pathNodeIds), 'edge-linked')
+  assert.equal(delegationPreviewEdgeState({ source: 'middle', target: 'target' }, pathNodeIds), 'edge-linked')
+  assert.equal(delegationPreviewEdgeState({ source: 'parent', target: 'other' }, pathNodeIds), 'edge-dimmed')
+  assert.equal(delegationPreviewEdgeState({ source: 'parent', target: 'middle', data: { relation: 'knowledge' } }, pathNodeIds), 'edge-dimmed')
 })

@@ -11,7 +11,7 @@ import { createRoot } from 'react-dom/client';
 import { AiDelegationRecovery } from '/src/components/AiDelegationRecovery.tsx';
 const root = createRoot(document.getElementById('root'));
 const originalFetch = window.fetch.bind(window);
-window.audit = { calls: [], confirm: true, fail: false, focus: null };
+window.audit = { calls: [], confirm: true, fail: false, focus: null, selection: null, preview: null };
 window.confirm = () => window.audit.confirm;
 const item = { id:'limited',mapId:'child-map',parentMapId:'parent-map',parentCardId:'parent',targetCardId:'child',targetCardLabel:'하위 작업',state:'waiting-usage-limit',createdAt:'2026-09-11',updatedAt:'current',recovery:{recoveryAvailable:true},childError:'사용량 초과' };
 const replacement = {...item,id:'replacement',state:'completed',createdAt:'2026-09-12',updatedAt:'replacement-current',workCompleted:true,recovery:null,childError:null};
@@ -26,8 +26,10 @@ window.fetch = async (url, init = {}) => {
   return new Response(JSON.stringify({map:{version:url.includes('parent-map') ? 7 : 9}}));
 };
 let sequence = 0;
-window.renderChildRecovery = (props={}) => root.render(React.createElement(AiDelegationRecovery,{key:++sequence,mapId:'child-map',cardId:'child',...props}));
-window.renderRecovery = (props={}) => root.render(React.createElement(AiDelegationRecovery,{key:++sequence,mapId:'parent-map',cardId:'parent',...props}));
+const selectCard = (mapId,cardId) => { window.audit.selection = {mapId,cardId} };
+const previewCards = (cards) => { window.audit.preview = cards };
+window.renderChildRecovery = (props={}) => root.render(React.createElement(AiDelegationRecovery,{key:++sequence,mapId:'child-map',cardId:'child',onSelectCard:selectCard,onPreviewCards:previewCards,...props}));
+window.renderRecovery = (props={}) => root.render(React.createElement(AiDelegationRecovery,{key:++sequence,mapId:'parent-map',cardId:'parent',onSelectCard:selectCard,onPreviewCards:previewCards,...props}));
 window.failedRecovery = () => {item.state='failed';item.recovery={recoveryAvailable:true};item.childError='모델 용량 초과';window.renderRecovery()};
 window.reportOnly = () => {item.state='parent-wake-failed';item.childError=null;item.parentError='보고 사용량 초과';item.workCompleted=true;item.reportPending=true;item.recovery={recoveryAvailable:false,reportRetryAvailable:true};item.closure={closeAvailable:true,reason:'completed-child-report-abandonment'};window.renderRecovery()};
 window.waitingReport = () => {item.state='waiting-parent';item.childError=null;item.parentError=null;item.workCompleted=true;item.reportPending=true;item.reportStatus='waiting';item.reportWaitReason='parent-busy';item.recovery=null;item.closure=null;window.renderRecovery()};
@@ -100,7 +102,23 @@ test('상위 카드 복구 화면은 하위 카드를 제외하고 AI 없이 재
     assert.equal(await evaluate('window.audit.calls.filter(c=>c.method==="POST").length'), 0)
     assert.match(await evaluate('Array.from(document.querySelectorAll("button")).find(b=>b.textContent==="상태 다시 확인").title'), /새 AI 실행은 요청하지 않습니다/)
     assert.match(await evaluate('Array.from(document.querySelectorAll("button")).find(b=>b.textContent==="기존 작업 재개").title'), /해당 AI가 다시 실행됩니다/)
+    assert.equal(await evaluate(`(() => {
+      const heading = document.querySelector('.ai-delegation-recovery-item-heading b');
+      const bounds = heading.getBoundingClientRect();
+      return document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2)?.classList.contains('ai-delegation-recovery-item-select');
+    })()`), true)
+    await evaluate(`document.querySelector('.ai-delegation-recovery-item').dispatchEvent(new MouseEvent('mouseover',{bubbles:true}))`)
+    assert.deepEqual(await evaluate('window.audit.preview'), {
+      parent: { mapId: 'parent-map', cardId: 'parent' },
+      target: { mapId: 'child-map', cardId: 'child' },
+    })
+    await evaluate(`document.querySelector('.ai-delegation-recovery-item').dispatchEvent(new MouseEvent('mouseout',{bubbles:true,relatedTarget:document.body}))`)
+    assert.equal(await evaluate('window.audit.preview'), null)
+    await evaluate('document.querySelector(".ai-delegation-recovery-item-select").click()')
+    assert.deepEqual(await evaluate('window.audit.selection'), { mapId: 'child-map', cardId: 'child' })
+    await evaluate('window.audit.selection=null')
     await click('상태 다시 확인')
+    assert.equal(await evaluate('window.audit.selection'), null)
     await waitFor(() => evaluate('Boolean(document.querySelector("[role=status]"))')); await ready()
     let posts = await evaluate('window.audit.calls.filter(c=>c.method==="POST")')
     assert.equal(posts[0].url, '/api/maps/parent-map/ai-delegations/limited/refresh')

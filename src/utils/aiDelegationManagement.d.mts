@@ -41,3 +41,12 @@ export type AiDelegationSummary = {
 }
 
 export function completedReplacementDelegations(delegation: AiDelegationSummary, delegations: AiDelegationSummary[]): AiDelegationSummary[]
+export function delegationHierarchyPathNodeIds(
+  parentCardId: string,
+  targetCardId: string,
+  hierarchyEdges: Array<{ source: string; target: string }>,
+): Set<string>
+export function delegationPreviewEdgeState(
+  edge: { source: string; target: string; data?: { relation?: string } },
+  pathNodeIds: Set<string> | null,
+): '' | 'edge-linked' | 'edge-dimmed'

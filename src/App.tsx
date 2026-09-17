@@ -37,7 +37,7 @@ import { MentionText } from './components/MentionText'
 import { AdminEditorPanel } from './components/AdminEditorPanel'
 import { AiConversationDialog } from './components/AiConversationDialog'
 import { WorkspaceSettingsDialog } from './components/WorkspaceSettingsDialog'
-import { AiDelegationRecovery } from './components/AiDelegationRecovery'
+import { AiDelegationRecovery, type AiDelegationPreview } from './components/AiDelegationRecovery'
 import { AiConversationPickerDialog } from './components/AiConversationPickerDialog'
 import { AiConversationActivityIndicator } from './components/AiConversationRuntimeBadge'
 import { DailyBackupPreviewDialog, type DailyBackupPreview } from './components/DailyBackupPreviewDialog'
@@ -47,7 +47,7 @@ import { SharedKnowledgeReviewDialog, type SharedKnowledgeReviewApplied } from '
 import { DashboardView, KanbanView, TimelineView } from './components/WorkViews'
 import type { AiConversationLink, AiConversationRuntime, AiDelegationCardStatus, ChecklistItem, KnowledgePolicy, MindDoorayLinkData, MindDoorayTaskData, MindDoorayWikiData, MindImageData, MindMapEdgeData, MindNodeData, TeamMember, WaitingItem } from './types/mindMap'
 import { aiDelegationStatusByCard } from './utils/aiDelegationStatus.mjs'
-import type { AiDelegationSummary } from './utils/aiDelegationManagement.mjs'
+import { delegationHierarchyPathNodeIds, delegationPreviewEdgeState, type AiDelegationSummary } from './utils/aiDelegationManagement.mjs'
 import { resolveAiConversationTarget, type AiConversationExplicitTarget } from './utils/aiConversationLaunch.mjs'
 import { applyBoxSelection, boxSelectionNodeIds, boxSelectionRect, isBoxSelectionDrag } from './utils/boxSelection.mjs'
 import { copyTextToClipboard } from './utils/clipboardText.mjs'
@@ -2386,6 +2386,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
   const [aiConversationActiveCounts, setAiConversationActiveCounts] = useState<Record<string, number>>({})
   const [aiDelegationStatuses, setAiDelegationStatuses] = useState<Record<string, AiDelegationCardStatus>>({})
   const [aiDelegationRecoveryFocus, setAiDelegationRecoveryFocus] = useState<{ cardId: string; requestId: number } | null>(null)
+  const [aiDelegationPreview, setAiDelegationPreview] = useState<AiDelegationPreview | null>(null)
   const [mergeNotice, setMergeNotice] = useState('')
   const [comments, setComments] = useState<NodeComment[]>([])
   const [commentStats, setCommentStats] = useState<NodeCommentStats>({})
@@ -2917,6 +2918,35 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     hierarchyEdges.forEach((edge) => result.set(edge.target, [...(result.get(edge.target) ?? []), edge.source]))
     return result
   }, [hierarchyEdges])
+  const selectAiDelegationCard = useCallback((mapId: string, cardId: string) => {
+    setSelectedGroupId(null)
+    setViewMode('mindmap')
+    setTrashOpen(false)
+    if (mapId === activeMapId) {
+      const ancestorIds = new Set<string>()
+      const remaining = [...(parentsById.get(cardId) ?? [])]
+      while (remaining.length > 0) {
+        const ancestorId = remaining.pop() as string
+        if (ancestorIds.has(ancestorId)) continue
+        ancestorIds.add(ancestorId)
+        remaining.push(...(parentsById.get(ancestorId) ?? []))
+      }
+      setNodeSearchTerm('')
+      setNodeFilter('all')
+      setAssigneeFilter('all')
+      setCollapsedNodeIds((current) => {
+        const next = new Set(current)
+        ancestorIds.forEach((ancestorId) => next.delete(ancestorId))
+        return next.size === current.size ? current : next
+      })
+      pendingSelection.current = null
+      setNodes((current) => synchronizeNodeSelection(current, cardId))
+      setSelectedId(cardId)
+      return
+    }
+    pendingSelection.current = cardId
+    setActiveMapId(mapId)
+  }, [activeMapId, parentsById, setNodes])
   const collapsibleNodeIds = useMemo(() => new Set(nodes.filter((node) => (childrenById.get(node.id)?.length ?? 0) > 0).map((node) => node.id)), [childrenById, nodes])
   const descendantCounts = useMemo(() => {
     const result = new Map<string, number>()
@@ -2997,6 +3027,14 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     }
     return visible
   }, [parentsById, searchMatchedNodeIds])
+  const aiDelegationPreviewNodeIds = useMemo(() => {
+    if (!aiDelegationPreview) return null
+    const { parent, target } = aiDelegationPreview
+    const nodeIds = parent.mapId === activeMapId && target.mapId === activeMapId
+      ? delegationHierarchyPathNodeIds(parent.cardId, target.cardId, hierarchyEdges)
+      : new Set([parent, target].filter((card) => card.mapId === activeMapId).map((card) => card.cardId))
+    return nodeIds.size > 0 ? nodeIds : null
+  }, [activeMapId, aiDelegationPreview, hierarchyEdges])
   const nodeSearchMatches = useMemo(() => nodes.filter((node) => searchMatchedNodeIds.has(node.id)), [nodes, searchMatchedNodeIds])
   const overlapPresentation = useMemo(() => {
     if (!boxSelectionArmed) return { warningIds: [], stacks: [] }
@@ -3168,13 +3206,15 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         node.id === dropTargetId ? 'drop-target' : '',
         node.id === knowledgeConnection?.sourceId ? `knowledge-link-source ${knowledgeConnection.policy === 'reuse-first' ? 'primary' : 'secondary'}` : '',
         node.id === knowledgeConnectionTargetId ? `knowledge-link-target ${hoveredKnowledgeConnectionIssue ? 'invalid' : 'valid'}` : '',
-        normalizedNodeSearch && searchMatchedNodeIds.has(node.id) ? 'search-match' : '',
-        normalizedNodeSearch && !searchMatchedNodeIds.has(node.id) && !hidden ? 'search-dim' : '',
+        !aiDelegationPreviewNodeIds && normalizedNodeSearch && searchMatchedNodeIds.has(node.id) ? 'search-match' : '',
+        (aiDelegationPreviewNodeIds
+          ? !aiDelegationPreviewNodeIds.has(node.id)
+          : normalizedNodeSearch && !searchMatchedNodeIds.has(node.id)) && !hidden ? 'search-dim' : '',
         filterActive && filterVisibleNodeIds.has(node.id) && !filterMatchedNodeIds.has(node.id) ? 'filter-context' : '',
         overlapWarningIds.has(node.id) ? 'overlap-warning' : '',
       ].filter(Boolean).join(' '),
     }
-  }), [activeMapId, aiConversationRuntimes, aiDelegationStatuses, beginHistoryTransaction, collapsedHiddenNodeIds, collapsedNodeIds, collapsibleNodeIds, commentStats, descendantCounts, dropTargetId, endHistoryTransaction, filterActive, filterMatchedNodeIds, filterVisibleNodeIds, hoveredKnowledgeConnectionIssue, knowledgeConnection, knowledgeConnectionTargetId, mode, nodes, normalizedNodeSearch, openAiDelegationRecovery, openDependencies, openWaitingItems, overlapStackByRepresentativeId, overlapWarningIds, progressRollups, referenceCommentStats, searchContextNodeIds, searchMatchedNodeIds, setNodes, teamMembers, unresolvedReferenceNodeIds])
+  }), [activeMapId, aiConversationRuntimes, aiDelegationPreviewNodeIds, aiDelegationStatuses, beginHistoryTransaction, collapsedHiddenNodeIds, collapsedNodeIds, collapsibleNodeIds, commentStats, descendantCounts, dropTargetId, endHistoryTransaction, filterActive, filterMatchedNodeIds, filterVisibleNodeIds, hoveredKnowledgeConnectionIssue, knowledgeConnection, knowledgeConnectionTargetId, mode, nodes, normalizedNodeSearch, openAiDelegationRecovery, openDependencies, openWaitingItems, overlapStackByRepresentativeId, overlapWarningIds, progressRollups, referenceCommentStats, searchContextNodeIds, searchMatchedNodeIds, setNodes, teamMembers, unresolvedReferenceNodeIds])
   const visibleFlowNodeIds = useMemo(() => new Set(flowNodes.filter((node) => !node.hidden).map((node) => node.id)), [flowNodes])
   visibleFlowNodeIdsRef.current = visibleFlowNodeIds
   const visibleFlowNodeIdsKey = useMemo(() => [...visibleFlowNodeIds].sort().join('\u0000'), [visibleFlowNodeIds])
@@ -3187,11 +3227,13 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     return edges.map((edge) => {
       const hidden = !visibleFlowNodeIds.has(edge.source) || !visibleFlowNodeIds.has(edge.target)
       const sourceNode = nodesById.get(edge.source)
-      // 선택한 카드에 닿는 연결선만 강조하고 나머지는 흐리게 해 밀집 구간에서 구분한다.
-      // 최상위 카드는 문서 전체를 대표하므로 강조하지 않고 평소 표시를 유지한다.
-      const selectionState = highlightSelectedId
-        ? (edge.source === highlightSelectedId || edge.target === highlightSelectedId ? 'edge-linked' : 'edge-dimmed')
-        : ''
+      // 위임 항목을 가리키는 동안에는 상위 카드에서 대상 카드까지 실제로 이어진 계층선만 유지한다.
+      // 평소에는 선택한 카드에 닿는 연결선만 강조하고, 최상위 카드 선택은 문서 전체를 대표하므로 강조하지 않는다.
+      const selectionState = aiDelegationPreviewNodeIds
+        ? delegationPreviewEdgeState(edge, aiDelegationPreviewNodeIds)
+        : highlightSelectedId
+          ? (edge.source === highlightSelectedId || edge.target === highlightSelectedId ? 'edge-linked' : 'edge-dimmed')
+          : ''
       if (!isKnowledgeEdge(edge)) return {
         ...edge,
         sourceHandle: sourceNode?.data.kind === 'image' ? 'image-source-right' : edge.sourceHandle,
@@ -3228,7 +3270,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         markerEnd: { type: MarkerType.ArrowClosed, width: 18, height: 18, color: primary ? 'var(--theme-knowledge-primary)' : 'var(--theme-knowledge-fallback)' },
       }
     })
-  }, [edges, nodes, selectedId, visibleFlowNodeIds])
+  }, [aiDelegationPreviewNodeIds, edges, nodes, selectedId, visibleFlowNodeIds])
 
   useLayoutEffect(() => {
     if (viewMode !== 'mindmap' || loadedMapId !== activeMapId || !visibleFlowNodeIdsKey) return
@@ -7623,7 +7665,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                 {normalizedNodeSearch && <button type="button" onClick={() => navigateNodeSearch(1)} disabled={nodeSearchMatches.length === 0} aria-label="다음 검색 결과">›</button>}
                 {normalizedNodeSearch && <button type="button" className="node-search-clear" onClick={() => setNodeSearchTerm('')} aria-label="노드 검색 지우기"><Icon name="close" size={11} /></button>}
               </label>
-              <select value={nodeFilter} onChange={(event) => setNodeFilter(event.target.value as NodeFilter)} aria-label="업무 상태 필터" title="업무 상태 필터">
+              <select className="node-status-filter" value={nodeFilter} onChange={(event) => setNodeFilter(event.target.value as NodeFilter)} aria-label="업무 상태 필터" title="업무 상태 필터">
                 <option value="all">전체 상태</option>
                 <option value="work">업무만</option>
                 <option value="planned">예정</option>
@@ -7631,7 +7673,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                 <option value="done">완료</option>
                 <option value="blocked">차단됨</option>
               </select>
-              <select value={assigneeFilter} onChange={(event) => setAssigneeFilter(event.target.value)} aria-label="담당자 필터" title="담당자 필터">
+              <select className="node-assignee-filter" value={assigneeFilter} onChange={(event) => setAssigneeFilter(event.target.value)} aria-label="담당자 필터" title="담당자 필터">
                 <option value="all">전체 담당자</option>
                 <option value="unassigned">담당자 미지정</option>
                 {teamMembers.map((member) => <option value={member.id} key={member.id}>{member.name}{member.active ? '' : ' (비활성)'}</option>)}
@@ -8043,6 +8085,8 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                     ? aiDelegationRecoveryFocus.requestId
                     : undefined}
                   onFocusHandled={(requestId) => setAiDelegationRecoveryFocus((current) => current?.requestId === requestId ? null : current)}
+                  onSelectCard={selectAiDelegationCard}
+                  onPreviewCards={setAiDelegationPreview}
                 />}
                 {selectedNode.data.reference && (
                   <div className="task-link-field reference-source-field">

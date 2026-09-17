@@ -36,11 +36,16 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   return body as T
 }
 
-export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHandled }: {
+export type AiDelegationPreviewCard = { mapId: string; cardId: string }
+export type AiDelegationPreview = { parent: AiDelegationPreviewCard; target: AiDelegationPreviewCard }
+
+export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHandled, onSelectCard, onPreviewCards }: {
   mapId: string
   cardId: string
   focusRequestId?: number
   onFocusHandled?: (requestId: number) => void
+  onSelectCard: (mapId: string, cardId: string) => void
+  onPreviewCards: (preview: AiDelegationPreview | null) => void
 }) {
   const [items, setItems] = useState<Delegation[]>([])
   const [loaded, setLoaded] = useState(false)
@@ -52,6 +57,7 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
   const mounted = useRef(true)
   const acting = useRef(false)
   const sectionRef = useRef<HTMLElement | null>(null)
+  const previewedItemId = useRef<string | null>(null)
   const listUrl = `/api/maps/${encodeURIComponent(mapId)}/ai-delegations`
   const refresh = useCallback(async (signal?: AbortSignal) => {
     const data = await request<{ delegations: Delegation[] }>(listUrl, { signal })
@@ -77,6 +83,8 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
     void poll()
     return () => { mounted.current = false; controller.abort(); clearTimeout(timer) }
   }, [refresh])
+
+  useEffect(() => () => onPreviewCards(null), [onPreviewCards])
 
   async function action(item: Delegation, kind: 'refresh' | 'recover' | 'retry-report' | 'supersede') {
     if (acting.current) return
@@ -176,6 +184,11 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
       : '중단된 작업을 재개하거나 저장된 결과를 다시 전달하고, 복구할 수 없는 기록을 완료로 표시하지 않고 정리할 수 있습니다.'
     : '진행 중인 AI 위임의 현재 상태를 확인할 수 있습니다.'
   useEffect(() => {
+    if (!previewedItemId.current || pending.some((item) => item.id === previewedItemId.current)) return
+    previewedItemId.current = null
+    onPreviewCards(null)
+  }, [onPreviewCards, pending])
+  useEffect(() => {
     if (!focusRequestId || (!loaded && !error && !notice)) return
     const frame = window.requestAnimationFrame(() => {
       sectionRef.current?.scrollIntoView({ block: 'start' })
@@ -195,7 +208,29 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
       const candidates = completedReplacementDelegations(item, items)
       const selectedReplacementId = replacementIds[item.id] ?? candidates[0]?.id ?? ''
       const closing = closeDraft?.id === item.id
-      return <div className="ai-delegation-recovery-item" key={item.id}>
+      return <div
+        className="ai-delegation-recovery-item"
+        key={item.id}
+        onMouseEnter={() => {
+          previewedItemId.current = item.id
+          onPreviewCards({
+            parent: { mapId: item.parentMapId ?? item.mapId, cardId: item.parentCardId },
+            target: { mapId: item.mapId, cardId: item.targetCardId },
+          })
+        }}
+        onMouseLeave={() => {
+          if (previewedItemId.current !== item.id) return
+          previewedItemId.current = null
+          onPreviewCards(null)
+        }}
+      >
+        <button
+          type="button"
+          className="ai-delegation-recovery-item-select"
+          aria-label={`${item.targetCardLabel} 카드 선택`}
+          title={`${item.targetCardLabel} 카드 선택`}
+          onClick={() => onSelectCard(item.mapId, item.targetCardId)}
+        />
         <div className="ai-delegation-recovery-item-heading">
           <div>
             <b>{item.targetCardLabel}</b>

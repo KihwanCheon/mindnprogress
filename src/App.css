@@ -373,7 +373,8 @@
 .node-search-box > button:hover:not(:disabled) { color: #5548c3; background: #ece9fa; }
 .node-search-box > button:disabled { opacity: .35; cursor: default; }
 .node-search-box > .node-search-clear { color: #aaa4af; }
-.node-explorer > select { width: 75px; height: 30px; min-width: 0; padding: 0 18px 0 6px; color: #625c69; border: 1px solid #e5e2e9; border-radius: 7px; outline: 0; background: #faf9fc; font-size: 8px; cursor: pointer; }
+.node-explorer > select { width: 90px; height: 30px; min-width: 90px; padding: 0 20px 0 8px; color: #625c69; border: 1px solid #e5e2e9; border-radius: 7px; outline: 0; background: #faf9fc; font-size: 8px; cursor: pointer; }
+.node-explorer > .node-assignee-filter { width: 100px; min-width: 100px; }
 .node-explorer > select:focus { border-color: #c8c1ea; }
 .node-explorer > .filter-reset { height: 30px; padding: 0 8px; color: #6154c8; border: 1px solid #dcd7f1; border-radius: 7px; background: #f1eefb; font-size: 7px; font-weight: 700; cursor: pointer; }
 .hint-pill { margin: 16px !important; padding: 7px 10px; color: #8d8796; border: 1px solid #e7e4ec; border-radius: 20px; background: rgba(255,255,255,.8); font-size: 9px; }
