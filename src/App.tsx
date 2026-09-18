@@ -45,7 +45,7 @@ import { DoorayMentionsPanel } from './components/DoorayMentionsPanel'
 import { ImagePreviewDialog } from './components/ImagePreviewDialog'
 import { SharedKnowledgeReviewDialog, type SharedKnowledgeReviewApplied } from './components/SharedKnowledgeReviewDialog'
 import { DashboardView, KanbanView, TimelineView } from './components/WorkViews'
-import type { AiConversationLink, AiConversationRuntime, AiDelegationCardStatus, ChecklistItem, KnowledgePolicy, MindDoorayLinkData, MindDoorayTaskData, MindDoorayWikiData, MindImageData, MindMapEdgeData, MindNodeData, TeamMember, WaitingItem } from './types/mindMap'
+import type { AiConversationLink, AiConversationRuntime, AiDelegationCardStatus, ChecklistItem, KnowledgePolicy, MindDoorayLinkData, MindDoorayTaskData, MindDoorayWikiData, MindImageData, MindMapEdgeData, MindNodeData, MindWebLinkData, TeamMember, WaitingItem } from './types/mindMap'
 import { aiDelegationStatusByCard } from './utils/aiDelegationStatus.mjs'
 import { delegationHierarchyPathNodeIds, delegationPreviewEdgeState, delegationPreviewNodeRole, type AiDelegationSummary } from './utils/aiDelegationManagement.mjs'
 import { resolveAiConversationTarget, type AiConversationExplicitTarget } from './utils/aiConversationLaunch.mjs'
@@ -60,6 +60,7 @@ import { createsKnowledgeCycle, isHierarchyEdge, isKnowledgeEdge, knowledgePolic
 import { isSameDoorayKnowledgeUrl, normalizedDoorayKnowledgeUrl, taskUrlProvider } from './utils/externalLinks'
 import { splitImageFileName, uniqueImageFileName } from './utils/imageFileNames.mjs'
 import { copiedImagePlacementOverrides } from './utils/imageClipboard.mjs'
+import { isSameWebLinkUrl, parseWebLinkUrl } from './utils/webLinks.mjs'
 import { shouldReconnectEventStream } from './utils/eventStreamHealth.mjs'
 import { aiConversationLinksFromData } from './utils/aiConversations.mjs'
 import { revisionReasonLabel, shouldRefreshMapContentForAction } from './utils/mapChangeMetadata.mjs'
@@ -843,6 +844,7 @@ function mergeResolvedReferenceData(localData: MindNodeData, resolvedData: MindN
     status: resolvedData.status,
     taskUrl: resolvedData.taskUrl,
     externalLink: resolvedData.externalLink,
+    webLink: resolvedData.webLink,
     aiConversationId: resolvedData.aiConversationId,
     aiConversations: resolvedData.aiConversations,
     isWork: resolvedData.isWork,
@@ -879,6 +881,7 @@ const REFERENCE_MANAGED_DATA_KEYS = new Set<keyof MindNodeData>([
   'status',
   'taskUrl',
   'externalLink',
+  'webLink',
   'aiConversationId',
   'aiConversations',
   'isWork',
@@ -3300,7 +3303,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       const targetNode = nodesById.get(edge.target)
       const sourceHandlePrefix = sourceNode?.data.kind === 'image'
         ? 'image-source'
-        : sourceNode && isDoorayKnowledgeCard(sourceNode.data) ? 'dooray-knowledge-source' : null
+        : sourceNode && (isDoorayKnowledgeCard(sourceNode.data) || sourceNode.data.webLink) ? 'dooray-knowledge-source' : null
       const nearestHandles = sourceHandlePrefix && sourceNode && targetNode
         ? nearestKnowledgeHandles(sourceNode, targetNode, sourceHandlePrefix)
         : undefined
@@ -6108,6 +6111,50 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     }
   }, [activeMapId, loadedMapId, mode, nodes, screenToFlowPosition, setCenter, setNodes, viewMode])
 
+  const addWebLinkAtPoint = useCallback((url: string, clientPoint: { x: number; y: number }) => {
+    if (mode !== 'editor' || viewMode !== 'mindmap' || !activeMapId || loadedMapId !== activeMapId) return
+    const parsed = parseWebLinkUrl(url)
+    if (!parsed || normalizedDoorayKnowledgeUrl(parsed.url)) return
+    const existing = nodes.find((node) => node.data.webLink && isSameWebLinkUrl(node.data.webLink.url, parsed.url))
+    if (existing) {
+      const { width, height } = nodeDimensions(existing)
+      setNodes((current) => current.map((node) => ({ ...node, selected: node.id === existing.id })))
+      setSelectedId(existing.id)
+      focusedNodeIdRef.current = null
+      setCenter(existing.position.x + width / 2, existing.position.y + height / 2, { duration: 350 })
+      setSavedAt('이미 추가된 웹 링크를 선택함')
+      return
+    }
+
+    const flowPoint = screenToFlowPosition(clientPoint)
+    const webLink: MindWebLinkData = { provider: 'web', url: parsed.url }
+    const createdId = `web-${crypto.randomUUID()}`
+    setNodes((current) => [
+      ...current.map((node) => node.selected ? { ...node, selected: false } : node),
+      {
+        id: createdId,
+        type: 'mind',
+        position: {
+          x: flowPoint.x - MINDMAP_DOORAY_TASK_DEFAULT_WIDTH / 2,
+          y: flowPoint.y - MINDMAP_DOORAY_TASK_DEFAULT_HEIGHT / 2,
+        },
+        selected: true,
+        data: {
+          label: parsed.title,
+          description: '',
+          status: 'planned',
+          progress: 0,
+          kind: 'task',
+          isWork: false,
+          taskUrl: parsed.url,
+          webLink,
+        },
+      },
+    ])
+    setSelectedId(createdId)
+    setSavedAt('웹 링크 카드 추가됨')
+  }, [activeMapId, loadedMapId, mode, nodes, screenToFlowPosition, setCenter, setNodes, viewMode])
+
   useEffect(() => {
     if (mode !== 'editor' || viewMode !== 'mindmap') return
     const handleClipboardContent = (event: ClipboardEvent) => {
@@ -6134,14 +6181,20 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         return
       }
       const doorayUrl = normalizedDoorayKnowledgeUrl(clipboardText)
-      if (!doorayUrl) return
+      if (doorayUrl) {
+        event.preventDefault()
+        void addDoorayKnowledgeAtPoint(doorayUrl, { x: pointer.x, y: pointer.y })
+        return
+      }
+      const webLink = parseWebLinkUrl(clipboardText)
+      if (!webLink) return
       event.preventDefault()
-      void addDoorayKnowledgeAtPoint(doorayUrl, { x: pointer.x, y: pointer.y })
+      addWebLinkAtPoint(webLink.url, { x: pointer.x, y: pointer.y })
     }
 
     window.addEventListener('paste', handleClipboardContent)
     return () => window.removeEventListener('paste', handleClipboardContent)
-  }, [addDoorayKnowledgeAtPoint, addImageFilesAtPoint, copiedImages, mode, pasteCopiedImagesAtPoint, viewMode])
+  }, [addDoorayKnowledgeAtPoint, addImageFilesAtPoint, addWebLinkAtPoint, copiedImages, mode, pasteCopiedImagesAtPoint, viewMode])
 
   const submitComment = async () => {
     const summary = newComment.trim()
@@ -8186,7 +8239,10 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                         const externalLink = selectedNode.data.externalLink?.url === normalizedUrl
                           ? selectedNode.data.externalLink
                           : undefined
-                        updateNode(selectedNode.id, { taskUrl, externalLink })
+                        const webLink = selectedNode.data.webLink
+                          ? { ...selectedNode.data.webLink, url: taskUrl }
+                          : undefined
+                        updateNode(selectedNode.id, { taskUrl, externalLink, webLink })
                       }}
                       onKeyDown={(event) => {
                         if (event.key !== 'Enter') return

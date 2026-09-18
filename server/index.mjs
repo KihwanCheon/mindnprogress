@@ -1073,6 +1073,11 @@ function isValidMap(map) {
     && (node.data?.externalLink === undefined
       || (isValidDoorayKnowledgeLinkData(node.data.externalLink)
         && node.data.taskUrl === node.data.externalLink.url))
+    && (node.data?.webLink === undefined
+      || (node.data.webLink?.provider === 'web'
+        && typeof node.data.webLink.url === 'string'
+        && node.data.webLink.url.length <= 2_048
+        && node.data.taskUrl === node.data.webLink.url))
     && (node.data?.sharedKnowledge === undefined
       || (typeof node.data.sharedKnowledge === 'string' && node.data.sharedKnowledge.length <= sharedKnowledgeMaxLength))
     && (node.data?.sharedKnowledgeReview === undefined
@@ -5801,6 +5806,7 @@ const referenceContentKeys = [
   'status',
   'taskUrl',
   'externalLink',
+  'webLink',
   'aiConversationId',
   'aiConversations',
   'isWork',

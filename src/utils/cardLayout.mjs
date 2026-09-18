@@ -34,6 +34,7 @@ export function cardLayoutKind(node, childCount = 0) {
   if (node.data.kind === 'image') return 'image'
   if (node.data.reference) return 'reference'
   if (node.data.externalLink) return 'dooray'
+  if (node.data.webLink) return 'web-link'
   if (node.data.isWork) return 'work'
   return childCount || ['root', 'branch'].includes(node.data.kind) ? 'group' : 'knowledge'
 }

@@ -51,6 +51,7 @@ function canRollupNode(node, rootId) {
     && node.data?.kind !== 'image'
     && !node.data?.reference
     && !node.data?.externalLink
+    && !node.data?.webLink
 }
 
 export function findRollupRoot(nodes, edges) {

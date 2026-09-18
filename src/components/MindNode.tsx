@@ -6,6 +6,8 @@ import { DoorayTaskNode } from './DoorayTaskNode'
 import { MindImageNode } from './MindImageNode'
 import { NodeOverlapBadge } from './NodeOverlapBadge'
 import { isSameDoorayKnowledgeUrl, normalizedDoorayKnowledgeUrl, taskUrlProvider } from '../utils/externalLinks'
+import { isSameWebLinkUrl, normalizedWebLinkUrl } from '../utils/webLinks.mjs'
+import { WebLinkNode } from './WebLinkNode'
 import './MindNode.css'
 
 type MindNodeType = Node<MindNodeData, 'mind'>
@@ -28,6 +30,10 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
   const isDoorayWiki = taskUrlProvider(doorayUrl ?? '') === 'dooray-wiki'
   if (doorayUrl && data.externalLink && isSameDoorayKnowledgeUrl(data.externalLink.url, doorayUrl)) {
     return <DoorayTaskNode data={data} selected={selected} isConnectable={isConnectable} />
+  }
+  const webUrl = normalizedWebLinkUrl(data.taskUrl ?? '')
+  if (!doorayUrl && webUrl && data.webLink && isSameWebLinkUrl(data.webLink.url, webUrl)) {
+    return <WebLinkNode data={data} selected={selected} isConnectable={isConnectable} />
   }
 
   const hasProgressRollup = data.progressRollupTargetCount !== undefined

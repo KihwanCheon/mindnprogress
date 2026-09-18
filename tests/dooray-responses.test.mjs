@@ -13,6 +13,7 @@ const maps = [{ id: 'map1', title: '홀덤 UI', version: 1, nodes: [
   { id: 'root1', data: { kind: 'root', label: '홀덤 UI', description: '' } },
   { id: 'task1', data: { kind: 'task', label: '베팅', description: '금액 표시 수정', taskUrl: item.url, aiConversations: [{ conversationId: 'old-chat', requestPreview: '베팅 표시 수정' }] } },
   { id: 'knowledge1', data: { kind: 'task', label: '기획 원문', externalLink: { projectId: 'p1', postId: 'post1' } } },
+  { id: 'web1', data: { kind: 'task', label: '웹 자료', webLink: { provider: 'web', url: 'https://example.com/' } } },
   { id: 'ref1', data: { kind: 'task', label: '참조 카드', reference: { mapId: 'else', nodeId: 'original' } } },
 ], edges: [{ source: 'root1', target: 'task1' }, { source: 'knowledge1', target: 'task1', data: { relation: 'knowledge' } }] }]
 const route = { action: 'direct', mapId: 'map1', cardId: 'task1', conversationId: 'old-chat', requestSummary: '금액 표시 수정', reason: '동일 Dooray 업무가 연결된 카드' }

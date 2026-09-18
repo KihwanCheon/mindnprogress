@@ -75,6 +75,11 @@ export type MindDoorayWikiData = {
 
 export type MindDoorayLinkData = MindDoorayTaskData | MindDoorayWikiData
 
+export type MindWebLinkData = {
+  provider: 'web'
+  url: string
+}
+
 export type AiConversationRuntime = {
   conversationId: string
   state: 'running' | 'waiting-confirmation' | 'idle' | 'unknown'
@@ -138,6 +143,7 @@ export type MindNodeData = {
   kind: 'root' | 'branch' | 'task' | 'image'
   image?: MindImageData
   externalLink?: MindDoorayLinkData
+  webLink?: MindWebLinkData
   imageAssetUrl?: string
   imageEditable?: boolean
   onImageResizeStart?: () => void

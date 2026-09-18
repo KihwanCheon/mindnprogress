@@ -73,7 +73,7 @@ export function buildDoorayRoutingCatalog(maps, source, inspectedMapIds = []) {
     documents.push({ mapId: map.id, title: map.title, group: map.responseGroup ?? null, cardCount: map.nodes.length })
     const directIds = new Set(map.nodes.filter((node) => linkedPost(node.data, source.item)).map((node) => node.id))
     for (const node of map.nodes) {
-      if (node.data.kind === 'image' || node.data.externalLink || node.data.reference) continue
+      if (node.data.kind === 'image' || node.data.externalLink || node.data.webLink || node.data.reference) continue
       const searchable = `${map.title} ${node.data.label} ${node.data.description ?? ''} ${node.data.sharedKnowledge ?? ''}`.toLowerCase()
       const knowledgeMatch = map.edges.some((edge) => edge.data?.relation === 'knowledge' && directIds.has(edge.source) && edge.target === node.id)
       const score = (directIds.has(node.id) ? 1000 : 0) + (knowledgeMatch ? 600 : 0)
@@ -147,7 +147,7 @@ export function validateDoorayRoute(result, maps) {
   if (!['direct', 'coordinator', 'group'].includes(result.action)) throw error('AI의 담당 경로를 확인할 수 없습니다.', 409)
   const map = maps.find((entry) => entry?.id === result.mapId && !entry.trashedAt && !entry.archivedAt)
   const card = map?.nodes.find((node) => node.id === result.cardId)
-  if (!card || card.data.reference || card.data.externalLink || card.data.kind === 'image') throw error('AI가 선택한 담당 카드가 유효하지 않습니다.', 409)
+  if (!card || card.data.reference || card.data.externalLink || card.data.webLink || card.data.kind === 'image') throw error('AI가 선택한 담당 카드가 유효하지 않습니다.', 409)
   if (!text(result.reason).trim() || !text(result.requestSummary).trim()) throw error('AI가 담당 경로의 근거를 반환하지 않았습니다.', 409)
   if (result.action === 'coordinator' && !map.edges.some((edge) => edge.source === card.id && edge.data?.relation !== 'knowledge')) throw error('선택한 카드에 조정할 하위 카드가 없습니다.', 409)
   if (result.action === 'group' && (map.responseGroup?.role !== 'coordinator' || card.data.kind !== 'root')) throw error('선택한 카드가 등록된 그룹 총괄 루트가 아닙니다.', 409)
