@@ -68,6 +68,7 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
     ? `완료되지 않은 선행 업무\n${blockedLabels.map((label) => `· ${label}`).join('\n')}`
     : `완료되지 않은 선행 업무 ${data.unresolvedDependencyCount ?? 0}건`
   const isOverdue = Boolean(data.dueDate && !isCompleted && new Date(`${data.dueDate}T23:59:59`) < new Date())
+  const showsSelectedStyle = selected
   const formattedDueDate = data.dueDate
     ? data.dueDate.split('-').slice(1).map(Number).join('.')
     : ''
@@ -75,7 +76,7 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
   return (
     <>
       <NodeOverlapBadge data={data} />
-      <article className={`mind-node ${data.kind} status-${displayStatus} ${isCompleted ? 'completed' : ''} ${selected ? 'selected' : ''}`}>
+      <article className={`mind-node ${data.kind} status-${displayStatus} ${isCompleted ? 'completed' : ''} ${showsSelectedStyle ? 'selected' : ''}`}>
       <Handle type="target" position={Position.Left} isConnectable={isConnectable} />
       {([
         ['top', Position.Top],

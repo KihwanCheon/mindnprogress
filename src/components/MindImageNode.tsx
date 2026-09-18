@@ -14,12 +14,13 @@ export function MindImageNode({ data, selected }: { data: MindNodeData; selected
     description ? `내용: ${description}` : '',
     `원본 크기: ${image.naturalWidth} × ${image.naturalHeight}`,
   ].filter(Boolean).join('\n')
+  const showsSelectedStyle = selected
 
   return (
     <>
       <NodeOverlapBadge data={data} />
       <NodeResizer
-        isVisible={selected && data.imageEditable === true}
+        isVisible={showsSelectedStyle && data.imageEditable === true}
         keepAspectRatio
         minWidth={48}
         minHeight={48}
@@ -53,7 +54,7 @@ export function MindImageNode({ data, selected }: { data: MindNodeData; selected
         />
       ))}
       <figure
-        className={`mind-image-node ${selected ? 'selected' : ''}`}
+        className={`mind-image-node ${showsSelectedStyle ? 'selected' : ''}`}
         title={tooltip}
       >
         <img

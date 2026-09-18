@@ -170,6 +170,7 @@ export type MindNodeData = {
   hiddenDescendantCount?: number
   aiConversationRuntime?: AiConversationRuntime
   aiDelegationStatus?: AiDelegationCardStatus
+  delegationPreviewRole?: 'source' | 'target'
   overlapStack?: {
     count: number
     titles: string[]

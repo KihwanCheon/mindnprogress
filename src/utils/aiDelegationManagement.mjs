@@ -64,3 +64,10 @@ export function delegationPreviewEdgeState(edge, pathNodeIds) {
     ? 'edge-linked'
     : 'edge-dimmed'
 }
+
+export function delegationPreviewNodeRole(preview, activeMapId, nodeId) {
+  if (!preview || preview.target?.mapId !== activeMapId) return undefined
+  if (preview.target.cardId === nodeId) return 'target'
+  if (preview.parent?.mapId === activeMapId && preview.parent.cardId === nodeId) return 'source'
+  return undefined
+}

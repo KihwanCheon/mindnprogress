@@ -47,7 +47,7 @@ import { SharedKnowledgeReviewDialog, type SharedKnowledgeReviewApplied } from '
 import { DashboardView, KanbanView, TimelineView } from './components/WorkViews'
 import type { AiConversationLink, AiConversationRuntime, AiDelegationCardStatus, ChecklistItem, KnowledgePolicy, MindDoorayLinkData, MindDoorayTaskData, MindDoorayWikiData, MindImageData, MindMapEdgeData, MindNodeData, TeamMember, WaitingItem } from './types/mindMap'
 import { aiDelegationStatusByCard } from './utils/aiDelegationStatus.mjs'
-import { delegationHierarchyPathNodeIds, delegationPreviewEdgeState, type AiDelegationSummary } from './utils/aiDelegationManagement.mjs'
+import { delegationHierarchyPathNodeIds, delegationPreviewEdgeState, delegationPreviewNodeRole, type AiDelegationSummary } from './utils/aiDelegationManagement.mjs'
 import { resolveAiConversationTarget, type AiConversationExplicitTarget } from './utils/aiConversationLaunch.mjs'
 import { applyBoxSelection, boxSelectionNodeIds, boxSelectionRect, isBoxSelectionDrag } from './utils/boxSelection.mjs'
 import { copyTextToClipboard } from './utils/clipboardText.mjs'
@@ -3107,10 +3107,13 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
   const overlapWarningIds = useMemo(() => new Set(overlapPresentation.warningIds), [overlapPresentation.warningIds])
   const overlapStackByRepresentativeId = useMemo(() => new Map(overlapPresentation.stacks.map((stack) => [stack.representativeId, stack])), [overlapPresentation.stacks])
   const flowNodes = useMemo(() => nodes.map((node) => {
+    const delegationPreviewRole = delegationPreviewNodeRole(aiDelegationPreview, activeMapId, node.id)
+    const visibleInDelegationPreview = aiDelegationPreviewNodeIds?.has(node.id) === true
     const hiddenByCollapse = collapsedHiddenNodeIds.has(node.id)
       && !searchContextNodeIds.has(node.id)
       && !(filterActive && filterVisibleNodeIds.has(node.id))
-    const hiddenByFilter = filterActive && !filterVisibleNodeIds.has(node.id)
+      && !visibleInDelegationPreview
+    const hiddenByFilter = filterActive && !filterVisibleNodeIds.has(node.id) && !visibleInDelegationPreview
     const hidden = hiddenByCollapse || hiddenByFilter
     const image = node.data.kind === 'image' ? node.data.image : undefined
     const externalLink = isDoorayKnowledgeCard(node.data)
@@ -3230,6 +3233,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         unresolvedCommentCount: (node.data.reference ? referenceCommentStats[node.id] : commentStats[node.id])?.unresolved ?? 0,
         aiConversationRuntime: aiConversationRuntimes[node.id],
         aiDelegationStatus: node.data.reference ? undefined : aiDelegationStatuses[node.id],
+        delegationPreviewRole,
         overlapStack: overlapStack ? { count: overlapStack.ids.length, titles: overlapStack.titles } : undefined,
         onCycleOverlap: overlapStack ? () => {
           const nextId = nextOverlappingNodeId(overlapStack.ids, selectedIdRef.current)
@@ -3255,6 +3259,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         node.id === dropTargetId ? 'drop-target' : '',
         node.id === knowledgeConnection?.sourceId ? `knowledge-link-source ${knowledgeConnection.policy === 'reuse-first' ? 'primary' : 'secondary'}` : '',
         node.id === knowledgeConnectionTargetId ? `knowledge-link-target ${hoveredKnowledgeConnectionIssue ? 'invalid' : 'valid'}` : '',
+        delegationPreviewRole ? `delegation-preview-${delegationPreviewRole}` : '',
         !aiDelegationPreviewNodeIds && normalizedNodeSearch && searchMatchedNodeIds.has(node.id) ? 'search-match' : '',
         (aiDelegationPreviewNodeIds
           ? !aiDelegationPreviewNodeIds.has(node.id)
@@ -3263,7 +3268,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         overlapWarningIds.has(node.id) ? 'overlap-warning' : '',
       ].filter(Boolean).join(' '),
     }
-  }), [activeMapId, aiConversationRuntimes, aiDelegationPreviewNodeIds, aiDelegationStatuses, beginHistoryTransaction, collapsedHiddenNodeIds, collapsedNodeIds, collapsibleNodeIds, commentStats, descendantCounts, dropTargetId, endHistoryTransaction, filterActive, filterMatchedNodeIds, filterVisibleNodeIds, hoveredKnowledgeConnectionIssue, knowledgeConnection, knowledgeConnectionTargetId, mode, nodes, normalizedNodeSearch, openAiDelegationRecovery, openDependencies, openWaitingItems, overlapStackByRepresentativeId, overlapWarningIds, progressRollups, referenceCommentStats, searchContextNodeIds, searchMatchedNodeIds, setNodes, teamMembers, unresolvedReferenceNodeIds])
+  }), [activeMapId, aiConversationRuntimes, aiDelegationPreview, aiDelegationPreviewNodeIds, aiDelegationStatuses, beginHistoryTransaction, collapsedHiddenNodeIds, collapsedNodeIds, collapsibleNodeIds, commentStats, descendantCounts, dropTargetId, endHistoryTransaction, filterActive, filterMatchedNodeIds, filterVisibleNodeIds, hoveredKnowledgeConnectionIssue, knowledgeConnection, knowledgeConnectionTargetId, mode, nodes, normalizedNodeSearch, openAiDelegationRecovery, openDependencies, openWaitingItems, overlapStackByRepresentativeId, overlapWarningIds, progressRollups, referenceCommentStats, searchContextNodeIds, searchMatchedNodeIds, setNodes, teamMembers, unresolvedReferenceNodeIds])
   const visibleFlowNodeIds = useMemo(() => new Set(flowNodes.filter((node) => !node.hidden).map((node) => node.id)), [flowNodes])
   visibleFlowNodeIdsRef.current = visibleFlowNodeIds
   const visibleFlowNodeIdsKey = useMemo(() => [...visibleFlowNodeIds].sort().join('\u0000'), [visibleFlowNodeIds])

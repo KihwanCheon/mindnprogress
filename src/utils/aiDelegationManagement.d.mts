@@ -50,3 +50,11 @@ export function delegationPreviewEdgeState(
   edge: { source: string; target: string; data?: { relation?: string } },
   pathNodeIds: Set<string> | null,
 ): '' | 'edge-linked' | 'edge-dimmed'
+export function delegationPreviewNodeRole(
+  preview: {
+    parent: { mapId: string; cardId: string }
+    target: { mapId: string; cardId: string }
+  } | null,
+  activeMapId: string,
+  nodeId: string,
+): 'source' | 'target' | undefined

@@ -50,12 +50,13 @@ export function DoorayTaskNode({ data, selected, isConnectable }: {
     item.note,
     item.resumeCondition ? `재개 조건: ${item.resumeCondition}` : '',
   ].filter(Boolean).join(' · ')).join('\n')
+  const showsSelectedStyle = selected
 
   return (
     <>
       <NodeOverlapBadge data={data} />
       <NodeResizer
-        isVisible={selected && data.externalLinkEditable === true}
+        isVisible={showsSelectedStyle && data.externalLinkEditable === true}
         minWidth={160}
         minHeight={96}
         maxWidth={1_200}
@@ -72,7 +73,7 @@ export function DoorayTaskNode({ data, selected, isConnectable }: {
           resizeGesture.current = null
         }}
       />
-      <article className={`mind-node dooray-task-node ${closed ? 'closed' : ''} ${selected ? 'selected' : ''}`} title={tooltip}>
+      <article className={`mind-node dooray-task-node ${closed ? 'closed' : ''} ${showsSelectedStyle ? 'selected' : ''}`} title={tooltip}>
         {waitingItems.length > 0 && (
           <button
             type="button"
