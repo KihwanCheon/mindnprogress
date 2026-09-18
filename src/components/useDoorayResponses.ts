@@ -87,6 +87,16 @@ export function useDoorayResponses(clientId: string, userId: string) {
   }, [userId])
   const request = async (itemKey: string) => {
     if (pending.current.has(itemKey)) return
+    // 상태가 표시된 버튼은 기록을 여는 동작이다. 재제안은 refine에서만 요청한다.
+    const previous = jobs.find((job) => job.itemKey === itemKey)
+    if (previous) {
+      setSelectedId(previous.id)
+      setShowCompleted(Boolean(previous.completedAt))
+      setOpen(true)
+      setError('')
+      setNotice('')
+      return
+    }
     pending.current.add(itemKey)
     setPendingKeys(new Set(pending.current))
     setOpen(true)

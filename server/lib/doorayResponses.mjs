@@ -297,10 +297,18 @@ export function createDoorayResponseService(deps) {
     }))
   }
   async function start(user, item, settings) {
+    // 원문 해시는 내용의 버전이지 참조의 식별자가 아니다. 기존 기록 열기로
+    // 재접수하거나 중지한 실행을 재개하지 않으며, 삭제 초기화만 기존 규칙을 따른다.
+    const sameReference = (job) => job.source.item.key === item.key
+      && job.source.item.projectId === item.projectId && job.source.item.postId === item.postId
+    const outstanding = (job) => sameReference(job) && !job.completedAt
+    await refreshDeleted(user.id, sameReference, true)
+    const existing = (await read(user.id)).jobs.find(outstanding)
+    if (existing) return { job: publicDoorayResponse(existing), repeated: true }
     const source = await deps.loadSource(item)
-    await refreshDeleted(user.id, (job) => job.source.fingerprint === source.fingerprint, true)
     const result = await update(user.id, async (state) => {
-      const previous = state.jobs.find((job) => job.source.fingerprint === source.fingerprint)
+      // 원문을 조회하는 사이 다른 탭에서 접수됐을 수 있으므로 쓰기 잠금 안에서 재확인한다.
+      const previous = state.jobs.find(outstanding) ?? state.jobs.find((job) => job.source.fingerprint === source.fingerprint)
       if (previous) return { job: previous, repeated: true }
       if (state.jobs.filter((job) => activeStates.has(job.status)).length >= 10) throw error('진행 중인 AI 대응이 많습니다. 기존 요청이 끝난 뒤 다시 시도해 주세요.', 409)
       const resolved = await deps.resolveSettings(user, settings)
@@ -313,7 +321,7 @@ export function createDoorayResponseService(deps) {
       state.jobs = [job, ...state.jobs.filter((entry, index) => index < 99 || activeStates.has(entry.status) || entry.completedAt || entry.approval || entry.approvalHistory?.length)]
       return { job, repeated: false }
     })
-    void tick(user.id, result.job.id)
+    if (!result.repeated) void tick(user.id, result.job.id)
     return { job: publicDoorayResponse(result.job), repeated: result.repeated }
   }
   async function advance(user, job) {
