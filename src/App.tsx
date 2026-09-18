@@ -68,6 +68,7 @@ import { mapContentsEqual, reconcileRemoteMapContent } from './utils/mapDocument
 import { mergeMapContent } from './utils/mergeMapContent.mjs'
 import { nextOverlappingNodeId, nodeOverlapPresentation } from './utils/nodeOverlap.mjs'
 import { viewportForNodeVisibility } from './utils/nodeViewportVisibility.mjs'
+import { notificationTitle } from './utils/notificationTitles.mjs'
 import { computeProgressRollups } from './utils/progressRollup.mjs'
 import { snapAspectResizeToGrid, snapFreeResizeToGrid } from './utils/resizeGrid.mjs'
 import type { ResizeSnapRequest } from './utils/resizeGrid.mjs'
@@ -749,7 +750,7 @@ type MapDocumentResponse = {
 type UserNotification = {
   id: string
   userId: string
-  type: 'comment' | 'mention' | 'reply' | 'assignment' | 'schedule' | 'waiting-released' | 'ai-delegation'
+  type: 'comment' | 'mention' | 'reply' | 'assignment' | 'schedule' | 'waiting-released' | 'ai-delegation' | 'ai-delegation-completed'
   mapId: string
   mapTitle: string
   nodeId: string
@@ -7034,19 +7035,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                     <button className={`notification-item ${notification.type} ${notification.readAt ? '' : 'unread'}`} key={notification.id} onClick={() => openNotification(notification)}>
                       <span className="notification-avatar">{notification.actor.name.replace(/\s/g, '').slice(0, 2)}</span>
                       <span>
-                        <strong>{notification.type === 'assignment'
-                          ? `${notification.actor.name}님이 담당자로 지정했습니다.`
-                          : notification.type === 'schedule'
-                            ? '담당 업무 일정 알림'
-                            : notification.type === 'waiting-released'
-                              ? `${notification.actor.name}님이 외부 대기를 해제했습니다.`
-                              : notification.type === 'ai-delegation'
-                                ? 'AI 위임 상태 알림'
-                              : notification.type === 'mention'
-                                ? `${notification.actor.name}님이 회원님을 멘션했습니다.`
-                                : notification.type === 'reply'
-                                  ? `${notification.actor.name}님이 답글을 남겼습니다.`
-                                  : `${notification.actor.name}님이 댓글을 남겼습니다.`}</strong>
+                        <strong>{notificationTitle(notification)}</strong>
                         <small>{notification.mapTitle} · {notification.nodeLabel}</small>
                         <em>{notification.message}</em>
                         <time>{new Date(notification.createdAt).toLocaleString('ko-KR')}</time>

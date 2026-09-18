@@ -148,6 +148,8 @@
 .notification-item.assignment > i { background: #4381c4; }
 .notification-item.schedule > i { background: #d48a3e; }
 .notification-item.ai-delegation > i { background: #7058c9; }
+.notification-item.ai-delegation-completed .notification-avatar { background: #2f9e77; }
+.notification-item.ai-delegation-completed > i { background: #2f9e77; }
 .notification-item > span:nth-child(2) { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .notification-item strong { color: #4c4653; font-size: 9px; }
 .notification-item small { overflow: hidden; color: #918b98; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }

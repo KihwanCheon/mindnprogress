@@ -392,6 +392,22 @@ export function aiDelegationSucceeded(delegation) {
   return true
 }
 
+export const AI_DELEGATION_COMPLETION_NOTIFICATION_TYPE = 'ai-delegation-completed'
+
+// 하위 AI 작업 완료 알림은 실제 작업 완료 판정(aiDelegationSucceeded)에 도달한 위임에 한 번만 만든다.
+// 문서 조정 대기·실패·사용자 종료·대체된 위임은 완료로 알리지 않는다.
+export function aiDelegationCompletionNotice(delegation) {
+  if (!delegation?.id || ['failed', 'superseded', 'closed'].includes(delegation.state)) return null
+  if (!aiDelegationSucceeded(delegation)) return null
+  const dedupeKey = `ai-delegation-completed:${delegation.id}`
+  if (delegation.completedNotificationKey === dedupeKey) return null
+  const parentCardLabel = String(delegation.parentCardLabel ?? delegation.parentCardId ?? '').trim() || '상위 카드'
+  return {
+    dedupeKey,
+    message: `하위 AI 작업이 완료되었습니다. 상위 카드 "${parentCardLabel}"의 AI 위임 진행 현황에서 결과 전달 상태를 확인할 수 있습니다.`,
+  }
+}
+
 export function aiDelegationReportResult(delegation) {
   const text = typeof delegation?.childResultSnapshot === 'string'
     ? delegation.childResultSnapshot

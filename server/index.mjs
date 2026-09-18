@@ -73,6 +73,8 @@ import {
   mergeAiDelegationSelections,
   nextAiDelegationWaitPoll,
   shouldReconcileAiDelegationChildWorkspace,
+  AI_DELEGATION_COMPLETION_NOTIFICATION_TYPE,
+  aiDelegationCompletionNotice,
 } from './lib/aiDelegations.mjs'
 import {
   detectImageAssetType,
@@ -3545,7 +3547,7 @@ ${checkpoint}- 원인: ${error}
 ${result ? `## 보존된 하위 AI의 마지막 응답\n\n${result}\n\n` : ''}같은 작업을 새로 위임하지 마세요. MindNProgress에서 기존 위임과 하위 카드·작업공간 상태를 확인한 뒤, 안전하게 이어갈 수 있을 때만 mindnprogress_recover_ai_delegation으로 기존 위임을 복구하세요. 자동 판단이 어렵다면 사용자에게 현재 상태와 필요한 확인을 알리세요.`
 }
 
-async function ensureAiDelegationNotification(delegation, { kind, message, dedupeKey }) {
+async function ensureAiDelegationNotification(delegation, { kind, message, dedupeKey, type = 'ai-delegation' }) {
   const notificationKey = `${kind}NotificationKey`
   if (delegation?.[notificationKey] === dedupeKey) return delegation
   const recipient = users.find((candidate) => candidate.id === delegation?.startedBy
@@ -3554,7 +3556,7 @@ async function ensureAiDelegationNotification(delegation, { kind, message, dedup
   const node = map?.nodes.find((candidate) => candidate.id === delegation?.targetCardId)
   if (!recipient || !map || map.trashedAt || !node) return delegation
   const notification = await createNotification(recipient, {
-    type: 'ai-delegation',
+    type,
     mapId: map.id,
     mapTitle: map.title,
     nodeId: node.id,
@@ -3567,6 +3569,19 @@ async function ensureAiDelegationNotification(delegation, { kind, message, dedup
     [notificationKey]: dedupeKey,
     [`${kind}NotificationId`]: notification.id,
     [`${kind}NotifiedAt`]: notification.createdAt,
+  })
+}
+
+// 하위 작업 완료 알림은 차단 알림과 다른 타입으로 만들어 화면에서 구분한다.
+// 이미 알린 위임은 dedupeKey로 건너뛰므로 보고 재전달·결과 재확인이 반복돼도 중복 생성되지 않는다.
+async function ensureAiDelegationCompletionNotification(delegation) {
+  const notice = aiDelegationCompletionNotice(delegation)
+  if (!notice) return delegation
+  return ensureAiDelegationNotification(delegation, {
+    kind: 'completed',
+    type: AI_DELEGATION_COMPLETION_NOTIFICATION_TYPE,
+    dedupeKey: notice.dedupeKey,
+    message: notice.message,
   })
 }
 
@@ -4593,6 +4608,11 @@ async function pollAiDelegations() {
         || aiDelegationReportArchivePending(delegation))
     for (let delegation of active) {
       if (aiDelegationActions.has(delegation.id)) continue
+      try {
+        delegation = await ensureAiDelegationCompletionNotification(delegation)
+      } catch (error) {
+        console.warn('[AI delegation completion notification]', error)
+      }
       const delivered = aiDelegationStoredReportDeliveryPatch(delegation)
       if (delivered) {
         await updateAiDelegation(delegation.id, delivered)
