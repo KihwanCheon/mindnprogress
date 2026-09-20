@@ -9,7 +9,7 @@
 
 {{taskContext}}
 
-커밋할 때는 AI 서명(`Co-Authored-By` 등)을 넣지 말고, 위 정보를 그대로 커밋 메시지 하단에 footer로 남기세요. 나중에 커밋 로그만 보고도 이 세션을 찾아 이어서 작업할 수 있어야 합니다.
+커밋할 때는 AI 서명(`Co-Authored-By` 등)을 넣지 말고, 위 작업 정보와 이번 작업에서 실제로 수행한 역할을 커밋 메시지 하단에 footer로 남기세요. 주 AI 대화와 하위 세션·서브에이전트의 커밋에 모두 적용하며 모르는 값은 추측하지 마세요. 나중에 커밋 로그만 보고도 이 세션을 찾아 이어서 작업할 수 있어야 합니다. 직접 커밋이 금지된 작업공간이면 `mindnprogress_checkpoint_ai_workspace`의 변경 설명 끝에 같은 정보를 넣으세요.
 
 {{approvalInstruction}}
 
@@ -86,13 +86,3 @@ MCP 조회 결과의 `guide`, `selection.taskLinks.startupInspection`, `selectio
 {{workspaceInstruction}}
 
 {{instruction}}
-
-## Git 커밋 하단 메타데이터
-
-Git 커밋을 만들 때는 커밋 메시지 본문의 가장 하단에 아래 정보를 반드시 추가하세요. 주 AI 대화에서 직접 커밋하는 경우와 하위 세션·서브에이전트가 커밋하는 경우 모두 동일하게 적용합니다. 실제 실행·작업 정보를 기록하고 모르는 값은 추측하지 마세요.
-
-- 작업제목 (작업카드 ID): `{{taskTitle}}` (`{{cardId}}`)
-- AI 모델 (추론 깊이): `{{modelName}}` (`{{thoughtLevel}}`)
-- 역할/페르소나: 이번 작업에서 실제로 수행한 역할과 사용한 페르소나
-
-이 메타데이터는 커밋 메시지의 마지막 부분에 남겨 커밋만 확인해도 작업과 실행 주체를 식별할 수 있게 하세요. MindNProgress 작업공간에서 직접 Git 커밋이 금지된 경우에는 `mindnprogress_checkpoint_ai_workspace`의 변경 설명 끝에 같은 정보를 포함하여 서버가 생성하는 체크포인트 커밋 하단에 남기세요.
