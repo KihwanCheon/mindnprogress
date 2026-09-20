@@ -48,7 +48,7 @@ function MeasuredMap({ map, members, onMeasured, onError, onZoomChange, layoutPr
       const imageSource = source?.data.kind === 'image'
       if (edge.data?.relation !== 'knowledge') return { ...edge, sourceHandle: imageSource ? 'image-source-right' : edge.sourceHandle }
       const primary = edge.data.knowledgePolicy !== 'inspect-if-insufficient'
-      const prefix = imageSource ? 'image-source' : source?.data.externalLink ? 'dooray-knowledge-source' : null
+      const prefix = imageSource ? 'image-source' : source?.data.externalLink || source?.data.webLink ? 'dooray-knowledge-source' : null
       const dx = (target?.position.x ?? 0) - (source?.position.x ?? 0); const dy = (target?.position.y ?? 0) - (source?.position.y ?? 0)
       const side = Math.abs(dx) >= Math.abs(dy) ? dx >= 0 ? 'right' : 'left' : dy >= 0 ? 'bottom' : 'top'
       const opposite = { left: 'right', right: 'left', top: 'bottom', bottom: 'top' }

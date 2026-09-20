@@ -75,6 +75,11 @@ export type MindDoorayWikiData = {
 
 export type MindDoorayLinkData = MindDoorayTaskData | MindDoorayWikiData
 
+export type MindWebLinkData = {
+  provider: 'web'
+  url: string
+}
+
 export type AiConversationRuntime = {
   conversationId: string
   state: 'running' | 'waiting-confirmation' | 'idle' | 'unknown'
@@ -84,6 +89,15 @@ export type AiConversationRuntime = {
   observedAt: string
   conversationCount?: number
   activeConversationIds?: string[]
+}
+
+export type AiDelegationCardStatus = {
+  kind: 'active' | 'recovery' | 'report'
+  count: number
+  activeCount: number
+  recoveryCount: number
+  reportCount: number
+  title: string
 }
 
 export type AiConversationOptionSnapshot = { id: string; label: string }
@@ -129,6 +143,7 @@ export type MindNodeData = {
   kind: 'root' | 'branch' | 'task' | 'image'
   image?: MindImageData
   externalLink?: MindDoorayLinkData
+  webLink?: MindWebLinkData
   imageAssetUrl?: string
   imageEditable?: boolean
   onImageResizeStart?: () => void
@@ -160,6 +175,8 @@ export type MindNodeData = {
   collapsed?: boolean
   hiddenDescendantCount?: number
   aiConversationRuntime?: AiConversationRuntime
+  aiDelegationStatus?: AiDelegationCardStatus
+  delegationPreviewRole?: 'source' | 'target'
   overlapStack?: {
     count: number
     titles: string[]
@@ -168,4 +185,5 @@ export type MindNodeData = {
   onToggleCollapse?: () => void
   onOpenWaitingItems?: () => void
   onOpenDependencies?: () => void
+  onOpenAiDelegationRecovery?: () => void
 }

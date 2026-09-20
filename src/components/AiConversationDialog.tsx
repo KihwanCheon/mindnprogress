@@ -1,11 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react'
 import type { KnowledgePolicy } from '../types/mindMap'
-import {
-  AI_WORKSPACE_MAX_LENGTH,
-  normalizeAiWorkspaceHistory,
-  rememberAiWorkspace,
-  removeAiWorkspace,
-} from '../utils/aiWorkspaceHistory.mjs'
+import { AI_WORKSPACE_MAX_LENGTH } from '../utils/aiWorkspaceHistory.mjs'
 import {
   availableAiRuntimeOptionId,
   getAiRuntimeSelection,
@@ -24,6 +19,7 @@ import './AiConversationDialog.css'
 import { WorkspaceSettingsDialog } from './WorkspaceSettingsDialog'
 import { WorkspaceHistoryList } from './WorkspaceHistoryList'
 import { useAiDialogSections } from './useAiDialogSections'
+import { useAiWorkspaceHistory } from './useAiWorkspaceHistory'
 import { loadWorkspaceContext, saveWorkspaceSetting, type WorkspaceContext, type WorkspaceChoice } from '../utils/workspaceSettings'
 
 type RuntimeOption = { id: string; label: string; description: string; providerId?: string }
@@ -61,8 +57,6 @@ type AionOptions = {
 }
 const runtimeSelectionsStorageKey = 'mindnprogress-ai-runtime-selections'
 const mcpSelectionsStorageKey = 'mindnprogress-ai-mcp-selections'
-const legacyWorkspaceHistoryStorageKey = 'mindnprogress-ai-workspace-history-v1'
-const workspaceHistoryApiPath = '/api/integrations/aionui/workspaces'
 const workspaceBrowseApiPath = '/api/integrations/aionui/directories'
 
 type WorkspaceDirectoryEntry = { name: string; path: string; git: boolean }
@@ -91,10 +85,6 @@ async function requestWorkspaceDirectory(directoryPath: string) {
   } satisfies WorkspaceDirectory
 }
 
-function workspaceHistoryStorageKey(userId: string, machineId = '') {
-  return `mindnprogress-ai-workspace-history-v2:${userId}${machineId ? `:${machineId}` : ''}`
-}
-
 function readRuntimeSelections() {
   try {
     return normalizeAiRuntimeSelections(JSON.parse(localStorage.getItem(runtimeSelectionsStorageKey) ?? '{}'))
@@ -111,62 +101,13 @@ function storeRuntimeSelections(value: ReturnType<typeof normalizeAiRuntimeSelec
   }
 }
 
-function readMcpSelections() {
+function readMcpSelections(fallback = new Set<string>()) {
   try {
     const value = JSON.parse(localStorage.getItem(mcpSelectionsStorageKey) ?? '[]') as unknown
     return new Set(Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string') : [])
   } catch {
-    return new Set<string>()
+    return new Set(fallback)
   }
-}
-
-function readWorkspaceHistory(userId: string, machineId = '') {
-  try {
-    const stored = localStorage.getItem(workspaceHistoryStorageKey(userId, machineId))
-      ?? (machineId ? null : localStorage.getItem(legacyWorkspaceHistoryStorageKey))
-      ?? '[]'
-    return normalizeAiWorkspaceHistory(JSON.parse(stored))
-  } catch {
-    return []
-  }
-}
-
-function readLegacyWorkspaceHistory() {
-  try {
-    return normalizeAiWorkspaceHistory(JSON.parse(localStorage.getItem(legacyWorkspaceHistoryStorageKey) ?? '[]'))
-  } catch {
-    return []
-  }
-}
-
-function storeWorkspaceHistory(userId: string, history: string[], machineId = '') {
-  try {
-    localStorage.setItem(workspaceHistoryStorageKey(userId, machineId), JSON.stringify(history))
-  } catch {
-    // 브라우저 저장소를 사용할 수 없어도 현재 대화는 시작할 수 있습니다.
-  }
-}
-
-function clearLegacyWorkspaceHistory() {
-  try {
-    localStorage.removeItem(legacyWorkspaceHistoryStorageKey)
-  } catch {
-    // 사용자별 서버 이력이 저장되었으므로 기존 공용 캐시 정리는 생략해도 됩니다.
-  }
-}
-
-async function requestWorkspaceHistory(method: 'GET' | 'POST' | 'DELETE', body?: object) {
-  const response = await fetch(workspaceHistoryApiPath, {
-    method,
-    credentials: 'include',
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
-    body: body ? JSON.stringify(body) : undefined,
-    keepalive: true,
-    signal: AbortSignal.timeout(5_000),
-  })
-  const result = await response.json().catch(() => ({})) as { workspaces?: unknown; error?: string }
-  if (!response.ok) throw new Error(result.error ?? '최근 작업공간을 동기화하지 못했습니다.')
-  return normalizeAiWorkspaceHistory(result.workspaces)
 }
 
 function encodeBase64Json(value: unknown) {
@@ -215,10 +156,8 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
   const [workspaceExplicit, setWorkspaceExplicit] = useState(false)
   const [workspaceSavedScope, setWorkspaceSavedScope] = useState<'document' | 'group' | null>(null)
   const [workspacePrompt, setWorkspacePrompt] = useState(false)
-  const [workspaceHistory, setWorkspaceHistory] = useState(() => readWorkspaceHistory(userId))
-  const workspaceHistoryRef = useRef(workspaceHistory)
-  const workspaceHistoryMutationRef = useRef(0)
-  const workspaceHistoryRequestRef = useRef<Promise<void>>(Promise.resolve())
+  const workspaceHistoryState = useAiWorkspaceHistory(userId, options?.machineId === machineId ? machineId : '')
+  const { history: workspaceHistory, remember: rememberWorkspace, remove: deleteWorkspaceHistory } = workspaceHistoryState
   const runtimeSelectionsRef = useRef(readRuntimeSelections())
   const [browserOpen, setBrowserOpen] = useState(false)
   const [browserDirectory, setBrowserDirectory] = useState<WorkspaceDirectory | null>(null)
@@ -244,46 +183,17 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
     storeRuntimeSelections(next)
   }, [])
 
-  const applyWorkspaceHistory = useCallback((history: string[]) => {
-    workspaceHistoryRef.current = history
-    storeWorkspaceHistory(userId, history, machineId)
-    setWorkspaceHistory(history)
-  }, [machineId, userId])
-
-  const enqueueWorkspaceHistoryRequest = useCallback((requestAction: () => Promise<string[]>) => {
-    const operation = workspaceHistoryRequestRef.current.then(requestAction, requestAction)
-    workspaceHistoryRequestRef.current = operation.then(() => undefined, () => undefined)
-    return operation
-  }, [])
-
-  useEffect(() => {
-    if (!options) return
-    if (options.machineRole === 'sub') {
-      applyWorkspaceHistory(readWorkspaceHistory(userId, options.machineId))
-      return
-    }
-    let active = true
-    const legacyHistory = readLegacyWorkspaceHistory()
-    const mutationVersion = workspaceHistoryMutationRef.current
-    const operation = enqueueWorkspaceHistoryRequest(async () => {
-      const serverHistory = await requestWorkspaceHistory('GET')
-      if (legacyHistory.length === 0) return serverHistory
-      return requestWorkspaceHistory('POST', { migration: true, workspaces: legacyHistory })
-    })
-    void operation.then((history) => {
-      clearLegacyWorkspaceHistory()
-      if (active && workspaceHistoryMutationRef.current === mutationVersion) applyWorkspaceHistory(history)
-    }).catch(() => {
-      // 서버가 일시적으로 응답하지 않으면 사용자별 브라우저 캐시를 계속 사용합니다.
-    })
-    return () => { active = false }
-  }, [applyWorkspaceHistory, enqueueWorkspaceHistoryRequest, options, userId])
-
   useEffect(() => {
     const controller = new AbortController()
     setLoading(true)
     setError('')
     setBrowserOpen(false)
+    browserRequestRef.current += 1
+    setBrowserDirectory(null)
+    setWorkspacePrompt(false)
+    setWorkspace('')
+    setWorkspaceExplicit(false)
+    setWorkspaceSavedScope(null)
     const params = new URLSearchParams()
     if (machineId) params.set('machineId', machineId)
     params.set('purpose', purpose)
@@ -293,6 +203,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
     fetch(`/api/integrations/aionui/options${query}`, { credentials: 'include', signal: controller.signal })
       .then(async (response) => {
         const body = await response.json().catch(() => ({})) as AionOptions & { error?: string }
+        if (controller.signal.aborted) throw controller.signal.reason
         if (!response.ok) {
           if (body.machineId && Array.isArray(body.machines)) {
             setOptions(body)
@@ -322,10 +233,11 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
           setThoughtLevel(availableAiRuntimeOptionId(initialAgent.thoughtLevels, savedAgentSelection.thoughtLevel, initialAgent.defaultThoughtLevel))
         }
         setSelectedSkillIds(new Set())
-        setSelectedMcpIds(new Set(body.mcpServers.filter((server) => server.required || savedMcpIds.has(server.id)).map((server) => server.id)))
+        // 현재 머신에 없는 ID도 보존한다. 표시와 실행 대상은 해당 머신의 목록에서만 고른다.
+        setSelectedMcpIds(savedMcpIds)
       })
       .catch((loadError) => {
-        if (loadError instanceof DOMException && loadError.name === 'AbortError') return
+        if (controller.signal.aborted) return
         setError(loadError instanceof Error ? loadError.message : 'AionUi 옵션을 불러오지 못했습니다.')
       })
       .finally(() => { if (!controller.signal.aborted) setLoading(false) })
@@ -336,14 +248,6 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
     if (!options || !agentId) return
     persistRuntimeSelection(agentId, { modelId, mode, thoughtLevel })
   }, [agentId, mode, modelId, options, persistRuntimeSelection, thoughtLevel])
-
-  useEffect(() => {
-    if (!options) return
-    const selectedIds = options.mcpServers
-      .filter((server) => !server.required && selectedMcpIds.has(server.id))
-      .map((server) => server.id)
-    localStorage.setItem(mcpSelectionsStorageKey, JSON.stringify(selectedIds))
-  }, [options, selectedMcpIds])
 
   const selectedAgent = useMemo(() => options?.agents.find((agent) => agent.id === agentId) ?? null, [agentId, options])
   const selectedModel = selectedAgent?.models.find((model) => model.id === modelId)
@@ -377,6 +281,28 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
     setWorkspaceSavedScope(null)
   }
 
+  const toggleMcpSelection = (id: string) => {
+    if (loading || launching || !options || options.machineId !== machineId) return
+    const server = options.mcpServers.find((item) => item.id === id)
+    if (!server || server.required) return
+    // 옵션 로딩·머신 전환·연결 실패는 사용자 선택 변경이 아니다. 체크 조작에서만 저장한다.
+    const next = readMcpSelections(selectedMcpIds)
+    if (selectedMcpIds.has(id)) next.delete(id)
+    else next.add(id)
+    setSelectedMcpIds(next)
+    try { localStorage.setItem(mcpSelectionsStorageKey, JSON.stringify([...next])) }
+    catch { /* 저장소를 사용할 수 없어도 현재 대화의 선택은 유지한다. */ }
+  }
+
+  const changeMachine = (value: string) => {
+    setLoading(true)
+    setWorkspace('')
+    setWorkspaceExplicit(false)
+    setWorkspaceSavedScope(null)
+    setWorkspacePrompt(false)
+    setMachineId(value)
+  }
+
   const openWorkspaceBrowser = useCallback((directoryPath: string) => {
     setBrowserOpen(true)
     setBrowserError('')
@@ -396,36 +322,6 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
         if (browserRequestRef.current === requestVersion) setBrowserLoading(false)
       })
   }, [])
-
-  const rememberWorkspace = async (value: string) => {
-    const normalizedWorkspace = value.trim()
-    if (!normalizedWorkspace) return
-    const next = rememberAiWorkspace(workspaceHistoryRef.current, normalizedWorkspace)
-    const mutationVersion = ++workspaceHistoryMutationRef.current
-    applyWorkspaceHistory(next)
-    try {
-      if (options?.machineRole === 'sub') return
-      const history = await enqueueWorkspaceHistoryRequest(() => requestWorkspaceHistory('POST', { workspace: normalizedWorkspace }))
-      if (workspaceHistoryMutationRef.current === mutationVersion) applyWorkspaceHistory(history)
-    } catch {
-      // 대화 시작은 서버 이력 저장 실패로 막지 않고 브라우저 캐시로 보완합니다.
-    }
-  }
-
-  const deleteWorkspaceHistory = async (value: string) => {
-    const previous = workspaceHistoryRef.current
-    const next = removeAiWorkspace(workspaceHistoryRef.current, value)
-    const mutationVersion = ++workspaceHistoryMutationRef.current
-    applyWorkspaceHistory(next)
-    try {
-      if (options?.machineRole === 'sub') return
-      const history = await enqueueWorkspaceHistoryRequest(() => requestWorkspaceHistory('DELETE', { workspace: value }))
-      if (workspaceHistoryMutationRef.current === mutationVersion) applyWorkspaceHistory(history)
-    } catch (reason) {
-      if (workspaceHistoryMutationRef.current === mutationVersion) applyWorkspaceHistory(previous)
-      throw reason
-    }
-  }
 
   const selectWorkspace = async (choice: WorkspaceChoice) => {
     if (!options || launching) throw new Error('대화 시작 옵션을 확인한 뒤 다시 선택해 주세요.')
@@ -591,7 +487,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
             {options && options.machines.length > 1 && (
               <label>
                 <span>실행 머신</span>
-                <select value={options.machineId} onChange={(event) => setMachineId(event.target.value)}>
+                <select value={options.machineId} disabled={launching} onChange={(event) => changeMachine(event.target.value)}>
                   {options.machines.map((machine) => (
                     <option key={machine.machineId} value={machine.machineId}>
                       {machine.label}{machine.role === 'main' ? ' · 메인' : machine.online === false ? ' · Runner 끊김' : ' · 서브'}
@@ -613,7 +509,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
             <div className="ai-knowledge-notice ai-machine-notice">
               <label className="ai-machine-select">
                 <span>실행 머신</span>
-                <select value={options.machineId} onChange={(event) => setMachineId(event.target.value)}>
+                <select value={options.machineId} disabled={launching} onChange={(event) => changeMachine(event.target.value)}>
                   {options.machines.map((machine) => (
                     <option key={machine.machineId} value={machine.machineId}>
                       {machine.label}{machine.role === 'main' ? ' · 메인' : machine.online === false ? ' · Runner 끊김' : ' · 서브'}
@@ -677,6 +573,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
               </label>
               <small>{workspaceSavedScope ? `${workspaceSavedScope === 'document' ? '문서' : '그룹'} 작업공간 기준에 저장한 경로 · 이번 대화에서 사용합니다.` : workspaceExplicit ? '이번 대화에서 선택한 경로 · 문서/그룹 기준은 변경하지 않습니다.' : options.workspaceContext?.source === 'document' ? '문서 작업공간 기준' : options.workspaceContext?.source === 'group' ? `${options.workspaceContext.groupName} 그룹 작업공간 기준` : '기준 미설정 · AionUi에서 시작을 누르면 선택할 수 있습니다.'}</small>
               {options.workspaceContext?.error && <small role="alert">{options.workspaceContext.error}</small>}
+              {workspaceHistoryState.error && <small role="status">{workspaceHistoryState.error}</small>}
               <button type="button" className="ai-workspace-browse ai-workspace-settings-button" disabled={launching} onClick={() => setWorkspacePrompt(true)}>작업공간 확인·설정…</button>
               {doorayApproval && Boolean(options.workspaceChoices?.length) && <WorkspaceHistoryList heading="문서·등록 작업공간" workspaces={options.workspaceChoices ?? []} workspace={workspace} onSelect={updateWorkspace} disabled={launching} />}
               {browserOpen && (
@@ -745,7 +642,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
               <div className="ai-capability-list ai-mcp-capability-list" aria-label="사용할 MCP 도구 선택">
                 {options.mcpServers.map((server) => (
                   <label key={server.id} title={server.description}>
-                    <input type="checkbox" checked={server.required || selectedMcpIds.has(server.id)} disabled={server.required} onChange={() => toggleSelection(setSelectedMcpIds, server.id)} />
+                    <input type="checkbox" checked={server.required || selectedMcpIds.has(server.id)} disabled={server.required || launching} onChange={() => toggleMcpSelection(server.id)} />
                     <span>
                       <strong>{server.name}{server.required ? ' · 필수' : ''}</strong>
                       <small>{server.toolCount > 0 ? `${server.toolCount}개 도구` : server.description || '도구 정보 없음'}</small>
@@ -768,7 +665,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
         <footer><span>응답은 {options?.machineLabel ?? '선택한 머신'}의 AionUi에서만 처리됩니다.</span><div><button type="button" onClick={onClose}>취소</button><button type="button" className="primary" onClick={() => { void launch() }} disabled={roleLoading || Boolean(roleError) || loading || launching || Boolean(error) || !selectedAgent || !modelId}>{launching ? '준비 중…' : 'AionUi에서 시작'}</button></div></footer>
       </section>
     </div>
-    {workspacePrompt && <WorkspaceSettingsDialog mapId={documentId} machineId={options?.machineId} name={documentTitle || cardTitle} initialWorkspace={workspace} workspaceHistory={workspaceHistory} onRemoveWorkspaceHistory={deleteWorkspaceHistory} onConfirm={selectWorkspace} onClose={() => setWorkspacePrompt(false)} />}
+    {workspacePrompt && <WorkspaceSettingsDialog key={`${userId}:${options?.machineId}`} userId={userId} mapId={documentId} machineId={options?.machineId} name={documentTitle || cardTitle} initialWorkspace={workspace} workspaceHistory={workspaceHistory} onRemoveWorkspaceHistory={deleteWorkspaceHistory} onConfirm={selectWorkspace} onClose={() => setWorkspacePrompt(false)} />}
     </>
   )
 }

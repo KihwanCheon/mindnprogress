@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './DoorayMentionsPanel.css'
 import { DoorayResponseInbox } from './DoorayResponseInbox'
 import type { DoorayHandoffLaunch } from './DoorayResponseHandoff'
-import { doorayResponseStatus, useDoorayResponses, type DoorayResponseJob } from './useDoorayResponses'
+import { doorayResponseStatusLabel, useDoorayResponses, type DoorayResponseJob } from './useDoorayResponses'
+import { doorayMentionQuickRangeDates, doorayMentionQuickRanges, doorayMentionRequestRange, toLocalDateInputValue } from '../utils/doorayMentionRange.mjs'
 
 export type DoorayMentionKind = 'mention-comment' | 'mention-body' | 'assigned' | 'cc' | 'related-comment'
 
@@ -103,37 +104,6 @@ const phaseLabels: Record<string, string> = {
   done: '완료',
 }
 
-const quickRanges = [
-  { id: 'today', calendarDays: 1, label: '오늘', title: '오늘 0시부터 현재까지' },
-  { id: 'one-day', rollingHours: 24, label: '1일', title: '현재 시각 기준 최근 24시간' },
-  { id: 'two-days', rollingHours: 48, label: '2일', title: '현재 시각 기준 최근 48시간' },
-  { id: 'three-days', calendarDays: 3, label: '3일', title: '오늘을 포함한 최근 3개 날짜' },
-  { id: 'seven-days', calendarDays: 7, label: '7일', title: '오늘을 포함한 최근 7개 날짜' },
-  { id: 'thirty-days', calendarDays: 30, label: '30일', title: '오늘을 포함한 최근 30개 날짜' },
-]
-
-function quickRangeDateValues(rangeId: string, currentTime = new Date()) {
-  const range = quickRanges.find((candidate) => candidate.id === rangeId)
-  if (!range) return null
-  const start = new Date(currentTime)
-  if (range.rollingHours) start.setTime(start.getTime() - range.rollingHours * 60 * 60 * 1_000)
-  else start.setDate(start.getDate() - ((range.calendarDays ?? 1) - 1))
-  return { since: toDateInputValue(start), until: toDateInputValue(currentTime) }
-}
-
-function toDateInputValue(date: Date) {
-  const offset = date.getTimezoneOffset() * 60_000
-  return new Date(date.getTime() - offset).toISOString().slice(0, 10)
-}
-
-function startOfDayIso(value: string) {
-  return new Date(`${value}T00:00:00`).toISOString()
-}
-
-function endOfDayIso(value: string) {
-  return new Date(`${value}T23:59:59.999`).toISOString()
-}
-
 function formatMoment(value: string) {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
@@ -202,11 +172,11 @@ export function DoorayMentionsPanel({ clientId, userId, aiRequestOpen = false, o
   onLaunchCard: (launch: DoorayHandoffLaunch) => void
 }) {
   const responses = useDoorayResponses(clientId, userId)
-  const today = useMemo(() => toDateInputValue(new Date()), [])
+  const today = useMemo(() => toLocalDateInputValue(new Date()), [])
   const [since, setSince] = useState(() => {
     const start = new Date()
     start.setDate(start.getDate() - 6)
-    return toDateInputValue(start)
+    return toLocalDateInputValue(start)
   })
   const [until, setUntil] = useState(today)
   const [quickRangeId, setQuickRangeId] = useState<string | null>('seven-days')
@@ -345,6 +315,13 @@ export function DoorayMentionsPanel({ clientId, userId, aiRequestOpen = false, o
     preferenceSaveQueueRef.current = pending
   }, [clientId, since, until, quickRangeId, sortOrder, includeBody, includeComments, includeAssigned, includeCc, unacknowledgedOnly, hiddenKinds])
 
+  const selectCustomDateRange = useCallback((nextSince: string, nextUntil: string) => {
+    setSince(nextSince)
+    setUntil(nextUntil)
+    setQuickRangeId(null)
+    persistPreferences({ since: nextSince, until: nextUntil, quickRangeId: null })
+  }, [persistPreferences])
+
   const load = useCallback(async () => {
     const signal = lifecycleControllerRef.current?.signal
     if (!signal) return null
@@ -357,7 +334,7 @@ export function DoorayMentionsPanel({ clientId, userId, aiRequestOpen = false, o
         const preferences = body.preferences
         if (preferences) {
           const quickDates = preferences.quickRangeId
-            ? quickRangeDateValues(preferences.quickRangeId)
+            ? doorayMentionQuickRangeDates(preferences.quickRangeId)
             : null
           setSince(quickDates?.since ?? preferences.since)
           setUntil(quickDates?.until ?? preferences.until)
@@ -388,6 +365,34 @@ export function DoorayMentionsPanel({ clientId, userId, aiRequestOpen = false, o
     setLoading(true)
     void load()
   }, [load])
+
+  useEffect(() => {
+    if (!quickRangeId) return undefined
+    let timer: number | undefined
+    const refreshDates = () => {
+      if (timer !== undefined) window.clearTimeout(timer)
+      const currentTime = new Date()
+      const dates = doorayMentionQuickRangeDates(quickRangeId, currentTime)
+      if (dates) {
+        setSince((current) => current === dates.since ? current : dates.since)
+        setUntil((current) => current === dates.until ? current : dates.until)
+      }
+      const nextDay = new Date(currentTime)
+      nextDay.setHours(24, 0, 0, 50)
+      timer = window.setTimeout(refreshDates, Math.max(1_000, nextDay.getTime() - currentTime.getTime()))
+    }
+    const refreshVisibleDates = () => {
+      if (document.visibilityState === 'visible') refreshDates()
+    }
+    refreshDates()
+    window.addEventListener('focus', refreshDates)
+    document.addEventListener('visibilitychange', refreshVisibleDates)
+    return () => {
+      if (timer !== undefined) window.clearTimeout(timer)
+      window.removeEventListener('focus', refreshDates)
+      document.removeEventListener('visibilitychange', refreshVisibleDates)
+    }
+  }, [quickRangeId])
 
   const running = data?.scan.status === 'running'
   useEffect(() => {
@@ -420,25 +425,24 @@ export function DoorayMentionsPanel({ clientId, userId, aiRequestOpen = false, o
       return
     }
     try {
-      const selectedQuickRange = quickRanges.find((range) => range.id === quickRangeId)
       const currentTime = new Date()
-      let requestSince = startOfDayIso(since)
-      let requestUntil = endOfDayIso(until)
-      if (selectedQuickRange?.rollingHours) {
-        requestSince = new Date(currentTime.getTime() - selectedQuickRange.rollingHours * 60 * 60 * 1_000).toISOString()
-        requestUntil = currentTime.toISOString()
-      } else if (selectedQuickRange?.calendarDays) {
-        const start = new Date(currentTime)
-        start.setDate(start.getDate() - (selectedQuickRange.calendarDays - 1))
-        requestSince = startOfDayIso(toDateInputValue(start))
-        requestUntil = currentTime.toISOString()
+      const currentQuickDates = quickRangeId ? doorayMentionQuickRangeDates(quickRangeId, currentTime) : null
+      if (currentQuickDates) {
+        setSince(currentQuickDates.since)
+        setUntil(currentQuickDates.until)
+        persistPreferences({ ...currentQuickDates, quickRangeId })
       }
+      const requestRange = doorayMentionRequestRange({
+        quickRangeId,
+        since: currentQuickDates?.since ?? since,
+        until: currentQuickDates?.until ?? until,
+      }, currentTime)
       await mentionRequest(clientId, '/api/integrations/dooray/mentions/scan', {
         method: 'POST',
         signal,
         body: JSON.stringify({
-          since: requestSince,
-          until: requestUntil,
+          since: requestRange.since,
+          until: requestRange.until,
           includeBody,
           includeComments,
           includeAssigned,
@@ -451,7 +455,7 @@ export function DoorayMentionsPanel({ clientId, userId, aiRequestOpen = false, o
     } catch (scanError) {
       if (!signal.aborted) setError(scanError instanceof Error ? scanError.message : '수집을 시작하지 못했습니다.')
     }
-  }, [clientId, since, until, quickRangeId, includeBody, includeComments, includeAssigned, includeCc, selectedProjectIds, load])
+  }, [clientId, since, until, quickRangeId, includeBody, includeComments, includeAssigned, includeCc, selectedProjectIds, load, persistPreferences])
 
   const acknowledge = useCallback(async (keys: string[], acknowledged: boolean) => {
     if (keys.length === 0) return
@@ -555,7 +559,7 @@ export function DoorayMentionsPanel({ clientId, userId, aiRequestOpen = false, o
         <div className="dooray-mentions-content" hidden={loading}>
         <div className="dooray-mentions-controls">
           <div className="dooray-mentions-range">
-            {quickRanges.map((range) => (
+            {doorayMentionQuickRanges.map((range) => (
               <button
                 key={range.id}
                 type="button"
@@ -563,7 +567,7 @@ export function DoorayMentionsPanel({ clientId, userId, aiRequestOpen = false, o
                 aria-pressed={quickRangeId === range.id}
                 title={range.title}
                 onClick={() => {
-                  const dates = quickRangeDateValues(range.id)
+                  const dates = doorayMentionQuickRangeDates(range.id)
                   if (!dates) return
                   setSince(dates.since)
                   setUntil(dates.until)
@@ -575,15 +579,11 @@ export function DoorayMentionsPanel({ clientId, userId, aiRequestOpen = false, o
               </button>
             ))}
             <input type="date" value={since} max={until} onChange={(event) => {
-              setSince(event.target.value)
-              setQuickRangeId(null)
-              persistPreferences({ since: event.target.value, quickRangeId: null })
+              selectCustomDateRange(event.target.value, until)
             }} aria-label="시작일" />
             <span>~</span>
             <input type="date" value={until} min={since} onChange={(event) => {
-              setUntil(event.target.value)
-              setQuickRangeId(null)
-              persistPreferences({ until: event.target.value, quickRangeId: null })
+              selectCustomDateRange(since, event.target.value)
             }} aria-label="종료일" />
           </div>
           <div className="dooray-mentions-options">
@@ -810,7 +810,7 @@ export function DoorayMentionsPanel({ clientId, userId, aiRequestOpen = false, o
                         <button type="button" className="dooray-response-request" disabled={responses.pendingKeys.has(item.key)}
                           onClick={() => void responses.request(item.key)}>
                           {responses.pendingKeys.has(item.key) ? '요청 준비 중…' : 'AI 대응 제안'}
-                          {responses.jobs.find((job) => job.itemKey === item.key) && ` · ${doorayResponseStatus[responses.jobs.find((job) => job.itemKey === item.key)!.status] ?? ''}`}
+                          {responses.jobs.find((job) => job.itemKey === item.key) && ` · ${doorayResponseStatusLabel(responses.jobs.find((job) => job.itemKey === item.key)!)}`}
                         </button>
                       </div>
                     </li>

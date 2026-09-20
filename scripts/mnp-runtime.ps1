@@ -105,7 +105,26 @@ function Test-MnpSameRecord($Before, $After) {
         $Before.ExecutablePath -ieq $After.ExecutablePath -and $Before.CommandLine -ceq $After.CommandLine
 }
 
+function Get-MnpTcpListeners([int[]]$Ports) {
+    # 사전 검사와 최종 검사를 같은 숨김 조회로 수행한다. NetTCPIP 공급자의 빈 결과에 의존하지 않는다.
+    # -p tcp는 IPv6 수신 포트를 제외하므로 전체 결과에서 TCP LISTENING만 선택한다.
+    $netstat = Invoke-MnpHiddenCommand (Join-Path $env:SystemRoot 'System32\netstat.exe') '-ano'
+    if ($netstat.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($netstat.Output) -or -not [string]::IsNullOrWhiteSpace($netstat.Error)) {
+        throw 'Could not verify TCP port ownership.'
+    }
+    foreach ($line in ($netstat.Output -split '\r?\n')) {
+        if ($line -notmatch '^\s*TCP\s+') { continue }
+        if ($line -notmatch '^\s*TCP\s+\S+:(\d+)\s+\S+\s+(\S+)\s+(\d+)\s*$') {
+            throw 'Unrecognized TCP row. Port ownership cannot be verified.'
+        }
+        if ($Matches[2] -eq 'LISTENING' -and $Ports -contains [int]$Matches[1]) {
+            [pscustomobject]@{ LocalPort = [int]$Matches[1]; OwningProcess = [int]$Matches[3] }
+        }
+    }
+}
+
 function Get-MnpSnapshot($Context, [switch]$FastPorts) {
+    # FastPorts는 기존 조회 호출과의 호환용이다. 지정 여부와 관계없이 같은 포트 검증을 사용한다.
     # Expensive identity queries are performed at boundaries, never inside polling loops.
     $all = @(Get-CimInstance Win32_Process -Filter "Name='node.exe' OR Name='powershell.exe' OR Name='wscript.exe'")
     $definitions = @(
@@ -148,17 +167,7 @@ function Get-MnpSnapshot($Context, [switch]$FastPorts) {
         }
         if ((Get-MnpProcessOwnerSid $record.Process.ProcessId) -ne $Context.OwnerSid) { throw "Cannot verify NHN ownership: $($record.Role)." }
     }
-    if ($FastPorts) {
-        $netstat = Invoke-MnpHiddenCommand (Join-Path $env:SystemRoot 'System32\netstat.exe') '-ano -p tcp'
-        if ($netstat.ExitCode -ne 0) { throw 'Could not verify final port ownership.' }
-        $listeners = @($netstat.Output -split '\r?\n' | ForEach-Object {
-            if ($_ -match '^\s*TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$' -and $Context.Ports -contains [int]$Matches[1]) {
-                [pscustomobject]@{ LocalPort = [int]$Matches[1]; OwningProcess = [int]$Matches[2] }
-            }
-        })
-    } else {
-        $listeners = @(Get-NetTCPConnection -State Listen | Where-Object { $Context.Ports -contains $_.LocalPort })
-    }
+    $listeners = @(Get-MnpTcpListeners $Context.Ports)
     foreach ($listener in $listeners) {
         $expectedRole = if ($listener.LocalPort -eq $Context.Config.apiPort) { 'api' } else { 'web' }
         if (-not @($records | Where-Object { $_.Role -eq $expectedRole -and $_.Process.ProcessId -eq $listener.OwningProcess }).Count) {
@@ -275,7 +284,7 @@ function Test-MnpHttp($Context, [int]$TimeoutMilliseconds = 900) {
     $handler.UseProxy = $false
     $client = New-Object Net.Http.HttpClient($handler)
     $client.Timeout = [timespan]::FromMilliseconds([math]::Max(1, $TimeoutMilliseconds))
-    $web = $null; $api = $null
+    $web = $null; $api = $null; $webTask = $null; $apiTask = $null
     $watch = [Diagnostics.Stopwatch]::StartNew()
     $check = [ordered]@{ healthy = $false; timeoutMs = $TimeoutMilliseconds; webStatus = $null; apiStatus = $null; error = $null; elapsedMs = 0 }
     try {
@@ -291,6 +300,9 @@ function Test-MnpHttp($Context, [int]$TimeoutMilliseconds = 900) {
         }
     } catch { $check.error = $_.Exception.GetBaseException().GetType().Name; Write-Verbose "HTTP check failed: $($_.Exception.Message)" }
     finally {
+        # 한쪽 요청이 멈추거나 실패해도 이미 완료된 다른 쪽의 상태 코드를 진단에 남긴다.
+        if ($webTask -and $webTask.Status -eq 'RanToCompletion') { $web = $webTask.Result; $check.webStatus = [int]$web.StatusCode }
+        if ($apiTask -and $apiTask.Status -eq 'RanToCompletion') { $api = $apiTask.Result; $check.apiStatus = [int]$api.StatusCode }
         if ($web) { $web.Dispose() }; if ($api) { $api.Dispose() }; $client.Dispose(); $handler.Dispose()
         $check.elapsedMs = $watch.ElapsedMilliseconds
         $script:MnpLastHttpCheck = $check
@@ -299,12 +311,18 @@ function Test-MnpHttp($Context, [int]$TimeoutMilliseconds = 900) {
 }
 
 function Wait-MnpHttpReady($Context, [datetime]$Deadline, [string]$Failure) {
+    $nextReportAt = [datetime]::MinValue
     do {
         $remainingMs = [int][math]::Ceiling(($Deadline - [datetime]::UtcNow).TotalMilliseconds)
         if ($remainingMs -le 0) { break }
-        # One deadline covers startup and final verification. Do not repeatedly
-        # cancel a healthy slow response after 900 ms or create a fresh final budget.
-        if (Test-MnpHttp $Context $remainingMs) { return }
+        # 전체 시작·최종 검증의 마감은 유지하되 멈춘 한 요청이 남은 시간을 전부 소비하지 않게 한다.
+        # 기존 900ms보다 긴 정상 응답을 허용하고, 최대 5초마다 새 연결로 다시 확인한다.
+        if (Test-MnpHttp $Context ([math]::Min(5000, $remainingMs))) { return }
+        if ([datetime]::UtcNow -ge $nextReportAt) {
+            $check = $script:MnpLastHttpCheck
+            Write-Host "[http-wait] web=$($check.webStatus); api=$($check.apiStatus); error=$($check.error); elapsed=$($check.elapsedMs)ms"
+            $nextReportAt = [datetime]::UtcNow.AddSeconds(2)
+        }
         $sleepMs = [math]::Min(150, [math]::Max(0, ($Deadline - [datetime]::UtcNow).TotalMilliseconds))
         if ($sleepMs -gt 0) { Start-Sleep -Milliseconds ([int]$sleepMs) }
     } while ([datetime]::UtcNow -lt $Deadline)

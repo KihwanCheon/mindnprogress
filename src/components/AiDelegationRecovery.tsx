@@ -36,8 +36,19 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   return body as T
 }
 
-export function AiDelegationRecovery({ mapId, cardId }: { mapId: string; cardId: string }) {
+export type AiDelegationPreviewCard = { mapId: string; cardId: string }
+export type AiDelegationPreview = { parent: AiDelegationPreviewCard; target: AiDelegationPreviewCard }
+
+export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHandled, onSelectCard, onPreviewCards }: {
+  mapId: string
+  cardId: string
+  focusRequestId?: number
+  onFocusHandled?: (requestId: number) => void
+  onSelectCard: (mapId: string, cardId: string) => void
+  onPreviewCards: (preview: AiDelegationPreview | null) => void
+}) {
   const [items, setItems] = useState<Delegation[]>([])
+  const [loaded, setLoaded] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
@@ -45,13 +56,17 @@ export function AiDelegationRecovery({ mapId, cardId }: { mapId: string; cardId:
   const [closeDraft, setCloseDraft] = useState<{ id: string; reason: CloseReason; note: string } | null>(null)
   const mounted = useRef(true)
   const acting = useRef(false)
+  const sectionRef = useRef<HTMLElement | null>(null)
+  const previewedItemId = useRef<string | null>(null)
   const listUrl = `/api/maps/${encodeURIComponent(mapId)}/ai-delegations`
   const refresh = useCallback(async (signal?: AbortSignal) => {
     const data = await request<{ delegations: Delegation[] }>(listUrl, { signal })
     const relevant = data.delegations.filter((item) =>
-      item.mapId === mapId && item.targetCardId === cardId
-      || (item.parentMapId ?? item.mapId) === mapId && item.parentCardId === cardId)
-    if (mounted.current) setItems(relevant)
+      (item.parentMapId ?? item.mapId) === mapId && item.parentCardId === cardId)
+    if (mounted.current) {
+      setItems(relevant)
+      setLoaded(true)
+    }
   }, [listUrl, mapId, cardId])
 
   useEffect(() => {
@@ -68,6 +83,8 @@ export function AiDelegationRecovery({ mapId, cardId }: { mapId: string; cardId:
     void poll()
     return () => { mounted.current = false; controller.abort(); clearTimeout(timer) }
   }, [refresh])
+
+  useEffect(() => () => onPreviewCards(null), [onPreviewCards])
 
   async function action(item: Delegation, kind: 'refresh' | 'recover' | 'retry-report' | 'supersede') {
     if (acting.current) return
@@ -148,19 +165,72 @@ export function AiDelegationRecovery({ mapId, cardId }: { mapId: string; cardId:
     }
   }
 
-  const pending = items.filter((item) => !['completed', 'failed', 'superseded', 'closed'].includes(item.state))
+  const pending = items.filter((item) =>
+    !['completed', 'failed', 'superseded', 'closed'].includes(item.state)
+    || item.recovery?.recoveryAvailable
+    || item.recovery?.reportRetryAvailable)
+  const recoveryCount = pending.filter((item) => item.recovery?.recoveryAvailable || item.recovery?.reportRetryAvailable).length
+  const activeCount = pending.length - recoveryCount
+  const sectionTitle = recoveryCount > 0
+    ? activeCount > 0 ? 'AI 위임 현황 및 복구' : 'AI 작업 복구'
+    : 'AI 위임 진행 현황'
+  const sectionCount = [
+    activeCount > 0 ? `진행 중 ${activeCount}건` : '',
+    recoveryCount > 0 ? `복구 필요 ${recoveryCount}건` : '',
+  ].filter(Boolean).join(' · ') || '상태 확인'
+  const sectionSummary = recoveryCount > 0
+    ? activeCount > 0
+      ? '진행 중인 AI 위임을 확인하고, 중단된 작업 재개나 결과 전달 등 필요한 후속 조치를 할 수 있습니다.'
+      : '중단된 작업을 재개하거나 저장된 결과를 다시 전달하고, 복구할 수 없는 기록을 완료로 표시하지 않고 정리할 수 있습니다.'
+    : '진행 중인 AI 위임의 현재 상태를 확인할 수 있습니다.'
+  useEffect(() => {
+    if (!previewedItemId.current || pending.some((item) => item.id === previewedItemId.current)) return
+    previewedItemId.current = null
+    onPreviewCards(null)
+  }, [onPreviewCards, pending])
+  useEffect(() => {
+    if (!focusRequestId || (!loaded && !error && !notice)) return
+    const frame = window.requestAnimationFrame(() => {
+      sectionRef.current?.scrollIntoView({ block: 'start' })
+      sectionRef.current?.focus({ preventScroll: true })
+      onFocusHandled?.(focusRequestId)
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [error, focusRequestId, loaded, notice, onFocusHandled, pending.length])
   if (!pending.length && !error && !notice) return null
-  return <section className="ai-delegation-recovery" aria-label="AI 작업 복구">
+  return <section ref={sectionRef} className="ai-delegation-recovery" aria-label={sectionTitle} tabIndex={-1}>
     <div className="ai-delegation-recovery-heading">
-      <strong>AI 작업 복구</strong>
-      <small>{pending.length ? `미종료 위임 ${pending.length}건` : '상태 확인'}</small>
+      <strong>{sectionTitle}</strong>
+      <small>{sectionCount}</small>
     </div>
-    <p className="ai-delegation-recovery-summary">중단 작업을 이어가거나, 복구할 수 없는 기록을 완료로 표시하지 않고 정리할 수 있습니다.</p>
+    <p className="ai-delegation-recovery-summary">{sectionSummary}</p>
     {pending.map((item) => {
       const candidates = completedReplacementDelegations(item, items)
       const selectedReplacementId = replacementIds[item.id] ?? candidates[0]?.id ?? ''
       const closing = closeDraft?.id === item.id
-      return <div className="ai-delegation-recovery-item" key={item.id}>
+      return <div
+        className="ai-delegation-recovery-item"
+        key={item.id}
+        onMouseEnter={() => {
+          previewedItemId.current = item.id
+          onPreviewCards({
+            parent: { mapId: item.parentMapId ?? item.mapId, cardId: item.parentCardId },
+            target: { mapId: item.mapId, cardId: item.targetCardId },
+          })
+        }}
+        onMouseLeave={() => {
+          if (previewedItemId.current !== item.id) return
+          previewedItemId.current = null
+          onPreviewCards(null)
+        }}
+      >
+        <button
+          type="button"
+          className="ai-delegation-recovery-item-select"
+          aria-label={`${item.targetCardLabel} 카드 선택`}
+          title={`${item.targetCardLabel} 카드 선택`}
+          onClick={() => onSelectCard(item.mapId, item.targetCardId)}
+        />
         <div className="ai-delegation-recovery-item-heading">
           <div>
             <b>{item.targetCardLabel}</b>

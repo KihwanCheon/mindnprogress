@@ -33,6 +33,7 @@ test('현재 확인이 필요한 상태와 완료 결과 전달 대기를 구분
   const report = { ...delegation('report', 'a', 'parent-wake-failed'), workCompleted: true, reportPending: true }
   assert.deepEqual(groupDelegationPresentation(report), { label: '작업 완료 · 총괄 보고 실패', tone: 'warning', attention: true })
   assert.equal(groupDelegationPresentation(delegation('limit', 'a', 'waiting-usage-limit')).attention, true)
+  assert.equal(groupDelegationPresentation(delegation('capacity', 'a', 'waiting-model-capacity')).label, '모델 실행 용량 대기')
   assert.equal(groupDelegationPresentation({ state: 'failed', displayState: 'recovery-dispatch-pending' }).tone, 'warning')
   assert.equal(groupDelegationPresentation({ state: 'failed' }).tone, 'danger')
   assert.equal(groupDelegationPresentation(null).label, '위임 없음')

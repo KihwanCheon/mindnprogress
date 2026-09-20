@@ -1558,7 +1558,8 @@
   background: var(--theme-danger-soft);
 }
 
-[data-theme="dark"] .ai-conversation-runtime-badge {
+[data-theme="dark"] .ai-conversation-runtime-badge,
+[data-theme="dark"] .node-topline > .ai-delegation-status-badge {
   color: #b9b0ff;
   border-color: #4b456c;
   background: var(--theme-accent-soft);
@@ -1571,12 +1572,26 @@
 }
 
 [data-theme="dark"] .ai-conversation-runtime-badge.running,
-[data-theme="dark"] .mind-node.root .ai-conversation-runtime-badge.running {
+[data-theme="dark"] .mind-node.root .ai-conversation-runtime-badge.running,
+[data-theme="dark"] .node-topline > .ai-delegation-status-badge.active,
+[data-theme="dark"] .mind-node.root .node-topline > .ai-delegation-status-badge.active {
   --ai-runtime-border-dim: #6d4a23;
   --ai-runtime-border-bright: #ffb454;
   --ai-runtime-glow-near: rgba(255, 180, 84, .42);
   --ai-runtime-glow-mid: rgba(255, 180, 84, .18);
   --ai-runtime-glow-far: rgba(255, 180, 84, .07);
+}
+
+[data-theme="dark"] .node-topline > .ai-delegation-status-badge.recovery-required,
+[data-theme="dark"] .mind-node.root .node-topline > .ai-delegation-status-badge.recovery-required {
+  --ai-runtime-border-dim: #713940;
+  --ai-runtime-border-bright: #ff7982;
+  --ai-runtime-glow-near: rgba(255, 121, 130, .42);
+  --ai-runtime-glow-mid: rgba(255, 121, 130, .18);
+  --ai-runtime-glow-far: rgba(255, 121, 130, .07);
+  color: #ffadb3;
+  border-color: #713940;
+  background: var(--theme-danger-soft);
 }
 
 /* High-contrast tuning for dense desktop use */

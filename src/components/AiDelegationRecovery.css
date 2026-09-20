@@ -38,11 +38,46 @@
 }
 
 .ai-delegation-recovery-item {
+  position: relative;
   margin-top: 10px;
   padding: 10px 11px;
   border: 1px solid var(--theme-border, #e8e5ed);
   border-radius: 9px;
   background: var(--theme-surface-raised, #faf9fc);
+  transition: border-color .15s, box-shadow .15s, background .15s;
+}
+
+.ai-delegation-recovery-item > :not(.ai-delegation-recovery-item-select) {
+  position: relative;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.ai-delegation-recovery-item :is(button, a, input, select, textarea, label, [contenteditable="true"]) {
+  pointer-events: auto;
+}
+
+.ai-delegation-recovery-item-select {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: inherit;
+  outline: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.ai-delegation-recovery-item:has(> .ai-delegation-recovery-item-select:hover) {
+  border-color: color-mix(in srgb, var(--theme-accent, #6657d9) 38%, var(--theme-border, #e8e5ed));
+  background: color-mix(in srgb, var(--theme-surface-raised, #faf9fc) 94%, var(--theme-accent, #6657d9));
+}
+
+.ai-delegation-recovery-item:has(> .ai-delegation-recovery-item-select:focus-visible) {
+  border-color: var(--theme-accent, #6657d9);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--theme-accent, #6657d9) 14%, transparent);
 }
 
 .ai-delegation-recovery-item-heading {

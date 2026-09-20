@@ -29,7 +29,7 @@ window.fetch = async (url, init = {}) => {
     body = a.context;
   } else if (url.startsWith('/api/integrations/aionui/options')) body = options;
   else if (url.startsWith('/api/integrations/aionui/workspace-context')) body = workspaceContext;
-  else if (url === '/api/integrations/aionui/workspaces') body = {workspaces:[]};
+  else if (url.startsWith('/api/integrations/aionui/workspaces?')) body = {userId:'fixture',machineId:'fixture',workspaces:[]};
   else if (url === '/api/integrations/aionui/dialog-preferences') body = {userId:'fixture',sections:{workspace:true,mcp:true,skills:true}};
   else if (url === '/api/integrations/aionui/attributions') body = {editorId:'fixture',attributionToken:'fixture',completionUrl:'http://fixture.invalid/completion'};
   else if (url === '/api/integrations/aionui/external-conversation-launches') body = {launchUrl:'about:blank'};

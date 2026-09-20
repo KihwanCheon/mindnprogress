@@ -40,6 +40,9 @@ test('작업공간 지침은 기존 대화에도 재배정 정보를 명확하�
     unityInstanceHash: '35b9a6e8409bd02a',
   })
   assert.match(instruction, /workspaceId: `fork2`/)
+  assert.match(instruction, /현재 작업공간 배정의 최신본/)
+  assert.match(instruction, /모든 작업공간 배정 전문은 더 이상 배정 근거로 사용하지 마세요/)
+  assert.match(instruction, /workspaceId.*jobId.*leaseId.*projectRoot.*branch.*baseCommit.*조합만 현재 유효합니다/)
   assert.match(instruction, /projectRoot: `C:\\Dev\\Game_Worker02\\client`/)
   assert.match(instruction, /sharedRoot: `C:\\Dev\\Game_Workspaces`/)
   assert.match(instruction, /다른 등록 작업공간으로 이동하거나/)
@@ -47,6 +50,9 @@ test('작업공간 지침은 기존 대화에도 재배정 정보를 명확하�
   assert.match(instruction, /직접 커밋하지 마세요/)
   assert.match(instruction, /commitMessage/)
   assert.match(instruction, /mindnprogress_checkpoint_ai_workspace.*operation\.action=confirm-no-changes/)
+  assert.match(instruction, /MNP_WORKSPACE_ASSIGNMENT_MISMATCH/)
+  assert.match(instruction, /파일 수정, 브랜치 전환, 새 작업공간 탐색 또는 기존 변경 정리를 하지 말고/)
+  assert.doesNotMatch(instruction, /ready_for_tools|mcpforunity:\/\/editor\/state|stale_status/)
 })
 
 test('체크포인트 커밋 메시지는 실제 변경 구조와 금지 항목을 검증한다', () => {

@@ -148,12 +148,13 @@ test('중첩 묶음의 파생 진행률은 상위 집계에 중복 포함하지 
   assert.equal(rollups.find((candidate) => candidate.nodeId === 'root').targetCount, 3)
 })
 
-test('이미지, Ref, Dooray 지식 카드는 비업무여도 롤업 대상으로 만들지 않는다', () => {
+test('이미지, Ref, Dooray 지식, 웹 링크 카드는 비업무여도 롤업 대상으로 만들지 않는다', () => {
   const nodes = [
     node('root', { kind: 'root', label: '루트', status: 'planned', progress: 0 }),
     node('image', { kind: 'image', label: '이미지', isWork: false, progress: 0 }),
     node('ref', { kind: 'branch', label: 'Ref', isWork: false, progress: 0, reference: { mapId: 'other', nodeId: 'source' } }),
     node('dooray', { kind: 'task', label: 'Dooray', isWork: false, progress: 0, externalLink: { provider: 'dooray-wiki' } }),
+    node('web', { kind: 'task', label: '웹 링크', isWork: false, progress: 0, webLink: { provider: 'web', url: 'https://example.com/' } }),
     node('a', { kind: 'task', label: 'A', isWork: true, status: 'in-progress', progress: 40 }),
   ]
   const edges = [
@@ -163,6 +164,8 @@ test('이미지, Ref, Dooray 지식 카드는 비업무여도 롤업 대상으�
     hierarchy('ref', 'a'),
     hierarchy('root', 'dooray'),
     hierarchy('dooray', 'a'),
+    hierarchy('root', 'web'),
+    hierarchy('web', 'a'),
   ]
   const rollupIds = computeProgressRollups(nodes, edges).map((rollup) => rollup.nodeId)
   assert.deepEqual(rollupIds, ['root'])

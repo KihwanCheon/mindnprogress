@@ -27,13 +27,45 @@ import {
   nextAiDelegationWaitPoll,
   shouldReconcileAiDelegationChildWorkspace,
   retryableExternalLimitCategory,
+  AI_DELEGATION_COMPLETION_NOTIFICATION_TYPE,
+  aiDelegationCompletionNotice,
 } from '../server/lib/aiDelegations.mjs'
+
+test('하위 작업 완료 알림은 실제 완료 판정에 도달한 위임에 한 번만 만들고 차단 알림과 타입을 구분한다', () => {
+  const completed = {
+    id: 'delegation-done', state: 'waiting-parent', childStatus: 'completed',
+    parentCardId: 'parent-card', parentCardLabel: '상위 기능', targetCardId: 'child-card',
+    workspaceLease: { leaseId: 'lease-1' }, workspaceResult: { status: 'completed' },
+  }
+  const notice = aiDelegationCompletionNotice(completed)
+  assert.equal(AI_DELEGATION_COMPLETION_NOTIFICATION_TYPE, 'ai-delegation-completed')
+  assert.equal(notice.dedupeKey, 'ai-delegation-completed:delegation-done')
+  assert.match(notice.message, /하위 AI 작업이 완료되었습니다/)
+  assert.match(notice.message, /"상위 기능"/)
+  assert.equal(aiDelegationCompletionNotice({ ...completed, completedNotificationKey: notice.dedupeKey }), null, '이미 알린 위임은 다시 만들지 않는다.')
+  for (const state of ['waking-parent', 'parent-wake-failed', 'completed']) {
+    assert.ok(aiDelegationCompletionNotice({ ...completed, state }), `${state}도 하위 작업 완료 알림 대상이다.`)
+  }
+  assert.match(aiDelegationCompletionNotice({ ...completed, parentCardLabel: '  ', parentCardId: '' }).message, /"상위 카드"/)
+
+  assert.equal(aiDelegationCompletionNotice({ ...completed, state: 'running', childStatus: null }), null)
+  assert.equal(aiDelegationCompletionNotice({ ...completed, state: 'waiting-document-work' }), null, '문서 조정 대기는 완료가 아니다.')
+  assert.equal(aiDelegationCompletionNotice({ ...completed, state: 'waiting-integration', workspaceResult: { status: 'waiting-integration' } }), null, '통합이 끝나기 전에는 알리지 않는다.')
+  assert.equal(aiDelegationCompletionNotice({ ...completed, workspaceError: '통합 실패' }), null)
+  assert.equal(aiDelegationCompletionNotice({ ...completed, integrationOperationId: 'integration-1', integrationStatus: 'running' }), null)
+  for (const state of ['failed', 'superseded', 'closed']) {
+    assert.equal(aiDelegationCompletionNotice({ ...completed, state }), null, `${state} 위임은 완료로 알리지 않는다.`)
+  }
+  assert.equal(aiDelegationCompletionNotice(null), null)
+})
 
 test('CLI 한도 오류 문구와 변경 없이 반납된 과거 위임도 복구 대상으로 인식한다', () => {
   for (const message of ["You've hit your limit", 'insufficient_quota', 'quota exhausted', 'You exceeded your current quota', 'out of extra usage', '사용량이 소진되었습니다.']) {
     assert.equal(retryableExternalLimitCategory(message), 'usage-limit', message)
   }
   assert.equal(retryableExternalLimitCategory('rate_limit_exceeded'), 'rate-limit')
+  assert.equal(retryableExternalLimitCategory('Selected model is at capacity. Please try a different model.'), 'model-capacity')
+  assert.equal(retryableExternalLimitCategory('선택한 모델의 실행 용량이 부족합니다.'), 'model-capacity')
   assert.equal(retryableExternalLimitCategory('컴파일러의 배열 인덱스 초과'), null)
   assert.equal(aiDelegationRecoveryAvailability({
     state: 'waiting-usage-limit', childStatus: 'failed', childError: 'usage limit exceeded',
@@ -95,6 +127,21 @@ test('사용량 또는 요청 한도로 격리된 parent-wake-failed 위임은 �
     recommendedAction: 'resume-existing',
     recoveryTool: 'mindnprogress_recover_ai_delegation',
   })
+  assert.deepEqual(aiDelegationRecoveryAvailability({
+    ...base,
+    state: 'failed',
+    workspaceResult: { ...base.workspaceResult, childError: 'Selected model is at capacity. Please try a different model.' },
+  }), {
+    failurePhase: 'child',
+    failureCategory: 'model-capacity',
+    recoveryAvailable: true,
+    recommendedAction: 'resume-existing',
+    recoveryTool: 'mindnprogress_recover_ai_delegation',
+  })
+  assert.equal(aiDelegationDisplayState({
+    state: 'failed', childStatus: 'failed', childError: '하위 AI 작업이 완료되지 않아 변경을 통합하지 않았습니다.',
+    workspaceResult: { childError: 'Selected model is at capacity. Please try a different model.' },
+  }), 'waiting-model-capacity')
 })
 
 test('작업 실패 원인이 외부 한도가 아니거나 상위 통지만 실패한 위임은 하위 작업을 재실행하지 않는다', () => {

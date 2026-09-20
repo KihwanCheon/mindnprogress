@@ -2,6 +2,8 @@ export type AiDelegationSummary = {
   id: string
   state: string
   displayState?: string
+  reasonCode?: string
+  message?: string
   mapId: string
   parentMapId?: string | null
   groupId?: string | null
@@ -17,6 +19,7 @@ export type AiDelegationSummary = {
   childError?: string | null
   parentDispatchState?: string | null
   parentError?: string | null
+  recoveryDispatchError?: string | null
   result?: string
   resultAvailability?: 'captured' | 'unavailable' | 'integrity-failed'
   workCompleted?: boolean
@@ -38,3 +41,20 @@ export type AiDelegationSummary = {
 }
 
 export function completedReplacementDelegations(delegation: AiDelegationSummary, delegations: AiDelegationSummary[]): AiDelegationSummary[]
+export function delegationHierarchyPathNodeIds(
+  parentCardId: string,
+  targetCardId: string,
+  hierarchyEdges: Array<{ source: string; target: string }>,
+): Set<string>
+export function delegationPreviewEdgeState(
+  edge: { source: string; target: string; data?: { relation?: string } },
+  pathNodeIds: Set<string> | null,
+): '' | 'edge-linked' | 'edge-dimmed'
+export function delegationPreviewNodeRole(
+  preview: {
+    parent: { mapId: string; cardId: string }
+    target: { mapId: string; cardId: string }
+  } | null,
+  activeMapId: string,
+  nodeId: string,
+): 'source' | 'target' | undefined

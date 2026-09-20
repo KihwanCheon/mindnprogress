@@ -337,6 +337,8 @@ export function buildWorkspaceInstruction(lease) {
   const sharedRoot = String(lease.sharedRoot ?? '').trim()
   return `# 할당된 작업공간
 
+이 전문이 현재 작업공간 배정의 최신본입니다. 이 대화에 앞서 전달된 모든 작업공간 배정 전문은 더 이상 배정 근거로 사용하지 마세요. 이번 전문에 기재된 \`workspaceId\`, \`jobId\`, \`leaseId\`, \`projectRoot\`, \`branch\`, \`baseCommit\` 조합만 현재 유효합니다. 이전 전문과 값이 다르면 이전 배정은 만료된 것입니다.
+
 - workspaceId: \`${lease.workspaceId}\`
 - jobId: \`${lease.jobId}\`
 - leaseId: \`${lease.leaseId}\`
@@ -345,6 +347,8 @@ ${sharedRoot ? `- sharedRoot: \`${sharedRoot}\`\n` : ''}- branch: \`${lease.bran
 - baseCommit: \`${lease.baseCommit}\`
 - Unity assetsPath: \`${lease.assetsPath}\`
 - Unity instance hash: \`${lease.unityInstanceHash}\`
+
+작업 전에 \`.ai-session.json\`의 \`workspaceId\`, \`jobId\`, \`leaseId\`, \`projectRoot\`, \`branch\`, \`baseCommit\`이 이번 전문과 일치하는지 확인하세요. 하나라도 일치하지 않으면 파일 수정, 브랜치 전환, 새 작업공간 탐색 또는 기존 변경 정리를 하지 말고 \`MNP_WORKSPACE_ASSIGNMENT_MISMATCH\`와 불일치 필드만 보고하세요.
 
 이 작업에서는 위 \`projectRoot\`만 수정하세요. 다른 등록 작업공간으로 이동하거나 브랜치를 바꾸거나 lease를 직접 해제하지 마세요. \`.ai-session.json\`의 값이 위 정보와 일치하는지 먼저 확인하세요.${sharedRoot ? ` 공통 규칙과 지식은 \`sharedRoot\`에서 읽기 전용으로 사용하고, 제안은 \`knowledge-inbox/${lease.jobId}.md\`에 기록하세요.` : ''}
 
@@ -1281,9 +1285,9 @@ export class WorkspacePoolManager {
     return this.runExclusive(async () => {
       const normalizedLeaseId = String(leaseId ?? '').trim()
       const normalizedConversationId = String(conversationId ?? '').trim()
-      if (!dispatchRecovery && !['usage-limit', 'rate-limit'].includes(String(failureCategory ?? '').trim())) {
+      if (!dispatchRecovery && !['usage-limit', 'rate-limit', 'model-capacity'].includes(String(failureCategory ?? '').trim())) {
         throw new WorkspacePoolUnavailableError(
-          '외부 사용량 또는 요청 한도로 확인된 격리 lease만 재활성화할 수 있습니다.',
+          '외부 사용량·요청 한도 또는 모델 용량 부족으로 확인된 격리 lease만 재활성화할 수 있습니다.',
           [],
           'QUARANTINED_LEASE_FAILURE_NOT_RETRYABLE',
         )

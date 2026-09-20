@@ -1,4 +1,5 @@
-.ai-conversation-runtime-badge {
+.ai-conversation-runtime-badge,
+.node-topline > .ai-delegation-status-badge {
   min-width: 0;
   display: inline-flex;
   flex: 0 0 auto;
@@ -15,18 +16,35 @@
   white-space: nowrap;
 }
 
+.node-topline > .ai-delegation-status-badge {
+  margin-left: auto;
+}
+
 .ai-conversation-runtime-badge.waiting-confirmation {
   color: #9a6a1d;
   border-color: #ecd9ae;
   background: #fff9e9;
 }
 
-.ai-conversation-runtime-badge.running {
+.ai-conversation-runtime-badge.running,
+.node-topline > .ai-delegation-status-badge.active {
   --ai-runtime-border-dim: #dfa3e4;
   --ai-runtime-border-bright: #cf2bd8;
   --ai-runtime-glow-near: rgba(207, 43, 216, .42);
   --ai-runtime-glow-mid: rgba(207, 43, 216, .2);
   --ai-runtime-glow-far: rgba(207, 43, 216, .08);
+  animation: ai-conversation-runtime-border 1.8s ease-in-out infinite;
+}
+
+.node-topline > .ai-delegation-status-badge.recovery-required {
+  --ai-runtime-border-dim: #e1a3a8;
+  --ai-runtime-border-bright: #d43f49;
+  --ai-runtime-glow-near: rgba(212, 63, 73, .4);
+  --ai-runtime-glow-mid: rgba(212, 63, 73, .18);
+  --ai-runtime-glow-far: rgba(212, 63, 73, .07);
+  color: #b43a43;
+  border-color: #e1a3a8;
+  background: #fff0f1;
   animation: ai-conversation-runtime-border 1.8s ease-in-out infinite;
 }
 
@@ -70,7 +88,8 @@
   color: #6758d8;
 }
 
-.mind-node.root .ai-conversation-runtime-badge {
+.mind-node.root .ai-conversation-runtime-badge,
+.mind-node.root .node-topline > .ai-delegation-status-badge {
   color: white;
   border-color: rgba(255, 255, 255, .25);
   background: rgba(255, 255, 255, .14);
@@ -82,12 +101,24 @@
   background: rgba(126, 83, 10, .2);
 }
 
-.mind-node.root .ai-conversation-runtime-badge.running {
+.mind-node.root .ai-conversation-runtime-badge.running,
+.mind-node.root .node-topline > .ai-delegation-status-badge.active {
   --ai-runtime-border-dim: rgba(255, 126, 222, .5);
   --ai-runtime-border-bright: #ff9ce8;
   --ai-runtime-glow-near: rgba(255, 105, 218, .46);
   --ai-runtime-glow-mid: rgba(255, 105, 218, .22);
   --ai-runtime-glow-far: rgba(255, 105, 218, .09);
+}
+
+.mind-node.root .node-topline > .ai-delegation-status-badge.recovery-required {
+  --ai-runtime-border-dim: rgba(255, 168, 174, .55);
+  --ai-runtime-border-bright: #ff8d95;
+  --ai-runtime-glow-near: rgba(255, 90, 102, .46);
+  --ai-runtime-glow-mid: rgba(255, 90, 102, .22);
+  --ai-runtime-glow-far: rgba(255, 90, 102, .09);
+  color: #fff0f1;
+  border-color: rgba(255, 168, 174, .55);
+  background: rgba(126, 24, 35, .24);
 }
 
 @keyframes ai-conversation-runtime-border {
@@ -110,7 +141,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ai-conversation-runtime-badge.running {
+  .ai-conversation-runtime-badge.running,
+  .ai-delegation-status-badge {
     border-color: var(--ai-runtime-border-bright);
     box-shadow: 0 0 5px var(--ai-runtime-glow-mid);
     animation: none;

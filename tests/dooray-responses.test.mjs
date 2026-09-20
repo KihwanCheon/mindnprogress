@@ -13,6 +13,7 @@ const maps = [{ id: 'map1', title: '홀덤 UI', version: 1, nodes: [
   { id: 'root1', data: { kind: 'root', label: '홀덤 UI', description: '' } },
   { id: 'task1', data: { kind: 'task', label: '베팅', description: '금액 표시 수정', taskUrl: item.url, aiConversations: [{ conversationId: 'old-chat', requestPreview: '베팅 표시 수정' }] } },
   { id: 'knowledge1', data: { kind: 'task', label: '기획 원문', externalLink: { projectId: 'p1', postId: 'post1' } } },
+  { id: 'web1', data: { kind: 'task', label: '웹 자료', webLink: { provider: 'web', url: 'https://example.com/' } } },
   { id: 'ref1', data: { kind: 'task', label: '참조 카드', reference: { mapId: 'else', nodeId: 'original' } } },
 ], edges: [{ source: 'root1', target: 'task1' }, { source: 'knowledge1', target: 'task1', data: { relation: 'knowledge' } }] }]
 const route = { action: 'direct', mapId: 'map1', cardId: 'task1', conversationId: 'old-chat', requestSummary: '금액 표시 수정', reason: '동일 Dooray 업무가 연결된 카드' }
@@ -94,7 +95,7 @@ async function fixture(t, overrides = {}) {
     messages: async (op) => [assistant({ requestId: op.id, ...(op.kind === 'router' ? route : { proposal: '변경 범위와 검증 조건 제안' }) })],
     ...overrides,
   }
-  return { deps, counts, operations, service: createDoorayResponseService(deps) }
+  return { directory, deps, counts, operations, service: createDoorayResponseService(deps) }
 }
 async function until(service, userId, expected, max = 50) {
   for (let i = 0; i < max; i++) {
@@ -130,6 +131,114 @@ test('서버 재시작 후 기존 실행을 조회하고 새 AI 실행을 중복
   assert.equal(job.route.cardId, 'task1')
   assert.equal(counts.create, 2)
   assert.equal(counts.dispatch, 2)
+})
+
+test('재시작으로 중단됐어도 현재 실행의 구조화 결과가 남아 있으면 재전송 없이 회수한다', async (t) => {
+  const { service, deps, counts } = await fixture(t)
+  const originalGetDispatch = deps.getDispatch
+  let interruptedOperationId = ''
+  deps.getDispatch = async (op) => {
+    if (op.kind === 'router' && !interruptedOperationId) interruptedOperationId = op.id
+    if (op.id === interruptedOperationId) {
+      return { conversationId: op.conversationId, state: 'recovery_required', errorMessage: 'interrupted_by_restart' }
+    }
+    return originalGetDispatch(op)
+  }
+
+  await service.start({ id: 'user1' }, item)
+  const [job] = await until(service, 'user1', 'proposal')
+  assert.equal(job.proposal, '변경 범위와 검증 조건 제안')
+  assert.equal(job.recoveringAfterRestart, false)
+  assert.equal(counts.dispatch, 2, '완료 결과가 남은 라우터는 재전송하지 않아야 한다')
+})
+
+test('재시작 중단 실행에 구조화 결과가 없으면 같은 전용 대화에 새 실행 ID로 제안을 재요청한다', async (t) => {
+  const { service, deps, counts, operations } = await fixture(t)
+  const originalGetDispatch = deps.getDispatch
+  const originalMessages = deps.messages
+  let interruptedOperationId = ''
+  deps.getDispatch = async (op) => {
+    if (op.kind === 'router' && !interruptedOperationId) interruptedOperationId = op.id
+    if (op.id === interruptedOperationId) {
+      return { conversationId: op.conversationId, state: 'recovery_required', errorMessage: 'interrupted_by_restart' }
+    }
+    return originalGetDispatch(op)
+  }
+  deps.messages = async (op) => op.id === interruptedOperationId
+    ? [{ position: 'left', type: 'text', content: '승인 기록이 없어 아직 실행할 수 없습니다.' }]
+    : originalMessages(op)
+
+  await service.start({ id: 'user1' }, item)
+  const [job] = await until(service, 'user1', 'proposal')
+  assert.equal(job.proposal, '변경 범위와 검증 조건 제안')
+  assert.equal(job.recoveringAfterRestart, false)
+  assert.equal(counts.create, 2, '라우터와 담당 AI 전용 대화만 생성해야 한다')
+  assert.equal(counts.dispatch, 3, '중단된 라우터만 한 번 재전송해야 한다')
+  assert.equal(operations.size, 3)
+})
+
+test('이미 failed로 저장된 interrupted_by_restart 제안을 재시도 버튼 없이 자동 복구한다', async (t) => {
+  const { directory, service, deps, counts } = await fixture(t)
+  const originalDispatch = deps.dispatch
+  let dispatched
+  const dispatchedPromise = new Promise((resolve) => { dispatched = resolve })
+  deps.dispatch = async (op) => {
+    const result = await originalDispatch(op)
+    if (op.kind === 'router') dispatched()
+    return result
+  }
+  await service.start({ id: 'user1' }, item)
+  await dispatchedPromise
+  await new Promise(setImmediate)
+
+  const file = path.join(directory, 'user1.json')
+  const stored = await deps.read(file)
+  const interruptedOperationId = stored.jobs[0].operation.id
+  stored.jobs[0].status = 'failed'
+  stored.jobs[0].error = 'interrupted_by_restart'
+  await deps.write(file, stored)
+
+  const originalGetDispatch = deps.getDispatch
+  const originalMessages = deps.messages
+  deps.getDispatch = async (op) => op.id === interruptedOperationId
+    ? { conversationId: op.conversationId, state: 'recovery_required', errorMessage: 'interrupted_by_restart' }
+    : originalGetDispatch(op)
+  deps.messages = async (op) => op.id === interruptedOperationId
+    ? [{ position: 'left', type: 'text', content: '승인 후에만 진행할 수 있습니다.' }]
+    : originalMessages(op)
+
+  const restarted = createDoorayResponseService(deps)
+  const [job] = await until(restarted, 'user1', 'proposal')
+  assert.equal(job.proposal, '변경 범위와 검증 조건 제안')
+  assert.equal(job.recoveringAfterRestart, false)
+  assert.equal(counts.dispatch, 3)
+})
+
+test('사용자가 중단한 waiting_resume는 재시작 자동 복구 대상으로 해석하지 않는다', async (t) => {
+  const { service, deps, counts } = await fixture(t)
+  deps.getDispatch = async (op) => ({ conversationId: op.conversationId, state: 'waiting_resume', errorMessage: '사용자가 중단한 실행입니다.' })
+  await service.start({ id: 'user1' }, item)
+  const [failed] = await until(service, 'user1', 'failed')
+  assert.equal(failed.recoveringAfterRestart, false)
+  assert.equal(counts.dispatch, 1)
+  for (let i = 0; i < 3; i++) await service.poll()
+  assert.equal((await service.list('user1'))[0].status, 'failed')
+  assert.equal(counts.dispatch, 1)
+})
+
+test('재시작 중단이 3회 반복되면 자동 재전송을 중단하고 조치 방법을 안내한다', async (t) => {
+  const { service, deps, counts } = await fixture(t)
+  deps.getDispatch = async (op) => ({ conversationId: op.conversationId, state: 'recovery_required', errorMessage: 'interrupted_by_restart' })
+  deps.messages = async () => [{ position: 'left', type: 'text', content: '구조화되지 않은 중간 답변' }]
+
+  await service.start({ id: 'user1' }, item)
+  const [failed] = await until(service, 'user1', 'failed')
+  assert.match(failed.error, /3회/)
+  assert.equal(failed.canRetry, false)
+  assert.equal(failed.recoveringAfterRestart, false)
+  assert.equal(counts.create, 1)
+  assert.equal(counts.dispatch, 4)
+  await assert.rejects(service.retry('user1', failed.id), /복구 한도/)
 })
 
 test('AI 전송 응답 유실은 같은 실행 ID로 상태를 확인하여 회수한다', async (t) => {
@@ -210,14 +319,105 @@ test('같은 담당의 추가 정보 재제안은 전용 접수·검토 대화�
   assert.ok([...operations.values()].some((op) => op.prompt.includes('소수점 처리')))
 })
 
-test('변경된 멘션 내용은 기존 확인 상태와 독립된 후속 요청으로 접수한다', async (t) => {
-  const { service, deps } = await fixture(t)
+test('제안 도착 뒤 원문이 바뀌어도 같은 참조는 기존 미완료 기록만 반환한다', async (t) => {
+  const { service, deps, counts } = await fixture(t)
   const first = await service.start({ id: 'user1' }, item)
-  await until(service, 'user1', 'proposal')
+  const [proposal] = await until(service, 'user1', 'proposal')
+  const stored = await deps.read(path.join(deps.directory, 'user1.json'))
+  const previousCounts = { ...counts }
   deps.loadSource = async () => ({ ...source, fingerprint: 'edited-comment' })
   const second = await service.start({ id: 'user1' }, item)
-  assert.notEqual(second.job.id, first.job.id)
+  assert.equal(second.job.id, first.job.id)
+  assert.equal(second.repeated, true)
+  assert.deepEqual(second.job, proposal)
+  assert.deepEqual(await service.list('user1'), [proposal])
+  assert.deepEqual(await deps.read(path.join(deps.directory, 'user1.json')), stored, '원문·제안·승인 버전과 실행 기록을 덮어쓰지 않는다')
+  assert.deepEqual(counts, previousCounts, '기록 확인으로 새 대화나 AI 실행을 만들지 않는다')
+})
+
+test('동시 접수에서 같은 참조의 원문 해시가 달라도 하나의 기록으로 합친다', { timeout: 5000 }, async (t) => {
+  let revision = 0
+  let release
+  const allSourcesRead = new Promise((resolve) => { release = resolve })
+  const { service, counts } = await fixture(t, { loadSource: async () => {
+    const currentRevision = ++revision
+    if (revision === 3) release()
+    await allSourcesRead
+    return { ...source, fingerprint: `edit-${currentRevision}` }
+  } })
+  const results = await Promise.all(Array.from({ length: 3 }, () => service.start({ id: 'user1' }, item)))
+  assert.equal(new Set(results.map(({ job }) => job.id)).size, 1)
+  assert.equal(results.filter(({ repeated }) => !repeated).length, 1)
+  assert.equal((await until(service, 'user1', 'proposal')).length, 1)
+  assert.equal(counts.create, 2)
+  assert.equal(counts.dispatch, 2)
+})
+
+test('이미 생긴 중복 기록은 삭제·병합하지 않고 가장 최근 기록만 열어 반환한다', async (t) => {
+  const { service, deps, counts } = await fixture(t)
+  await service.start({ id: 'user1' }, item)
   await until(service, 'user1', 'proposal')
+  const file = path.join(deps.directory, 'user1.json')
+  const stored = await deps.read(file)
+  stored.jobs.unshift({ ...structuredClone(stored.jobs[0]), id: 'legacy-duplicate', status: 'failed',
+    error: '사용자가 중지했습니다.', proposal: '', source: { ...stored.jobs[0].source, fingerprint: 'edited-comment' } })
+  await deps.write(file, stored)
+  const previousCounts = { ...counts }
+  const result = await service.start({ id: 'user1' }, item)
+  assert.equal(result.job.id, 'legacy-duplicate')
+  assert.equal(result.job.status, 'failed')
+  assert.equal(result.repeated, true)
+  assert.deepEqual(await deps.read(file), stored)
+  assert.deepEqual(counts, previousCounts)
+})
+
+test('사용자가 중지한 같은 참조를 다시 접수해도 원문 조회나 실행 재개를 하지 않는다', async (t) => {
+  const { service, deps, counts } = await fixture(t, {
+    getDispatch: async (op) => ({ conversationId: op.conversationId, state: 'failed', errorMessage: '사용자가 중지했습니다.' }),
+  })
+  await service.start({ id: 'user1' }, item)
+  const [stopped] = await until(service, 'user1', 'failed')
+  const previousCounts = { ...counts }
+  deps.loadSource = async () => { throw new Error('기록 열기에는 Dooray 원문 접근이 필요하지 않습니다.') }
+  deps.resolveSettings = async () => { throw new Error('기록 열기에는 실행 설정이 필요하지 않습니다.') }
+  const repeated = await service.start({ id: 'user1' }, item)
+  assert.deepEqual(repeated.job, stopped)
+  assert.equal(repeated.repeated, true)
+  await service.poll()
+  assert.deepEqual(await service.list('user1'), [stopped])
+  assert.deepEqual(counts, previousCounts)
+})
+
+test('대응 완료 후 명시적으로 접수한 변경 원문은 새 후속 요청으로 남긴다', async (t) => {
+  const { service, deps } = await fixture(t)
+  await service.start({ id: 'user1' }, item)
+  const [first] = await until(service, 'user1', 'proposal')
+  await service.complete('user1', first.id)
+  deps.loadSource = async () => ({ ...source, fingerprint: 'edited-comment' })
+  const second = await service.start({ id: 'user1' }, item)
+  assert.notEqual(second.job.id, first.id)
+  assert.equal(second.repeated, false)
+  for (let i = 0; i < 50; i++) {
+    await service.poll()
+    if ((await service.list('user1')).find((job) => job.id === second.job.id)?.status === 'proposal') break
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  const jobs = await service.list('user1')
+  assert.equal(jobs.length, 2)
+  assert.equal(jobs.find((job) => job.id === first.id).status, 'completed')
+  assert.equal(jobs.find((job) => job.id === second.job.id).status, 'proposal')
+})
+
+test('같은 업무의 다른 댓글과 다른 사용자의 요청은 각각 독립적으로 접수한다', async (t) => {
+  const { service } = await fixture(t)
+  const first = await service.start({ id: 'user1' }, item)
+  const otherComment = await service.start({ id: 'user1' }, { ...item, key: 'comment:post1:comment2', commentId: 'comment2' })
+  const otherUser = await service.start({ id: 'user2' }, item)
+  assert.equal(new Set([first.job.id, otherComment.job.id, otherUser.job.id]).size, 3)
+  await until(service, 'user1', 'proposal')
+  await until(service, 'user2', 'proposal')
+  assert.equal((await service.list('user1')).length, 2)
+  assert.equal((await service.list('user2')).length, 1)
 })
 
 test('예전 단일 대화 연결도 기존 담당 대화 후보에 포함한다', () => {

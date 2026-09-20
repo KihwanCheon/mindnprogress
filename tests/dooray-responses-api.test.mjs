@@ -46,6 +46,7 @@ test('로그인 계정의 실제 서버 API에서 제안 접수·삭제 초기�
   const reviewProposal = '금액 포맷터를 확인하고 경계값을 검증하는 작업을 제안합니다.\n' + '상세 조건을 확인합니다.\n'.repeat(320) + '제안의 마지막 검증 조건입니다.'
   let conversationFailure = null
   let approvalMode = false
+  let selectedComment = '김용민님, 금액 표시를 확인해 주세요.'
   const approvalTickets = []
   const approvalDecision = { kind: 'approval', reason: '그룹·총괄 구성의 사실은 충분하고 실행 동의만 남았습니다.', questions: [],
     approval: { title: '연동 그룹과 총괄 구성', scope: ['연동 그룹과 총괄 문서를 생성한다.'], exclusions: ['기능 구현과 하위 AI 실행은 제외한다.'] } }
@@ -60,7 +61,7 @@ test('로그인 계정의 실제 서버 API에서 제안 접수·삭제 초기�
       response.end(JSON.stringify(dooray ? { header: { isSuccessful: true }, result } : { success: status < 400, data: result }))
     }
     if (url.pathname === '/project/v1/projects/p1/posts/post1') return send({ subject: item.subject, body: { content: '베팅 금액은 천 단위 구분자를 표시합니다.' } }, 200, true)
-    if (url.pathname === '/project/v1/projects/p1/posts/post1/logs') return send([{ id: 'comment1', type: 'comment', body: { content: approvalMode ? '그룹과 총괄 문서 구성도 검토해 주세요.' : '김용민님, 금액 표시를 확인해 주세요.' } }], 200, true)
+    if (url.pathname === '/project/v1/projects/p1/posts/post1/logs') return send([{ id: 'comment1', type: 'comment', body: { content: approvalMode ? '그룹과 총괄 문서 구성도 검토해 주세요.' : selectedComment } }], 200, true)
     if (url.pathname === '/api/internal/external-conversation-launches' && request.method === 'POST') {
       approvalTickets.push(body)
       return send({ launchId: 'a'.repeat(64) }, 201)
@@ -205,6 +206,19 @@ test('로그인 계정의 실제 서버 API에서 제안 접수·삭제 초기�
   assert.deepEqual(mcpReloads, [], '기존 업무 대화의 MCP를 변경하지 않는다')
   assert.ok(extraByConversation.get('existing-chat').mcp_server_ids.includes('kept-mcp'))
   assert.deepEqual(extraByConversation.get('existing-chat').session_mcp_servers, [{ name: 'session-tool', command: 'test-only' }])
+  const originalComment = selectedComment
+  selectedComment += ' 편집된 원문입니다.'
+  const sourceReads = paths.filter((entry) => entry.startsWith('GET /project/')).length
+  const changedSource = await (await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ itemKey: item.key }) })).json()
+  assert.equal(changedSource.job.id, accepted.job.id, '원문 변경 뒤 같은 버튼 요청도 기존 제안을 반환한다')
+  assert.equal(changedSource.repeated, true)
+  assert.equal(changedSource.job.proposal, latest.proposal)
+  assert.equal(changedSource.job.status, 'proposal')
+  assert.equal((await (await fetch(endpoint, { headers })).json()).jobs.length, 1)
+  assert.equal(created.length, 2)
+  assert.equal(operations.size, 2)
+  assert.equal(paths.filter((entry) => entry.startsWith('GET /project/')).length, sourceReads, '기존 기록 열기에는 원문 재조회가 필요하지 않다')
+  selectedComment = originalComment
   const refinement = await fetch(`${endpoint}/${latest.id}/refine`, { method: 'POST', headers, body: JSON.stringify({ hint: '소수점 표시 조건도 검토해 주세요.' }) })
   assert.equal(refinement.status, 202)
   await waitFor(async () => {

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   AionUiExternalLaunchPayloadError,
+  createAionUiConversationWebUrl,
   createAionUiWebLaunchUrl,
   normalizeAionUiExternalLaunchPayload,
   parseMindNProgressCompletionToken,
@@ -66,4 +67,12 @@ test('AionUi WebUI launch 주소에는 짧은 ticket만 포함한다', () => {
     `http://10.77.15.110:7777/#/guid?external-launch=${launchId}`,
   )
   assert.throws(() => createAionUiWebLaunchUrl('http://10.77.15.110:7777', 'short'))
+})
+
+test('AionUi 대화 주소는 지정한 머신 WebUI를 유지한다', () => {
+  assert.equal(
+    createAionUiConversationWebUrl('http://10.78.12.223:7777/previous?value=1#old', 'conversation-on-mac'),
+    'http://10.78.12.223:7777/#/conversation/conversation-on-mac',
+  )
+  assert.throws(() => createAionUiConversationWebUrl('http://10.78.12.223:7777', 'invalid conversation'))
 })

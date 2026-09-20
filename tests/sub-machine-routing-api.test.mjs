@@ -8,6 +8,8 @@ import test from 'node:test'
 const projectDirectory = path.resolve(import.meta.dirname, '..')
 const adminEmail = 'routing-admin@mind.local'
 const adminPassword = 'routing-admin-password'
+// 실제 사내 주소를 테스트 데이터로 고정하지 않는다. TEST-NET-1은 문서·예제 전용 대역이다.
+const runnerNetworkAddress = '192.0.2.23'
 
 async function waitForServer(baseUrl, timeoutMs = 15_000) {
   const deadline = Date.now() + timeoutMs
@@ -64,7 +66,7 @@ async function requestWithRunner(baseUrl, token, pendingRequest, resolver) {
       '',
       '/api/machines/macbook/runner/operations/claim',
       'POST',
-      { waitMs: 1_000, limit: 16 },
+      { waitMs: 1_000, limit: 16, callbackBaseUrl: 'http://127.0.0.1:43129' },
       { Authorization: `Bearer ${token}` },
     )
     assert.equal(claimed.response.status, 200)
@@ -112,6 +114,9 @@ function subMachineResponse(request, conversationId = 'conversation-on-mac') {
     return { conversationId: 'delegated-on-mac', state: 'running', turnId: 'turn-1' }
   }
   if (request.pathname === '/api/internal/external-conversation-launches') {
+    const callbackUrl = new URL(request.body.completionUrl)
+    assert.equal(callbackUrl.hostname, '127.0.0.1')
+    assert.equal(callbackUrl.port, '43129')
     return { launchId: 'a'.repeat(64), expiresAt: '2026-09-08T00:00:00.000Z' }
   }
   if (request.pathname === `/api/conversations/${conversationId}`) {
@@ -150,7 +155,9 @@ test('새 대화와 일반 AI 위임의 전체 경로는 선택한 서브 머신
       MNP_API_HOST: '127.0.0.1',
       MNP_API_PORT: String(port),
       MNP_WEB_PORT: String(port),
-      MNP_PUBLIC_URL: baseUrl,
+      // 실제 메인 MnP처럼 서브 AionCore에서 loopback이 아닌 주소다.
+      // 외부 대화 완료 주소는 이 값이 아니라 Runner의 loopback 릴레이를 써야 한다.
+      MNP_PUBLIC_URL: `http://192.0.2.10:${port}`,
       MNP_MACHINE_ID: 'desk-win',
       MNP_AIONUI_URL: 'http://127.0.0.1:9',
       MNP_AIONUI_WEB_URL: 'http://main.example:7777',
@@ -168,6 +175,14 @@ test('새 대화와 일반 AI 위임의 전체 경로는 선택한 서브 머신
     })).response.status, 200)
     const issued = await request(baseUrl, cookie, '/api/machines/macbook/token', 'POST')
     const runnerToken = issued.body.token
+    const heartbeat = await request(baseUrl, '', '/api/machines/macbook/runner/heartbeat', 'POST', {
+      callbackBaseUrl: 'http://127.0.0.1:43129',
+    }, {
+      Authorization: `Bearer ${runnerToken}`,
+      // 실제 서브 머신이 Vite 프록시를 경유해 접속한 주소를 재현한다.
+      'X-Forwarded-For': runnerNetworkAddress,
+    })
+    assert.equal(heartbeat.response.status, 200)
     assert.equal((await request(baseUrl, cookie, '/api/account/distributed-work', 'PUT', {
       enabled: true, defaultMachineId: 'macbook',
     })).response.status, 200)
@@ -211,7 +226,7 @@ test('새 대화와 일반 AI 위임의 전체 경로는 선택한 서브 머신
     const attribution = await requestWithRunner(baseUrl, runnerToken, attributionRequest, subMachineResponse)
     assert.equal(attribution.response.status, 201)
     assert.equal(attribution.body.homeMachineId, 'macbook')
-    assert.ok(attribution.body.completionUrl.startsWith(`${baseUrl}/api/integrations/aionui/launches/`))
+    assert.ok(attribution.body.completionUrl.startsWith('http://127.0.0.1:43129/api/integrations/aionui/launches/'))
 
     let relayedLaunchPayload = null
     const launchRequest = request(baseUrl, cookie, '/api/integrations/aionui/external-conversation-launches', 'POST', {
@@ -228,7 +243,10 @@ test('새 대화와 일반 AI 위임의 전체 경로는 선택한 서브 머신
     })
     assert.equal(launch.response.status, 201)
     assert.equal(launch.body.homeMachineId, 'macbook')
-    assert.match(launch.body.launchUrl, /^http:\/\/127\.0\.0\.1:7777\/#\/guid\?external-launch=/)
+    const launchUrl = new URL(launch.body.launchUrl)
+    assert.equal(launchUrl.hostname, runnerNetworkAddress)
+    assert.equal(launchUrl.port, '7777')
+    assert.match(launchUrl.hash, /^#\/guid\?external-launch=/)
     assert.equal(relayedLaunchPayload.completionUrl, attribution.body.completionUrl)
 
     const conversationId = 'conversation-on-mac'
@@ -258,6 +276,19 @@ test('새 대화와 일반 AI 위임의 전체 경로는 선택한 서브 머신
     assert.equal(listed.body.conversations[0].homeMachineId, 'macbook')
     assert.equal(listed.body.conversations[0].homeMachineLabel, '개발 맥북')
     assert.equal(listed.body.conversations[0].accessible, true)
+
+    const openUrlResult = await request(
+      baseUrl,
+      cookie,
+      `/api/maps/${mapId}/cards/root-card/ai-conversations/${conversationId}/open-url`,
+    )
+    assert.equal(openUrlResult.response.status, 200)
+    assert.equal(openUrlResult.body.homeMachineId, 'macbook')
+    assert.equal(openUrlResult.body.homeMachineRole, 'sub')
+    const conversationUrl = new URL(openUrlResult.body.openUrl)
+    assert.equal(conversationUrl.hostname, runnerNetworkAddress)
+    assert.equal(conversationUrl.port, '7777')
+    assert.equal(conversationUrl.hash, '#/conversation/conversation-on-mac')
 
     const transcriptRequest = request(
       baseUrl,

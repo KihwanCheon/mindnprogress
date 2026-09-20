@@ -75,6 +75,8 @@ import {
   mergeAiDelegationSelections,
   nextAiDelegationWaitPoll,
   shouldReconcileAiDelegationChildWorkspace,
+  AI_DELEGATION_COMPLETION_NOTIFICATION_TYPE,
+  aiDelegationCompletionNotice,
 } from './lib/aiDelegations.mjs'
 import {
   detectImageAssetType,
@@ -131,6 +133,7 @@ import {
 } from '../src/utils/aiConversations.mjs'
 import {
   AionUiExternalLaunchPayloadError,
+  createAionUiConversationWebUrl,
   createAionUiWebLaunchUrl,
   normalizeAionUiExternalLaunchPayload,
   parseMindNProgressCompletionToken,
@@ -170,6 +173,7 @@ import {
   verifyMachineToken,
 } from './lib/subMachines.mjs'
 import { MachineOperationError, MachineOperationQueue } from './lib/machineOperations.mjs'
+import { authorizeRunnerMcpRequest } from './lib/runnerMcpAccess.mjs'
 import {
   MachinePairingError,
   MachinePairingStore,
@@ -465,6 +469,8 @@ const machineOperationQueue = new MachineOperationQueue({
   createOperationId: () => randomBytes(12).toString('base64url'),
 })
 const machinePairingStore = new MachinePairingStore()
+const runnerCallbackBaseUrls = new Map()
+const runnerObservedAddresses = new Map()
 const aiAttributionContinuationToken = Symbol('aiAttributionContinuationToken')
 let aiAttributionWriteQueue = Promise.resolve()
 let aiConversationAttributionWriteQueue = Promise.resolve()
@@ -756,9 +762,67 @@ function machineAccessibleByUser(user, machineId) {
 
 function aionUiWebBaseUrlForMachine(machineId) {
   if (!machineId || machineId === machineRegistry.mainMachineId) return aionUiWebBaseUrl
+  const observedAddress = runnerObservedAddresses.get(normalizeMachineId(machineId))
+  if (!observedAddress) {
+    throw new SubMachinePayloadError('서브 머신의 AionUi WebUI 접속 주소를 확인할 수 없습니다. Runner 연결을 확인한 뒤 다시 시도해 주세요.')
+  }
   const url = new URL(aionUiWebBaseUrl)
-  url.hostname = '127.0.0.1'
+  url.hostname = observedAddress.includes(':') ? `[${observedAddress}]` : observedAddress
   return url.toString().replace(/\/+$/, '')
+}
+
+function isLoopbackClientAddress(value) {
+  return value === '::1' || value.startsWith('127.')
+}
+
+function noteRunnerObservedAddress(machineId, request) {
+  const normalizedMachineId = normalizeMachineId(machineId)
+  if (!normalizedMachineId) return null
+
+  // 직접 접속이면 소켓 주소를 사용해 Runner가 임의로 넣은 전달 헤더를 신뢰하지 않는다.
+  // 로컬 Vite 프록시를 경유한 경우에만 프록시가 마지막에 붙인 실제 접속 주소를 사용한다.
+  const directAddress = normalizeClientAddress(request?.socket?.remoteAddress)
+  const observedAddress = directAddress && !isLoopbackClientAddress(directAddress)
+    ? directAddress
+    : requestClientAddress(request)
+  if (!observedAddress || isLoopbackClientAddress(observedAddress)) return null
+  runnerObservedAddresses.set(normalizedMachineId, observedAddress)
+  return observedAddress
+}
+
+function normalizeRunnerCallbackBaseUrl(value) {
+  try {
+    const url = new URL(String(value ?? '').trim())
+    const loopback = url.hostname === '127.0.0.1' || url.hostname === '[::1]'
+    const port = Number(url.port)
+    if (url.protocol !== 'http:' || !loopback || !Number.isInteger(port) || port < 1 || port > 65_535
+      || url.username || url.password || (url.pathname !== '/' && url.pathname !== '') || url.search || url.hash) return null
+    return url.toString().replace(/\/+$/, '')
+  } catch {
+    return null
+  }
+}
+
+function noteRunnerCallbackBaseUrl(machineId, value) {
+  const normalizedMachineId = normalizeMachineId(machineId)
+  const baseUrl = normalizeRunnerCallbackBaseUrl(value)
+  if (!normalizedMachineId || !baseUrl) {
+    if (normalizedMachineId) runnerCallbackBaseUrls.delete(normalizedMachineId)
+    return null
+  }
+  runnerCallbackBaseUrls.set(normalizedMachineId, baseUrl)
+  return baseUrl
+}
+
+function runnerCallbackBaseUrlForMachine(machineId) {
+  return runnerCallbackBaseUrls.get(normalizeMachineId(machineId)) ?? null
+}
+
+function clearRunnerRuntimeRouting(machineId) {
+  const normalizedMachineId = normalizeMachineId(machineId)
+  if (!normalizedMachineId) return
+  runnerCallbackBaseUrls.delete(normalizedMachineId)
+  runnerObservedAddresses.delete(normalizedMachineId)
 }
 
 function scopedAttribution(request) {
@@ -1032,6 +1096,11 @@ function isValidMap(map) {
     && (node.data?.externalLink === undefined
       || (isValidDoorayKnowledgeLinkData(node.data.externalLink)
         && node.data.taskUrl === node.data.externalLink.url))
+    && (node.data?.webLink === undefined
+      || (node.data.webLink?.provider === 'web'
+        && typeof node.data.webLink.url === 'string'
+        && node.data.webLink.url.length <= 2_048
+        && node.data.taskUrl === node.data.webLink.url))
     && (node.data?.sharedKnowledge === undefined
       || (typeof node.data.sharedKnowledge === 'string' && node.data.sharedKnowledge.length <= sharedKnowledgeMaxLength))
     && (node.data?.sharedKnowledgeReview === undefined
@@ -1603,8 +1672,11 @@ function persistGroupDocumentInstructions() {
 
 function persistAiWorkspaceHistories() {
   const storedHistories = [...aiWorkspaceHistories.entries()]
-    .sort(([firstUserId], [secondUserId]) => firstUserId.localeCompare(secondUserId))
-    .map(([userId, workspaces]) => ({ userId, workspaces }))
+    .sort(([first], [second]) => first.localeCompare(second))
+    .map(([key, workspaces]) => {
+      const [userId, machineId] = JSON.parse(key)
+      return { userId, machineId, workspaces }
+    })
   aiWorkspaceHistoryWriteQueue = aiWorkspaceHistoryWriteQueue.catch(() => {})
     .then(() => writeStoredArray(aiWorkspaceHistoriesFile, storedHistories))
   return aiWorkspaceHistoryWriteQueue
@@ -1740,6 +1812,7 @@ async function decommissionEditorMachines(editorId, { remove = false } = {}) {
       )),
   }
   for (const machineId of machineIds) {
+    clearRunnerRuntimeRouting(machineId)
     machineOperationQueue.cancelMachine(
       machineId,
       remove ? '머신 소유자 계정이 삭제되었습니다.' : '머신 소유자 계정이 비활성화되었습니다.',
@@ -1849,7 +1922,7 @@ async function loadAiDelegations() {
         : {}),
     }
     if (['failed', 'parent-wake-failed'].includes(normalized.state) && aiDelegationLimitState(normalized)) {
-      normalized.attemptHistory = aiDelegationAttemptHistory(delegation, '사용량 제한 대기 상태로 복원')
+      normalized.attemptHistory = aiDelegationAttemptHistory(delegation, '재시도 가능한 외부 제한 대기 상태로 복원')
       normalized.state = aiDelegationLimitState(normalized)
     }
     if (JSON.stringify(normalized) !== JSON.stringify(delegation)) repairedCount += 1
@@ -1866,11 +1939,15 @@ async function loadAiDelegations() {
 
 async function loadAiWorkspaceHistories() {
   const storedHistories = await readStoredArray(aiWorkspaceHistoriesFile)
-  for (const history of storedHistories) {
+  // 구버전 서버 이력은 메인에서만 사용했다. 서브 머신이나 계정 기본 머신으로 복제하지 않는다.
+  // 명시적 머신 기록(빈 목록 포함)이 구버전 기록보다 우선한다.
+  for (const history of [...storedHistories].sort((a, b) => Number(Boolean(a?.machineId)) - Number(Boolean(b?.machineId)))) {
     if (typeof history?.userId !== 'string' || !Array.isArray(history.workspaces)
       || !users.some((user) => user.id === history.userId)) continue
+    const machineId = Object.hasOwn(history, 'machineId') ? normalizeMachineId(history.machineId) : machineRegistry.mainMachineId
+    if (!machineId) continue
     const workspaces = normalizeAiWorkspaceHistory(history.workspaces)
-    aiWorkspaceHistories.set(history.userId, workspaces)
+    aiWorkspaceHistories.set(JSON.stringify([history.userId, machineId]), workspaces)
   }
   await persistAiWorkspaceHistories()
 }
@@ -2636,13 +2713,30 @@ function delegationRecoveryInstruction(delegation, instruction, recovery = null,
   const inspection = delegation.coordinationOnly
     ? `${DOCUMENT_COORDINATOR_INSTRUCTION}\n\n먼저 그룹 기준, 현재 문서의 실행 계약, 하위 위임 상태와 최근 대화·카드 결과를 대조하세요. 이 조정 업무에는 worker가 배정되지 않으므로 작업공간을 임의로 점유하거나 새 lease를 만들지 마세요.`
     : '먼저 `.ai-session.json`, 현재 브랜치, Git 변경과 최근 대화·카드 결과를 서로 대조하세요. 다른 작업공간으로 이동하거나 새 lease를 만들지 마세요.'
-  const externalLimitRecovery = ['usage-limit', 'rate-limit'].includes(recovery?.failureCategory)
+  const externalLimitRecovery = ['usage-limit', 'rate-limit', 'model-capacity'].includes(recovery?.failureCategory)
   const userStopRecovery = recovery?.failureCategory === 'user-stop'
-  const title = externalLimitRecovery ? '외부 사용량 제한 해제 후 위임 복구' : userStopRecovery ? '사용자 중지 후 위임 재개' : '재시작 후 위임 복구'
+  const title = recovery?.failureCategory === 'model-capacity'
+    ? '모델 실행 용량 확보 후 위임 복구'
+    : externalLimitRecovery ? '외부 사용량 제한 해제 후 위임 복구'
+      : userStopRecovery ? '사용자 중지 후 위임 재개' : '재시작 후 위임 복구'
   const reason = externalLimitRecovery
-    ? `이전 실행은 ${recovery.failureCategory === 'rate-limit' ? '요청 한도' : '사용량 한도'}로 중단됐고, 사용자가 한도 해제를 확인한 뒤 같은 대화와 작업공간의 재개를 요청했습니다.`
+    ? `이전 실행은 ${recovery.failureCategory === 'rate-limit' ? '요청 한도' : recovery.failureCategory === 'model-capacity' ? '선택 모델의 실행 용량 부족' : '사용량 한도'}로 중단됐고, 사용자가 원인 해소를 확인한 뒤 같은 대화와 작업공간의 재개를 요청했습니다.`
     : userStopRecovery ? '사용자가 중지했던 기존 위임을 같은 대화에서 다시 이어가도록 요청했습니다.'
       : 'AionCore 또는 MindNProgress 재시작으로 이전 실행의 메모리 상태가 끊겼습니다.'
+  const workspaceLease = delegation.workspaceLease
+  const workspaceSummary = delegation.coordinationOnly
+    ? '- 현재 작업공간 배정: 문서 조정 전용 · worker 배정 없음'
+    : workspaceLease
+      ? `- 현재 workspaceId: \`${workspaceLease.workspaceId ?? '미확인'}\`
+- 현재 jobId: \`${workspaceLease.jobId ?? '미확인'}\`
+- 현재 leaseId: \`${workspaceLease.leaseId ?? '미확인'}\`
+- 현재 projectRoot: \`${workspaceLease.projectRoot ?? '미확인'}\`
+- 현재 branch: \`${workspaceLease.branch ?? '미확인'}\`
+- 현재 baseCommit: \`${workspaceLease.baseCommit ?? '미확인'}\``
+      : '- 현재 작업공간 배정: 기존 대화 작업공간 · 등록된 worker lease 없음'
+  const workspaceRecoveryRule = delegation.coordinationOnly
+    ? ''
+    : '\n복구 작업에서도 이번 전문의 `# 할당된 작업공간`에 기재된 현재 배정만 사용하세요. 대화 기록에 남은 이전 경로·브랜치·lease를 복구 후보로 사용하지 마세요.'
   return `# ${title}
 
 ${reason} 원래 지시를 처음부터 반복하지 말고, 아래 복구 확인 절차에 따라 미완료 부분만 이어서 수행하세요.
@@ -2650,9 +2744,9 @@ ${reason} 원래 지시를 처음부터 반복하지 말고, 아래 복구 확�
 - 위임 ID: ${delegation.id}
 - 대상 카드: ${delegation.targetCardLabel} (${delegation.targetCardId})
 - 대상 대화: ${conversationDisplayLabel}
-- 작업공간: ${delegation.coordinationOnly ? '문서 조정 전용 · worker 배정 없음' : delegation.workspaceLease?.projectRoot ?? '기존 대화 작업공간'}
+${workspaceSummary}
 
-${inspection}
+${inspection}${workspaceRecoveryRule}
 현재 상태와 아래 복구 지시를 대조하고 원래 맡긴 범위의 미완료 작업만 이어가세요. 범위를 벗어난 변경이 필요하면 상위 AI에 보고하세요. 분석·제안 위임의 복구는 계속 분석·제안만 허용됩니다.
 이미 완료된 변경이나 외부 처리는 중복 실행하지 말고 검증과 결과 보고만 하세요.
 
@@ -3510,7 +3604,7 @@ ${checkpoint}- 원인: ${error}
 ${result ? `## 보존된 하위 AI의 마지막 응답\n\n${result}\n\n` : ''}같은 작업을 새로 위임하지 마세요. MindNProgress에서 기존 위임과 하위 카드·작업공간 상태를 확인한 뒤, 안전하게 이어갈 수 있을 때만 mindnprogress_recover_ai_delegation으로 기존 위임을 복구하세요. 자동 판단이 어렵다면 사용자에게 현재 상태와 필요한 확인을 알리세요.`
 }
 
-async function ensureAiDelegationNotification(delegation, { kind, message, dedupeKey }) {
+async function ensureAiDelegationNotification(delegation, { kind, message, dedupeKey, type = 'ai-delegation' }) {
   const notificationKey = `${kind}NotificationKey`
   if (delegation?.[notificationKey] === dedupeKey) return delegation
   const recipient = users.find((candidate) => candidate.id === delegation?.startedBy
@@ -3519,7 +3613,7 @@ async function ensureAiDelegationNotification(delegation, { kind, message, dedup
   const node = map?.nodes.find((candidate) => candidate.id === delegation?.targetCardId)
   if (!recipient || !map || map.trashedAt || !node) return delegation
   const notification = await createNotification(recipient, {
-    type: 'ai-delegation',
+    type,
     mapId: map.id,
     mapTitle: map.title,
     nodeId: node.id,
@@ -3532,6 +3626,19 @@ async function ensureAiDelegationNotification(delegation, { kind, message, dedup
     [notificationKey]: dedupeKey,
     [`${kind}NotificationId`]: notification.id,
     [`${kind}NotifiedAt`]: notification.createdAt,
+  })
+}
+
+// 하위 작업 완료 알림은 차단 알림과 다른 타입으로 만들어 화면에서 구분한다.
+// 이미 알린 위임은 dedupeKey로 건너뛰므로 보고 재전달·결과 재확인이 반복돼도 중복 생성되지 않는다.
+async function ensureAiDelegationCompletionNotification(delegation) {
+  const notice = aiDelegationCompletionNotice(delegation)
+  if (!notice) return delegation
+  return ensureAiDelegationNotification(delegation, {
+    kind: 'completed',
+    type: AI_DELEGATION_COMPLETION_NOTIFICATION_TYPE,
+    dedupeKey: notice.dedupeKey,
+    message: notice.message,
   })
 }
 
@@ -3742,7 +3849,7 @@ async function refreshSuspendedAiDelegation(delegation) {
       completedAt: new Date().toISOString(), attemptHistory: aiDelegationAttemptHistory(delegation, '기존 결과 전달 완료 확인'),
     })
   }
-  if (!['waiting-usage-limit', 'waiting-rate-limit', 'parent-wake-failed', 'failed'].includes(delegation.state)) return delegation
+  if (!['waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity', 'parent-wake-failed', 'failed'].includes(delegation.state)) return delegation
   const limitState = aiDelegationLimitState({ ...delegation, childStatus: status.state, childError: status.errorMessage ?? null })
   if (limitState) {
     // 새 사용량 중단의 worker만 한 번 안전하게 보존한다. 이후에는 상태 조회만 한다.
@@ -4259,7 +4366,7 @@ async function drainWaitingWorkspaceDelegations() {
       'waiting-workspace',
       'waiting-integration-clean',
       'waiting-integration',
-      'waiting-usage-limit', 'waiting-rate-limit',
+      'waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity',
     ].includes(delegation.state) || delegation.pendingRecovery)
     .map((delegation) => delegation.id))
   for (const delegationId of aiDelegationWaitPolls.keys()) {
@@ -4548,7 +4655,7 @@ async function pollAiDelegations() {
     await drainWaitingWorkspaceDelegations()
     const active = [...aiDelegations.values()].filter((delegation) =>
       [
-        'waiting-integration-clean', 'waiting-usage-limit', 'waiting-rate-limit',
+        'waiting-integration-clean', 'waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity',
         'starting', 'waiting-resource', 'running', 'waiting-child-resume', 'waiting-document-work',
         'recovery-required',
         'waiting-integration', 'integration-starting', 'integration-waiting-resource',
@@ -4558,6 +4665,11 @@ async function pollAiDelegations() {
         || aiDelegationReportArchivePending(delegation))
     for (let delegation of active) {
       if (aiDelegationActions.has(delegation.id)) continue
+      try {
+        delegation = await ensureAiDelegationCompletionNotification(delegation)
+      } catch (error) {
+        console.warn('[AI delegation completion notification]', error)
+      }
       const delivered = aiDelegationStoredReportDeliveryPatch(delegation)
       if (delivered) {
         await updateAiDelegation(delegation.id, delivered)
@@ -4573,14 +4685,16 @@ async function pollAiDelegations() {
         scheduleAiDelegationWaitPoll(delegation)
         continue
       }
-      if (['waiting-usage-limit', 'waiting-rate-limit'].includes(delegation.state)) {
+      if (['waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity'].includes(delegation.state)) {
         if (!aiDelegationWaitPollDue(aiDelegationWaitPolls.get(delegation.id), delegation)) continue
         try { await refreshSuspendedAiDelegation(delegation) } catch { /* 확인 실패 시 보존하고 다음 조회를 기다린다. */ }
         try {
           const current = aiDelegations.get(delegation.id)
-          if (['waiting-usage-limit', 'waiting-rate-limit'].includes(current?.state)) await ensureAiDelegationNotification(current, {
+          if (['waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity'].includes(current?.state)) await ensureAiDelegationNotification(current, {
             kind: 'limit', dedupeKey: `ai-delegation-limit:${delegation.id}:${delegation.childOperationId ?? delegation.id}`,
-            message: 'AI 한도로 작업이 중단되었습니다. 작업과 변경은 보존되어 있으며, 한도 해제 후 카드 세부 정보의 AI 작업 복구에서 이어갈 수 있습니다.',
+            message: current.state === 'waiting-model-capacity'
+              ? '선택한 AI 모델의 실행 용량 부족으로 작업이 중단되었습니다. 작업과 변경은 보존되어 있으며, 용량 확보 후 카드 세부 정보의 AI 위임 영역에서 이어갈 수 있습니다.'
+              : 'AI 한도로 작업이 중단되었습니다. 작업과 변경은 보존되어 있으며, 한도 해제 후 카드 세부 정보의 AI 위임 영역에서 이어갈 수 있습니다.',
           })
         } catch (error) { console.warn('[AI delegation limit notification]', error) }
         scheduleAiDelegationWaitPoll(delegation)
@@ -5769,6 +5883,7 @@ const referenceContentKeys = [
   'status',
   'taskUrl',
   'externalLink',
+  'webLink',
   'aiConversationId',
   'aiConversations',
   'isWork',
@@ -6562,6 +6677,26 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
     return
   }
   const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`)
+  const runnerMcpAccess = authorizeRunnerMcpRequest({
+    request,
+    pathname: url.pathname,
+    machineRegistry,
+    conversationOrigins: aiConversationOrigins,
+    transientAttributions: aiAttributions.values(),
+    users,
+  })
+  if (runnerMcpAccess.kind === 'rejected') {
+    return sendJson(response, runnerMcpAccess.status, {
+      error: runnerMcpAccess.error,
+      code: runnerMcpAccess.code,
+    })
+  }
+  if (runnerMcpAccess.kind === 'authorized') {
+    // 머신 토큰은 검증된 대화에서만 기존 연동 권한으로 승격한다.
+    // 이후 라우트는 기존 로컬 MCP와 같은 사용자 귀속·권한 검사를 그대로 사용한다.
+    request.headers.authorization = `Bearer ${integrationToken}`
+    request.headers['x-mnp-ai-editor-id'] = runnerMcpAccess.owner.id
+  }
   let delegationActionId = null
   let releaseDocumentMutation = null
 
@@ -7555,7 +7690,10 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         })
         const completionBaseUrl = homeMachineId === machineRegistry.mainMachineId
           ? `http://127.0.0.1:${port}`
-          : publicBaseUrl
+          : runnerCallbackBaseUrlForMachine(homeMachineId)
+        if (!completionBaseUrl) {
+          throw new SubMachinePayloadError('서브 머신의 AionUi Runner를 최신 버전으로 다시 시작한 뒤 시도해 주세요.')
+        }
         const completionUrl = `${completionBaseUrl}/api/integrations/aionui/launches/${completionToken}/conversation`
         aiConversationLaunches.get(sessionTokenKey(completionToken)).completionUrl = completionUrl
         await persistAiAttributions()
@@ -7592,6 +7730,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         const completionToken = parseMindNProgressCompletionToken(payload.completionUrl, [
           `http://127.0.0.1:${port}`,
           publicBaseUrl,
+          ...runnerCallbackBaseUrls.values(),
         ])
         if (!completionToken) {
           return sendJson(response, 400, { error: 'AI 대화 완료 통보 주소가 올바르지 않습니다.' })
@@ -7640,6 +7779,9 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       } catch (error) {
         if (error instanceof AionUiExternalLaunchPayloadError) {
           return sendJson(response, 400, { error: error.message })
+        }
+        if (error instanceof SubMachinePayloadError) {
+          return sendJson(response, 503, { error: error.message })
         }
         // 완료·변경된 승인으로 시작하려는 요청은 외부 서버 장애가 아닌 승인 충돌이다.
         if (error.status === 409) return sendJson(response, 409, { error: error.message })
@@ -7707,6 +7849,15 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           await cardLayoutRequests.linkConversation(launch.cardLayoutRequestId, { id: conversationId, homeMachineId: launch.homeMachineId, linkedAt: new Date().toISOString() }, { id: launch.startedBy })
         }
         if (launch.purpose === 'shared-knowledge-review' || launch.purpose === 'document-reconstruction' || launch.purpose === 'card-layout') {
+          rememberAiConversationOrigin({
+            conversationId,
+            mapId: launch.mapId,
+            cardId: launch.cardId,
+            startedBy: launch.startedBy,
+            linkedAt: new Date().toISOString(),
+            homeMachineId: launch.homeMachineId,
+          })
+          await persistAiConversationOrigins()
           aiConversationLaunches.delete(tokenKey)
           return sendJson(response, 200, {
             conversationId,
@@ -8103,7 +8254,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         })
       }
       const recoveryAvailability = aiDelegationRecoveryAvailability(delegation)
-      const retryableParentWakeFailure = ['parent-wake-failed', 'failed', 'waiting-usage-limit', 'waiting-rate-limit'].includes(delegation.state)
+      const retryableParentWakeFailure = ['parent-wake-failed', 'failed', 'waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity'].includes(delegation.state)
         && recoveryAvailability?.recoveryAvailable === true
         && recoveryAvailability.recommendedAction === 'resume-existing'
       if (!['recovery-required', 'integration-recovery-required', 'waiting-child-resume'].includes(delegation.state)
@@ -9459,6 +9610,47 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       return await (crossDocument ? groupProjects.exclusive(runDelegation) : runDelegation())
     }
 
+    const cardAiConversationOpenRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/cards\/([^/]+)\/ai-conversations\/([^/]+)\/open-url$/)
+    if (cardAiConversationOpenRoute && request.method === 'GET') {
+      const user = requireUser(request, response)
+      if (!user) return
+      if (!canEdit(user)) return sendJson(response, 403, { error: '편집자만 AI 대화를 열 수 있습니다.' })
+      const mapId = decodeURIComponent(cardAiConversationOpenRoute[1])
+      const cardId = decodeURIComponent(cardAiConversationOpenRoute[2])
+      const conversationId = decodeURIComponent(cardAiConversationOpenRoute[3])
+      if (!isValidMapId(mapId)
+        || !cardId || cardId.length > 120
+        || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$/.test(conversationId)) {
+        return sendJson(response, 400, { error: '문서, 카드 또는 대화 ID가 올바르지 않습니다.' })
+      }
+      const map = await readMap(mapId)
+      const card = map?.nodes.find((node) => node.id === cardId)
+      if (!map || map.trashedAt || !card || !isAiConversationLinked(card.data, conversationId)) {
+        return sendJson(response, 404, { error: '카드에 연결된 AI 대화를 찾을 수 없습니다.' })
+      }
+      const linkedConversation = aiConversationLinksFromData(card.data)
+        .find((link) => link.conversationId === conversationId)
+      const homeMachineId = conversationHomeMachineId(conversationId, linkedConversation)
+      if (!machineAccessibleByUser(user, homeMachineId)) {
+        return sendJson(response, 403, { error: '이 대화가 저장된 서브 머신을 사용할 권한이 없습니다.' })
+      }
+      try {
+        return sendJson(response, 200, {
+          conversationId,
+          homeMachineId,
+          homeMachineLabel: machineLabel(homeMachineId),
+          homeMachineRole: homeMachineId === machineRegistry.mainMachineId ? 'main' : 'sub',
+          openUrl: createAionUiConversationWebUrl(aionUiWebBaseUrlForMachine(homeMachineId), conversationId),
+        })
+      } catch (error) {
+        if (error instanceof SubMachinePayloadError) {
+          return sendJson(response, 503, { error: error.message })
+        }
+        console.error('[AionUi conversation open URL]', error)
+        return sendJson(response, 503, { error: 'AionUi 대화 주소를 만들지 못했습니다.' })
+      }
+    }
+
     const cardAiConversationItemRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/cards\/([^/]+)\/ai-conversations\/([^/]+)$/)
     if (cardAiConversationItemRoute && request.method === 'DELETE') {
       const user = requireUser(request, response)
@@ -9768,6 +9960,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       }
 
       const token = `mnprn_${randomBytes(32).toString('base64url')}`
+      clearRunnerRuntimeRouting(machine.machineId)
       machineRegistry = setMachineToken(machineRegistry, machine.machineId, token)
       machineOperationQueue.wake(machine.machineId)
       await persistMachineRegistry()
@@ -9788,6 +9981,8 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       if (!machine) return
       const body = await readJsonBody(request)
       const waitMs = Math.max(0, Math.min(machineOperationLongPollMs, Math.trunc(Number(body?.waitMs)) || machineOperationLongPollMs))
+      noteRunnerCallbackBaseUrl(machine.machineId, body?.callbackBaseUrl)
+      noteRunnerObservedAddress(machine.machineId, request)
       await noteMachineSeen(machine.machineId)
 
       // long-poll 도중 Runner가 끊기면 깨어난 이 요청이 오퍼레이션을 가져가 버린다.
@@ -9845,6 +10040,9 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
     if (request.method === 'POST' && machineRunnerHeartbeatRoute) {
       const machine = requireRunnerMachine(request, response, machineRunnerHeartbeatRoute[1])
       if (!machine) return
+      const body = await readJsonBody(request)
+      noteRunnerCallbackBaseUrl(machine.machineId, body?.callbackBaseUrl)
+      noteRunnerObservedAddress(machine.machineId, request)
       await noteMachineSeen(machine.machineId)
       return sendJson(response, 200, {
         machineId: machine.machineId,
@@ -9926,6 +10124,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         const machineId = normalizeMachineId(machineTokenRoute[1])
         machinePairingStore.revokeMachine(machineId)
         const token = `mnprn_${randomBytes(32).toString('base64url')}`
+        clearRunnerRuntimeRouting(machineId)
         try {
           machineRegistry = setMachineToken(machineRegistry, machineId, token)
         } catch (error) {
@@ -9941,6 +10140,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       if (request.method === 'DELETE') {
         const machineId = normalizeMachineId(machineTokenRoute[1])
         machinePairingStore.revokeMachine(machineId)
+        clearRunnerRuntimeRouting(machineId)
         try {
           machineRegistry = setMachineToken(machineRegistry, machineId, null)
         } catch (error) {
@@ -10005,6 +10205,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           throw error
         }
         machinePairingStore.revokeMachine(removedMachineId)
+        clearRunnerRuntimeRouting(removedMachineId)
         // 등록이 사라진 머신으로 향하던 요청은 영원히 전달될 수 없으므로 즉시 실패로 확정한다.
         machineOperationQueue.cancelMachine(removedMachineId)
         // 삭제한 머신을 기본값으로 쓰던 사용자는 조회 시 자동으로 해제되지만 저장값도 함께 정리한다.
@@ -10040,13 +10241,31 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       if (!user) return
       if (!canEdit(user)) return sendJson(response, 403, { error: '편집자만 AI 작업공간 이력을 사용할 수 있습니다.' })
 
+      if (!['GET', 'POST', 'DELETE'].includes(request.method)) return sendJson(response, 405, { error: '지원하지 않는 요청입니다.' })
+      const body = request.method === 'GET' ? {} : await readJsonBody(request)
+      if (body?.expectedUserId !== undefined && body.expectedUserId !== user.id) {
+        return sendJson(response, 409, { error: '로그인 계정이 변경되었습니다. 대화 시작 창을 다시 열어 주세요.' })
+      }
+      const queryMachineId = url.searchParams.get('machineId')
+      if (queryMachineId && body?.machineId && queryMachineId !== body.machineId) {
+        return sendJson(response, 400, { error: '작업공간 이력의 머신 정보가 일치하지 않습니다.' })
+      }
+      let machineId
+      try {
+        // 머신을 보내지 않는 구버전 클라이언트는 메인 이력만 사용한다.
+        machineId = resolveTargetMachineForUser(user, body?.machineId || queryMachineId || machineRegistry.mainMachineId).machineId
+      } catch (error) {
+        return sendJson(response, 400, { error: error.message })
+      }
+      const historyKey = JSON.stringify([user.id, machineId])
+      const result = (workspaces) => ({ userId: user.id, machineId, workspaces })
+
       if (request.method === 'GET') {
-        return sendJson(response, 200, { workspaces: aiWorkspaceHistories.get(user.id) ?? [] })
+        return sendJson(response, 200, result(aiWorkspaceHistories.get(historyKey) ?? []))
       }
 
       if (request.method === 'POST') {
-        const body = await readJsonBody(request)
-        const currentWorkspaces = aiWorkspaceHistories.get(user.id) ?? []
+        const currentWorkspaces = aiWorkspaceHistories.get(historyKey) ?? []
 
         if (typeof body?.workspace === 'string') {
           const workspace = body.workspace.trim()
@@ -10054,9 +10273,9 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
             return sendJson(response, 400, { error: '추가할 작업공간이 올바르지 않습니다.' })
           }
           const workspaces = rememberAiWorkspace(currentWorkspaces, workspace)
-          aiWorkspaceHistories.set(user.id, workspaces)
+          aiWorkspaceHistories.set(historyKey, workspaces)
           await persistAiWorkspaceHistories()
-          return sendJson(response, 200, { workspaces })
+          return sendJson(response, 200, result(workspaces))
         }
 
         if (body?.migration === true) {
@@ -10066,28 +10285,25 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
               || workspace.trim().length > AI_WORKSPACE_MAX_LENGTH)) {
             return sendJson(response, 400, { error: '가져올 작업공간 이력이 올바르지 않습니다.' })
           }
-          if (aiWorkspaceHistories.has(user.id)) return sendJson(response, 200, { workspaces: currentWorkspaces })
+          if (aiWorkspaceHistories.has(historyKey)) return sendJson(response, 200, result(currentWorkspaces))
           const workspaces = normalizeAiWorkspaceHistory(body.workspaces)
-          if (workspaces.length > 0) {
-            aiWorkspaceHistories.set(user.id, workspaces)
-            await persistAiWorkspaceHistories()
-          }
-          return sendJson(response, 200, { workspaces })
+          aiWorkspaceHistories.set(historyKey, workspaces)
+          await persistAiWorkspaceHistories()
+          return sendJson(response, 200, result(workspaces))
         }
 
         return sendJson(response, 400, { error: '추가할 작업공간이 올바르지 않습니다.' })
       }
 
       if (request.method === 'DELETE') {
-        const body = await readJsonBody(request)
         const workspace = typeof body.workspace === 'string' ? body.workspace.trim() : ''
         if (!workspace || workspace.length > AI_WORKSPACE_MAX_LENGTH) {
           return sendJson(response, 400, { error: '삭제할 작업공간이 올바르지 않습니다.' })
         }
-        const workspaces = removeAiWorkspace(aiWorkspaceHistories.get(user.id) ?? [], workspace)
-        aiWorkspaceHistories.set(user.id, workspaces)
+        const workspaces = removeAiWorkspace(aiWorkspaceHistories.get(historyKey) ?? [], workspace)
+        aiWorkspaceHistories.set(historyKey, workspaces)
         await persistAiWorkspaceHistories()
-        return sendJson(response, 200, { workspaces })
+        return sendJson(response, 200, result(workspaces))
       }
 
       return sendJson(response, 405, { error: '지원하지 않는 요청입니다.' })
@@ -10318,7 +10534,9 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         users = users.filter((candidate) => candidate.id !== editor.id)
         await invalidateUserSessions(editor.id)
         await decommissionEditorMachines(editor.id, { remove: true })
-        aiWorkspaceHistories.delete(editor.id)
+        for (const key of aiWorkspaceHistories.keys()) {
+          if (JSON.parse(key)[0] === editor.id) aiWorkspaceHistories.delete(key)
+        }
         distributedWorkSettings.delete(editor.id)
         await persistAiWorkspaceHistories()
         await persistDistributedWorkSettings()

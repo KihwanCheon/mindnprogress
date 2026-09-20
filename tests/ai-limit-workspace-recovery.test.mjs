@@ -68,7 +68,9 @@ for (const dirty of [false, true]) test(`한도 중단은 ${dirty ? '미커밋 �
   }
   await assert.rejects(() => restarted.finalize(lease.leaseId, { childStatus: 'failed', childError: 'too many requests' }))
   await restarted.reactivateQuarantinedLease(lease.leaseId, { ...scope, failureCategory: 'rate-limit' })
-  assert.equal(restarted.state.leases[lease.leaseId].recoveryHistory.length, 2)
+  await assert.rejects(() => restarted.finalize(lease.leaseId, { childStatus: 'failed', childError: 'Selected model is at capacity. Please try a different model.' }))
+  await restarted.reactivateQuarantinedLease(lease.leaseId, { ...scope, failureCategory: 'model-capacity' })
+  assert.equal(restarted.state.leases[lease.leaseId].recoveryHistory.length, 3)
 })
 
 test('구버전에서 변경 없이 반납한 한도 중단은 풀에서 복구용 lease를 한 번만 배정한다', async (t) => {
@@ -228,6 +230,11 @@ for (const expired of [false, true]) test(`복구 API는 ${expired ? '실행 기
     assert.equal(posted[0].targetConversationId, scope.conversationId)
     assert.equal(posted[0].workspaceLease.leaseId, lease.leaseId)
     assert.ok(posted[0].instruction.includes(input.instruction))
+    assert.ok(posted[0].instruction.includes(`- 현재 workspaceId: \`${lease.workspaceId}\``))
+    assert.ok(posted[0].instruction.includes(`- 현재 jobId: \`${lease.jobId}\``))
+    assert.ok(posted[0].instruction.includes(`- 현재 leaseId: \`${lease.leaseId}\``))
+    assert.match(posted[0].instruction, /이번 전문의 `# 할당된 작업공간`에 기재된 현재 배정만 사용하세요/)
+    assert.match(posted[0].instruction, /대화 기록에 남은 이전 경로·브랜치·lease를 복구 후보로 사용하지 마세요/)
     assert.equal(result.delegation.targetConversationId, scope.conversationId)
     assert.equal(result.delegation.dispatchRecoveryProof.kind, expired ? 'original-message-after-operation-expiry' : 'original-operation')
     if (expired) assert.equal(result.delegation.dispatchRecoveryProof.messageId, originalMessage.id)

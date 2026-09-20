@@ -1,11 +1,13 @@
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react'
 import type { MindNodeData } from '../types/mindMap'
-import { AiConversationRuntimeBadge } from './AiConversationRuntimeBadge'
+import { AiConversationRuntimeBadge, AiDelegationStatusBadge } from './AiConversationRuntimeBadge'
 import { AssigneeTooltip } from './AssigneeTooltip'
 import { DoorayTaskNode } from './DoorayTaskNode'
 import { MindImageNode } from './MindImageNode'
 import { NodeOverlapBadge } from './NodeOverlapBadge'
 import { isSameDoorayKnowledgeUrl, normalizedDoorayKnowledgeUrl, taskUrlProvider } from '../utils/externalLinks'
+import { isSameWebLinkUrl, normalizedWebLinkUrl } from '../utils/webLinks.mjs'
+import { WebLinkNode } from './WebLinkNode'
 import './MindNode.css'
 
 type MindNodeType = Node<MindNodeData, 'mind'>
@@ -28,6 +30,10 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
   const isDoorayWiki = taskUrlProvider(doorayUrl ?? '') === 'dooray-wiki'
   if (doorayUrl && data.externalLink && isSameDoorayKnowledgeUrl(data.externalLink.url, doorayUrl)) {
     return <DoorayTaskNode data={data} selected={selected} isConnectable={isConnectable} />
+  }
+  const webUrl = normalizedWebLinkUrl(data.taskUrl ?? '')
+  if (!doorayUrl && webUrl && data.webLink && isSameWebLinkUrl(data.webLink.url, webUrl)) {
+    return <WebLinkNode data={data} selected={selected} isConnectable={isConnectable} />
   }
 
   const hasProgressRollup = data.progressRollupTargetCount !== undefined
@@ -68,6 +74,7 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
     ? `완료되지 않은 선행 업무\n${blockedLabels.map((label) => `· ${label}`).join('\n')}`
     : `완료되지 않은 선행 업무 ${data.unresolvedDependencyCount ?? 0}건`
   const isOverdue = Boolean(data.dueDate && !isCompleted && new Date(`${data.dueDate}T23:59:59`) < new Date())
+  const showsSelectedStyle = selected
   const formattedDueDate = data.dueDate
     ? data.dueDate.split('-').slice(1).map(Number).join('.')
     : ''
@@ -75,7 +82,7 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
   return (
     <>
       <NodeOverlapBadge data={data} />
-      <article className={`mind-node ${data.kind} status-${displayStatus} ${isCompleted ? 'completed' : ''} ${selected ? 'selected' : ''}`}>
+      <article className={`mind-node ${data.kind} status-${displayStatus} ${isCompleted ? 'completed' : ''} ${showsSelectedStyle ? 'selected' : ''}`}>
       <Handle type="target" position={Position.Left} isConnectable={isConnectable} />
       {([
         ['top', Position.Top],
@@ -127,7 +134,8 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
             <span aria-hidden="true">💬</span>{data.commentCount}
           </span>
         )}
-        {showsProgress && (
+        <AiDelegationStatusBadge status={data.aiDelegationStatus} />
+        {!data.aiDelegationStatus && showsProgress && (
           <strong title={hasProgressRollup ? progressRollupDescription : undefined}>
             {hasProgressRollup ? `${progressRollupScope} ${data.progress}%` : `${data.progress}%`}
           </strong>

@@ -204,7 +204,7 @@ function DailyBackupPreviewCanvas({
       const primary = knowledgePolicyOf(edge) === 'reuse-first'
       const sourceHandlePrefix = sourceNode?.data.kind === 'image'
         ? 'image-source'
-        : sourceNode?.data.externalLink ? 'dooray-knowledge-source' : null
+        : sourceNode?.data.externalLink || sourceNode?.data.webLink ? 'dooray-knowledge-source' : null
       const nearestHandles = sourceHandlePrefix && sourceNode && targetNode
         ? nearestKnowledgeHandles(sourceNode, targetNode, sourceHandlePrefix)
         : undefined
