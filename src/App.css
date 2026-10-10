@@ -180,6 +180,8 @@
 .account-summary span { overflow: hidden; color: #9a94a0; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
 .account-popover > button { width: 100%; display: flex; align-items: center; gap: 8px; padding: 9px 10px; color: #5d5664; border: 0; border-radius: 7px; background: transparent; font-size: 9px; font-weight: 650; text-align: left; cursor: pointer; }
 .account-popover > button:hover { color: #5d50ca; background: #f3f1fa; }
+.account-popover > button > .account-setting-state { flex: 0 0 auto; margin-left: auto; color: #827a90; font-size: 8px; }
+.account-popover > button[aria-pressed="true"] > .account-setting-state { color: #5d50ca; }
 .account-popover > button.account-logout { color: #a65b5b; }
 .account-popover > button.account-logout:hover { background: #fff2f2; }
 .workspace { min-height: 0; position: relative; flex: 1; display: grid; grid-template-columns: var(--sidebar-width, 226px) minmax(520px, 1fr) var(--inspector-width, 278px); overflow: hidden; }

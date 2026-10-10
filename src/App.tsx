@@ -80,6 +80,7 @@ import { extractTextLinks } from './utils/textLinks.mjs'
 import { touchPointCentroid, touchPointDistance, viewportForTouchGesture } from './utils/touchViewport.mjs'
 import { normalizeWorkspaceLocation, restorableWorkspaceLocation, workspaceLocationPath, workspaceLocationStorageKey } from './utils/workspaceLocation.mjs'
 import { appliedUiTheme, applyUiTheme, storedUiTheme, UI_THEME_STORAGE_KEY, type UiTheme } from './theme'
+import { AI_INDICATOR_MOTION_STORAGE_KEY, applyAiIndicatorMotion, initialAiIndicatorMotion, storedAiIndicatorMotion, type AiIndicatorMotion } from './aiIndicatorMotion'
 
 const DOCUMENT_COLORS = [
   { id: 'violet', label: '보라', solid: '#6758d8', halo: '#dedafd' },
@@ -2322,7 +2323,7 @@ function DistributedWorkDialog({ onClose }: { onClose: () => void }) {
   )
 }
 
-function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onToggleTheme }: { user: AuthUser; onLogout: () => void; initialDeepLink: WorkspaceDeepLink | null; initialGroupId: string | null; theme: UiTheme; onToggleTheme: () => void }) {
+function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onToggleTheme, aiIndicatorMotion, onToggleAiIndicatorMotion }: { user: AuthUser; onLogout: () => void; initialDeepLink: WorkspaceDeepLink | null; initialGroupId: string | null; theme: UiTheme; onToggleTheme: () => void; aiIndicatorMotion: AiIndicatorMotion; onToggleAiIndicatorMotion: () => void }) {
   const [nodes, setNodes, onNodesChange] = useNodesState<MindMapNode>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState<MindMapEdge>([])
   const { canUndo, canRedo, undo, redo, resetHistory, rebaseline: rebaselineHistory, beginTransaction: beginHistoryTransaction, endTransaction: endHistoryTransaction, cancelTransaction: cancelHistoryTransaction } = useMapHistory(nodes, setNodes, edges, setEdges)
@@ -7190,6 +7191,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
             {accountMenuOpen && (
               <div className="account-popover">
                 <div className="account-summary"><strong>{user.name}</strong><span>{user.email}</span></div>
+                <button type="button" aria-pressed={aiIndicatorMotion === 'always'} title="이 브라우저에서만 AI 작업 표시의 점 3개를 항상 움직일 수 있습니다. 다른 애니메이션과 시스템 설정은 변경하지 않습니다." onClick={onToggleAiIndicatorMotion}><Icon name="sparkles" size={14} /><span>AI 작업 표시 움직임</span><span className="account-setting-state">{aiIndicatorMotion === 'always' ? '항상' : '시스템'}</span></button>
                 {!user.publicAccess && mode === 'editor' && <button onClick={() => { setAccountMenuOpen(false); setDistributedWorkOpen(true) }}><Icon name="sparkles" size={14} /><span>분산 작업 설정</span></button>}
                 {!user.publicAccess && <button onClick={() => { setAccountMenuOpen(false); setPasswordDialogOpen(true) }}><Icon name="lock" size={14} /><span>비밀번호 변경</span></button>}
                 <button className="account-logout" onClick={onLogout}><Icon name="logout" size={14} /><span>{user.publicAccess ? '로그인 화면으로 이동' : '로그아웃'}</span></button>
@@ -9336,12 +9338,19 @@ function App() {
   const [user, setUser] = useState<AuthUser | null>(null)
   const [checkingSession, setCheckingSession] = useState(true)
   const [theme, setTheme] = useState<UiTheme>(() => appliedUiTheme())
+  const [aiIndicatorMotion, setAiIndicatorMotion] = useState<AiIndicatorMotion>(() => initialAiIndicatorMotion())
 
   const toggleTheme = useCallback(() => {
     const nextTheme = theme === 'dark' ? 'light' : 'dark'
     applyUiTheme(nextTheme, true)
     setTheme(nextTheme)
   }, [theme])
+
+  const toggleAiIndicatorMotion = useCallback(() => {
+    const nextMotion = aiIndicatorMotion === 'always' ? 'system' : 'always'
+    applyAiIndicatorMotion(nextMotion, true)
+    setAiIndicatorMotion(nextMotion)
+  }, [aiIndicatorMotion])
 
   useEffect(() => {
     const synchronizeTheme = (event: StorageEvent) => {
@@ -9353,6 +9362,17 @@ function App() {
     }
     window.addEventListener('storage', synchronizeTheme)
     return () => window.removeEventListener('storage', synchronizeTheme)
+  }, [])
+
+  useEffect(() => {
+    const synchronizeAiIndicatorMotion = (event: StorageEvent) => {
+      if (event.key !== AI_INDICATOR_MOTION_STORAGE_KEY) return
+      const nextMotion = storedAiIndicatorMotion(event.newValue)
+      applyAiIndicatorMotion(nextMotion)
+      setAiIndicatorMotion(nextMotion)
+    }
+    window.addEventListener('storage', synchronizeAiIndicatorMotion)
+    return () => window.removeEventListener('storage', synchronizeAiIndicatorMotion)
   }, [])
 
   useEffect(() => {
@@ -9389,7 +9409,7 @@ function App() {
 
   return (
     <ReactFlowProvider>
-      <Workspace user={user} onLogout={() => { void logout() }} initialDeepLink={deepLink} initialGroupId={groupId} theme={theme} onToggleTheme={toggleTheme} />
+      <Workspace user={user} onLogout={() => { void logout() }} initialDeepLink={deepLink} initialGroupId={groupId} theme={theme} onToggleTheme={toggleTheme} aiIndicatorMotion={aiIndicatorMotion} onToggleAiIndicatorMotion={toggleAiIndicatorMotion} />
     </ReactFlowProvider>
   )
 }

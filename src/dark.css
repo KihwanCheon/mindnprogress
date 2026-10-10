@@ -339,6 +339,14 @@
   color: var(--theme-text-secondary);
 }
 
+[data-theme="dark"] .account-popover > button > .account-setting-state {
+  color: var(--theme-text-muted);
+}
+
+[data-theme="dark"] .account-popover > button[aria-pressed="true"] > .account-setting-state {
+  color: #c5bdff;
+}
+
 [data-theme="dark"] .account-popover > button:hover,
 [data-theme="dark"] .node-context-menu > button:hover:not(:disabled) {
   color: #c5bdff;
