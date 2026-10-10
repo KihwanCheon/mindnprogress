@@ -26,6 +26,8 @@
 - operation ID는 위임·상위 대화·하위 실행 턴·결과 해시로 고정한다. 응답 유실이나 MnP/Core 재시작 후에도 같은 메시지 ID를 사용하며 다른 본문으로 덮어쓰지 않는다. 재시도에는 처음 저장한 전문을 사용한다.
 - 기본 목록은 `reportArchive`에서 긴 본문을 제외한다. `reportArchived`와 `reportArchivePending`으로 사용자 기록 여부를 별도로 확인할 수 있다. `completed`라도 수신 확인 직후 네트워크 장애가 있으면 전문 저장은 대기 중일 수 있다.
 - 지원 여부는 `historyOnlyReports=true` capability로 확인한다. 구형 Core, 서버 장애, 응답 불일치이면 미완료 기록과 오류 코드를 보존하고 최대 60초 간격으로 재시도한다. 이 재시도는 AI를 실행하지 않는다. 새 완료 보고의 자동 실행은 전문이 저장될 때까지 기다린다.
+- 서브 머신에서는 AionUi 내장 Runner도 `POST /api/conversations/{id}/external-reports`를 허용해야 한다. Core가 API를 지원하더라도 Runner의 허용 경로 목록이 누락되면 보고는 저장되지 않는다. 요청 거절은 `RUNNER_OPERATION_REJECTED` 실패 결과로 즉시 반환하며 같은 묶음의 정상 요청은 계속 처리한다.
+- 실패 시 `reportArchive`에 `errorCode`, `errorReasonCode`, `errorStatus`, `errorMessage`, `errorStage`, `errorMachineId`를 보존한다. `RUNNER_UNAVAILABLE`과 `RESULT_TIMEOUT`을 포괄 오류로 덮지 않으며, 기능 조회(`capabilities`)와 보고 요청(`archive-request`) 실패를 구분한다. 오류 설명은 토큰·보고 본문을 제거하고 1,000자 이내로 제한한다. 로그에는 본문·오류 설명 대신 단계·코드·머신만 남기고 같은 오류의 반복을 억제한다. 저장 성공 시 이전 오류 필드는 비운다.
 
 완료 보고 수신 확인은 기존 위임 조회·갱신 도구로 처리하며, 이를 위한 별도 MCP 도구는 추가하지 않는다. 기본 목록에는 긴 원문을 포함하지 않으며, 전체 대화의 최신 응답으로 과거 위임 결과를 대체하지 않는다.
 
@@ -36,6 +38,8 @@
 과거 `parent-acknowledged`로 완료됐지만 전문이 없는 기록은 보존된 결과와 수신 확인의 대화·턴·해시가 일치할 때 자동으로 전문을 보충한다. `dispatch-delivered` 기록은 기존 자동 보고 메시지가 있으므로 보충 대상이 아니다. 삭제·폐기·복구 중이거나 무결성이 맞지 않는 결과는 자동 보충하지 않는다.
 
 배포 순서는 AionCore 소스 반영 → 사용자의 Core 빌드·AionUi 재시작이다. MnP를 먼저 재시작해도 대기 기록은 보존되며, 새 Core의 capability가 관측되면 별도 수동 재전달 없이 기록을 보충한다. 실제 A/B 대화의 보충 확인은 새 Core 적용 후 가능하다.
+
+Core가 이미 완료 보고 API를 지원하고 내장 Runner만 수정한 경우에는 Core 재빌드 없이 수정된 AionUi와 Runner를 적용한다. MnP의 상세 진단 보완은 MnP 서버 재시작 후 적용된다. 기존 결과와 고정 operation ID는 그대로 사용하며, 보고 복구를 위해 하위 AI를 재실행하거나 대화를 새로 만들지 않는다.
 
 미전달 결과는 상위 대화가 유휴 상태일 때 자동으로 전달하므로 재시작 후 상위 AI가 다시 실행될 수 있다. 전달 근거가 없거나 실패한 기록까지 일괄 완료 처리하지 않는다. 그런 기록은 결과를 읽은 담당 상위 AI의 명시적 수신 확인 또는 기존 결과 전달 재시도 절차를 사용한다.
 

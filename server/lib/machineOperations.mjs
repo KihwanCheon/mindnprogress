@@ -23,6 +23,21 @@ export class MachineOperationError extends Error {
   }
 }
 
+export function sanitizeMachineOperationErrorMessage(value, omittedContents = []) {
+  if (typeof value !== 'string') return null
+  let message = value
+  for (const content of omittedContents) {
+    if (typeof content !== 'string' || !content) continue
+    message = message.replaceAll(content, '[본문 생략]')
+      .replaceAll(JSON.stringify(content).slice(1, -1), '[본문 생략]')
+  }
+  return message
+    .replace(/\b(?:mnprn|mnprl|mnop|mnpat|mnpai)_[A-Za-z0-9_-]+/g, '[비공개]')
+    .replace(/Bearer\s+[^\s"']+/gi, 'Bearer [비공개]')
+    .replace(/((?:AIONUI_RUNTIME_TOKEN|attributionToken|api[_-]?key|token)["'\s]*[:=]["'\s]*)[A-Za-z0-9._-]+/gi, '$1[비공개]')
+    .replace(/\s+/g, ' ').trim().slice(0, 1000) || null
+}
+
 function isRecord(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
@@ -238,7 +253,8 @@ export class MachineOperationQueue {
       const status = Number.isInteger(result?.status) ? result.status : null
       operation.state = 'failed'
       this.finish(operation, new MachineOperationError(
-        `AIONUI_REQUEST_FAILED${status === null ? '' : `:${status}`}`,
+        sanitizeMachineOperationErrorMessage(result?.message, [operation.request.body?.content])
+          ?? `AIONUI_REQUEST_FAILED${status === null ? '' : `:${status}`}`,
         { status, code: result?.code ?? null, reasonCode: 'REMOTE_REQUEST_FAILED' },
       ))
     }

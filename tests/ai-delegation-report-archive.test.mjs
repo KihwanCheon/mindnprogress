@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import test from 'node:test'
 import { aiDelegationReportArchived, aiDelegationReportArchivePending, createAiDelegationReportArchiver } from '../server/lib/aiDelegationReportArchive.mjs'
 import { RuntimeStoppingError } from '../server/lib/runtimeStopping.mjs'
+import { MachineOperationError, MachineOperationQueue } from '../server/lib/machineOperations.mjs'
 
 const hash = (value) => createHash('sha256').update(value).digest('hex')
 const result = '완료 결과 원문\n마지막 줄까지 보존'
@@ -123,6 +124,87 @@ test('잘못된 저장 응답은 성공으로 인정하지 않는다', async () 
     assert.equal(aiDelegationReportArchived(h.stored), false)
     assert.equal(h.stored.reportArchive.errorCode, 'REPORT_ARCHIVE_RESPONSE_INVALID')
   }
+})
+
+test('Runner 미연결과 결과 시간 초과를 원인 코드·실패 단계·대상 머신으로 구분한다', async () => {
+  for (const reasonCode of ['RUNNER_UNAVAILABLE', 'RESULT_TIMEOUT']) {
+    const h = harness()
+    const archive = createAiDelegationReportArchiver({ ...h.options, capabilities: async () => {
+      throw new MachineOperationError('Runner 응답을 받지 못했습니다.', { reasonCode })
+    } })
+    await archive(h.stored)
+    assert.equal(h.stored.reportArchive.errorCode, reasonCode)
+    assert.equal(h.stored.reportArchive.errorReasonCode, reasonCode)
+    assert.equal(h.stored.reportArchive.errorStage, 'capabilities')
+    assert.equal(h.stored.reportArchive.errorMachineId, 'parent-machine')
+    assert.equal(h.stored.reportArchive.errorMessage, 'Runner 응답을 받지 못했습니다.')
+    assert.equal(h.requests.length, 0, '보고 저장 전 기능 조회 실패를 저장 실패와 구분한다.')
+  }
+})
+
+test('Runner가 보고 요청을 거절하면 상한 대기 없이 상세 원인을 저장하고 복구 후 오류를 지운다', async () => {
+  const h = harness()
+  const queue = new MachineOperationQueue()
+  const archive = createAiDelegationReportArchiver({ ...h.options, fetchOn: async (machineId, pathname, options) => {
+    const queued = queue.enqueue(machineId, { pathname, ...options })
+    const [claimed] = queue.claim(machineId)
+    queue.settle(machineId, claimed.operationId, { ok: false, status: null,
+      code: 'RUNNER_OPERATION_REJECTED', message: 'Runner operation is not allowed.' })
+    return queued.completion
+  } })
+  await archive(h.stored)
+  assert.equal(h.stored.reportArchive.errorCode, 'RUNNER_OPERATION_REJECTED')
+  assert.equal(h.stored.reportArchive.errorReasonCode, 'REMOTE_REQUEST_FAILED')
+  assert.equal(h.stored.reportArchive.errorStage, 'archive-request')
+  assert.equal(h.stored.reportArchive.errorMessage, 'Runner operation is not allowed.')
+  assert.deepEqual(queue.snapshot('parent-machine'), { pending: 0, dispatched: 0, waiting: 0 })
+  const operationId = h.stored.reportArchive.operationId
+  h.advance()
+  await createAiDelegationReportArchiver(h.options)(h.stored)
+  assert.equal(aiDelegationReportArchived(h.stored), true)
+  assert.equal(h.stored.reportArchive.operationId, operationId)
+  for (const field of ['errorCode', 'errorReasonCode', 'errorStage', 'errorMachineId', 'errorMessage', 'errorStatus']) {
+    assert.equal(h.stored.reportArchive[field], null)
+  }
+})
+
+test('HTTP 상태와 원격 오류 코드는 함께 보존하고 같은 오류의 반복 로그는 억제한다', async () => {
+  for (const code of [null, 'REPORT_DISABLED']) {
+    const h = harness()
+    const archive = createAiDelegationReportArchiver({ ...h.options, fetchOn: async () => {
+      throw new MachineOperationError('완료 보고 저장 API를 사용할 수 없습니다.',
+        { status: 503, code, reasonCode: 'REMOTE_REQUEST_FAILED' })
+    } })
+    await archive(h.stored)
+    assert.equal(h.stored.reportArchive.errorCode, code ?? 'HTTP_503')
+    assert.equal(h.stored.reportArchive.errorStatus, 503)
+    assert.equal(h.stored.reportArchive.errorReasonCode, 'REMOTE_REQUEST_FAILED')
+    h.advance()
+    await archive(h.stored)
+    assert.equal(h.warnings.length, 1)
+  }
+})
+
+test('같은 코드라도 실패 단계가 바뀌면 새 진단을 남긴다', async () => {
+  const h = harness()
+  const failure = async () => { throw new MachineOperationError('결과 시간 초과', { reasonCode: 'RESULT_TIMEOUT' }) }
+  await createAiDelegationReportArchiver({ ...h.options, capabilities: failure })(h.stored)
+  h.advance()
+  await createAiDelegationReportArchiver({ ...h.options, fetchOn: failure })(h.stored)
+  assert.equal(h.stored.reportArchive.errorStage, 'archive-request')
+  assert.equal(h.warnings.length, 2)
+})
+
+test('진단에는 토큰과 완료 전문을 남기지 않고 오류 설명 길이를 제한한다', async () => {
+  const h = harness()
+  const archive = createAiDelegationReportArchiver({ ...h.options, fetchOn: async () => {
+    throw new Error(`Bearer example-secret mnprn_example-secret mnpat_example-secret\n${h.stored.reportArchive.content}\n${'x'.repeat(2000)}`)
+  } })
+  await archive(h.stored)
+  const diagnostics = JSON.stringify({ message: h.stored.reportArchive.errorMessage, warnings: h.warnings })
+  assert.doesNotMatch(diagnostics, /example-secret|완료 결과 원문|마지막 줄까지 보존/)
+  assert.ok(h.stored.reportArchive.errorMessage.length <= 1000)
+  assert.equal(h.stored.reportArchive.errorCode, 'REPORT_ARCHIVE_UNAVAILABLE')
 })
 
 test('캡처 결과가 바뀌면 이전 메시지의 저장 완료를 재사용하지 않는다', async () => {

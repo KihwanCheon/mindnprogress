@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { aiDelegationReportResult, aiDelegationSucceeded } from './aiDelegations.mjs'
 import { throwIfRuntimeStopping } from './runtimeStopping.mjs'
+import { sanitizeMachineOperationErrorMessage } from './machineOperations.mjs'
 
 const hash = (value) => createHash('sha256').update(value).digest('hex')
 
@@ -43,29 +44,45 @@ export function createAiDelegationReportArchiver({ update, fetchOn, capabilities
     }
     if (Date.parse(archive.nextAttemptAt ?? '') > now()) return delegation
     const attempt = Number(archive.attempt ?? 0) + 1
+    let errorStage = 'integrity-check'
+    let machineId = null
     try {
       if (typeof archive.content !== 'string' || hash(archive.content) !== archive.contentHash) {
         throw Object.assign(new Error('저장할 완료 전문의 무결성을 확인하지 못했습니다.'), { code: 'REPORT_ARCHIVE_INTEGRITY_ERROR' })
       }
-      const machineId = parentMachineId(delegation)
+      machineId = parentMachineId(delegation)
+      errorStage = 'capabilities'
       if ((await capabilities(machineId))?.historyOnlyReports !== true) {
         throw Object.assign(new Error('완료 전문 기록 API를 지원하는 AionCore의 적용을 기다립니다.'), { code: 'AIONCORE_HISTORY_REPORT_UNSUPPORTED' })
       }
+      errorStage = 'archive-request'
       const result = await fetchOn(machineId, `/api/conversations/${encodeURIComponent(delegation.parentConversationId)}/external-reports`, {
         method: 'POST', body: { operationId, content: archive.content },
       })
+      errorStage = 'verify-response'
       if (result?.operationId !== operationId || result.conversationId !== delegation.parentConversationId
         || !/^external-report-[a-f0-9]{64}$/.test(result.messageId ?? '')
         || result.contentHash !== archive.contentHash || result.executionRequested !== false) {
         throw Object.assign(new Error('완료 전문 저장 응답의 대상·본문·실행 여부가 일치하지 않습니다.'), { code: 'REPORT_ARCHIVE_RESPONSE_INVALID' })
       }
+      errorStage = 'record-receipt'
       return await update(delegation.id, { reportArchive: { ...archive, status: 'recorded', attempt,
-        messageId: result.messageId, recordedAt: new Date(now()).toISOString(), nextAttemptAt: null, errorCode: null } })
+        messageId: result.messageId, recordedAt: new Date(now()).toISOString(), nextAttemptAt: null,
+        errorCode: null, errorReasonCode: null, errorStatus: null, errorMessage: null, errorStage: null, errorMachineId: null } })
     } catch (error) {
       throwIfRuntimeStopping(error)
-      const errorCode = error?.code ?? (error?.status ? `HTTP_${error.status}` : 'REPORT_ARCHIVE_UNAVAILABLE')
-      if (archive.errorCode !== errorCode) warn('[AI delegation report archive]', { delegationId: delegation.id, operationId, errorCode })
-      return await update(delegation.id, { reportArchive: { ...archive, status: 'pending', attempt, errorCode,
+      const errorReasonCode = error?.reasonCode ?? null
+      const errorStatus = Number.isInteger(error?.status) ? error.status : null
+      const errorCode = error?.code ?? (errorStatus ? `HTTP_${errorStatus}` : errorReasonCode ?? 'REPORT_ARCHIVE_UNAVAILABLE')
+      const errorMessage = sanitizeMachineOperationErrorMessage(error?.message,
+        [archive.content, aiDelegationReportResult(delegation).text])
+      if (archive.errorCode !== errorCode || archive.errorStage !== errorStage
+        || archive.errorReasonCode !== errorReasonCode || archive.errorStatus !== errorStatus) {
+        warn('[AI delegation report archive]', { delegationId: delegation.id, operationId, machineId,
+          errorCode, errorReasonCode, errorStatus, errorStage })
+      }
+      return await update(delegation.id, { reportArchive: { ...archive, status: 'pending', attempt,
+        errorCode, errorReasonCode, errorStatus, errorMessage, errorStage, errorMachineId: machineId,
         nextAttemptAt: new Date(now() + Math.min(60_000, 5_000 * 2 ** Math.min(attempt - 1, 4))).toISOString() } })
     }
   }
