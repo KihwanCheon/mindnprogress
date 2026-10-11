@@ -19,6 +19,8 @@
 
 기존 로컬 풀의 lease는 별도 유지한다. 메인 통합 잠금만 기존 manager의 직렬화 경로와 공유한다. 새 원격 결과는 서버 데이터 디렉터리의 `remote-workspaces/staging/<leaseId>/repository`에서 기존 체크포인트·dirty·untracked 충돌·HEAD/브랜치 이동 검사를 거친다. staging의 Git 참조와 작업 트리는 독립적이지만 기준 Git 객체는 메인 저장소와 공유해 전체 팩을 매번 복제하지 않는다. staging의 전체 작업 트리 체크아웃은 여전히 임시 디스크를 차지하므로 운영 전 크기를 측정해야 한다. staging이 남아 있는 동안 메인 저장소의 객체 정리나 이력 재작성으로 필요한 기준 객체를 제거해서는 안 된다. 네트워크가 끊겼다고 worker를 반환하거나 재배정하지 않는다.
 
+새 staging은 checkout 전에 메인 저장소의 로컬 `info/attributes`와 `info/exclude`를 복사한다. 공유 clone은 이 파일들을 자동 상속하지 않으므로, 기존 CRLF 파일의 checkout 정책이나 lease 메타데이터의 제외 정책이 달라져 가짜 dirty 상태가 생기는 것을 방지한다. 메인에 설정된 Git 신원은 복사하되, 미설정이면 임의의 이름·이메일을 만들지 않고 Git의 기본 동작을 유지한다. 실제 메인·worker의 파일, 속성 설정, 미커밋 변경을 자동 정리하거나 dirty 검사를 생략하지 않는다.
+
 전송 계약 v2에서는 Runner가 보고한 유휴 worker HEAD가 메인 기준 커밋과 같으면 기준선 bundle을 만들지 않는다. 뒤처져 있으면 해당 HEAD가 메인 기준 커밋의 조상인지 확인한 뒤 그 사이의 증분 bundle만 보낸다. 메인에서 공통 기준을 검증할 수 없으면 `REMOTE_WORKSPACE_BOOTSTRAP_REQUIRED`로 배정을 차단하며, 전체 이력 bundle로 자동 우회하지 않는다. 결과는 `baseCommit..작업 브랜치`, 반환은 `baseCommit..통합 브랜치` 범위의 증분 bundle이다. 무변경 결과나 Runner가 이미 보유한 통합 커밋은 bundle을 생략한다.
 
 ## 설정과 승인 순서
@@ -66,6 +68,8 @@ registry 예시의 경로는 실제 설정에 사용할 값이 아니라 계약 
 - 메인 staging 통합 충돌: 원격 Fork와 staging을 보존하고 `REMOTE_INTEGRATION_CONFLICT_MANUAL_REVIEW`로 격리한다. 자동 충돌 해결 대화를 Mac에 잘못 보내지 않는다. 통합 잠금은 명시적 복구 전까지 보존한다.
 - 통합 성공/반환 실패: `release-pending`으로 유지한다. 반환 ack 전까지 용량으로 계산하지 않는다.
 - 양쪽의 `completed` receipt가 영속 저장된 뒤 해당 lease의 bundle·chunk와 메인 staging을 정리한다. 정리 실패는 완료 결과를 뒤집지 않지만 `cleanup-pending`으로 새 배정을 막고 재시도한다. 중단된 `started` receipt, `release-pending`, 격리 상태의 산출물과 소유권 표시는 정리하지 않는다.
+- staging에서 생긴 추적·미추적 drift 복구 자료와 결과 기록은 `remote-workspaces/recovery/<leaseId>/`에 보존하며 완료 정리 대상에 넣지 않는다. 이전 버전의 결과가 staging 안의 `workspace-drift`를 가리키면 해당 복구 경로와 결과 기록은 그대로 유지하고 큰 `repository`와 임시 상태만 정리한다. 복구 자료의 삭제·보존 기간 결정은 별도 운영 절차다.
+- artifact 요청은 접수 시와 큐 실행 시에 머신 귀속·봉인·완료 상태를 다시 검사한다. 완료 lease의 새 전송은 거절한다. 완료 정리는 해당 lease의 모든 artifact 큐가 끝날 때까지 기다려 이미 실행 중인 업로드·다운로드와 파일 삭제가 경합하지 않게 한다. 완료 receipt 재조회는 정리된 bundle을 다시 요구하지 않는다.
 
 `.git/mnp-remote-owner.json`과 `.git/mnp-local-owner.json`은 coordinator 간 경합을 막는 영구 소유권 표시다. 물리 Git 잠금과 Runner state mutation 잠금은 프로세스 간 원자적 mkdir로 획득한다. 장애 후 잠금을 시간만 보고 삭제하면 안 된다.
 
@@ -84,6 +88,13 @@ registry 예시의 경로는 실제 설정에 사용할 값이 아니라 계약 
 - MCP smoke test의 등록 도구 59개 호출 검증 통과.
 - AionUi 새 bridge/test 파일 lint·format, Runner sidecar CJS bundle 생성 통과.
 - 세 저장소의 `git diff --check` 통과. 원본 AionUi의 `bun.lock` 변경은 보존했다.
+
+### v2 완료 정리 보완 검증
+
+- 원격 Git 테스트 25개와 기존 풀·통합·복구 테스트 58개 통과. 완료 후 drift 자료 보존, 이전 버전의 복구 경로 유지, 대기·실행 중인 업로드와 정리 경합, receipt 재조회, 로컬 checkout·ignore 정책 복제를 추가 검증했다.
+- Runner·머신 큐·인증 API·위임 회귀 테스트 108개 및 production 빌드 통과.
+- 실제 Mac 프로젝트는 별도 shared staging에서 원본 HEAD·브랜치를 유지하고 파일 정책을 복제한 후 clean 상태임을 확인했다. 원본 풀 상태 변경·Runner 호출을 금지한 검증이며 Windows↔Mac 전송·Unity 실행 검증을 대체하지 않는다.
+- AionCore 게시·Rust 검증과 운영 적용 조건은 여전히 별도로 확인해야 한다. 이번 보완은 main 병합·배포·재시작·원격 풀 활성화를 포함하지 않는다.
 
 MnP의 Git/복구 검증 재현 명령:
 

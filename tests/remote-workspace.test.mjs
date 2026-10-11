@@ -167,6 +167,173 @@ test('완료 후 산출물 정리가 실패하면 결과는 유지하고 다음 
   await assert.rejects(() => stat(path.join(f.remote.artifacts.root, lease.leaseId)), { code: 'ENOENT' })
 })
 
+test('완료 정리는 staging 밖의 추적·미추적 drift 복구 자료와 결과 기록을 보존한다', async (t) => {
+  const f = await fixture(t), lease = await f.acquire()
+  await writeFile(path.join(f.worker, 'feature.txt'), 'checkpointed result\n')
+  await f.checkpoint(lease)
+  const stored = f.remote.state.leases[lease.leaseId]
+  const sealed = await f.remote.command(stored, 'seal', { checkpointRound: 1 })
+  stored.headCommit = sealed.headCommit; stored.resultMode = sealed.resultMode
+  const stage = await f.remote.stage(stored)
+  const projectRoot = stage.state.leases[lease.leaseId].projectRoot
+  await writeFile(path.join(projectRoot, 'feature.txt'), 'uncheckpointed review\n')
+  await writeFile(path.join(projectRoot, 'operator-review.txt'), 'preserve review material\n')
+
+  const result = await f.remote.finalize(lease.leaseId, { childStatus: 'completed' })
+  assert.equal(result.status, 'completed')
+  const recoveryRoot = path.join(f.remote.root, 'recovery', lease.leaseId)
+  assert.ok(result.driftArchive.startsWith(`${recoveryRoot}${path.sep}`))
+  assert.equal(await readFile(path.join(result.driftArchive, 'untracked', 'operator-review.txt'), 'utf8'), 'preserve review material\n')
+  assert.match(await readFile(path.join(result.driftArchive, 'tracked.diff'), 'utf8'), /uncheckpointed review/)
+  assert.equal((await jsonFile(path.join(recoveryRoot, 'job-results', `${lease.jobId}.json`))).driftArchive, result.driftArchive)
+  assert.equal(await readFile(path.join(f.integration, 'feature.txt'), 'utf8'), 'checkpointed result\n')
+  await assert.rejects(() => stat(path.join(f.remote.root, 'staging', lease.leaseId)), { code: 'ENOENT' })
+  await assert.rejects(() => stat(path.join(f.remote.artifacts.root, lease.leaseId)), { code: 'ENOENT' })
+})
+
+test('재시작 후 이전 버전의 staging 복구 경로는 유지하고 큰 저장소만 정리한다', async (t) => {
+  const f = await fixture(t), lease = await f.acquire()
+  await f.remote.checkpoint(lease.leaseId, { requestId: 'no-change', jobId: lease.jobId,
+    mapId: 'map', cardId: 'card', conversationId: 'conversation-1', paths: [], confirmNoChanges: true })
+  await f.remote.finalize(lease.leaseId, { childStatus: 'completed' })
+  const stagingRoot = path.join(f.remote.root, 'staging', lease.leaseId)
+  const archive = path.join(stagingRoot, 'workspace-drift', 'fork1', 'legacy-archive')
+  await mkdir(path.join(archive, 'untracked'), { recursive: true })
+  await writeFile(path.join(archive, 'untracked', 'review.txt'), 'legacy recovery\n')
+  await mkdir(path.join(stagingRoot, 'repository'))
+  await writeFile(path.join(stagingRoot, 'repository', 'large-worktree.txt'), 'discardable checkout\n')
+  await saveJson(path.join(stagingRoot, 'state.json'), { leases: {} })
+  const stored = f.remote.state.leases[lease.leaseId]
+  stored.result.driftArchive = archive; stored.cleanupPending = true
+  await saveJson(path.join(stagingRoot, 'job-results', `${lease.jobId}.json`), stored.result)
+  await f.remote.persist()
+
+  const restarted = new RemoteWorkspacePool({ local: f.local, stateFile: f.remote.stateFile,
+    mainMachineId: f.remote.mainMachineId, callRunner: f.remote.callRunner })
+  await restarted.initialize()
+  await restarted.cleanupCompletedLeases()
+  assert.equal(restarted.state.leases[lease.leaseId].cleanupPending, false)
+  assert.equal(restarted.state.leases[lease.leaseId].result.driftArchive, archive)
+  assert.equal(await readFile(path.join(archive, 'untracked', 'review.txt'), 'utf8'), 'legacy recovery\n')
+  assert.equal((await jsonFile(path.join(stagingRoot, 'job-results', `${lease.jobId}.json`))).driftArchive, archive)
+  await assert.rejects(() => stat(path.join(stagingRoot, 'repository')), { code: 'ENOENT' })
+  await assert.rejects(() => stat(path.join(stagingRoot, 'state.json')), { code: 'ENOENT' })
+})
+
+test('봉인 전에 접수된 대기 중 chunk는 완료 시 거절되고 정리 후 산출물을 재생성하지 않는다', async (t) => {
+  const f = await fixture(t), lease = await f.acquire()
+  await writeFile(path.join(f.worker, 'feature.txt'), 'late duplicate chunk\n'); await f.checkpoint(lease)
+  const sealed = await f.remote.command(f.remote.state.leases[lease.leaseId], 'seal', { checkpointRound: 1 })
+  const chunk = await f.remote.artifacts.chunk(lease.leaseId, 'result', 0)
+  let resume, cleanupStarted
+  f.remote.artifactQueues.set(`${lease.leaseId}:result`, new Promise((resolve) => { resume = resolve }))
+  const cleaning = new Promise((resolve) => { cleanupStarted = resolve })
+  const cleanup = f.remote.cleanupCompletedLease.bind(f.remote)
+  f.remote.cleanupCompletedLease = (stored) => { cleanupStarted(); return cleanup(stored) }
+  const pendingUpload = f.remote.artifactRequest('macbook', lease.leaseId, 'result', 'chunks/0', 'POST',
+    { manifest: sealed.manifest, chunk }).catch((error) => error)
+  const finalizing = f.remote.finalize(lease.leaseId, { childStatus: 'completed' })
+  try {
+    await cleaning
+    assert.equal(f.remote.state.leases[lease.leaseId].cleanupPending, true)
+    assert.ok(await stat(path.join(f.remote.artifacts.root, lease.leaseId)))
+  } finally { resume() }
+  assert.equal((await pendingUpload).code, 'REMOTE_WORKSPACE_ARTIFACT_LEASE_COMPLETED')
+  assert.equal((await finalizing).status, 'completed')
+  assert.equal(f.remote.state.leases[lease.leaseId].cleanupPending, false)
+  await assert.rejects(() => stat(path.join(f.remote.artifacts.root, lease.leaseId)), { code: 'ENOENT' })
+  assert.equal(f.remote.artifactQueues.has(`${lease.leaseId}:result`), false)
+})
+
+test('이미 실행 중인 chunk 저장을 기다린 뒤 완료 산출물을 정리한다', async (t) => {
+  const f = await fixture(t), lease = await f.acquire()
+  await writeFile(path.join(f.worker, 'feature.txt'), 'in-flight duplicate chunk\n'); await f.checkpoint(lease)
+  const sealed = await f.remote.command(f.remote.state.leases[lease.leaseId], 'seal', { checkpointRound: 1 })
+  const chunk = await f.remote.artifacts.chunk(lease.leaseId, 'result', 0)
+  let resume, uploadStarted, cleanupStarted
+  const blocked = new Promise((resolve) => { resume = resolve })
+  const uploading = new Promise((resolve) => { uploadStarted = resolve })
+  const cleaning = new Promise((resolve) => { cleanupStarted = resolve })
+  const receive = f.remote.artifacts.receive.bind(f.remote.artifacts)
+  f.remote.artifacts.receive = async (...args) => { uploadStarted(); await blocked; return receive(...args) }
+  const cleanup = f.remote.cleanupCompletedLease.bind(f.remote)
+  f.remote.cleanupCompletedLease = (stored) => { cleanupStarted(); return cleanup(stored) }
+  const pendingUpload = f.remote.artifactRequest('macbook', lease.leaseId, 'result', 'chunks/0', 'POST', { manifest: sealed.manifest, chunk })
+  await uploading
+  const finalizing = f.remote.finalize(lease.leaseId, { childStatus: 'completed' })
+  try {
+    await cleaning
+    assert.equal(f.remote.state.leases[lease.leaseId].cleanupPending, true)
+    assert.ok(await stat(path.join(f.remote.artifacts.root, lease.leaseId)))
+  } finally { resume() }
+  assert.equal((await pendingUpload).received, true)
+  assert.equal((await finalizing).status, 'completed')
+  await assert.rejects(() => stat(path.join(f.remote.artifacts.root, lease.leaseId)), { code: 'ENOENT' })
+})
+
+test('완료 정리·Runner 재시작 후 receipt 재조회는 파일 없이 멱등하고 새 전송은 차단한다', async (t) => {
+  const f = await fixture(t), lease = await f.acquire()
+  await writeFile(path.join(f.worker, 'feature.txt'), 'receipt replay\n'); await f.checkpoint(lease)
+  const result = await f.remote.finalize(lease.leaseId, { childStatus: 'completed' })
+  const release = Object.values(f.remote.state.leases[lease.leaseId].operations).find((operation) => operation.action === 'release')
+  await f.restartAgent()
+  assert.equal((await f.agent().execute(release)).released, true)
+  assert.deepEqual(await f.remote.finalize(lease.leaseId, { childStatus: 'completed' }), result)
+  await assert.rejects(() => f.remote.artifactRequest('macbook', lease.leaseId, 'result', 'complete', 'POST'), /ARTIFACT_LEASE_COMPLETED/)
+  await assert.rejects(() => f.remote.artifactRequest('macbook', lease.leaseId, 'release', 'manifest', 'GET'), /ARTIFACT_LEASE_COMPLETED/)
+  await assert.rejects(() => stat(path.join(f.remote.artifacts.root, lease.leaseId)), { code: 'ENOENT' })
+})
+
+test('staging은 로컬 속성·메타데이터 제외를 복사하고 미설정 신원·실제 변경을 안전하게 처리한다', async (t) => {
+  const f = await fixture(t)
+  const relative = 'ProjectSettings/AudioManager.asset'
+  const attributes = `${relative} -text -eol\n`
+  const baseline = '%YAML 1.1\r\nAudioManager:\r\n  m_Volume: 1\r\n'
+  await mkdir(path.join(f.integration, 'ProjectSettings'))
+  await writeFile(path.join(f.integration, '.gitignore'), '')
+  await writeFile(path.join(f.integration, '.gitattributes'), '*.txt text eol=lf\n*.asset merge=unityyamlmerge eol=lf\n')
+  await writeFile(path.join(f.integration, '.git', 'info', 'attributes'), attributes)
+  await writeFile(path.join(f.integration, '.git', 'info', 'exclude'), '/.ai-session.json\n')
+  await writeFile(path.join(f.integration, relative), baseline)
+  await git(f.integration, ['add', '.']); await git(f.integration, ['commit', '-m', '[김용민] 기존 CRLF 기준선 검증'])
+  await writeFile(path.join(f.worker, '.git', 'info', 'attributes'), attributes)
+  await writeFile(path.join(f.worker, '.git', 'info', 'exclude'), '/.ai-session.json\n')
+  await git(f.worker, ['fetch', f.integration, 'main']); await git(f.worker, ['merge', '--ff-only', 'FETCH_HEAD'])
+  await f.observe()
+  const lease = await f.acquire()
+  await writeFile(path.join(f.worker, 'feature.txt'), 'attribute-safe result\n'); await f.checkpoint(lease)
+  const stored = f.remote.state.leases[lease.leaseId]
+  const sealed = await f.remote.command(stored, 'seal', { checkpointRound: 1 })
+  stored.headCommit = sealed.headCommit; stored.resultMode = sealed.resultMode
+  await git(f.integration, ['config', '--unset', 'user.name'])
+  await git(f.integration, ['config', '--unset', 'user.email'])
+  const stage = await f.remote.stage(stored)
+  const projectRoot = stage.state.leases[lease.leaseId].projectRoot
+  assert.equal(await readFile(path.join(projectRoot, '.git', 'info', 'attributes'), 'utf8'), attributes)
+  assert.equal(await readFile(path.join(projectRoot, '.git', 'info', 'exclude'), 'utf8'), '/.ai-session.json\n')
+  assert.equal(await readFile(path.join(projectRoot, relative), 'utf8'), baseline)
+  assert.equal(await git(projectRoot, ['status', '--porcelain', '--untracked-files=all']), '')
+  for (const key of ['user.name', 'user.email']) {
+    const identity = await git(f.integration, ['config', '--get', key]).catch((error) => {
+      if (error.code === 1) return null
+      throw error
+    })
+    const copied = await git(projectRoot, ['config', '--local', '--get', key]).catch((error) => {
+      if (error.code === 1) return null
+      throw error
+    })
+    assert.equal(copied, identity)
+  }
+  await git(f.integration, ['config', 'user.name', 'MnP test'])
+  await git(f.integration, ['config', 'user.email', 'mnp@example.invalid'])
+
+  await writeFile(path.join(f.integration, relative), baseline.replace('m_Volume: 1', 'm_Volume: 2'))
+  assert.equal((await f.remote.finalize(lease.leaseId, { childStatus: 'completed' })).status, 'waiting-integration')
+  assert.match(await readFile(path.join(f.integration, relative), 'utf8'), /m_Volume: 2/)
+  await writeFile(path.join(f.integration, relative), baseline)
+  assert.equal((await f.remote.finalize(lease.leaseId, { childStatus: 'completed' })).status, 'completed')
+})
+
 test('원격 결과 통합은 최신 main 미커밋 변경을 보존하고 자동 대기한다', async (t) => {
   const f = await fixture(t), lease = await f.acquire()
   await writeFile(path.join(f.worker, 'feature.txt'), 'remote change\n'); await f.checkpoint(lease)

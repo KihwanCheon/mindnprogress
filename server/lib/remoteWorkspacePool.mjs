@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, rm } from 'node:fs/promises'
+import { copyFile, lstat, mkdir, rm } from 'node:fs/promises'
 import path from 'node:path'
 import { WorkspacePoolManager, WorkspacePoolUnavailableError, integrationWorktreeDirtyReasonCode } from './workspacePool.mjs'
 import { RemoteWorkspaceArtifacts } from './remoteWorkspaceArtifacts.mjs'
@@ -144,10 +144,23 @@ export class RemoteWorkspacePool {
   }
   async cleanupCompletedLease(lease) {
     if (lease.status !== 'completed' || !lease.cleanupPending) return
+    const artifactKeys = ['baseline', 'result', 'release'].map((kind) => `${lease.leaseId}:${kind}`)
+    // Closing the lease rejects new requests; drain accepted reads/writes before deleting their files.
+    await Promise.all(artifactKeys.map((key) => (this.artifactQueues.get(key) ?? Promise.resolve()).catch(() => {})))
     await this.artifacts.cleanup(lease.leaseId)
-    await rm(path.join(this.root, 'staging', lease.leaseId), { recursive: true, force: true, maxRetries: 6, retryDelay: 100 })
+    const stagingRoot = path.join(this.root, 'staging', lease.leaseId)
+    const legacyRecovery = await lstat(path.join(stagingRoot, 'workspace-drift')).catch((error) => {
+      if (error.code === 'ENOENT') return null
+      throw error
+    })
+    const removalOptions = { recursive: true, force: true, maxRetries: 6, retryDelay: 100 }
+    if (legacyRecovery) {
+      // Older completed results already reference this path. Keep their recovery data and receipts in place.
+      await rm(path.join(stagingRoot, 'repository'), removalOptions)
+      await rm(path.join(stagingRoot, 'state.json'), removalOptions)
+    } else await rm(stagingRoot, removalOptions)
     this.stages.delete(lease.leaseId)
-    for (const kind of ['baseline', 'result', 'release']) this.artifactQueues.delete(`${lease.leaseId}:${kind}`)
+    for (const key of artifactKeys) this.artifactQueues.delete(key)
     lease.cleanupPending = false
     await this.persist()
   }
@@ -293,9 +306,23 @@ export class RemoteWorkspacePool {
       try { await git(this.local.registry.integration.root, ['clone', '--shared', '--no-checkout', '--single-branch', '--branch', lease.baseBranch,
         this.local.registry.integration.root, workerPath]) }
       catch (error) { throw workspaceError('REMOTE_WORKSPACE_STAGING_RECOVERY_REQUIRED', error.message) }
-      await git(workerPath, ['config', 'user.name', await git(this.local.registry.integration.root, ['config', 'user.name'])])
-      await git(workerPath, ['config', 'user.email', await git(this.local.registry.integration.root, ['config', 'user.email'])])
+      for (const key of ['user.name', 'user.email']) {
+        const identity = await git(this.local.registry.integration.root, ['config', '--get', key]).catch((error) => {
+          if (error.code === 1) return null
+          throw error
+        })
+        // Preserve configured identities without inventing a user or replacing Git's normal fallback.
+        if (identity) await git(workerPath, ['config', key, identity])
+      }
       await git(workerPath, ['remote', 'set-url', 'origin', this.local.registry.originUrl])
+      // A clone does not inherit local checkout/ignore policy, including exclusions for lease metadata.
+      for (const file of ['attributes', 'exclude']) {
+        const source = path.resolve(this.local.registry.integration.root,
+          await git(this.local.registry.integration.root, ['rev-parse', '--git-path', `info/${file}`]))
+        const target = path.resolve(workerPath, await git(workerPath, ['rev-parse', '--git-path', `info/${file}`]))
+        await mkdir(path.dirname(target), { recursive: true })
+        await copyFile(source, target).catch((error) => { if (error.code !== 'ENOENT') throw error })
+      }
       if (lease.resultMode === 'delta') {
         await git(workerPath, ['bundle', 'verify', this.artifacts.file(lease.leaseId, 'result')])
         await git(workerPath, ['fetch', '--no-tags', this.artifacts.file(lease.leaseId, 'result'),
@@ -312,7 +339,7 @@ export class RemoteWorkspacePool {
       await saveJson(stateFile, state)
     }
     const manager = new WorkspacePoolManager({ stateFile })
-    manager.registry = { ...this.local.registry, sharedRoot: root,
+    manager.registry = { ...this.local.registry, sharedRoot: path.join(this.root, 'recovery', lease.leaseId),
       workers: [{ id: lease.workspaceId, root: workerPath, role: 'worker' }],
       workspaces: [this.local.registry.integration, { id: lease.workspaceId, root: workerPath, role: 'worker' }] }
     manager.state = state
@@ -434,11 +461,17 @@ export class RemoteWorkspacePool {
     })
   }
   async artifactRequest(machineId, leaseId, kind, suffix, method, body) {
-    const lease = this.scoped(leaseId)
-    if (lease.ownership.machineId !== machineId || !['baseline', 'result', 'release'].includes(kind)) throw workspaceError('MNP_WORKSPACE_ASSIGNMENT_MISMATCH')
-    if (kind === 'result' ? method !== 'POST' || lease.sealed : method !== 'GET') throw workspaceError('REMOTE_WORKSPACE_ARTIFACT_DIRECTION_INVALID')
+    const validate = () => {
+      const lease = this.scoped(leaseId)
+      if (lease.ownership.machineId !== machineId || !['baseline', 'result', 'release'].includes(kind)) throw workspaceError('MNP_WORKSPACE_ASSIGNMENT_MISMATCH')
+      if (lease.status === 'completed') throw workspaceError('REMOTE_WORKSPACE_ARTIFACT_LEASE_COMPLETED')
+      if (kind === 'result' ? method !== 'POST' || lease.sealed : method !== 'GET') throw workspaceError('REMOTE_WORKSPACE_ARTIFACT_DIRECTION_INVALID')
+    }
+    validate()
     const key = `${leaseId}:${kind}`
     const action = async () => {
+      // Ownership and lifecycle may change while this request waits behind another artifact operation.
+      validate()
       if (method === 'GET' && suffix === 'manifest') return this.artifacts.manifest(leaseId, kind)
       const chunk = /^chunks\/(\d+)$/.exec(suffix)
       if (method === 'GET' && chunk) return this.artifacts.chunk(leaseId, kind, Number(chunk[1]))
