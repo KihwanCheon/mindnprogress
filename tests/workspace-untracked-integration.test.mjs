@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { execFile, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
-import { mkdtemp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
@@ -84,6 +84,8 @@ async function localChangesQuarantine(t) {
     conversationId: 'conversation-test', paths: ['base.txt'], commitMessage })
   const hooks = path.join(f.root, 'integration-hooks')
   await put(hooks, 'post-commit', "#!/bin/sh\nprintf 'user local change\\n' > base.txt\n")
+  // Git ignores non-executable hooks on macOS/Linux; the fixture must actually run.
+  await chmod(path.join(hooks, 'post-commit'), 0o755)
   await git(f.worker, ['config', 'core.hooksPath', hooks])
   await assert.rejects(f.manager.finalize(f.lease.leaseId, { childStatus: 'completed' }), /local changes/i)
   await git(f.worker, ['config', 'core.hooksPath', path.join(f.root, 'no-hooks')])

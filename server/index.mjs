@@ -219,6 +219,7 @@ import {
   integrationWorktreeDirtyMessage,
   integrationWorktreeDirtyReasonCode,
 } from './lib/workspacePool.mjs'
+import { RemoteWorkspacePool, remoteWorkspaceFacade } from './lib/remoteWorkspacePool.mjs'
 
 const serverDirectory = path.dirname(fileURLToPath(import.meta.url))
 const projectDirectory = path.resolve(serverDirectory, '..')
@@ -323,10 +324,14 @@ const groupDocumentInstructionActions = createGroupDocumentInstructionDispatchCo
 let groupDocumentInstructionWriteQueue = Promise.resolve()
 let groupDocumentInstructionPollRunning = false
 const aiDelegationWaitPolls = new Map()
-const workspacePoolManager = new WorkspacePoolManager({
+const localWorkspacePoolManager = new WorkspacePoolManager({
   registryFile: workspacePoolRegistryFile,
   stateFile: workspacePoolStateFile,
 })
+const remoteWorkspacePool = new RemoteWorkspacePool({ local: localWorkspacePoolManager,
+  stateFile: path.join(dataDirectory, '_remote-workspace-pools.json'),
+  mainMachineId: () => machineRegistry.mainMachineId, callRunner: fetchAionUiOn })
+const workspacePoolManager = remoteWorkspaceFacade(localWorkspacePoolManager, remoteWorkspacePool)
 let aiConversationRuntimeLibraryRefresh = null
 const aiConversationRuntimeSnapshotStates = new Map()
 const aionCoreDispatchCapabilitiesCaches = new Map()
@@ -1801,6 +1806,8 @@ function machineRegistryResponse(user) {
   const now = Date.now()
   return {
     ...registry,
+    remoteWorkspaceCoordinatorId: remoteWorkspacePool.state?.coordinatorId ?? null,
+    remotePools: (remoteWorkspacePool.snapshot().remotePools ?? []).filter((pool) => machineManageableBy(machineRegistry, pool.machineId, machineViewer(user))),
     runner: {
       apiUrl: runnerApiBaseUrl,
       lanReachable: runnerApiLanReachable,
@@ -2155,8 +2162,11 @@ function fetchAionCoreDispatchCapabilities(machineId = machineRegistry.mainMachi
 
 async function aionCoreSupportsWorkspaceLease(machineId = machineRegistry.mainMachineId) {
   try {
-    const capabilities = await fetchAionCoreDispatchCapabilities(machineId)
-    return capabilities?.workspaceLeaseVersion >= 2
+    const targetMachineId = normalizeMachineId(machineId) || machineRegistry.mainMachineId
+    const capabilities = await fetchAionCoreDispatchCapabilities(targetMachineId)
+    const remote = targetMachineId !== machineRegistry.mainMachineId
+    return capabilities?.workspaceLeaseVersion >= (remote ? 3 : 2)
+      && (!remote || capabilities?.remoteWorkspaceOwnership === true)
       && capabilities?.atomicWorkspaceRebind === true
       && capabilities?.releasesRuntimeOnTerminal === true
   } catch {
@@ -2896,10 +2906,10 @@ function delegationParentMachineId(delegation) {
     || conversationHomeMachineId(delegation?.parentConversationId)
 }
 
-async function resolveAiDelegationWorkspacePool({ selection, targetCard, parentAttribution, requested }) {
+async function resolveAiDelegationWorkspacePool({ selection, targetCard, parentAttribution, requested, machineId }) {
   const selectedWorkspace = String(selection?.workspace ?? '').trim()
   if (selectedWorkspace) return { known: true, workspaceHint: selectedWorkspace,
-    expectsWorkspacePool: Boolean(workspacePoolManager.poolForWorkspace(selectedWorkspace)) }
+    expectsWorkspacePool: Boolean(workspacePoolManager.poolForWorkspace(selectedWorkspace, machineId)) }
   const candidates = [
     selection?.workspace,
     requested?.workspace,
@@ -4241,6 +4251,9 @@ async function finalizeDelegationWorkspace(delegation, childStatus, childError) 
     })
     return { result, error: null }
   } catch (error) {
+    const remoteLease = remoteWorkspacePool.state?.leases[delegation.workspaceLease.leaseId]
+    if (remoteLease?.status === 'release-pending') return { result: remoteLease.result, error: null }
+    if (remoteLease) return { result: await remoteWorkspacePool.quarantine(remoteLease.leaseId, error.message), error: null }
     if (error instanceof WorkspacePoolIntegrationError) {
       return { result: error.details ?? null, error: error.message }
     }
@@ -4412,6 +4425,12 @@ async function startWorkspaceConflictResolution(delegation, workspaceResult) {
 }
 
 async function advanceWorkspaceIntegration(delegation, workspace) {
+  if (delegation.workspaceLease?.ownership && workspace.result?.status === 'quarantined') {
+    clearAiDelegationWaitPoll(delegation.id)
+    await updateAiDelegation(delegation.id, { state: 'integration-recovery-required', workspaceResult: workspace.result,
+      workspaceError: workspace.result.reason, integrationError: workspace.result.reason, recoveryRequiredAt: new Date().toISOString() })
+    return true
+  }
   if (workspace.result?.status === 'result-correction-held') {
     await updateAiDelegation(delegation.id, { state: 'recovery-required', workspaceResult: workspace.result,
       workspaceError: workspace.result.error, resultCorrection: { ...delegation.resultCorrection, phase: 'held' } })
@@ -4556,7 +4575,7 @@ async function drainWaitingWorkspaceDelegations() {
       resumedDelegation = null
     }
 
-    if (!await aionCoreSupportsWorkspaceLease()) {
+    if (!await aionCoreSupportsWorkspaceLease(queued.targetHomeMachineId)) {
       const workspaceWaitMessage = '현재 AionCore가 작업공간 lease를 지원하지 않아 재기동을 기다리고 있습니다.'
       const blocked = await updateAiDelegation(queued.id, {
         workspaceWaitError: workspaceWaitMessage,
@@ -4645,6 +4664,8 @@ async function drainWaitingWorkspaceDelegations() {
             conversationId: queued.targetConversationId,
           })
         : await workspacePoolManager.acquire({
+            machineId: queued.targetHomeMachineId,
+            requestId: queued.id,
             workspaceHint: queued.pendingWorkspaceHint,
             mapId: map.id,
             cardId: targetCard.id,
@@ -4706,8 +4727,9 @@ async function drainWaitingWorkspaceDelegations() {
         continue
       }
       await updateAiDelegation(queued.id, {
-        state: 'failed',
-        childStatus: 'rejected',
+        state: error.workspaceLease?.ownership ? 'recovery-required' : 'failed',
+        childStatus: error.workspaceLease?.ownership ? 'interrupted' : 'rejected',
+        ...(error.workspaceLease?.ownership ? { workspaceLease: error.workspaceLease, recoveryRequiredAt: new Date().toISOString() } : {}),
         childError: error?.message ?? String(error),
         workspaceWaitError: error?.message ?? String(error),
         failureReasonCode: error?.reasonCode ?? error?.code ?? 'AI_DELEGATION_WORKSPACE_PREPARATION_FAILED',
@@ -4799,6 +4821,9 @@ async function pollAiDelegations() {
         || aiDelegationReportArchivePending(delegation))
     for (let delegation of active) {
       if (aiDelegationActions.has(delegation.id)) continue
+      const remoteLease = remoteWorkspacePool.state?.leases[delegation.workspaceLease?.leaseId]
+      if (remoteLease && ['preparing', 'quarantined'].includes(remoteLease.status)
+        && ['recovery-required', 'integration-recovery-required'].includes(delegation.state)) continue
       if (delegation.resultCorrection?.phase === 'preparing') continue
       try {
         delegation = await ensureAiDelegationCompletionNotification(delegation)
@@ -8657,9 +8682,13 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       if (!user) return
       if (!canEdit(user)) return sendJson(response, 403, { error: '편집자만 AI 작업공간 풀을 조회할 수 있습니다.' })
       const scope = integrationRequestScope(request)
-      return sendJson(response, 200, workspacePoolManager.publicSnapshot({
+      const machineId = scope.conversationId ? conversationHomeMachineId(scope.conversationId) : machineRegistry.mainMachineId
+      if (!machineAccessibleByUser(user, machineId)) return sendJson(response, 403, { error: '대화가 속한 머신의 작업공간을 조회할 권한이 없습니다.' })
+      const snapshot = workspacePoolManager.publicSnapshot({
         conversationId: scope.conversationId,
-      }))
+        machineId,
+      })
+      return sendJson(response, 200, { ...snapshot, remotePools: snapshot.remotePools.filter((pool) => machineAccessibleByUser(user, pool.machineId)) })
     }
 
     if (aiWorkspaceCheckpointRoute && request.method === 'POST') {
@@ -8730,6 +8759,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       const card = map?.nodes.find((node) => node.id === checkpointCardId)
       try {
         const result = await workspacePoolManager.checkpoint(leaseId, {
+          requestId: body.requestId,
           jobId: String(body.jobId),
           mapId: scope.mapId,
           cardId: checkpointCardId,
@@ -8746,7 +8776,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         })
         return sendJson(response, result.noChanges ? 200 : 201, result)
       } catch (error) {
-        if (error instanceof WorkspacePoolUnavailableError) {
+        if (error instanceof WorkspacePoolUnavailableError || error.status === 409 && error.reasonCode) {
           return sendJson(response, 409, {
             error: error.message,
             code: error.reasonCode ?? error.code,
@@ -10040,6 +10070,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         targetCard,
         parentAttribution,
         requested: body.newConversation,
+        machineId: targetHomeMachineId,
       })
       if (!workspacePoolResolution.known && !resumedDelegation?.workspaceLease?.leaseId) {
         return sendAiDelegationResponse(response, 503, 'AI_DELEGATION_WORKSPACE_SCOPE_UNKNOWN',
@@ -10053,11 +10084,13 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       const expectsWorkspacePool = !crossDocument && Boolean(workspacePoolResolution.expectsWorkspacePool
         || resumedDelegation?.workspaceLease?.leaseId)
       if (expectsWorkspacePool && targetHomeMachineId !== machineRegistry.mainMachineId) {
-        return sendAiDelegationResponse(response, 409, 'AI_WORKSPACE_REMOTE_ROUTING_NOT_SUPPORTED',
-          '등록된 Unity 작업공간 풀 위임의 서브 머신 라우팅은 Tier 2에서 지원합니다. 이번 위임은 메인 머신을 선택해 주세요.', {
-          code: 'AI_WORKSPACE_REMOTE_ROUTING_NOT_SUPPORTED',
-          targetHomeMachineId,
-        })
+        try {
+          remoteWorkspacePool.pool(targetHomeMachineId)
+          const capabilities = await fetchAionCoreDispatchCapabilities(targetHomeMachineId)
+          if (!(capabilities?.workspaceLeaseVersion >= 3) || capabilities?.remoteWorkspaceOwnership !== true) throw Object.assign(new Error('AionCore 원격 작업공간 소유권 지원이 필요합니다.'), { reasonCode: 'AIONCORE_REMOTE_WORKSPACE_UNAVAILABLE' })
+        } catch (error) {
+          return sendAiDelegationResponse(response, 409, error.reasonCode ?? 'REMOTE_WORKSPACE_UNAVAILABLE', error.message, { targetHomeMachineId })
+        }
       }
       if (expectsWorkspacePool) {
         const now = new Date().toISOString()
@@ -10068,7 +10101,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           console.warn('[AI delegation integration workspace preflight]', error)
         }
         const waitingForIntegrationClean = integrationChanges.dirty === true
-        const workspacePoolSnapshot = workspacePoolManager.publicSnapshot()
+        const workspacePoolSnapshot = workspacePoolManager.publicSnapshot({ machineId: targetHomeMachineId })
         const workerCounts = workspacePoolSnapshot.workspaces
           .filter((workspace) => workspace.role === 'worker')
           .reduce((counts, workspace) => {
@@ -10156,6 +10189,8 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
               conversationId: targetConversationId,
             })
           : await workspacePoolManager.acquire({
+              machineId: targetHomeMachineId,
+              requestId: id,
               workspaceHint: workspacePoolHint ?? selection.workspace,
               mapId,
               cardId: targetCard.id,
@@ -10929,6 +10964,51 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       })
     }
 
+    const remotePoolRoute = url.pathname.match(/^\/api\/machines\/([^/]+)\/workspace-pool$/)
+    const remoteRecoveryRoute = url.pathname.match(/^\/api\/machines\/([^/]+)\/workspace-pool\/leases\/([^/]+)\/(retry-integration|retry-preparation)$/)
+    if (remotePoolRoute || remoteRecoveryRoute) {
+      const user = requireSignedInUser(request, response)
+      if (!user) return
+      const machineId = normalizeMachineId((remotePoolRoute ?? remoteRecoveryRoute)[1])
+      if (!canEdit(user) || !machineManageableBy(machineRegistry, machineId, machineViewer(user))) return sendJson(response, 403, { error: '본인 소유 머신의 풀만 관리할 수 있습니다.' })
+      try {
+        if (remotePoolRoute && request.method === 'GET') return sendJson(response, 200, remoteWorkspacePool.snapshot(machineId))
+        if (remotePoolRoute && request.method === 'PUT') return sendJson(response, 200, await remoteWorkspacePool.approve(machineId, await readJsonBody(request)))
+        if (remoteRecoveryRoute && request.method === 'POST') {
+          const lease = remoteWorkspacePool.scoped(remoteRecoveryRoute[2])
+          if (lease.ownership.machineId !== machineId) return sendJson(response, 403, { error: 'lease 머신 귀속이 다릅니다.' })
+          if (remoteRecoveryRoute[3] === 'retry-preparation') {
+            const delegation = aiDelegations.get(lease.requestId)
+            if (!delegation || delegation.targetHomeMachineId !== machineId || delegation.mapId !== lease.mapId
+              || delegation.targetCardId !== lease.cardId || !['waiting-workspace', 'recovery-required'].includes(delegation.state)) return sendJson(response, 409, { error: '보존된 준비 대기 위임을 확인할 수 없습니다.' })
+            const workspaceLease = await remoteWorkspacePool.retryPreparation(lease.leaseId, await readJsonBody(request))
+            await updateAiDelegation(delegation.id, { state: 'waiting-workspace', workspaceLease, childStatus: null, childError: null })
+            return sendJson(response, 200, { workspaceLease, state: 'waiting-workspace' })
+          }
+          const result = await remoteWorkspacePool.retryIntegration(lease.leaseId, await readJsonBody(request))
+          const delegation = aiDelegations.get(lease.requestId)
+          if (delegation && ['integration-recovery-required', 'waiting-integration'].includes(delegation.state)
+            && ['completed', 'waiting-integration'].includes(result?.status)) {
+            await updateAiDelegation(delegation.id, { state: result.status === 'completed' ? 'waiting-parent' : 'waiting-integration',
+              workspaceResult: result, workspaceError: null, childStatus: 'completed', childError: null, integrationError: null })
+          }
+          return sendJson(response, 200, result)
+        }
+        return sendJson(response, 405, { error: '지원하지 않는 요청입니다.' })
+      } catch (error) { return sendJson(response, 409, { error: error.message, reasonCode: error.reasonCode ?? error.code }) }
+    }
+
+    const remoteArtifactRoute = url.pathname.match(/^\/api\/machines\/([^/]+)\/runner\/workspace-artifacts\/([^/]+)\/(baseline|result|release)\/(manifest|complete|chunks\/\d+)$/)
+    if (remoteArtifactRoute) {
+      const machine = requireRunnerMachine(request, response, remoteArtifactRoute[1])
+      if (!machine) return
+      await noteMachineSeen(machine.machineId)
+      try {
+        const body = request.method === 'POST' ? await readJsonBody(request) : undefined
+        return sendJson(response, 200, await remoteWorkspacePool.artifactRequest(machine.machineId, remoteArtifactRoute[2], remoteArtifactRoute[3], remoteArtifactRoute[4], request.method, body))
+      } catch (error) { return sendJson(response, 409, { error: error.message, reasonCode: error.reasonCode ?? error.code }) }
+    }
+
     // Runner는 사용자 세션이 아니라 머신 토큰으로 인증한다.
     const machineRunnerClaimRoute = url.pathname.match(/^\/api\/machines\/([^/]+)\/runner\/operations\/claim$/)
     if (request.method === 'POST' && machineRunnerClaimRoute) {
@@ -11000,12 +11080,16 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       noteRunnerCallbackBaseUrl(machine.machineId, body?.callbackBaseUrl)
       noteRunnerObservedAddress(machine.machineId, request)
       await noteMachineSeen(machine.machineId)
+      try { await remoteWorkspacePool.observe(machine.machineId, body?.workspacePool) } catch (error) {
+        return sendJson(response, 409, { error: error.message, reasonCode: error.reasonCode ?? error.code })
+      }
       return sendJson(response, 200, {
         machineId: machine.machineId,
         label: machine.label,
         longPollMs: machineOperationLongPollMs,
         queue: machineOperationQueue.snapshot(machine.machineId),
         serverStartedAt,
+        coordinatorId: remoteWorkspacePool.state.coordinatorId,
       })
     }
 

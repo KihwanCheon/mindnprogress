@@ -368,6 +368,7 @@ export function aiDelegationWorkspaceLeaseMatches(expected, actual) {
     && expected.leaseId === actual.leaseId
     && normalizedWorkspaceRoot(expected.projectRoot) === normalizedWorkspaceRoot(actual.projectRoot)
     && (!expected.branch || !Object.hasOwn(actual, 'branch') || expected.branch === actual.branch)
+    && (!expected.ownership || ['coordinatorId', 'machineId', 'poolId', 'generation'].every((key) => expected.ownership[key] === actual.ownership?.[key]))
 }
 
 export function aiDelegationNewWorkspace(requested, parent, target) {
