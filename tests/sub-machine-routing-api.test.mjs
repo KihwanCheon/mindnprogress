@@ -268,6 +268,43 @@ test('새 대화와 일반 AI 위임의 전체 경로는 선택한 서브 머신
     assert.equal(link.conversationId, conversationId)
     assert.equal(link.homeMachineId, 'macbook')
 
+    const linkedStartedAt = Date.now()
+    const linked = await request(baseUrl, cookie, `/api/maps/${mapId}/cards/root-card/ai-conversations?view=linked`)
+    assert.equal(linked.response.status, 200)
+    assert.ok(Date.now() - linkedStartedAt < 2_000, '서브 머신 응답 없이 연결 목록을 반환한다')
+    assert.equal(linked.body.conversations[0].conversationId, conversationId)
+    assert.equal(linked.body.conversations[0].homeMachineId, 'macbook')
+    assert.equal(linked.body.conversations[0].accessible, true)
+    assert.equal(linked.body.conversations[0].liveStatusChecked, false)
+    assert.equal(linked.body.conversations[0].linkMissing, false)
+
+    assert.equal((await request(baseUrl, cookie, '/api/machines', 'POST', {
+      machineId: 'offline-mac', label: '오프라인 맥북', platform: 'darwin',
+    })).response.status, 200)
+    assert.equal((await request(baseUrl, cookie, '/api/machines/offline-mac/token', 'POST')).response.status, 200)
+    const offlineMap = await request(baseUrl, cookie, '/api/maps', 'POST', {
+      title: '오프라인 대화 목록',
+      map: { nodes: [{
+        id: 'offline-root', type: 'mind', position: { x: 0, y: 0 },
+        data: {
+          label: '오프라인 대화', kind: 'root', progress: 0, status: 'planned',
+          aiConversationId: 'offline-conversation',
+          aiConversations: [{ conversationId: 'offline-conversation', homeMachineId: 'offline-mac' }],
+        },
+      }], edges: [] },
+    })
+    assert.equal(offlineMap.response.status, 201)
+    const offlineListStartedAt = Date.now()
+    const offlineList = await request(baseUrl, cookie,
+      `/api/maps/${offlineMap.body.map.id}/cards/offline-root/ai-conversations`)
+    assert.equal(offlineList.response.status, 200)
+    assert.ok(Date.now() - offlineListStartedAt < 2_000, '오프라인 Runner의 대기열을 기다리지 않는다')
+    assert.equal(offlineList.body.conversations[0].conversationId, 'offline-conversation')
+    assert.equal(offlineList.body.conversations[0].accessible, true)
+    assert.equal(offlineList.body.conversations[0].machineOnline, false)
+    assert.equal(offlineList.body.conversations[0].liveStatusChecked, false)
+    assert.equal(offlineList.body.conversations[0].linkMissing, false)
+
     const listRequest = request(baseUrl, cookie, `/api/maps/${mapId}/cards/root-card/ai-conversations`)
     const listed = await requestWithRunner(
       baseUrl,

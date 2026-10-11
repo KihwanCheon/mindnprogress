@@ -6,6 +6,9 @@ type ConversationListItem = AiConversationLink & {
   homeMachineLabel: string
   homeMachineRole: 'main' | 'sub'
   accessible: boolean
+  machineOnline?: boolean
+  liveStatusChecked?: boolean
+  linkMissing?: boolean
   available: boolean
   name: string
   modifiedAt: string | null
@@ -46,7 +49,7 @@ export function AiConversationPickerDialog({ mapId, cardId, cardTitle, onSelect,
   const [deletingConversationId, setDeletingConversationId] = useState<string | null>(null)
 
   const deleteUnavailableConversation = async (conversation: ConversationListItem) => {
-    if (conversation.available || deletingConversationId) return
+    if (!conversation.linkMissing || deletingConversationId) return
     const confirmed = window.confirm('AionUi에서 찾을 수 없는 대화입니다. 이 카드에 남은 대화 연결 기록을 삭제할까요?')
     if (!confirmed) return
     setDeleteError('')
@@ -67,17 +70,34 @@ export function AiConversationPickerDialog({ mapId, cardId, cardTitle, onSelect,
 
   useEffect(() => {
     const controller = new AbortController()
-    fetch(`/api/maps/${encodeURIComponent(mapId)}/cards/${encodeURIComponent(cardId)}/ai-conversations`, {
-      credentials: 'include',
-      signal: controller.signal,
-    }).then(async (response) => {
-      const body = await response.json().catch(() => ({})) as ConversationListResponse
-      if (!response.ok) throw new Error(body.error ?? 'AI 대화 목록을 불러오지 못했습니다.')
-      setResult(body)
-    }).catch((loadError) => {
-      if (loadError instanceof DOMException && loadError.name === 'AbortError') return
-      setError(loadError instanceof Error ? loadError.message : 'AI 대화 목록을 불러오지 못했습니다.')
-    })
+    const pathname = `/api/maps/${encodeURIComponent(mapId)}/cards/${encodeURIComponent(cardId)}/ai-conversations`
+    const load = async () => {
+      let linkedLoaded = false
+      try {
+        const response = await fetch(`${pathname}?view=linked`, { credentials: 'include', signal: controller.signal })
+        const linked = await response.json().catch(() => ({})) as ConversationListResponse
+        if (!response.ok) throw new Error(linked.error ?? 'AI 대화 목록을 불러오지 못했습니다.')
+        setResult(linked)
+        linkedLoaded = true
+
+        // 오프라인 서브 머신은 조회 대기열에 넣지 않는다. 연결 기록만으로도 목록을 사용할 수 있다.
+        if (!linked.conversations.some((conversation) => conversation.accessible && conversation.machineOnline)) return
+        const detailResponse = await fetch(pathname, { credentials: 'include', signal: controller.signal })
+        const detailed = await detailResponse.json().catch(() => ({})) as ConversationListResponse
+        if (!detailResponse.ok) return
+        setResult((current) => current ? {
+          ...detailed,
+          // 조회 중 사용자가 삭제한 연결을 늦게 도착한 응답으로 되살리지 않는다.
+          latestConversationId: current.latestConversationId,
+          conversations: detailed.conversations.filter((conversation) => current.conversations
+            .some((linkedConversation) => linkedConversation.conversationId === conversation.conversationId)),
+        } : detailed)
+      } catch (loadError) {
+        if (controller.signal.aborted) return
+        if (!linkedLoaded) setError(loadError instanceof Error ? loadError.message : 'AI 대화 목록을 불러오지 못했습니다.')
+      }
+    }
+    void load()
     return () => controller.abort()
   }, [cardId, mapId])
 
@@ -101,7 +121,11 @@ export function AiConversationPickerDialog({ mapId, cardId, cardTitle, onSelect,
           {error && <div className="ai-conversation-picker-message error"><strong>대화 목록을 불러오지 못했습니다.</strong><span>{error}</span></div>}
           {deleteError && <div className="ai-conversation-picker-delete-error" role="alert">{deleteError}</div>}
           {result?.conversations.map((conversation) => {
-            const status = runtimeLabel(conversation.runtime, conversation.available)
+            const status = conversation.liveStatusChecked === false
+              ? conversation.machineOnline === false
+                ? { className: 'unavailable', label: '머신 연결 안 됨' }
+                : { className: 'unknown', label: '상태 확인 중' }
+              : runtimeLabel(conversation.runtime, conversation.available)
             const isLatest = result.latestConversationId === conversation.conversationId
             return (
               <article
@@ -111,7 +135,7 @@ export function AiConversationPickerDialog({ mapId, cardId, cardTitle, onSelect,
                 <button
                   type="button"
                   className="ai-conversation-choice-open"
-                  disabled={!conversation.accessible || deletingConversationId === conversation.conversationId}
+                  disabled={!conversation.accessible || conversation.machineOnline === false || deletingConversationId === conversation.conversationId}
                   onClick={() => onSelect(conversation)}
                 >
                   <span className="ai-conversation-choice-heading">
@@ -125,6 +149,7 @@ export function AiConversationPickerDialog({ mapId, cardId, cardTitle, onSelect,
                   <span className="ai-conversation-choice-options">
                     <span>실행 머신 {conversation.homeMachineLabel}{conversation.homeMachineRole === 'main' ? ' · 메인' : ' · 서브'}</span>
                     {!conversation.accessible && <span>이 머신을 사용할 권한 없음</span>}
+                    {conversation.accessible && conversation.machineOnline === false && <span>서브 머신이 다시 연결되면 열 수 있습니다</span>}
                   </span>
                   {(conversation.mode || conversation.thoughtLevel) && (
                     <span className="ai-conversation-choice-options">
@@ -140,7 +165,7 @@ export function AiConversationPickerDialog({ mapId, cardId, cardTitle, onSelect,
                   </span>
                   <span className="ai-conversation-choice-meta"><span>{conversation.startedBy?.label ?? '시작한 편집자 정보 없음'}</span><time>{displayDate(conversation.startedAt ?? conversation.linkedAt)}</time></span>
                 </button>
-                {conversation.accessible && !conversation.available && (
+                {conversation.accessible && conversation.linkMissing === true && (
                   <button
                     type="button"
                     className="ai-conversation-choice-delete"

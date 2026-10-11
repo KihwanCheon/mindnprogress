@@ -10584,6 +10584,8 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       const map = await readMap(mapId)
       const card = map?.nodes.find((node) => node.id === cardId)
       if (!map || map.trashedAt || !card) return sendJson(response, 404, { error: '카드를 찾을 수 없습니다.' })
+      // 대화 선택 화면은 연결 기록을 먼저 보여준다. 원격 머신 조회는 별도 요청에서 수행한다.
+      const linkedOnly = url.searchParams.get('view') === 'linked'
       const currentAttribution = aiConversationAttributions.get(conversationAttributionKey(mapId, cardId))
       const cardLinks = aiConversationLinksFromData(card.data)
       const links = cardLinks.map((link) => {
@@ -10626,13 +10628,22 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           workspacePoolId: recordedWorkspacePoolId,
         }) ?? link
         const workspaceBinding = recordedWorkspacePool ? 'pool-rebindable' : 'fixed'
-        if (!machineAccessibleByUser(user, recordedLink.homeMachineId)) {
+        const accessible = machineAccessibleByUser(user, recordedLink.homeMachineId)
+        const homeMachine = findMachine(machineRegistry, recordedLink.homeMachineId)
+        const machineOnline = recordedLink.homeMachineId === machineRegistry.mainMachineId
+          || Boolean(homeMachine?.lastSeenAt
+            && Date.now() - Date.parse(homeMachine.lastSeenAt) <= runnerOnlineWithinMs)
+        // Runner가 끊긴 머신은 상세 조회 요청을 큐에 넣어 목록 전체를 지연시키지 않는다.
+        if (linkedOnly || !accessible || !machineOnline) {
           return {
             ...recordedLink,
             workspaceBinding,
             homeMachineLabel: machineLabel(recordedLink.homeMachineId),
             homeMachineRole: recordedLink.homeMachineId === machineRegistry.mainMachineId ? 'main' : 'sub',
-            accessible: false,
+            accessible,
+            machineOnline,
+            liveStatusChecked: false,
+            linkMissing: false,
             available: false,
             name: '',
             modifiedAt: null,
@@ -10675,6 +10686,9 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
             homeMachineLabel: machineLabel(enrichedLink.homeMachineId),
             homeMachineRole: enrichedLink.homeMachineId === machineRegistry.mainMachineId ? 'main' : 'sub',
             accessible: true,
+            machineOnline: true,
+            liveStatusChecked: true,
+            linkMissing: false,
             available: true,
             name: String(conversation.name ?? ''),
             startedAt: enrichedLink.startedAt ?? normalizedIsoDate(conversation.created_at),
@@ -10690,6 +10704,9 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
             homeMachineLabel: machineLabel(recordedLink.homeMachineId),
             homeMachineRole: recordedLink.homeMachineId === machineRegistry.mainMachineId ? 'main' : 'sub',
             accessible: true,
+            machineOnline,
+            liveStatusChecked: true,
+            linkMissing: shutdownError?.status === 404 || shutdownError?.message === 'AIONUI_CONVERSATION_NOT_FOUND',
             available: false,
             name: '',
             modifiedAt: null,
