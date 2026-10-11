@@ -3401,7 +3401,11 @@ async function reconcileAiDelegationWorkspaceLeases() {
       }))
     }
   }
+}
 
+// Runner 요청은 이 서버의 claim API가 열린 뒤에야 완료될 수 있다.
+// 시작 전 복구에서 기다리면 원격 위임이 하나만 있어도 API 수신을 영원히 막는다.
+async function reconcileAiDelegationWorkspaceLeasesAfterListen() {
   const delegations = [...aiDelegations.values()]
   if (await aionCoreSupportsWorkspaceLease()) {
     for (const delegation of delegations) {
@@ -7256,6 +7260,7 @@ const cardLayoutRequests = await createCardLayoutRequests({
     })
   },
 })
+let workspacePoolStartupRecoveryReady = false
 try {
   const unconfirmedLeaseIds = [...aiDelegations.values()].filter((delegation) => delegation.state === 'recovery-required'
     && !delegation.targetConversationId && delegation.childOperationId && delegation.workspaceLease?.leaseId)
@@ -7263,6 +7268,7 @@ try {
   if (await workspacePoolManager.initialize({ unconfirmedLeaseIds })) {
     console.log(`[Mind & Progress] AI 작업공간 pool registry를 불러왔습니다: ${workspacePoolRegistryFile}`)
     await reconcileAiDelegationWorkspaceLeases()
+    workspacePoolStartupRecoveryReady = true
   }
 } catch (error) {
   console.warn('[AI workspace pool startup]', error)
@@ -12764,6 +12770,11 @@ server.listen(port, host, () => {
   resolveRuntimeReady()
   console.log(`[Mind & Progress API] http://${host}:${port}`)
   console.log(`[Mind & Progress Public] ${publicBaseUrl}`)
+  if (workspacePoolStartupRecoveryReady) {
+    void runtimeLifecycle.track(() => reconcileAiDelegationWorkspaceLeasesAfterListen()).catch((error) => {
+      console.warn('[AI workspace pool post-listen recovery]', error)
+    })
+  }
   void runtimeLifecycle.track(() => recoverLinkedConversationAttributions()).catch((error) => {
     console.warn('[AI conversation attribution startup recovery]', error)
   })
