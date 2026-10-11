@@ -1,4 +1,5 @@
 import { createServer } from 'node:http'
+import { normalizeUntrackedMetaRecovery } from './lib/workspaceMetaRecovery.mjs'
 import { createRuntimeLifecycle, installRuntimeShutdown } from './lib/runtimeLifecycle.mjs'
 import { retryDispatchStatus, throwIfRuntimeStopping } from './lib/runtimeStopping.mjs'
 import { createAiWorkspaceSettings } from './lib/aiWorkspaceSettings.mjs'
@@ -8972,6 +8973,14 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       const body = await readJsonBody(request)
       const instruction = String(body.instruction ?? '').trim()
       const resultCorrection = body.recoveryMode === 'correct-integration-result'
+      let untrackedMetaRecovery
+      if (body.untrackedMetaRecovery !== undefined) {
+        if (!retryIntegration || recoveryAvailability.failureCategory !== 'integration-git-lock' || resultCorrection) {
+          return sendJson(response, 400, { error: '메타 보존 승인은 완료된 통합 Git 잠금 실패의 재시도에만 사용할 수 있습니다.' })
+        }
+        try { untrackedMetaRecovery = normalizeUntrackedMetaRecovery(body.untrackedMetaRecovery) }
+        catch (error) { return sendJson(response, 400, { error: error.message, reasonCode: error.reasonCode }) }
+      }
       if (delegation.resultCorrection?.phase === 'held') return sendJson(response, 409, { error: '결과 정정 실행 또는 Git 상태를 확인할 수 없어 통합 잠금을 유지하고 있습니다. 수동 증거 검토가 필요합니다.', code: 'AI_DELEGATION_RESULT_CORRECTION_HELD' })
       if (body.recoveryMode !== undefined && !resultCorrection) return sendJson(response, 400, { error: '지원하지 않는 복구 모드입니다.' })
       if (delegation.resultCorrection && !resultCorrection) return sendJson(response, 409, { error: '진행 중인 결과 정정에는 같은 복구 모드를 명시해야 합니다.' })
@@ -9049,6 +9058,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           const workspaceResult = await workspacePoolManager[recoverIntegration](
             delegation.workspaceLease.leaseId,
             { mapId, cardId: delegation.targetCardId, conversationId: delegation.targetConversationId },
+            ...(untrackedMetaRecovery ? [{ untrackedMetaRecovery }] : []),
           )
           const current = aiDelegations.get(delegation.id)
           const repeated = current.state === 'waiting-integration'

@@ -8,6 +8,7 @@ import { aiDelegationWorkspaceLeaseMatches, integrationGitLockFailure, localChan
 import { replaceFileWithRetry } from './replaceFileWithRetry.mjs'
 import { assertAiDelegationSourceCompletionLease } from './aiDelegationSourceCompletion.mjs'
 import { acquireWorkspaceLock, git as ownershipGit, jsonFile, saveJson } from './remoteWorkspaceProtocol.mjs'
+import { normalizeUntrackedMetaRecovery, preserveUntrackedMeta, consumePreservedMeta } from './workspaceMetaRecovery.mjs'
 
 const execFileAsync = promisify(execFile)
 const idleDriftReason = '작업공간에 소유자를 확정할 수 없는 변경이 있습니다.'
@@ -1826,7 +1827,7 @@ export class WorkspacePoolManager {
     }
   }
 
-  async recoverIntegrationGitLockFailure(leaseId, scope) {
+  async recoverIntegrationGitLockFailure(leaseId, scope, { untrackedMetaRecovery } = {}) {
     return this.runExclusive(async () => {
       const lease = this.state?.leases?.[leaseId]
       const workspace = this.registry?.workers.find((item) => item.id === lease?.workspaceId)
@@ -1885,7 +1886,9 @@ export class WorkspacePoolManager {
         this.git(integration.root, ['rev-parse', 'HEAD']),
         this.integrationTrackedChanges(integration),
       ])
-      if (dirty || mainChanges.dirty) reject('작업공간에 로컬 변경이 남아 있습니다. 사용자 변경을 보존한 뒤 통합 재시도를 요청하세요.')
+      if (mainChanges.dirty) reject('통합 작업공간에 로컬 변경이 남아 있습니다. 변경 원본을 보존·정리한 뒤 통합 재시도를 요청하세요.')
+      const metaPlan = untrackedMetaRecovery === undefined ? null : normalizeUntrackedMetaRecovery(untrackedMetaRecovery)
+      if (dirty && !metaPlan) reject('fork 작업공간에 로컬 변경이 남아 있습니다. 변경 원본을 보존·정리한 뒤 통합 재시도를 요청하세요.')
       if (branch !== lease.integrationBranch || head !== failure.candidateCommit || workHead !== lease.headCommit
         || result.headCommit !== lease.headCommit || mainBranch !== lease.baseBranch) reject('보존된 작업 브랜치 또는 통합 후보 HEAD가 변경되었습니다.')
       await this.validateIntegrationCheckpointCandidate(lease, workspace, head)
@@ -1907,11 +1910,17 @@ export class WorkspacePoolManager {
       let preserved = null
       try { preserved = await this.git(workspace.root, ['rev-parse', '--verify', '--quiet', backupRef]) } catch (error) { if (error?.code !== 1) throw error }
       if (preserved && preserved !== head) reject('통합 복구 보존 참조가 기존 후보와 다릅니다.')
+      // 승인된 단일 메타는 원문을 검증·백업만 한다. 실제 정리는 내구 기록 저장 후 finalize에서 수행한다.
+      if (metaPlan) {
+        lease.untrackedMetaRecovery = await preserveUntrackedMeta({ git: this.git, workerRoot: workspace.root,
+          mainRoot: integration.root, sharedRoot: this.registry.sharedRoot, lease, plan: metaPlan, mainHead, candidate: head })
+      }
       if (!preserved) await this.git(workspace.root, ['update-ref', backupRef, head, '0'.repeat(40)])
       lease.integrationRecoveryHistory = [...(lease.integrationRecoveryHistory ?? []), {
         type: 'integration-git-lock', recoveredAt: new Date().toISOString(), previousResult: result,
         preservedHead: head, preservedBranch: lease.integrationBranch, backupRef, retryBranch,
         mainHeadAtRecovery: mainHead, alreadyIntegrated,
+        ...(metaPlan ? { untrackedMetaRecovery: lease.untrackedMetaRecovery } : {}),
       }]
       lease.integrationBranch = retryBranch
       lease.integrationHeadCommit = retryBranch === branch ? head : null
@@ -2421,6 +2430,13 @@ export class WorkspacePoolManager {
       let headCommit = null
       let integratedCommit = null
       try {
+        const metaRecovery = lease.untrackedMetaRecovery
+        if (metaRecovery && (await this.git(workspace.root, ['branch', '--show-current'])) === metaRecovery.preservedBranch) {
+          // 복구 대기 중 재생성도 같은 승인 해시에 정확히 일치할 때만 보존한다.
+          await consumePreservedMeta({ git: this.git, workerRoot: workspace.root, mainRoot: integration.root,
+            sharedRoot: this.registry.sharedRoot, lease })
+          await this.persist()
+        }
         const currentBranch = await this.git(workspace.root, ['branch', '--show-current'])
         if (!lease.integrationBranch && currentBranch !== lease.branch) {
           throw new Error(`예상 브랜치 ${lease.branch}가 아닌 ${currentBranch}입니다.`)
