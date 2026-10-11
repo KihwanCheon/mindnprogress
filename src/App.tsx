@@ -561,6 +561,18 @@ type MachineRegistryResponse = {
   mainMachineId: string
   machines: MachineSummary[]
   runner: RunnerConnectionInfo
+  remoteWorkspaceCoordinatorId?: string | null
+  remotePools?: RemoteWorkspacePoolSummary[]
+}
+
+type RemoteWorkspacePoolSummary = {
+  machineId: string
+  poolId: string
+  registryDigest: string
+  originUrl: string
+  approved: boolean
+  stale: boolean
+  workspaces: { workspaceId: string; projectRoot: string; status: string; dirty: boolean; branch: string; headCommit: string; runtimeIdle: boolean; leaseId?: string | null }[]
 }
 
 type DistributedWorkSettings = {
@@ -1986,6 +1998,8 @@ function DistributedWorkDialog({ onClose }: { onClose: () => void }) {
   const [probingMachineId, setProbingMachineId] = useState('')
   const [probeResults, setProbeResults] = useState<Record<string, MachineProbeResult>>({})
   const [pairing, setPairing] = useState<RunnerPairingResponse | null>(null)
+  const [remotePools, setRemotePools] = useState<RemoteWorkspacePoolSummary[]>([])
+  const [workspaceCoordinatorId, setWorkspaceCoordinatorId] = useState<string | null>(null)
 
   const applySettings = useCallback((payload: { settings: DistributedWorkSettings; targets: DistributedWorkTargets }) => {
     setTargets(payload.targets)
@@ -2001,6 +2015,8 @@ function DistributedWorkDialog({ onClose }: { onClose: () => void }) {
     applySettings(settings)
     setMachines(registry.machines)
     setRunnerInfo(registry.runner)
+    setRemotePools(registry.remotePools ?? [])
+    setWorkspaceCoordinatorId(registry.remoteWorkspaceCoordinatorId ?? null)
   }, [applySettings])
 
   useEffect(() => {
@@ -2026,6 +2042,8 @@ function DistributedWorkDialog({ onClose }: { onClose: () => void }) {
           if (cancelled) return
           setMachines(registry.machines)
           setRunnerInfo(registry.runner)
+          setRemotePools(registry.remotePools ?? [])
+          setWorkspaceCoordinatorId(registry.remoteWorkspaceCoordinatorId ?? null)
         })
         .catch(() => {})
     }, 15_000)
@@ -2149,6 +2167,18 @@ function DistributedWorkDialog({ onClose }: { onClose: () => void }) {
 
   const subMachines = machines.filter((machine) => machine.role === 'sub')
 
+  async function registerWorkspacePool(pool: RemoteWorkspacePoolSummary) {
+    if (!window.confirm(`${pool.machineId}의 ${pool.poolId} 풀을 ${pool.approved ? '비활성화' : '등록 승인'}할까요? 진행 중인 lease는 반환 확인 전까지 보존됩니다.`)) return
+    setSubmitting(true); setError('')
+    try {
+      await apiRequest(`/api/machines/${encodeURIComponent(pool.machineId)}/workspace-pool`, {
+        method: 'PUT', body: JSON.stringify({ poolId: pool.poolId, registryDigest: pool.registryDigest, enabled: !pool.approved }),
+      })
+      await reload()
+    } catch (failure) { setError(failure instanceof Error ? failure.message : '원격 풀 등록을 변경하지 못했습니다.') }
+    finally { setSubmitting(false) }
+  }
+
   return (
     <div className="history-modal-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
       <section ref={dialogRef} className="history-modal distributed-work-modal" role="dialog" aria-modal="true" aria-label="분산 작업 설정">
@@ -2162,7 +2192,8 @@ function DistributedWorkDialog({ onClose }: { onClose: () => void }) {
         ) : (
           <div className="distributed-work-body">
             <p className="distributed-work-intro">
-              메인 머신이 MnP를 단독으로 운영하고, 서브 머신은 자체 AionUi와 Unity 작업공간 풀로 위임 작업을 수행합니다.
+              메인 머신이 MnP를 운영하고, 서브 머신은 연결된 Runner로 AI 작업을 수행합니다.
+              Unity Fork 위임에는 서브 머신 registry 보고, 메인 풀 등록 승인, 최신 AionCore의 소유권 지원이 모두 필요합니다.
               이 설정을 켜야 서브 머신이 위임 대상 후보로 올라오며, 실제 실행은 해당 머신에 Runner를 연결한 뒤부터 가능합니다.
             </p>
 
@@ -2196,6 +2227,19 @@ function DistributedWorkDialog({ onClose }: { onClose: () => void }) {
             </label>
 
             <div className="distributed-work-machines">
+              <h4>원격 Unity Fork 풀</h4>
+              <p>서브 머신 registry의 coordinatorId: <code>{workspaceCoordinatorId ?? '확인 중'}</code></p>
+              {remotePools.length === 0 && <p>Runner가 보고한 관리형 Fork 풀이 없습니다. 일반 대화 경로는 풀 등록이 아닙니다.</p>}
+              {remotePools.map((pool) => (
+                <section key={`${pool.machineId}:${pool.poolId}`}>
+                  <strong>{pool.machineId} · {pool.poolId} · {pool.stale ? '보고 만료' : pool.approved ? '승인됨' : '승인 대기'}</strong>
+                  <p>origin: <code>{pool.originUrl.replace(/(https?:\/\/)[^/@]+@/, '$1[인증정보 생략]@')}</code></p>
+                  <ul>{pool.workspaces.map((worker) => (
+                    <li key={worker.workspaceId}><code>{worker.projectRoot}</code> · {worker.status}{worker.dirty ? ' · 미커밋 변경 있음' : ''}{worker.leaseId ? ` · ${worker.leaseId}` : ''}<small>Git 보고: {worker.branch} · {worker.headCommit.slice(0, 10)} · AI runtime {worker.runtimeIdle ? '유휴' : '사용 중'}</small></li>
+                  ))}</ul>
+                  <button type="button" disabled={submitting || pool.stale && !pool.approved} onClick={() => void registerWorkspacePool(pool)}>{pool.approved ? '새 배정 비활성화' : '풀 등록 승인'}</button>
+                </section>
+              ))}
               <h4>등록된 머신</h4>
               <ul>
                 {machines.map((machine) => {

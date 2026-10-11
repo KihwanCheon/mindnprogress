@@ -7,6 +7,7 @@ import { promisify } from 'node:util'
 import { aiDelegationWorkspaceLeaseMatches, localChangesIntegrationCommits, retryableExternalLimitCategory } from './aiDelegations.mjs'
 import { replaceFileWithRetry } from './replaceFileWithRetry.mjs'
 import { assertAiDelegationSourceCompletionLease } from './aiDelegationSourceCompletion.mjs'
+import { acquireWorkspaceLock, git as ownershipGit, jsonFile, saveJson } from './remoteWorkspaceProtocol.mjs'
 
 const execFileAsync = promisify(execFile)
 const idleDriftReason = '작업공간에 소유자를 확정할 수 없는 변경이 있습니다.'
@@ -337,7 +338,8 @@ function integrationConflictCheckpointMessage(lease) {
 export function buildWorkspaceInstruction(lease) {
   if (!lease) return ''
   const sharedRoot = String(lease.sharedRoot ?? '').trim()
-  return `# 할당된 작업공간
+  const ownershipInstruction = lease.ownership ? `\n원격 풀 소유권: coordinatorId=${lease.ownership.coordinatorId}, machineId=${lease.ownership.machineId}, poolId=${lease.ownership.poolId}, generation=${lease.ownership.generation}. 이 값도 .ai-session.json과 일치해야 합니다. 원격 체크포인트 도구 호출에는 requestId를 반드시 전달하세요. 새 체크포인트마다 새 ID를 만들고 동일 요청의 재시도에만 같은 ID를 사용합니다. 결과 통합은 메인 staging에서 수행하며 그 경로로 직접 이동하지 마세요.\n` : ''
+  return `# 할당된 작업공간${ownershipInstruction}
 
 이 전문이 현재 작업공간 배정의 최신본입니다. 이 대화에 앞서 전달된 모든 작업공간 배정 전문은 더 이상 배정 근거로 사용하지 마세요. 이번 전문에 기재된 \`workspaceId\`, \`jobId\`, \`leaseId\`, \`projectRoot\`, \`branch\`, \`baseCommit\` 조합만 현재 유효합니다. 이전 전문과 값이 다르면 이전 배정은 만료된 것입니다.
 
@@ -403,6 +405,7 @@ export class WorkspacePoolManager {
         }
       }
       for (const workspace of this.registry.workers) {
+        if (await this.isRemotelyOwned(workspace)) continue
         const current = this.state.workspaces[workspace.id]
         if (this.recoverablePreparationFailureState(current)) {
           try {
@@ -644,6 +647,8 @@ export class WorkspacePoolManager {
 
   async synchronizeIdleWorkersToIntegration({ workspaceIds } = {}) {
     return this.runExclusive(async () => {
+      const releases = []
+      try {
       if (!this.registry || !this.state) {
         throw new WorkspacePoolUnavailableError(
           'AI 작업공간 풀이 준비되지 않았습니다.',
@@ -708,6 +713,9 @@ export class WorkspacePoolManager {
       const preflight = []
       for (const id of requestedIds) {
         const workspace = workersById.get(id)
+        const release = await this.claimLocalWorkspace(workspace)
+        if (!release) throw new WorkspacePoolUnavailableError('원격 coordinator 소유 worker는 로컬 풀에서 동기화할 수 없습니다.', [{ workspaceId: id }], 'REMOTE_WORKSPACE_OWNER_MISMATCH')
+        releases.push(release)
         const current = this.state.workspaces[workspace.id]
         if (current?.status !== 'idle') {
           throw new WorkspacePoolUnavailableError(
@@ -806,6 +814,7 @@ export class WorkspacePoolManager {
         baseTree,
         workspaces: synchronized,
       }
+      } finally { for (const release of releases.reverse()) await release() }
     })
   }
 
@@ -1105,6 +1114,24 @@ export class WorkspacePoolManager {
     })
   }
 
+  async isRemotelyOwned(workspace) {
+    try {
+      const file = path.resolve(workspace.root, await ownershipGit(workspace.root, ['rev-parse', '--git-path', 'mnp-remote-owner.json']))
+      return Boolean(await jsonFile(file))
+    } catch { return true }
+  }
+
+  async claimLocalWorkspace(workspace) {
+    const release = await acquireWorkspaceLock(workspace.root)
+    try {
+      const owner = path.resolve(workspace.root, await ownershipGit(workspace.root, ['rev-parse', '--git-path', 'mnp-remote-owner.json']))
+      if (await jsonFile(owner)) { await release(); return null }
+      const localOwner = path.resolve(workspace.root, await ownershipGit(workspace.root, ['rev-parse', '--git-path', 'mnp-local-owner.json']))
+      await saveJson(localOwner, { poolId: this.registry.poolId })
+      return release
+    } catch (error) { await release(); throw error }
+  }
+
   async acquire({ workspaceHint, mapId, cardId, conversationId, cardLabel, replacesLeaseId } = {}) {
     return this.runExclusive(async () => {
       if (!this.poolForWorkspace(workspaceHint)) return null
@@ -1150,6 +1177,13 @@ export class WorkspacePoolManager {
       const branch = `mnp/${jobId}`
       const failures = []
       for (const workspace of this.orderedRecoverableWorkers(workspaceHint)) {
+        // A physical Fork cannot belong to a local pool and a remote coordinator.
+        let releaseLock
+        try { releaseLock = await this.claimLocalWorkspace(workspace) } catch (error) {
+          failures.push({ workspaceId: workspace.id, reason: error.message }); continue
+        }
+        if (!releaseLock) continue
+        try {
         let current = this.state.workspaces[workspace.id] ?? { status: 'idle' }
         if (this.recoverablePreparationFailureState(current)) {
           try {
@@ -1273,6 +1307,7 @@ export class WorkspacePoolManager {
           }
           await this.persist()
         }
+        } finally { await releaseLock() }
       }
       throw new WorkspacePoolUnavailableError(
         '사용 가능한 AI 작업공간이 없습니다.',

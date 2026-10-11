@@ -1716,6 +1716,7 @@ async function main() {
   registerTool(server, 'mindnprogress_checkpoint_ai_workspace', 'MindNProgress가 할당한 AI worker의 검증 전 상태를 기록합니다. operation.action=commit-changes는 실제 변경 경로와 구조화 커밋 메시지를 체크포인트로 고정하고, confirm-no-changes는 git status와 diff를 확인해 의도한 파일 변경이 전혀 없는 조사·검증 작업임을 확인합니다. Unity Play Mode, 재임포트, 동적 폰트·Atlas 생성 등 검증 전에 호출하며 두 action의 증거를 섞지 마세요. 서버가 변경 체크포인트에 현재 문서·카드 제목과 안정적인 ID로 [MnP] 출처를 추가합니다.', {
     mapId: z.string().min(1).describe('할당된 작업 문서 ID'),
     leaseId: z.string().min(1).max(120).describe('최초 위임 전문의 할당된 작업공간 leaseId'),
+    requestId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$/).optional().describe('원격 Fork 체크포인트에는 필수. 새 체크포인트마다 새 ID를 사용하고 같은 요청 재시도에는 같은 ID를 유지'),
     jobId: z.string().min(1).max(120).describe('최초 위임 전문의 할당된 작업공간 jobId'),
     operation: z.discriminatedUnion('action', [
       z.object({
@@ -1729,7 +1730,7 @@ async function main() {
         action: z.literal('confirm-no-changes'),
       }).strict(),
     ]).describe('변경을 커밋할지 파일 변경 없음을 확인할지 선택하는 체크포인트 동작'),
-  }, async ({ mapId, leaseId, jobId, operation }) => {
+  }, async ({ mapId, leaseId, jobId, operation, requestId }) => {
     const origin = delegationOriginForMap(mapId)
     return apiRequest(`/api/ai-workspaces/${encodeURIComponent(leaseId)}/checkpoint`, {
       method: 'POST',
@@ -1741,8 +1742,8 @@ async function main() {
       aiModel: origin.aiModel,
       timeoutMs: 60_000,
       body: JSON.stringify(operation.action === 'commit-changes'
-        ? { jobId, paths: operation.paths, commitMessage: operation.commitMessage }
-        : { jobId, paths: [], confirmNoChanges: true }),
+        ? { jobId, requestId, paths: operation.paths, commitMessage: operation.commitMessage }
+        : { jobId, requestId, paths: [], confirmNoChanges: true }),
     })
   })
 

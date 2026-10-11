@@ -6,7 +6,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { promisify } from 'node:util'
 import {
-  WorkspacePoolManager,
+  WorkspacePoolManager as RealWorkspacePoolManager,
   WorkspacePoolUnavailableError,
   buildWorkspaceInstruction,
   integrationStatusRetryReasonCode,
@@ -15,6 +15,16 @@ import {
 import { replaceFileWithRetry } from '../server/lib/replaceFileWithRetry.mjs'
 
 const execFileAsync = promisify(execFile)
+// Synthetic Git fixtures have no physical repository. Real Git tests keep the actual lock.
+class WorkspacePoolManager extends RealWorkspacePoolManager {
+  constructor(options) {
+    super(options)
+    if (options?.gitRunner) {
+      this.claimLocalWorkspace = async () => async () => {}
+      this.isRemotelyOwned = async () => false
+    }
+  }
+}
 const checkpointCommitMessage = {
   summary: '일본 로그인 IDP 뷰 이중 등록 해소',
   background: '일본 로그인 진입 과정에서 동일 뷰가 중복 등록되어 초기화 순서가 불안정했습니다.',

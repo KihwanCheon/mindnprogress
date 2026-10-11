@@ -1,0 +1,416 @@
+import { randomUUID } from 'node:crypto'
+import { mkdir } from 'node:fs/promises'
+import path from 'node:path'
+import { WorkspacePoolManager, WorkspacePoolUnavailableError, integrationWorktreeDirtyReasonCode } from './workspacePool.mjs'
+import { RemoteWorkspaceArtifacts } from './remoteWorkspaceArtifacts.mjs'
+import { aiDelegationWorkspaceLeaseMatches } from './aiDelegations.mjs'
+import { REMOTE_WORKSPACE_VERSION, identifier, commitId, git, jsonFile, saveJson, stableHash, workspaceError, assignmentMatches } from './remoteWorkspaceProtocol.mjs'
+
+// Remote paths are identities reported by the authenticated Runner, never local paths.
+export class RemoteWorkspacePool {
+  constructor({ local, stateFile, mainMachineId, callRunner, now = () => Date.now() }) {
+    Object.assign(this, { local, stateFile, mainMachineId, callRunner, now })
+    this.root = path.join(path.dirname(stateFile), 'remote-workspaces')
+    this.artifacts = new RemoteWorkspaceArtifacts(path.join(this.root, 'artifacts'))
+    this.queue = Promise.resolve()
+    this.artifactQueues = new Map()
+    this.stages = new Map()
+  }
+  exclusive(action) {
+    const result = this.queue.catch(() => {}).then(action)
+    this.queue = result.catch(() => {})
+    return result
+  }
+  persist() { return saveJson(this.stateFile, this.state) }
+  async initialize() {
+    const stored = await jsonFile(this.stateFile)
+    this.state = stored ?? { schemaVersion: 1, coordinatorId: `mnp-${randomUUID()}`, pools: {}, reports: {}, leases: {} }
+    identifier(this.state.coordinatorId)
+    if (!stored) await this.persist()
+  }
+  key(machineId, poolId) { return `${identifier(machineId)}:${identifier(poolId)}` }
+  async observe(machineId, report) {
+    return this.exclusive(async () => {
+      if (!report) {
+        if (this.state.reports[machineId]) this.state.reports[machineId].receivedAt = 0
+        await this.persist(); return
+      }
+      if (report.version !== REMOTE_WORKSPACE_VERSION || report.machineId !== machineId
+        || report.coordinatorId !== this.state.coordinatorId || !Array.isArray(report.workspaces)
+        || report.workspaces.length > 32) throw workspaceError('REMOTE_WORKSPACE_REPORT_INVALID')
+      identifier(report.poolId)
+      if (!/^[a-f0-9]{64}$/.test(report.registryDigest ?? '') || typeof report.sharedRoot !== 'string'
+        || !report.sharedRoot || report.sharedRoot.length > 4096 || typeof report.originUrl !== 'string'
+        || !report.originUrl || report.originUrl.length > 4096) throw workspaceError('REMOTE_WORKSPACE_REPORT_INVALID')
+      const ids = new Set(), roots = new Set()
+      for (const worker of report.workspaces) {
+        identifier(worker.workspaceId); commitId(worker.headCommit)
+        if (!Number.isSafeInteger(worker.generation) || worker.generation < 0 || typeof worker.dirty !== 'boolean'
+          || typeof worker.runtimeIdle !== 'boolean') throw workspaceError('REMOTE_WORKSPACE_REPORT_INVALID')
+        if (typeof worker.projectRoot !== 'string' || !worker.projectRoot || worker.projectRoot.length > 4096
+          || ids.has(worker.workspaceId) || roots.has(worker.projectRoot)) throw workspaceError('REMOTE_WORKSPACE_REPORT_INVALID')
+        ids.add(worker.workspaceId); roots.add(worker.projectRoot)
+      }
+      this.state.reports[machineId] = { ...report, receivedAt: this.now() }
+      await this.persist()
+    })
+  }
+  async approve(machineId, { poolId, registryDigest, enabled }) {
+    return this.exclusive(async () => {
+      const key = this.key(machineId, poolId)
+      if (typeof enabled !== 'boolean') throw workspaceError('REMOTE_WORKSPACE_REGISTRATION_INVALID')
+      if (!enabled) {
+        if (this.state.pools[key]) this.state.pools[key].enabled = false
+        await this.persist(); return this.snapshot(machineId)
+      }
+      const report = this.report(machineId)
+      if (!this.local.registry?.integration || report.poolId !== poolId || report.registryDigest !== registryDigest
+        || report.originUrl !== this.local.registry.originUrl
+        || report.workspaces.some((worker) => worker.originUrl !== report.originUrl)) throw workspaceError('REMOTE_WORKSPACE_REGISTRATION_MISMATCH')
+      const previous = this.state.pools[key]
+      if (previous && previous.registryDigest !== registryDigest
+        && Object.values(this.state.leases).some((lease) => lease.ownership.machineId === machineId
+          && lease.poolId === poolId && lease.status !== 'completed')) throw workspaceError('REMOTE_WORKSPACE_REGISTRY_BUSY')
+      this.state.pools[key] = { enabled: true, machineId, poolId, registryDigest, originUrl: report.originUrl,
+        workspaces: report.workspaces.map((worker) => ({ ...worker })), approvedAt: new Date(this.now()).toISOString() }
+      await this.persist(); return this.snapshot(machineId)
+    })
+  }
+  report(machineId) {
+    const report = this.state.reports[machineId]
+    if (!report || this.now() - report.receivedAt > 180_000) throw workspaceError('REMOTE_WORKSPACE_RUNNER_STALE')
+    return report
+  }
+  pool(machineId) {
+    if (!this.local.registry?.integration || !this.local.state) throw workspaceError('REMOTE_WORKSPACE_MAIN_POOL_UNAVAILABLE')
+    const report = this.report(machineId)
+    const pool = this.state.pools[this.key(machineId, report.poolId)]
+    if (!pool?.enabled || pool.registryDigest !== report.registryDigest) throw workspaceError('REMOTE_WORKSPACE_POOL_NOT_APPROVED')
+    return { pool, report }
+  }
+  hasLease(id) { return Boolean(this.state?.leases[id]) }
+  publicLease(lease) {
+    const { checkpoints, result, operations, sealed, ...publicFields } = lease
+    return { ...publicFields, checkpointCount: checkpoints?.length ?? 0 }
+  }
+  poolForWorkspace(root, machineId) {
+    if (machineId && machineId === this.mainMachineId()) return null
+    // Include unapproved observations so a managed Fork never falls through to ordinary dispatch.
+    return [...Object.values(this.state?.reports ?? {}), ...Object.values(this.state?.pools ?? {})].find((report) => (!machineId || report.machineId === machineId)
+      && report.workspaces.some((worker) => worker.projectRoot === root)) ?? null
+  }
+  snapshot(machineId) {
+    const reports = Object.values(this.state?.reports ?? {}).filter((report) => !machineId || report.machineId === machineId)
+    return { coordinatorId: this.state?.coordinatorId, remotePools: reports.map((report) => ({
+      ...report, approved: Boolean(this.state.pools[this.key(report.machineId, report.poolId)]?.enabled
+        && this.state.pools[this.key(report.machineId, report.poolId)].registryDigest === report.registryDigest),
+      stale: this.now() - report.receivedAt > 180_000,
+      workspaces: report.workspaces.map((worker) => {
+        const lease = Object.values(this.state.leases).find((item) => item.ownership.machineId === report.machineId
+          && item.poolId === report.poolId && item.workspaceId === worker.workspaceId && item.status !== 'completed')
+        return { ...worker, role: 'worker', machineId: report.machineId, poolId: report.poolId,
+          status: lease?.status ?? worker.status, leaseId: lease?.leaseId ?? worker.leaseId }
+      }),
+    })) }
+  }
+  workspaceSnapshot({ machineId, conversationId = '' } = {}) {
+    const snapshot = this.snapshot(machineId)
+    const pool = snapshot.remotePools[0]
+    const workspaces = (pool?.workspaces ?? []).map((worker) => ({ ...worker, enabled: Boolean(pool.approved && !pool.stale),
+      assignedToCurrentConversation: Boolean(conversationId && Object.values(this.state.leases).some((lease) => lease.conversationId === conversationId
+        && lease.ownership.machineId === machineId && lease.workspaceId === worker.workspaceId && lease.status !== 'completed')) }))
+    const statusCounts = {}
+    for (const worker of workspaces) statusCounts[worker.status] = (statusCounts[worker.status] ?? 0) + 1
+    return { ...snapshot, available: Boolean(pool?.approved && !pool?.stale), poolId: pool?.poolId ?? null,
+      integrationWorkspaceId: null, workspaces, statusCounts }
+  }
+  async command(lease, action, options = {}) {
+    const body = { action, lease: this.publicLease(lease), options }
+    // Persist the complete immutable body: later binding/status changes must not change retries.
+    const key = action === 'checkpoint' ? `checkpoint-${identifier(options.requestId)}` : `${action}-${stableHash(options).slice(0, 32)}`
+    lease.operations ??= {}
+    if (lease.operations[key] && stableHash(lease.operations[key].options) !== stableHash(options)) throw workspaceError('REMOTE_WORKSPACE_OPERATION_CONFLICT')
+    const operation = lease.operations[key] ??= { ...body, operationId: `${action}-${stableHash(body).slice(0, 48)}` }
+    await this.persist()
+    try { return await this.callRunner(lease.ownership.machineId, '/mnp/workspaces', { method: 'POST', body: operation, timeoutMs: 600_000 }) } catch (error) {
+      if (/^(REMOTE_|MNP_WORKSPACE_)/.test(error.code ?? '')) error.reasonCode = error.code
+      throw error
+    }
+  }
+  async acquire(options) {
+    return this.exclusive(async () => {
+      const { machineId, requestId, mapId, cardId, conversationId = '', cardLabel } = options
+      identifier(requestId)
+      const prior = Object.values(this.state.leases).find((lease) => lease.requestId === requestId)
+      if (prior) {
+        if (prior.ownership.machineId !== machineId || prior.mapId !== mapId || prior.cardId !== cardId) throw workspaceError('REMOTE_WORKSPACE_REQUEST_CONFLICT')
+        if (prior.status === 'preparing') {
+          const prepared = await this.command(prior, 'prepare')
+          if (!assignmentMatches(prior, prepared.lease)) throw workspaceError('MNP_WORKSPACE_ASSIGNMENT_MISMATCH')
+          prior.status = 'leased'; await this.persist()
+        }
+        if (prior.status !== 'leased') throw workspaceError('REMOTE_WORKSPACE_RECOVERY_REQUIRED')
+        return this.publicLease(prior)
+      }
+      const { pool, report } = this.pool(machineId)
+      const knownHint = this.local.poolForWorkspace(options.workspaceHint) ? null
+        : this.poolForWorkspace(options.workspaceHint, machineId) ?? this.poolForWorkspace(options.workspaceHint)
+      if (knownHint && knownHint.originUrl !== pool.originUrl) throw workspaceError('REMOTE_WORKSPACE_SCOPE_MISMATCH')
+      const changes = await this.local.integrationTrackedChanges()
+      if (changes.dirty) throw new WorkspacePoolUnavailableError('통합 작업공간의 미커밋 변경을 먼저 정리해야 합니다.', changes.paths, integrationWorktreeDirtyReasonCode)
+      const worker = report.workspaces.find((candidate) => candidate.status === 'idle' && !candidate.dirty && candidate.runtimeIdle
+        && !candidate.leaseId && !Object.values(this.state.leases).some((lease) => lease.ownership.machineId === machineId
+          && lease.workspaceId === candidate.workspaceId && lease.status !== 'completed'))
+      if (!worker) throw new WorkspacePoolUnavailableError('사용 가능한 원격 worker가 없습니다.', [], 'CAPACITY_EXHAUSTED')
+      const integration = this.local.registry.integration
+      const baseBranch = await git(integration.root, ['branch', '--show-current'])
+      if (!baseBranch) throw workspaceError('REMOTE_WORKSPACE_BASE_BRANCH_INVALID')
+      const baseCommit = commitId(await git(integration.root, ['rev-parse', 'HEAD']))
+      const jobId = `job-${randomUUID()}`, leaseId = `lease-${randomUUID()}`
+      const generation = Math.max(worker.generation ?? 0, ...Object.values(this.state.leases).filter((item) => item.ownership.machineId === machineId && item.workspaceId === worker.workspaceId).map((item) => item.ownership.generation)) + 1
+      const lease = { poolId: pool.poolId, workspaceId: worker.workspaceId, jobId, leaseId, requestId,
+        ownership: { coordinatorId: this.state.coordinatorId, machineId, poolId: pool.poolId, generation },
+        projectRoot: worker.projectRoot, sharedRoot: report.sharedRoot, assetsPath: worker.assetsPath, unityInstanceHash: worker.unityInstanceHash,
+        branch: `mnp/${jobId}`, baseBranch, baseCommit, mapId, cardId, cardLabel, conversationId,
+        status: 'preparing', startedAt: new Date().toISOString(), checkpoints: [] }
+      this.state.leases[leaseId] = lease
+      await this.persist()
+      const file = this.artifacts.file(leaseId, 'baseline')
+      await mkdir(path.dirname(file), { recursive: true })
+      await git(integration.root, ['bundle', 'create', file, `refs/heads/${baseBranch}`])
+      await this.artifacts.publish(leaseId, 'baseline')
+      const prepared = await this.command(lease, 'prepare')
+      if (!assignmentMatches(lease, prepared.lease)) throw workspaceError('MNP_WORKSPACE_ASSIGNMENT_MISMATCH')
+      lease.status = 'leased'; await this.persist()
+      return this.publicLease(lease)
+    }).catch(async (error) => {
+      const lease = Object.values(this.state.leases).find((item) => item.requestId === options.requestId)
+      if (lease) {
+        error.workspaceLease = this.publicLease(lease)
+      }
+      throw error
+    })
+  }
+  async retryPreparation(id, { confirmed, expectedLeaseId, generation } = {}) {
+    const lease = this.scoped(id)
+    if (!confirmed || lease.status !== 'preparing' || expectedLeaseId !== id || generation !== lease.ownership.generation) throw workspaceError('REMOTE_WORKSPACE_RECOVERY_CONFIRMATION_REQUIRED')
+    try {
+      return await this.acquire({ machineId: lease.ownership.machineId, requestId: lease.requestId, mapId: lease.mapId, cardId: lease.cardId, conversationId: lease.conversationId, cardLabel: lease.cardLabel })
+    } catch (error) {
+      // These gates precede reservation/Git mutation. Other failures require receipt inspection.
+      if (!['REMOTE_WORKSPACE_RUNTIME_ACTIVE', 'REMOTE_WORKSPACE_DIRTY'].includes(error.reasonCode ?? error.code)) throw error
+      return this.exclusive(async () => {
+        const prepared = await this.command(lease, 'prepare', { retryToken: randomUUID() })
+        if (!assignmentMatches(lease, prepared.lease)) throw workspaceError('MNP_WORKSPACE_ASSIGNMENT_MISMATCH')
+        lease.status = 'leased'; await this.persist()
+        return this.publicLease(lease)
+      })
+    }
+  }
+  scoped(leaseId, options = {}) {
+    const lease = this.state.leases[identifier(leaseId)]
+    if (!lease) throw workspaceError('REMOTE_WORKSPACE_LEASE_NOT_FOUND')
+    for (const key of ['mapId', 'cardId', 'conversationId']) {
+      if (options[key] !== undefined && lease[key] !== options[key]) throw workspaceError('MNP_WORKSPACE_ASSIGNMENT_MISMATCH')
+    }
+    return lease
+  }
+  async bindConversation(id, conversationId) {
+    return this.exclusive(async () => {
+      const lease = this.scoped(id)
+      if (!['leased', 'checkpoint-required'].includes(lease.status)) throw workspaceError('REMOTE_WORKSPACE_RECOVERY_REQUIRED')
+      if (lease.conversationId && lease.conversationId !== conversationId) throw workspaceError('MNP_WORKSPACE_ASSIGNMENT_MISMATCH')
+      await this.command(lease, 'bind', { conversationId })
+      lease.conversationId = conversationId; await this.persist()
+      return this.publicLease(lease)
+    })
+  }
+  async reuseLease(id, options) {
+    return this.exclusive(async () => {
+      if (!options?.mapId || !options.cardId || !options.conversationId) throw workspaceError('MNP_WORKSPACE_ASSIGNMENT_MISMATCH')
+      const lease = this.scoped(id, options)
+      if (lease.sealed || !['leased', 'checkpoint-required'].includes(lease.status)) throw workspaceError('REMOTE_WORKSPACE_RECOVERY_REQUIRED')
+      await this.command(lease, 'reuse', { ...options, attempt: randomUUID() })
+      return this.publicLease(lease)
+    })
+  }
+  async checkpoint(id, options) {
+    return this.exclusive(async () => {
+      const lease = this.scoped(id, options)
+      if (lease.sealed) throw workspaceError('REMOTE_WORKSPACE_RESULT_SEALED')
+      if (!['leased', 'checkpoint-required'].includes(lease.status)) throw workspaceError('REMOTE_WORKSPACE_RECOVERY_REQUIRED')
+      identifier(options.requestId)
+      const result = await this.command(lease, 'checkpoint', options)
+      if (result.checkpoint && !lease.checkpoints.some((entry) => entry.requestId === options.requestId)) lease.checkpoints.push({ ...result.checkpoint, requestId: options.requestId })
+      lease.status = 'leased'; await this.persist()
+      return { ...result, lease: this.publicLease(lease) }
+    })
+  }
+  async stage(lease) {
+    if (this.stages.has(lease.leaseId)) return this.stages.get(lease.leaseId)
+    const root = path.join(this.root, 'staging', lease.leaseId)
+    const stateFile = path.join(root, 'state.json'), workerPath = path.join(root, 'repository')
+    await mkdir(root, { recursive: true })
+    let state = await jsonFile(stateFile)
+    if (!state) {
+      // Clone only into a new, server-owned staging directory, never the live remote Fork.
+      try { await git(this.local.registry.integration.root, ['clone', '--no-local', this.artifacts.file(lease.leaseId, 'result'), workerPath]) }
+      catch (error) { throw workspaceError('REMOTE_WORKSPACE_STAGING_RECOVERY_REQUIRED', error.message) }
+      await git(workerPath, ['config', 'user.name', await git(this.local.registry.integration.root, ['config', 'user.name'])])
+      await git(workerPath, ['config', 'user.email', await git(this.local.registry.integration.root, ['config', 'user.email'])])
+      await git(workerPath, ['remote', 'set-url', 'origin', this.local.registry.originUrl])
+      await git(workerPath, ['switch', lease.branch])
+      if (await git(workerPath, ['rev-parse', 'HEAD']) !== lease.headCommit) throw workspaceError('REMOTE_WORKSPACE_RESULT_HEAD_MISMATCH')
+      await git(workerPath, ['merge-base', '--is-ancestor', lease.baseCommit, lease.headCommit])
+      const staged = { ...lease, projectRoot: workerPath, status: 'leased', result: null }
+      await saveJson(path.join(workerPath, '.ai-session.json'), staged)
+      state = { leases: { [lease.leaseId]: staged }, workspaces: { [lease.workspaceId]: { status: 'leased', leaseId: lease.leaseId } }, integrationLeaseId: null }
+      await saveJson(stateFile, state)
+    }
+    const manager = new WorkspacePoolManager({ stateFile })
+    manager.registry = { ...this.local.registry, sharedRoot: root,
+      workers: [{ id: lease.workspaceId, root: workerPath, role: 'worker' }],
+      workspaces: [this.local.registry.integration, { id: lease.workspaceId, root: workerPath, role: 'worker' }] }
+    manager.state = state
+    const persist = manager.persist.bind(manager)
+    manager.persist = async () => {
+      await persist()
+      this.local.state.integrationLeaseId = manager.state.integrationLeaseId
+      await this.local.persist()
+    }
+    manager.runExclusive = (action) => this.local.runExclusive(async () => {
+      manager.state.integrationLeaseId = this.local.state.integrationLeaseId
+      return action()
+    })
+    this.stages.set(lease.leaseId, manager)
+    return manager
+  }
+  async finalize(id, options = {}) {
+    return this.exclusive(async () => {
+      const lease = this.scoped(id)
+      if (['completed', 'quarantined'].includes(lease.status)) return lease.result ?? null
+      if (options.childStatus !== 'completed') return this.hold(lease, options.childError ?? '하위 실행이 완료되지 않았습니다.')
+      if (!lease.sealed) {
+        const sealed = await this.command(lease, 'seal', { checkpointRound: lease.checkpoints.length })
+        if (sealed.status === 'checkpoint-required') {
+          lease.status = sealed.status; lease.result = { ...sealed, leaseId: id, jobId: lease.jobId }
+          await this.persist(); return lease.result
+        }
+        if (sealed.status !== 'sealed') throw workspaceError('REMOTE_WORKSPACE_RESULT_INVALID')
+        const manifest = await this.artifacts.manifest(id, 'result')
+        if (stableHash(manifest) !== stableHash(sealed.manifest)) throw workspaceError('REMOTE_WORKSPACE_ARTIFACT_HASH_MISMATCH')
+        lease.headCommit = commitId(sealed.headCommit); lease.checkpoints = sealed.checkpoints; lease.sealed = true
+        lease.remoteDriftArchives = sealed.remoteDriftArchives ?? []
+        lease.status = 'waiting-integration'; await this.persist()
+      }
+      const stage = await this.stage(lease)
+      let result
+      try { result = await stage.finalize(id, options) } catch (error) {
+        return this.hold(lease, error.message, { stagedResult: stage.state.leases[id].result, stagingRoot: stage.state.leases[id].projectRoot, reasonCode: error.reasonCode ?? error.code })
+      }
+      if (result?.status === 'awaiting-conflict-resolution') {
+        return this.hold(lease, '원격 결과의 메인 staging 통합 충돌입니다. staging에서 명시적으로 복구해야 합니다.', { stagedResult: result, stagingRoot: stage.state.leases[id].projectRoot, reasonCode: 'REMOTE_INTEGRATION_CONFLICT_MANUAL_REVIEW' })
+      }
+      if (result?.status !== 'completed') {
+        lease.status = result?.status ?? 'waiting-integration'; lease.result = result
+        await this.persist(); return result
+      }
+      return this.release(lease, result)
+    })
+  }
+  async release(lease, result) {
+    lease.status = 'release-pending'; lease.result = { ...result, status: 'waiting-integration', phase: 'release-pending' }
+    await this.persist()
+    const integration = this.local.registry.integration
+    const integratedCommit = commitId(await git(integration.root, ['rev-parse', 'HEAD']))
+    const file = this.artifacts.file(lease.leaseId, 'release')
+    await mkdir(path.dirname(file), { recursive: true })
+    if (!lease.releaseCommit) {
+      await git(integration.root, ['bundle', 'create', file, `refs/heads/${lease.baseBranch}`])
+      await this.artifacts.publish(lease.leaseId, 'release')
+      lease.releaseCommit = integratedCommit; await this.persist()
+    }
+    const released = await this.command(lease, 'release', { integratedCommit: lease.releaseCommit })
+    if (!released.released || released.idleCommit !== lease.releaseCommit) throw workspaceError('REMOTE_WORKSPACE_RELEASE_MISMATCH')
+    lease.status = 'completed'; lease.result = { ...result, remoteReleased: true, remoteDriftArchives: released.remoteDriftArchives ?? lease.remoteDriftArchives ?? [] }
+    await this.persist(); return lease.result
+  }
+  async hold(lease, reason, details = {}) {
+    if (lease.status === 'completed') return lease.result
+    lease.status = 'quarantined'; lease.result = { status: 'quarantined', leaseId: lease.leaseId, jobId: lease.jobId, reason, ...details }
+    await this.persist()
+    // Failure to deliver quarantine is not evidence that the worker stopped.
+    await this.command(lease, 'quarantine', { reason }).catch(() => {})
+    return lease.result
+  }
+  quarantine(id, reason) { return this.exclusive(() => this.hold(this.scoped(id), reason)) }
+  cancel(id, reason) { return this.quarantine(id, reason ?? '원격 작업 취소: 실행 여부 확인 후 명시적 복구가 필요합니다.') }
+  async reactivateQuarantinedLease(id, options) {
+    return this.exclusive(async () => {
+      if (!options?.mapId || !options.cardId || !options.conversationId) throw workspaceError('MNP_WORKSPACE_ASSIGNMENT_MISMATCH')
+      const lease = this.scoped(id, options)
+      if (!['quarantined', 'leased'].includes(lease.status)
+        || !['confirmed-dispatch', 'usage-limit', 'rate-limit', 'model-capacity'].includes(options.failureCategory)
+        || options.failureCategory === 'confirmed-dispatch' && !aiDelegationWorkspaceLeaseMatches(lease, options.confirmedDispatchLease)) throw workspaceError('REMOTE_WORKSPACE_RECOVERY_PROOF_REQUIRED')
+      if (lease.sealed) throw workspaceError('REMOTE_WORKSPACE_RESULT_SEALED')
+      await this.command(lease, 'recover', { ...options, attempt: randomUUID() })
+      lease.status = 'leased'; lease.result = null; await this.persist()
+      return this.publicLease(lease)
+    })
+  }
+  async retryIntegration(id, { confirmed = false, expectedHead } = {}) {
+    return this.exclusive(async () => {
+      const lease = this.scoped(id)
+      if (!lease.sealed) throw workspaceError('REMOTE_WORKSPACE_RESULT_NOT_SEALED')
+      if (lease.status === 'completed') return lease.result
+      const stage = await this.stage(lease)
+      if (!confirmed || commitId(expectedHead) !== await git(stage.state.leases[id].projectRoot, ['rev-parse', 'HEAD'])) throw workspaceError('REMOTE_WORKSPACE_RECOVERY_CONFIRMATION_REQUIRED')
+      if (stage.state.leases[id].status === 'completed') return this.release(lease, stage.state.leases[id].result)
+      const result = stage.state.leases[id].status === 'awaiting-conflict-resolution'
+        ? await stage.completeConflictResolution(id, { childStatus: 'completed' }) : await stage.recoverCheckpointedFinalizationFailure(id)
+      lease.status = result?.status ?? 'waiting-integration'; lease.result = result
+      await this.persist()
+      return result?.status === 'completed' ? this.release(lease, result) : result
+    })
+  }
+  async artifactRequest(machineId, leaseId, kind, suffix, method, body) {
+    const lease = this.scoped(leaseId)
+    if (lease.ownership.machineId !== machineId || !['baseline', 'result', 'release'].includes(kind)) throw workspaceError('MNP_WORKSPACE_ASSIGNMENT_MISMATCH')
+    if (kind === 'result' ? method !== 'POST' || lease.sealed : method !== 'GET') throw workspaceError('REMOTE_WORKSPACE_ARTIFACT_DIRECTION_INVALID')
+    const key = `${leaseId}:${kind}`
+    const action = async () => {
+      if (method === 'GET' && suffix === 'manifest') return this.artifacts.manifest(leaseId, kind)
+      const chunk = /^chunks\/(\d+)$/.exec(suffix)
+      if (method === 'GET' && chunk) return this.artifacts.chunk(leaseId, kind, Number(chunk[1]))
+      if (method === 'POST' && chunk && Number(chunk[1]) === body?.chunk?.index) return this.artifacts.receive(leaseId, kind, body.manifest, body.chunk)
+      if (method === 'POST' && suffix === 'complete') return this.artifacts.finish(leaseId, kind)
+      throw workspaceError('REMOTE_WORKSPACE_ARTIFACT_REQUEST_INVALID')
+    }
+    const result = (this.artifactQueues.get(key) ?? Promise.resolve()).catch(() => {}).then(action)
+    this.artifactQueues.set(key, result.catch(() => {}))
+    return result
+  }
+}
+
+export function remoteWorkspaceFacade(local, remote) {
+  const methods = new Set(['bindConversation', 'reuseLease', 'checkpoint', 'finalize', 'cancel', 'quarantine', 'reactivateQuarantinedLease'])
+  const unsupported = new Set(['completeConflictResolution', 'prepareIntegrationResultCorrection', 'resumeIntegrationResultCorrection',
+    'recoverCheckpointedFinalizationFailure', 'recoverLegacyDirtyIntegration', 'recoverLocalChangesIntegrationFailure', 'recoverUntrackedIntegrationFailure'])
+  return new Proxy(local, { get(target, property) {
+    if (property === 'state') return target.state ? { ...target.state, leases: { ...target.state.leases, ...remote.state?.leases } } : target.state
+    if (property === 'initialize') return async (options) => { await remote.initialize(); return target.initialize(options) }
+    if (property === 'poolForWorkspace') return (root, machineId) => remote.poolForWorkspace(root, machineId)
+      ?? target.poolForWorkspace(root) ?? remote.poolForWorkspace(root)
+    if (property === 'publicSnapshot') return (options) => options?.machineId && options.machineId !== remote.mainMachineId()
+      ? remote.workspaceSnapshot(options) : ({ ...target.publicSnapshot(options), ...remote.snapshot() })
+    if (property === 'acquire') return (options) => options.machineId && options.machineId !== remote.mainMachineId()
+      ? remote.acquire(options) : target.acquire(options)
+    if (methods.has(property)) return (id, ...args) => remote.hasLease(id) ? remote[property](id, ...args) : target[property](id, ...args)
+    if (unsupported.has(property)) return (id, ...args) => {
+      if (remote.hasLease(id)) throw workspaceError('REMOTE_WORKSPACE_EXPLICIT_RECOVERY_REQUIRED')
+      return target[property](id, ...args)
+    }
+    const value = target[property]
+    return typeof value === 'function' ? value.bind(target) : value
+  } })
+}

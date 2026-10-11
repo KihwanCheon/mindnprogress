@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -38,7 +38,7 @@ function startServer(dataDirectory, port, extraEnv = {}) {
       MNP_ADMIN_PASSWORD: adminPassword,
       ...extraEnv,
     },
-    stdio: 'ignore',
+    stdio: extraEnv.MNP_TEST_CAPTURE_LOG ? 'pipe' : 'ignore',
   })
 }
 
@@ -94,6 +94,47 @@ async function registerMacbook(baseUrl, cookie) {
   assert.match(issued.body.token, /^mnprn_[A-Za-z0-9_-]{20,}$/)
   return issued.body.token
 }
+
+test('원격 workspace 보고·등록 승인은 인증·coordinator·digest를 검증하고 일반 heartbeat와 분리한다', { timeout: 30_000 }, async () => {
+  const dataDirectory = await mkdtemp(path.join(tmpdir(), 'mnp-remote-api-'))
+  const baseUrl = 'http://127.0.0.1:4989'
+  const registry = path.join(dataDirectory, '_test-registry.json')
+  const originUrl = 'https://example.invalid/project.git'
+  await mkdir(path.join(dataDirectory, 'main')); await mkdir(path.join(dataDirectory, 'worker'))
+  await writeFile(registry, JSON.stringify({ schemaVersion: 1, poolId: 'local', originUrl,
+    sharedRoot: path.join(dataDirectory, 'shared'), workspaces: [
+      { id: 'main', root: path.join(dataDirectory, 'main'), role: 'integration' },
+      { id: 'worker', root: path.join(dataDirectory, 'worker'), role: 'worker' },
+    ] }))
+  const server = startServer(dataDirectory, 4989, { MNP_WORKSPACE_POOL_REGISTRY: registry, MNP_TEST_CAPTURE_LOG: '1' })
+  let output = ''
+  server.stdout.on('data', (chunk) => { output += String(chunk) })
+  server.stderr.on('data', (chunk) => { output += String(chunk) })
+  try {
+    await waitForServer(baseUrl).catch((error) => { throw new Error(`${error.message}\n${output}`) })
+    const cookie = await login(baseUrl), token = await registerMacbook(baseUrl, cookie)
+    const heartbeat = await runnerRequest(baseUrl, token, '/api/machines/macbook/runner/heartbeat', {})
+    assert.equal(heartbeat.response.status, 200)
+    const report = { version: 1, coordinatorId: heartbeat.body.coordinatorId, machineId: 'macbook', poolId: 'remote',
+      registryDigest: 'a'.repeat(64), originUrl, sharedRoot: '/sub-machine/shared',
+      workspaces: [{ workspaceId: 'fork1', projectRoot: '/sub-machine/verified-repository', assetsPath: '/sub-machine/verified-repository/Assets',
+        originUrl, headCommit: 'a'.repeat(40), status: 'idle', dirty: false, runtimeIdle: true, generation: 0 }] }
+    const badReport = await runnerRequest(baseUrl, token, '/api/machines/macbook/runner/heartbeat', { workspacePool: { ...report, coordinatorId: 'different' } })
+    assert.equal(badReport.response.status, 409)
+    assert.equal((await runnerRequest(baseUrl, token, '/api/machines/macbook/runner/heartbeat', { workspacePool: report })).response.status, 200)
+    const snapshot = await userRequest(baseUrl, cookie, '/api/machines/macbook/workspace-pool')
+    assert.equal(snapshot.body.remotePools[0].approved, false)
+    const approve = { poolId: 'remote', registryDigest: report.registryDigest, enabled: true }
+    assert.equal((await runnerRequest(baseUrl, token, '/api/machines/macbook/workspace-pool', approve)).response.status, 401)
+    assert.equal((await userRequest(baseUrl, cookie, '/api/machines/macbook/workspace-pool', 'PUT', { ...approve, registryDigest: 'b'.repeat(64) })).response.status, 409)
+    assert.equal((await userRequest(baseUrl, cookie, '/api/machines/macbook/workspace-pool', 'PUT', approve)).body.remotePools[0].approved, true)
+    await runnerRequest(baseUrl, token, '/api/machines/macbook/runner/heartbeat', {})
+    const stale = await userRequest(baseUrl, cookie, '/api/machines/macbook/workspace-pool')
+    assert.equal(stale.body.remotePools[0].stale, true)
+    const unauthenticated = await fetch(`${baseUrl}/api/machines/macbook/runner/workspace-artifacts/lease-1/baseline/manifest`)
+    assert.equal(unauthenticated.status, 401)
+  } finally { await stopServer(server); await rm(dataDirectory, { recursive: true, force: true }) }
+})
 
 test('AionUi 페어링 링크는 일회용 코드로 Runner 토큰을 교환하고 즉시 연결된다', { timeout: 60_000 }, async () => {
   const dataDirectory = await mkdtemp(path.join(tmpdir(), 'mnp-runner-pairing-'))
