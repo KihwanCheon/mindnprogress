@@ -148,6 +148,36 @@ test('Git 잠금 해소 후 최신 main에서 별도 후보로 통합하고 이�
   assert.deepEqual(await restartedAgain.finalize(f.lease.leaseId, { childStatus: 'completed' }), completed)
 })
 
+test('승인 메타 보존 후 최신 main의 등록 메타를 유지하며 기존 완료 커밋을 통합한다', realGit, async (t) => {
+  const f = await gitLockQuarantine(t)
+  await rm(f.lockPath)
+  const metaPath = 'Assets/Scripts/Guard.cs.meta'
+  const guid = 'a15eb8176d53e3d4f868808613a85690'
+  const generated = Buffer.from(`fileFormatVersion: 2\nguid: ${guid}`)
+  const registered = `fileFormatVersion: 2\nguid: ${guid}\nMonoImporter:\n  executionOrder: 0\n`
+  await put(f.main, metaPath, registered)
+  await git(f.main, ['add', metaPath])
+  await git(f.main, ['commit', '-m', 'register missing meta'])
+  const mainCommit = await git(f.main, ['rev-parse', 'HEAD'])
+  await put(f.worker, metaPath, generated)
+  const options = { untrackedMetaRecovery: { path: metaPath, expectedSha256: createHash('sha256').update(generated).digest('hex'), mainCommit } }
+  await assert.rejects(f.manager.recoverIntegrationGitLockFailure(f.lease.leaseId, localRecoveryScope), /로컬 변경/)
+  await f.manager.recoverIntegrationGitLockFailure(f.lease.leaseId, localRecoveryScope, options)
+  assert.deepEqual(await readFile(path.join(f.worker, metaPath)), generated, '접수만으로 원본을 제거하지 않는다.')
+  const restarted = new WorkspacePoolManager(f)
+  await restarted.initialize()
+  const result = await restarted.finalize(f.lease.leaseId, { childStatus: 'completed' })
+  assert.equal(result.status, 'completed')
+  assert.equal(result.integrationBaseCommit, mainCommit)
+  assert.equal(await readFile(path.join(f.main, metaPath), 'utf8'), registered)
+  assert.equal(await readFile(path.join(f.worker, metaPath), 'utf8'), registered)
+  const record = restarted.state.leases[f.lease.leaseId].untrackedMetaRecovery
+  assert.deepEqual(await readFile(path.join(f.sharedRoot, record.archiveRelative, 'original.meta')), generated)
+  assert.equal(await git(f.worker, ['rev-parse', f.failed.integrationBranch]), f.failed.integrationHeadCommit)
+  assert.equal(await git(f.worker, ['rev-parse', f.lease.branch]), f.failed.headCommit)
+  assert.equal(restarted.state.workspaces.fork2.status, 'idle')
+})
+
 for (const alreadyApplied of [false, true]) {
 test(`Git 잠금 복구 접수 후 main 진행(${alreadyApplied ? '기존 후보 반영 후' : '기존 후보 미반영'})도 결과를 중복 적용하지 않는다`, realGit, async (t) => {
   const f = await gitLockQuarantine(t)
@@ -329,9 +359,23 @@ test('통합 재시도는 소유권·세션·체크포인트·수동 커밋 불�
   assert.equal(f.manager.state.leases[f.lease.leaseId].integrationRecoveryHistory, undefined)
 })
 
-for (const failureType of ['local-changes', 'integration-git-lock']) {
+for (const failureType of ['local-changes', 'integration-git-lock', 'integration-git-lock-meta']) {
 test(`통합 복구 API(${failureType})는 최신 승인·유휴 대화를 확인하고 결과 해시를 보존하며 하위 AI 실행 없이 복구한다`, realGit, async (t) => {
-  const f = await (failureType === 'integration-git-lock' ? gitLockQuarantine : localChangesQuarantine)(t)
+  const gitLock = failureType.startsWith('integration-git-lock')
+  const f = await (gitLock ? gitLockQuarantine : localChangesQuarantine)(t)
+  let untrackedMetaRecovery
+  if (failureType === 'integration-git-lock-meta') {
+    await rm(f.lockPath)
+    const metaPath = 'Assets/Scripts/Guard.cs.meta'
+    const guid = 'a15eb8176d53e3d4f868808613a85690'
+    const original = `fileFormatVersion: 2\nguid: ${guid}`
+    await put(f.main, metaPath, `${original}\nMonoImporter:\n  executionOrder: 0\n`)
+    await git(f.main, ['add', metaPath])
+    await git(f.main, ['commit', '-m', 'register missing meta'])
+    await put(f.worker, metaPath, original)
+    untrackedMetaRecovery = { path: metaPath, expectedSha256: createHash('sha256').update(original).digest('hex'), mainCommit: await git(f.main, ['rev-parse', 'HEAD']) }
+    await writeFile(f.lockPath, '다른 Git 작업의 잠금')
+  }
   const dataDirectory = path.join(f.root, 'server-data')
   await mkdir(dataDirectory)
   await writeFile(path.join(dataDirectory, '_workspace-pool.json'), JSON.stringify(f.manager.state))
@@ -383,7 +427,8 @@ test(`통합 복구 API(${failureType})는 최신 승인·유휴 대화를 확�
     assert.equal(login.status, 200)
     const headers = { Cookie: login.headers.get('set-cookie').split(';')[0], 'Content-Type': 'application/json' }
     const endpoint = baseUrl + '/api/maps/map-test/ai-delegations/local-integration/recover'
-    const input = { instruction: '로컬 변경을 해소했으므로 완료 커밋의 통합만 재시도합니다.', expectedUpdatedAt: now, sourceRevision: 1, targetRevision: 1, confirmApprovedScope: true }
+    const input = { instruction: '로컬 변경을 해소했으므로 완료 커밋의 통합만 재시도합니다.', expectedUpdatedAt: now, sourceRevision: 1, targetRevision: 1, confirmApprovedScope: true,
+      ...(untrackedMetaRecovery ? { untrackedMetaRecovery } : {}) }
     const post = body => fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(body) })
     assert.equal((await post({ ...input, expectedUpdatedAt: 'stale' })).status, 409)
     assert.equal((await post({ ...input, confirmApprovedScope: false })).status, 400)
@@ -392,12 +437,19 @@ test(`통합 복구 API(${failureType})는 최신 승인·유휴 대화를 확�
     runtimeState = 'idle'
     const dirty = await post(input)
     assert.equal(dirty.status, 409)
-    assert.match((await dirty.json()).error, failureType === 'integration-git-lock' ? /Git 잠금/ : /로컬 변경/)
+    assert.match((await dirty.json()).error, gitLock ? /Git 잠금/ : /로컬 변경/)
     assert.equal(JSON.parse(await readFile(path.join(dataDirectory, '_workspace-pool.json'), 'utf8')).leases[f.lease.leaseId].status, 'quarantined')
-    if (failureType === 'integration-git-lock') await rm(f.lockPath)
+    if (gitLock) await rm(f.lockPath)
     else {
       await rename(path.join(f.worker, 'base.txt'), path.join(f.root, 'api-user-backup.txt'))
       await git(f.worker, ['restore', 'base.txt'])
+    }
+    if (untrackedMetaRecovery) {
+      assert.equal((await post({ ...input, untrackedMetaRecovery: { ...untrackedMetaRecovery, path: '../outside.cs.meta' } })).status, 400)
+      assert.equal((await post({ ...input, untrackedMetaRecovery: { ...untrackedMetaRecovery, expectedSha256: 'a'.repeat(64) } })).status, 409)
+      assert.equal((await post({ ...input, untrackedMetaRecovery: undefined })).status, 409)
+    } else if (!gitLock) {
+      assert.equal((await post({ ...input, untrackedMetaRecovery: { path: 'Assets/Guard.cs.meta', expectedSha256: 'a'.repeat(64), mainCommit: 'b'.repeat(40) } })).status, 400)
     }
     const response = await post(input)
     const body = await response.json()
@@ -414,6 +466,13 @@ test(`통합 복구 API(${failureType})는 최신 승인·유휴 대화를 확�
     assert.equal(saved.attemptHistory.length, 1)
     assert.equal((await post(input)).status, 409, '중복 요청이 새 하위 실행을 만들면 안 된다.')
     assert.deepEqual(posts, [])
+    if (untrackedMetaRecovery) {
+      const pool = JSON.parse(await readFile(path.join(dataDirectory, '_workspace-pool.json'), 'utf8'))
+      const record = pool.leases[f.lease.leaseId].untrackedMetaRecovery
+      const original = await readFile(path.join(f.worker, untrackedMetaRecovery.path))
+      assert.deepEqual(await readFile(path.join(f.sharedRoot, record.archiveRelative, 'original.meta')), original)
+      assert.equal(createHash('sha256').update(original).digest('hex'), untrackedMetaRecovery.expectedSha256)
+    }
     const savedMap = JSON.parse(await readFile(path.join(dataDirectory, 'map-test.json'), 'utf8'))
     assert.deepEqual(savedMap.nodes, map.nodes)
   } finally {

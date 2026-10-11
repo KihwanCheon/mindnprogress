@@ -2134,7 +2134,12 @@ async function main() {
     instruction: z.string().min(1).max(100000).describe('현재 상태를 확인한 뒤 이어서 수행할 범위와 완료 조건. 커밋 전 변경은 보존하고 완료된 작업은 반복하지 않습니다. 구버전 failed-clean 작업은 MindNProgress가 새 lease를 배정할 수 있으므로 이번 전문의 할당 경로·브랜치·세션을 확인하도록 지시하세요.'),
     sourceRevision: z.number().int().positive().describe('get_context 또는 get_document에서 확인한 현재 문서 version'),
     recoveryMode: z.enum(['correct-integration-result']).optional().describe('승인된 기존 작업의 통합 대기 결과 정정 범위를 명시할 때 지정합니다. 원 owner·lease·source·후보·HEAD를 검증한 뒤 같은 worker에서 새 체크포인트로 정정합니다. integration 사용자 파일 삭제·이동·덮어쓰기는 허용하지 않습니다. 재시도는 동일 지시와 모드를 사용합니다.'),
-  }, async ({ mapId, delegationId, instruction, sourceRevision, recoveryMode }) => {
+    untrackedMetaRecovery: z.object({
+      path: z.string().min(1),
+      expectedSha256: z.string().regex(/^[a-f0-9]{64}$/),
+      mainCommit: z.string().regex(/^[a-f0-9]{40}$/),
+    }).strict().optional().describe('사용자가 승인한 단일 미추적 Assets/*.cs.meta의 원본 보존·정리. Git 잠금 통합 재시도에만 지정합니다. 정확한 경로·원본 SHA-256·최신 main HEAD를 전달하며 같은 GUID의 등록 메타가 main에 있어야 합니다. 다른 변경은 정리하지 않습니다.'),
+  }, async ({ mapId, delegationId, instruction, sourceRevision, recoveryMode, untrackedMetaRecovery }) => {
     const origin = delegationOriginForMap(mapId)
     return apiRequest(`/api/maps/${encodeURIComponent(mapId)}/ai-delegations/${encodeURIComponent(delegationId)}/recover`, {
       method: 'POST',
@@ -2145,7 +2150,8 @@ async function main() {
       aiType: origin.aiType,
       aiModel: origin.aiModel,
       timeoutMs: 60_000,
-      body: JSON.stringify({ instruction, sourceRevision, ...(recoveryMode ? { recoveryMode } : {}) }),
+      body: JSON.stringify({ instruction, sourceRevision, ...(recoveryMode ? { recoveryMode } : {}),
+        ...(untrackedMetaRecovery ? { untrackedMetaRecovery } : {}) }),
     })
   })
 

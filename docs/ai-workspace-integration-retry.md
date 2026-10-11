@@ -38,6 +38,16 @@ MnP는 하위 AI 작업 완료와 `main` 반영 완료를 구분한다. 완료�
 
 Git 잠금 실패는 서버 시작만으로 새 복구를 승인하지 않는다. 사용자가 승인해 풀을 통합 대기로 저장한 직후 서버가 종료된 경우에만 시작 시 위임 레코드 저장을 대사한다. 실제 통합 완료 후에도 별도 품질 검수와 상위 결과 확인이 필요하다.
 
+### 승인된 단일 자동 생성 스크립트 메타 보존
+
+옛 통합 후보에는 메타가 없고 최신 main에는 같은 GUID의 정식 메타가 등록된 경우, 기존 `recover` API/MCP에 선택적으로 `untrackedMetaRecovery: { path, expectedSha256, mainCommit }`를 지정할 수 있다. 사용자가 원본 보존·정리를 승인한 정확한 경로와 원본 SHA-256, 조회한 최신 main HEAD만 전달한다. 일반 UI 재시도는 이 옵션을 자동으로 넣지 않는다.
+
+- Git 잠금으로 실패한 완료 위임에만 적용한다. `Assets/*.cs.meta` 일반 파일 한 개이며, worker의 전체 Git 상태가 그 파일의 미추적 한 건이어야 한다. 후보와 source 모두 해당 메타가 없고, 원문이 `fileFormatVersion`·`guid` 두 줄 형식이며 main의 등록 MonoImporter 메타와 GUID가 일치해야 한다. GUID 일치만으로 파일 전체가 같거나 사용자 변경이 아니라고 단정하지 않는다.
+- 기존 소유권·세션·체크포인트·후보 검증 후 `sharedRoot/workspace-drift/<worker>/meta-recovery-<고유값>/`에 `original.meta` 바이트와 SHA-256·Git 상태·승인·귀속·main 등록 blob을 저장한다. 백업을 다시 읽어 바이트를 비교한 뒤 승인 기록을 풀 상태에 내구 저장한다. 접수 시 원본 파일은 아직 건드리지 않는다.
+- 정상 finalize에서 귀속·백업·후보·Git 상태·잠금을 다시 검증하고 승인된 원본만 복구 폴더의 고유 파일로 이동한다. 이동 경계에서 내용이 바뀌어도 원문을 보존하고 격리를 유지한다. 새 후보는 최신 main의 등록 메타를 Git checkout으로 받으며 clone 간 파일 복사나 main 사용자 파일 변경은 하지 않는다.
+- 정리와 풀 저장 사이에 재시작돼 파일이 이미 없는 경우에도 검증된 원본 백업으로 이어 처리한다. 같은 파일이 다시 생성되면 승인 해시가 정확히 일치할 때만 다시 보존할 수 있다. 다른 변경·해시·GUID·등록 blob·소유권 또는 Git 작업이 발견되면 처리하지 않는다. 옵션 생략 시 기존 dirty 차단을 그대로 유지한다.
+- 기존 결과 원문·해시·실행 턴·source와 실패 후보를 보존하며 하위 AI 재실행, 새 위임, Unity/Play 실행은 없다. 복구 성공은 제품 품질 PASS가 아니다.
+
 ## 통합 대기 결과 정정
 
 기존 담당자의 우발 변경이 포함된 완료 결과는 기존 `recover` API 또는 `mindnprogress_recover_ai_delegation`의 `recoveryMode: "correct-integration-result"`로 정정을 요청한다. 목록의 `recovery.recommendedAction=correct-integration-result`는 기록 기준 후보이며 실제 Git·소유권 검증을 통과했다는 뜻이 아니다. 후보 HEAD가 없는 단순 통합 순서 대기는 대상이 아니다. 카드와 그룹 총괄 UI의 **통합 대기 결과 정정**도 같은 모드를 명시한다.

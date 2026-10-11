@@ -2434,6 +2434,30 @@
             "correct-integration-result"
           ],
           "description": "승인된 기존 작업의 통합 대기 결과 정정 범위를 명시할 때 지정합니다. 원 owner·lease·source·후보·HEAD를 검증한 뒤 같은 worker에서 새 체크포인트로 정정합니다. integration 사용자 파일 삭제·이동·덮어쓰기는 허용하지 않습니다. 재시도는 동일 지시와 모드를 사용합니다."
+        },
+        "untrackedMetaRecovery": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1
+            },
+            "expectedSha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "mainCommit": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{40}$"
+            }
+          },
+          "required": [
+            "path",
+            "expectedSha256",
+            "mainCommit"
+          ],
+          "additionalProperties": false,
+          "description": "사용자가 승인한 단일 미추적 Assets/*.cs.meta의 원본 보존·정리. Git 잠금 통합 재시도에만 지정합니다. 정확한 경로·원본 SHA-256·최신 main HEAD를 전달하며 같은 GUID의 등록 메타가 main에 있어야 합니다. 다른 변경은 정리하지 않습니다."
         }
       },
       "required": [

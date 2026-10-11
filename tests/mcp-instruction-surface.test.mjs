@@ -35,8 +35,12 @@ test('최신 59개 이름·input schema와 복구한 도구 설명 전문을 검
     const tools = [...(await client.listTools()).tools].sort((a, b) => a.name.localeCompare(b.name))
     assert.deepEqual(tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })), fixture)
     assert.equal(tools.length, 59)
-    assert.equal(createHash('sha256').update(JSON.stringify(tools.map(({ name, inputSchema }) => ({ name, inputSchema })))).digest('hex'), '2f98357cc31ac562df2b6fe220274b0846f2f7335bf518a2b3be401c7fc9f6ae')
-    assert.equal(tools.reduce((sum, tool) => sum + countSchemaDescriptions(tool.inputSchema), 0), 144)
+    assert.equal(createHash('sha256').update(JSON.stringify(tools.map(({ name, inputSchema }) => ({ name, inputSchema })))).digest('hex'), '73204391d7f6745ae2877903e8694fc82b4008c35730f8e8e79c2c1ed0b17e33')
+    assert.equal(tools.reduce((sum, tool) => sum + countSchemaDescriptions(tool.inputSchema), 0), 145)
+    const metaRecovery = tools.find(tool => tool.name === 'mindnprogress_recover_ai_delegation').inputSchema.properties.untrackedMetaRecovery
+    assert.deepEqual(metaRecovery.required, ['path', 'expectedSha256', 'mainCommit'])
+    assert.equal(metaRecovery.additionalProperties, false)
+    assert.match(metaRecovery.description, /사용자가 승인한.*원본 보존.*같은 GUID.*다른 변경은 정리하지/s)
     assert.equal(baselineDescriptions.size, 56)
     for (const tool of tools) {
       if (safetyTools.has(tool.name) || tool.name === 'mindnprogress_search_content' || tool.name === 'mindnprogress_patch_card_text') continue
