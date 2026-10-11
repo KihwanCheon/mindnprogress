@@ -8,6 +8,7 @@ import {
   aiDelegationBlocksResume,
   aiDelegationRecoveryAvailability,
   localChangesIntegrationCommits,
+  integrationGitLockFailure,
   aiDelegationReportResult,
   aiDelegationLimitState,
   aiDelegationAttemptHistory,
@@ -51,6 +52,28 @@ test('로컬 변경으로 중단된 완료 커밋 통합은 AI 재개와 구분�
   }
   assert.equal(aiDelegationRecoveryAvailability({ ...delegation, state: 'completed' }), null)
   assert.equal(aiDelegationRecoveryAvailability({ ...delegation, pendingRecovery: {} }).recoveryAvailable, false)
+})
+
+test('통합 Git 잠금 분류는 완료된 fast-forward 실패만 통합 재시도로 안내한다', () => {
+  const commit = 'a'.repeat(40)
+  const result = { status: 'quarantined', childStatus: 'completed', headCommit: commit,
+    integrationBranch: 'mnp/integrate/job-test', integrationBaseCommit: 'b'.repeat(40),
+    error: `Command failed: git merge --ff-only --no-overwrite-ignore ${commit}\nerror: Unable to create 'C:/main/.git/index.lock': File exists.\n` }
+  const delegation = { state: 'failed', workspaceLease: { leaseId: 'lease-test' }, workspaceResult: result }
+  assert.deepEqual(integrationGitLockFailure(result), { candidateCommit: commit, lockPath: 'C:/main/.git/index.lock' })
+  assert.equal(aiDelegationRecoveryAvailability(delegation).failureCategory, 'integration-git-lock')
+  assert.equal(aiDelegationRecoveryAvailability(delegation).recommendedAction, 'retry-integration')
+  assert.ok(integrationGitLockFailure({ ...result, error: result.error.replace(' --no-overwrite-ignore', '') }))
+  assert.ok(integrationGitLockFailure({ ...result, error: result.error.replaceAll('\n', '\r\n').replace('C:/main/.git/index.lock', '/main/.git/index.lock') }))
+  for (const patch of [{ childStatus: 'failed' }, { integratedCommit: commit }, { integrationBranch: null },
+    { conflictRound: 1 }, { unmergedFiles: ['file'] }, { integrationHeadCommit: 'c'.repeat(40) },
+    { error: result.error.replace('File exists.', 'Permission denied.') },
+    { error: result.error.replace('git merge --ff-only --no-overwrite-ignore', 'git cherry-pick') },
+    { error: result.error.replace('index.lock', 'config.lock') }, { error: 'fatal: unknown Git error' }]) {
+    assert.equal(integrationGitLockFailure({ ...result, ...patch }), null)
+    assert.notEqual(aiDelegationRecoveryAvailability({ ...delegation, workspaceResult: { ...result, ...patch } })?.recommendedAction, 'retry-integration')
+  }
+  assert.equal(aiDelegationRecoveryAvailability({ ...delegation, state: 'completed' }), null)
 })
 
 test('하위 작업 완료 알림은 실제 완료 판정에 도달한 위임에 한 번만 만들고 차단 알림과 타입을 구분한다', () => {

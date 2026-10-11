@@ -177,7 +177,7 @@ test('상위 카드 복구 화면은 하위 카드를 제외하고 AI 없이 재
     assert.equal(await evaluate('Array.from(document.querySelectorAll("button")).some(b=>["기존 작업 재개","결과 전달 재시도","후속 성공으로 종료","보고하지 않고 종료"].includes(b.textContent))'), false)
     assert.equal(await evaluate('window.audit.calls.filter(c=>c.method==="POST").length'), beforeQuarantinePosts)
     await evaluate('window.retryIntegration()'); await ready()
-    assert.match(await evaluate('document.body.textContent'), /로컬 변경을 보존·정리한 뒤 통합 재시도/)
+    assert.match(await evaluate('document.body.textContent'), /통합 차단 원인을 해소한 뒤 통합 재시도/)
     assert.equal(await evaluate('Array.from(document.querySelectorAll("button")).some(b=>b.textContent==="기존 작업 재개")'), false)
     assert.match(await evaluate('Array.from(document.querySelectorAll("button")).find(b=>b.textContent==="통합 재시도").title'), /하위 AI 작업은 다시 실행하지 않습니다/)
     await evaluate('window.audit.confirm=false'); await click('통합 재시도')

@@ -35,8 +35,8 @@ test('최신 59개 이름·input schema와 복구한 도구 설명 전문을 검
     const tools = [...(await client.listTools()).tools].sort((a, b) => a.name.localeCompare(b.name))
     assert.deepEqual(tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })), fixture)
     assert.equal(tools.length, 59)
-    assert.equal(createHash('sha256').update(JSON.stringify(tools.map(({ name, inputSchema }) => ({ name, inputSchema })))).digest('hex'), '5beb90c211a2bdcf2966215ec45788750e8bd8ff5101cc20d13670f2ad38313e')
-    assert.equal(tools.reduce((sum, tool) => sum + countSchemaDescriptions(tool.inputSchema), 0), 143)
+    assert.equal(createHash('sha256').update(JSON.stringify(tools.map(({ name, inputSchema }) => ({ name, inputSchema })))).digest('hex'), '2f98357cc31ac562df2b6fe220274b0846f2f7335bf518a2b3be401c7fc9f6ae')
+    assert.equal(tools.reduce((sum, tool) => sum + countSchemaDescriptions(tool.inputSchema), 0), 144)
     assert.equal(baselineDescriptions.size, 56)
     for (const tool of tools) {
       if (safetyTools.has(tool.name) || tool.name === 'mindnprogress_search_content' || tool.name === 'mindnprogress_patch_card_text') continue
@@ -49,6 +49,7 @@ test('최신 59개 이름·input schema와 복구한 도구 설명 전문을 검
     assert.match(descriptions.get('mindnprogress_restore_history'), /복원 직전.*백업.*전체.*교체.*변경.*새.*이력.*get_document.*list_history/s)
     assert.match(descriptions.get('mindnprogress_update_document_info'), /최신 baseVersion.*force=true.*사용자가 명시적으로 승인.*get_document/s)
     assert.match(descriptions.get('mindnprogress_recover_ai_delegation'), /복구.*mindnprogress_list_ai_delegations.*상태.*확인/s)
+    assert.match(descriptions.get('mindnprogress_recover_ai_delegation'), /index.lock.*fast-forward.*하위 AI 작업은 다시 실행하지 않습니다.*잠금은 자동 삭제하지/s)
     assert.match(descriptions.get('mindnprogress_search_content'), /ranked.*catalog.*page.hasMore.*coverage/s)
     assert.match(MNP_MCP_SERVER_INSTRUCTIONS, /read_me_first.*get_context.*guide.*nextStep/s)
     assert.equal(MNP_MCP_SERVER_INSTRUCTIONS.length, budget.sourceConstantChars)

@@ -451,6 +451,17 @@ export function localChangesIntegrationCommits(result) {
   return command[1].trim().split(/\s+/)
 }
 
+export function integrationGitLockFailure(result) {
+  if (result?.status !== 'quarantined' || result.childStatus !== 'completed'
+    || result.integratedCommit || !result.integrationBranch || !result.integrationBaseCommit
+    || result.conflictRound || result.unmergedFiles?.length) return null
+  const error = String(result.error ?? '')
+  const command = error.match(/^Command failed: git merge --ff-only(?: --no-overwrite-ignore)? ([a-f0-9]{40})\r?\n/iu)
+  const lock = error.match(/^(?:error|fatal): Unable to create '([^'\r\n]+[/\\]index\.lock)': File exists\.[\t ]*\r?$/imu)
+  if (!command || !lock || (result.integrationHeadCommit && result.integrationHeadCommit !== command[1])) return null
+  return { candidateCommit: command[1], lockPath: lock[1] }
+}
+
 export function aiDelegationRecoveryAvailability(delegation) {
   if (delegation?.resultCorrection && (['completed', 'superseded', 'closed'].includes(delegation.state)
     || aiDelegationSucceeded(delegation))) return null
@@ -476,6 +487,11 @@ export function aiDelegationRecoveryAvailability(delegation) {
   if (delegation.state === 'failed' && delegation.workspaceLease?.leaseId
     && localChangesIntegrationCommits(delegation.workspaceResult)) {
     return { failurePhase: 'integration', failureCategory: 'workspace-local-changes', recoveryAvailable: true, recommendedAction: 'retry-integration', recoveryTool: 'mindnprogress_recover_ai_delegation' }
+  }
+  if (delegation.state === 'failed' && delegation.workspaceLease?.leaseId
+    && integrationGitLockFailure(delegation.workspaceResult)) {
+    return { failurePhase: 'integration', failureCategory: 'integration-git-lock', recoveryAvailable: true,
+      recommendedAction: 'retry-integration', recoveryTool: 'mindnprogress_recover_ai_delegation' }
   }
   if (['recovery-required', 'integration-recovery-required', 'waiting-child-resume'].includes(delegation.state)) {
     return { failurePhase: 'child', failureCategory: delegation.state === 'waiting-child-resume' ? 'user-stop' : 'restart', recoveryAvailable: true, recommendedAction: 'resume-existing', recoveryTool: 'mindnprogress_recover_ai_delegation' }

@@ -80,6 +80,14 @@ test('보고 전달 대기·전달 중·수신 완료와 상위 실행 상태를
   assert.equal(groupDelegationPresentation({ state: 'parent-wake-failed', displayState: 'recovery-dispatch-pending', workCompleted: true, reportPending: true }).label, '복구 요청 전달 확인 대기')
 })
 
+test('Git 잠금 통합 실패는 하위 재실행이 아닌 통합 재시도로 안내한다', () => {
+  const item = { state: 'failed', childStatus: 'completed', workspaceResult: { status: 'quarantined' },
+    recovery: { recoveryAvailable: true, recommendedAction: 'retry-integration', failureCategory: 'integration-git-lock' } }
+  assert.equal(groupDelegationPresentation(item).label, '통합 복구 필요')
+  assert.match(groupDelegationReportHint(item), /Git 잠금/)
+  assert.match(groupDelegationReportHint(item), /완료된 하위 AI 작업과 커밋을 그대로 사용/)
+})
+
 test('업무 대기와 AI 확인 대기는 위임 완료 집계와 별도로 필터링한다', () => {
   const waiting = { ...document('wait', '스토리'), work: { total: 5, done: 2, waiting: 1 } }
   const confirmation = { ...document('confirm', '승인'), runtime: { state: 'waiting-confirmation' } }

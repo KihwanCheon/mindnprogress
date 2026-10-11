@@ -4935,7 +4935,7 @@ async function pollAiDelegations() {
           const updated = await updateAiDelegation(capturedDelegation.id, {
             childStatus,
             childTurnId: status.turnId ?? delegation.childTurnId ?? null,
-            childError: workspace.error ?? childError,
+            childError: childStatus === 'completed' ? childError : workspace.error ?? childError,
             childCompletedAt: new Date().toISOString(),
             workspaceResult: workspace.result,
             workspaceError: workspace.error,
@@ -4979,7 +4979,7 @@ async function pollAiDelegations() {
         const updated = await updateAiDelegation(delegation.id, {
           workspaceResult: workspace.result,
           workspaceError: workspace.error,
-          childError: workspace.error ?? delegation.childError ?? null,
+          childError: delegation.childStatus === 'completed' ? workspace.result?.childError ?? null : workspace.error ?? delegation.childError ?? null,
         })
         if (await advanceWorkspaceIntegration(updated, workspace)) continue
         await updateAiDelegation(delegation.id, { state: 'waiting-parent' })
@@ -5027,7 +5027,7 @@ async function pollAiDelegations() {
             integrationCompletedAt: new Date().toISOString(),
             workspaceResult: workspace.result,
             workspaceError: workspace.error,
-            childError: workspace.error ?? delegation.childError ?? null,
+            childError: delegation.childStatus === 'completed' ? workspace.result?.childError ?? null : workspace.error ?? delegation.childError ?? null,
           })
           if (await advanceWorkspaceIntegration(updated, workspace)) continue
           await updateAiDelegation(delegation.id, { state: 'waiting-parent' })
@@ -9007,11 +9007,16 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
 
       if (retryIntegration) {
         try {
+          if (aiDelegationReportResult(delegation).availability === 'integrity-failed') {
+            return sendJson(response, 409, { error: '기존 완료 결과의 해시 또는 실행 턴이 변경되어 통합 재시도를 거부합니다.', code: 'AI_DELEGATION_RESULT_INTEGRITY_FAILED' })
+          }
           const conversation = await fetchAiConversationRuntime(delegation.targetConversationId)
           const runtime = normalizeAiConversationRuntime(delegation.targetConversationId, conversation)
           if (runtime.state !== 'idle') return sendJson(response, 409, { error: `대상 대화가 ${runtime.state} 상태이므로 지금 통합을 재시도할 수 없습니다.`, runtime })
           await validateAiDelegationAction(request, aiDelegations.get(delegation.id), body, true)
-          const workspaceResult = await workspacePoolManager.recoverLocalChangesIntegrationFailure(
+          const recoverIntegration = recoveryAvailability.failureCategory === 'integration-git-lock'
+            ? 'recoverIntegrationGitLockFailure' : 'recoverLocalChangesIntegrationFailure'
+          const workspaceResult = await workspacePoolManager[recoverIntegration](
             delegation.workspaceLease.leaseId,
             { mapId, cardId: delegation.targetCardId, conversationId: delegation.targetConversationId },
           )
@@ -9025,7 +9030,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
             reportPayloadHash: null, reportResultAvailability: null, reportResultHash: null,
             reportResultTurnId: null, reportPreparedAt: null, completedAt: null,
             integrationRecoveryRequestedAt: new Date().toISOString(),
-            attemptHistory: aiDelegationAttemptHistory(delegation, '사용자가 로컬 변경 해소 후 완료 커밋의 통합 재시도 요청'),
+            attemptHistory: aiDelegationAttemptHistory(delegation, '사용자가 통합 차단 원인 해소 후 완료 커밋의 통합 재시도 요청'),
           })
           return sendJson(response, 202, {
             delegation: delegationPublicView(updated), repeated,
@@ -9033,9 +9038,11 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           })
         } catch (error) {
           throwIfRuntimeStopping(error, runtimeLifecycle.signal)
+          const message = `통합을 재시도하지 못했습니다: ${error?.message ?? String(error)}`
           return sendJson(response, error.status ?? 409, {
-            error: `통합을 재시도하지 못했습니다: ${error?.message ?? String(error)}`,
+            error: message, message,
             code: error?.code ?? 'AI_DELEGATION_INTEGRATION_RECOVERY_FAILED',
+            ...(error?.reasonCode ? { reasonCode: error.reasonCode } : {}),
           })
         }
       }

@@ -201,7 +201,7 @@ export function GroupOverview({ groupId, name, membershipKey, editable, clientId
     if (action === 'supersede' && !replacement) return setError('같은 카드에서 나중에 완료된 후속 위임을 찾을 수 없습니다.')
     if (action !== 'refresh' && !window.confirm(action === 'recover'
       ? correctResult ? '통합 대기 결과 정정을 승인할까요? 원 담당 AI가 같은 worker에서 요구사항과 증거를 대사하고 자기 우발 변경을 새 체크포인트로 정정합니다. 통합 사용자 파일은 보존합니다. 업무 완료·품질 승인이나 사용자 파일 삭제 권한을 부여하지 않습니다.' : retryIntegration
-        ? 'fork 작업공간의 로컬 변경을 보존·정리했나요? 기존 승인 범위에서 완료된 커밋의 통합만 다시 시도합니다. 하위 AI 작업은 다시 실행하지 않습니다.'
+        ? '로컬 변경 또는 Git 잠금 등 통합 차단 원인이 해소됐나요? 기존 승인 범위에서 완료된 커밋의 통합만 다시 시도합니다. 사용자 파일과 기존 후보를 보존하며 하위 AI 작업은 다시 실행하지 않습니다.'
         : '중단 원인이 해소되었고 현재 기획 기준·범위가 기존 사용자 승인 계획과 같음을 확인했나요? 같은 대화에서 현재 결과를 확인하고 미완료 부분만 이어갑니다. 이미 끝난 작업은 반복하지 않습니다. 기준이나 방향이 달라졌다면 취소하고 새 계획을 승인해 주세요.'
       : action === 'finalize-coordination'
         ? '문서 조정 AI의 실행만 종료해 현재 결과를 총괄 AI에 전달합니다. 카드 상태·진행률·외부 대기와 실제 미완료 하위 위임은 그대로 유지합니다. 변경 없이 한도에 막힌 과거 시도에 같은 카드의 완료된 후속 위임이 있으면 그 과거 시도만 후속 성공 이력으로 함께 정리합니다. 이 상태로 조정 실행을 종료할까요?'
@@ -219,7 +219,7 @@ export function GroupOverview({ groupId, name, membershipKey, editable, clientId
         confirmSupersededByCompletedDelegation: action === 'supersede',
         ...(replacement ? { replacementDelegationId: replacement.id } : {}),
         ...(action === 'recover' && correctResult ? { recoveryMode: 'correct-integration-result' } : {}),
-        ...(action === 'recover' ? { instruction: correctResult ? '사용자가 통합 대기 결과 정정을 승인했습니다. 원 요구사항과 source 체크포인트 증거를 대사하고 본인의 우발 변경만 같은 worker에서 정정하세요. integration 사용자 파일은 보존하세요. 정상 변경 체크포인트 후 정정 검증 결과를 보고하세요.' : retryIntegration ? '사용자가 로컬 변경 해소 후 기존 승인 범위의 완료 커밋 통합 재시도를 요청했습니다.' : '사용자가 총괄 화면에서 기존 승인 범위의 재개를 요청했습니다. 최신 그룹 기준과 원래 사용자 승인 근거·계획을 먼저 대조하세요. 같은 대화에서 이미 진행된 문서·하위 위임·검수 결과를 확인하고, 완료된 작업은 반복하지 말고 결과를 보고하세요. 남은 작업만 기존 승인 범위에서 이어가며 기준·방향·범위가 달라졌으면 제안 후 재승인을 기다리세요. 새 작업공간을 임의 점유하거나 새 위임으로 우회하지 마세요.' } : {}),
+        ...(action === 'recover' ? { instruction: correctResult ? '사용자가 통합 대기 결과 정정을 승인했습니다. 원 요구사항과 source 체크포인트 증거를 대사하고 본인의 우발 변경만 같은 worker에서 정정하세요. integration 사용자 파일은 보존하세요. 정상 변경 체크포인트 후 정정 검증 결과를 보고하세요.' : retryIntegration ? '사용자가 통합 차단 원인 해소 후 기존 승인 범위의 완료 커밋 통합 재시도를 요청했습니다.' : '사용자가 총괄 화면에서 기존 승인 범위의 재개를 요청했습니다. 최신 그룹 기준과 원래 사용자 승인 근거·계획을 먼저 대조하세요. 같은 대화에서 이미 진행된 문서·하위 위임·검수 결과를 확인하고, 완료된 작업은 반복하지 말고 결과를 보고하세요. 남은 작업만 기존 승인 범위에서 이어가며 기준·방향·범위가 달라졌으면 제안 후 재승인을 기다리세요. 새 작업공간을 임의 점유하거나 새 위임으로 우회하지 마세요.' } : {}),
       }) })
       await refresh()
       const supersededCount = actionResult.supersededDelegations?.length ?? 0

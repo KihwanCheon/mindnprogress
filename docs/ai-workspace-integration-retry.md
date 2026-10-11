@@ -25,6 +25,19 @@ MnP는 하위 AI 작업 완료와 `main` 반영 완료를 구분한다. 완료�
 
 검증된 기록만 통합 대기로 전환하고 기존 실패 결과·보고 정보는 복구 이력에 보존한다. 기준 변경 등으로 검증에 실패하면 격리를 유지한다. 위임 레코드 저장 전에 서버가 중단된 경우에도 풀에 저장한 복구 결과를 이어 반영한다.
 
+## 통합 Git 잠금 실패의 명시적 재시도
+
+완료된 하위 위임의 `git merge --ff-only [--no-overwrite-ignore] <후보>`가 통합 작업공간의 `index.lock` 존재로 실패한 경우, 목록은 `failurePhase=integration`, `failureCategory=integration-git-lock`, `recommendedAction=retry-integration`을 제공한다. UI의 **통합 재시도**와 기존 `recover` API/MCP를 사용한다. 목록은 기록 기준 복구 후보이며 현재 잠금 해소나 안전 검증 완료를 뜻하지 않는다.
+
+- API는 기존 승인·문서 버전·상위 소유권과 대상 대화의 유휴 상태를 확인한다. 풀은 오류의 잠금 경로를 실제 통합 저장소의 `git rev-parse --git-path index.lock`과 대조한다. worker의 잠금 오류, 권한 오류, 일반 Git 실패, 충돌·미완료 실행은 이 경로로 복구하지 않는다.
+- worker와 통합 저장소의 잠금·병합·cherry-pick·리베이스·sequencer, 다른 lease의 통합 점유가 남아 있으면 거부한다. 잠금 삭제, 프로세스 종료, 사용자 변경 되돌리기를 수행하지 않는다.
+- map/card/conversation/job/lease, registry·메타데이터·세션, source 브랜치·HEAD·명시적 체크포인트, 실패 후보 브랜치·HEAD를 검증한다. 각 source 커밋을 `git merge-tree --write-tree --merge-base`로 재현하여 후보 tree와 정확히 대조한다. 실제 index·worktree는 변경하지 않는다. 해당 명령을 지원하는 Git이 필요하며 검증 불능은 격리를 유지한다.
+- 원 결과·오류와 후보 참조는 `integrationRecoveryHistory` 및 `refs/mnp/integration-recovery/<job>/git-lock-<번호>`에 보존한다. main 기준이 그대로면 기존 후보를 사용한다. main이 진행됐으면 기존 후보 브랜치는 그대로 두고 `mnp/integrate/<job>-retry-<번호>`에서 완료 체크포인트만 새 기준에 적용한다. main을 reset하지 않는다.
+- 기존 통합 직렬화·branch/HEAD 검사·tracked/untracked/ignored 파일 보호와 정상 worker 반환 절차를 그대로 사용한다. 복구 접수 뒤 main이 더 진행돼도 별도 후보로 다시 구성하며, 새 브랜치는 덮어쓰기 없는 `switch -c`로 만든다. 후보 생성 중 재시작도 완료 체크포인트 전체의 tree 검증을 통과해야 반영한다. 이미 main에 반영된 후보는 다시 적용하지 않는다. 새 후보에 충돌이 생기면 기존 충돌 해결 절차로 전달하며 품질 완료로 간주하지 않는다.
+- 복구는 하위 AI를 실행하거나 새 위임을 만들지 않는다. 원 결과 snapshot/hash/turn/operation은 위임 감사 이력과 함께 유지한다. child 완료와 통합 실패는 분리해 표시한다. 복구 접수 후 재시작·중복 요청에서도 기존 통합 요청을 이어 처리한다.
+
+Git 잠금 실패는 서버 시작만으로 새 복구를 승인하지 않는다. 사용자가 승인해 풀을 통합 대기로 저장한 직후 서버가 종료된 경우에만 시작 시 위임 레코드 저장을 대사한다. 실제 통합 완료 후에도 별도 품질 검수와 상위 결과 확인이 필요하다.
+
 ## 통합 대기 결과 정정
 
 기존 담당자의 우발 변경이 포함된 완료 결과는 기존 `recover` API 또는 `mindnprogress_recover_ai_delegation`의 `recoveryMode: "correct-integration-result"`로 정정을 요청한다. 목록의 `recovery.recommendedAction=correct-integration-result`는 기록 기준 후보이며 실제 Git·소유권 검증을 통과했다는 뜻이 아니다. 후보 HEAD가 없는 단순 통합 순서 대기는 대상이 아니다. 카드와 그룹 총괄 UI의 **통합 대기 결과 정정**도 같은 모드를 명시한다.

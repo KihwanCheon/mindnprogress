@@ -12,7 +12,7 @@ import {
 } from '../server/lib/workspacePool.mjs'
 
 const exec = promisify(execFile)
-const realGit = { skip: process.env.MNP_REAL_GIT_TEST !== '1' && 'MNP_REAL_GIT_TEST=1일 때 실행' }
+const realGit = { skip: process.env.MNP_REAL_GIT_TEST !== '1' && 'MNP_REAL_GIT_TEST=1일 때 실행', timeout: Number(process.env.MNP_REAL_GIT_TEST_TIMEOUT_MS) || 300_000 }
 const assetPaths = ['Assets/번역 자료/I2LanguagesJP.asset', 'Assets/번역 자료/I2LanguagesJP.asset.meta']
 const commitMessage = {
   summary: '통합 재시도 검증', background: '미추적 충돌을 재현합니다.',
@@ -92,6 +92,179 @@ async function localChangesQuarantine(t) {
 }
 const localRecoveryScope = { mapId: 'map-test', cardId: 'card-test', conversationId: 'conversation-test' }
 
+async function gitLockQuarantine(t) {
+  const f = await fixture(t, ['first.txt'])
+  // source와 원 main의 tree가 달라도 정확한 cherry-pick 결과를 검증해야 한다.
+  await put(f.main, 'main-before.txt', '원래 main 변경\n')
+  await git(f.main, ['add', 'main-before.txt'])
+  await git(f.main, ['commit', '-m', 'main before integration'])
+  f.lockPath = path.resolve(f.main, await git(f.main, ['rev-parse', '--git-path', 'index.lock']))
+  await writeFile(f.lockPath, '다른 Git 작업의 잠금')
+  await assert.rejects(f.manager.finalize(f.lease.leaseId, { childStatus: 'completed' }), /index\.lock/)
+  f.failed = structuredClone(f.manager.state.leases[f.lease.leaseId])
+  assert.equal(f.failed.result.childStatus, 'completed')
+  assert.equal(f.failed.result.childError, null)
+  return f
+}
+
+test('Git 잠금 해소 후 최신 main에서 별도 후보로 통합하고 이전 후보·사용자 파일을 보존한다', realGit, async (t) => {
+  const f = await gitLockQuarantine(t)
+  const original = structuredClone(f.manager.state)
+  await assert.rejects(f.manager.recoverIntegrationGitLockFailure(f.lease.leaseId, localRecoveryScope), /Git 잠금/)
+  assert.equal(await readFile(f.lockPath, 'utf8'), '다른 Git 작업의 잠금')
+  assert.deepEqual(f.manager.state, original)
+  await rm(f.lockPath)
+  await put(f.main, 'main-after.txt', '이후 다른 업무\n')
+  await git(f.main, ['add', 'main-after.txt'])
+  await git(f.main, ['commit', '-m', 'main advanced'])
+  const advanced = await git(f.main, ['rev-parse', 'HEAD'])
+  await put(f.main, 'user-untracked.txt', '사용자 미추적 파일\n')
+  await put(f.main, '.ai-session.json', '사용자 ignored 파일\n')
+  const restarted = new WorkspacePoolManager(f)
+  await restarted.initialize()
+  const recovered = await restarted.recoverIntegrationGitLockFailure(f.lease.leaseId, localRecoveryScope)
+  assert.equal(recovered.status, 'waiting-integration')
+  assert.equal(recovered.integrationHeadCommit, null)
+  const history = restarted.state.leases[f.lease.leaseId].integrationRecoveryHistory
+  assert.equal(history.length, 1)
+  assert.deepEqual(history[0].previousResult, f.failed.result)
+  assert.notEqual(history[0].retryBranch, f.failed.integrationBranch)
+  assert.equal(await git(f.worker, ['rev-parse', history[0].backupRef]), f.failed.integrationHeadCommit)
+  const restartedAgain = new WorkspacePoolManager(f)
+  await restartedAgain.initialize()
+  assert.deepEqual(await restartedAgain.recoverIntegrationGitLockFailure(f.lease.leaseId, localRecoveryScope), recovered)
+  assert.deepEqual(await restartedAgain.recoverUntrackedIntegrationFailure(f.lease.leaseId), recovered, '풀 저장 후 위임 저장 전 중단도 대사한다.')
+  const completed = await restartedAgain.finalize(f.lease.leaseId, { childStatus: 'completed' })
+  assert.equal(completed.status, 'completed')
+  assert.equal(completed.integrationBaseCommit, advanced)
+  assert.equal(await git(f.main, ['rev-list', '--count', `${advanced}..HEAD`]), '1')
+  for (const [file, content] of [['main-before.txt', '원래 main 변경\n'], ['main-after.txt', '이후 다른 업무\n'],
+    ['first.txt', 'worker:first.txt\n'], ['user-untracked.txt', '사용자 미추적 파일\n'], ['.ai-session.json', '사용자 ignored 파일\n']]) {
+    assert.equal(await readFile(path.join(f.main, file), 'utf8'), content)
+  }
+  assert.equal(await git(f.worker, ['rev-parse', f.failed.integrationBranch]), f.failed.integrationHeadCommit)
+  assert.equal(await git(f.worker, ['rev-parse', f.lease.branch]), f.failed.headCommit)
+  assert.equal(restartedAgain.state.workspaces.fork2.status, 'idle')
+  assert.deepEqual(await restartedAgain.finalize(f.lease.leaseId, { childStatus: 'completed' }), completed)
+})
+
+for (const alreadyApplied of [false, true]) {
+test(`Git 잠금 복구 접수 후 main 진행(${alreadyApplied ? '기존 후보 반영 후' : '기존 후보 미반영'})도 결과를 중복 적용하지 않는다`, realGit, async (t) => {
+  const f = await gitLockQuarantine(t)
+  await rm(f.lockPath)
+  // 구버전 기록: 응답에 후보가 없어도 오류·실제 Git·체크포인트로 검증한다.
+  delete f.manager.state.leases[f.lease.leaseId].result.integrationHeadCommit
+  const recovered = await f.manager.recoverIntegrationGitLockFailure(f.lease.leaseId, localRecoveryScope)
+  assert.equal(recovered.integrationHeadCommit, f.failed.integrationHeadCommit)
+  if (alreadyApplied) await git(f.main, ['merge', '--ff-only', '--no-overwrite-ignore', f.failed.integrationHeadCommit])
+  await put(f.main, 'later.txt', '후속 커밋\n')
+  await git(f.main, ['add', 'later.txt'])
+  await git(f.main, ['commit', '-m', 'later commit'])
+  const mainHead = await git(f.main, ['rev-parse', 'HEAD'])
+  const completed = await f.manager.finalize(f.lease.leaseId, { childStatus: 'completed' })
+  assert.equal(completed.status, 'completed')
+  if (alreadyApplied) {
+    assert.equal(completed.integratedCommit, mainHead)
+    assert.equal(await git(f.main, ['rev-parse', 'HEAD']), mainHead)
+  } else {
+    assert.equal(completed.integrationBaseCommit, mainHead)
+    assert.equal(await git(f.main, ['rev-list', '--count', `${mainHead}..HEAD`]), '1')
+  }
+  assert.equal(await readFile(path.join(f.main, 'first.txt'), 'utf8'), 'worker:first.txt\n')
+  assert.equal(await readFile(path.join(f.main, 'later.txt'), 'utf8'), '후속 커밋\n')
+  assert.equal(await git(f.worker, ['rev-parse', f.failed.integrationBranch]), f.failed.integrationHeadCommit)
+  assert.equal(f.manager.state.workspaces.fork2.status, 'idle')
+})
+}
+
+test('Git 잠금 재시도 후보 생성 중 재시작은 일부 체크포인트만 완료로 반영하지 않는다', async () => {
+  const base = 'a'.repeat(40), first = 'b'.repeat(40), head = 'c'.repeat(40), candidate = 'd'.repeat(40)
+  const workspace = { root: 'worker' }, integration = { root: 'main' }
+  const calls = []
+  const manager = new WorkspacePoolManager({ gitRunner: async (cwd, args) => {
+    calls.push({ cwd, args })
+    assert.equal(cwd, workspace.root, '불완전 후보가 main을 조회하거나 변경하면 안 된다.')
+    if (args[0] === 'status') return ''
+    if (args[0] === 'rev-parse') return args[1] === 'HEAD' ? candidate : head
+    if (args[0] === 'merge-base') return ''
+    if (args[0] === 'rev-list') return args[2] === `${base}..${head}` ? `${first}\n${head}` : first
+    throw new Error(`예기치 않은 Git 명령: ${args.join(' ')}`)
+  } })
+  const lease = { branch: 'source', baseCommit: base, headCommit: head, integrationBaseCommit: base,
+    integrationHeadCommit: null, commits: [first, head], checkpoints: [{ commit: first }, { commit: head }],
+    integrationRecoveryHistory: [{ type: 'integration-git-lock' }] }
+  await assert.rejects(manager.applyIntegration(lease, workspace, integration), /커밋 수/)
+  assert.equal(lease.integrationHeadCommit, null)
+  assert.ok(calls.length > 0)
+})
+
+test('Git 잠금 복구는 다른 경로·점유·세션·체크포인트·후보 변경·진행 중 Git을 거부한다', realGit, async (t) => {
+  const f = await gitLockQuarantine(t)
+  await rm(f.lockPath)
+  const original = structuredClone(f.manager.state)
+  const recover = () => f.manager.recoverIntegrationGitLockFailure(f.lease.leaseId, localRecoveryScope)
+  await assert.rejects(f.manager.recoverIntegrationGitLockFailure(f.lease.leaseId, { ...localRecoveryScope, conversationId: 'other' }), /소유권/)
+  f.manager.state.leases[f.lease.leaseId].result.jobId = 'other-job'
+  await assert.rejects(recover(), /배정/)
+  f.manager.state = structuredClone(original)
+  f.manager.state.integrationLeaseId = 'other-lease'
+  await assert.rejects(recover(), /다른 위임/)
+  f.manager.state = structuredClone(original)
+  f.manager.state.leases[f.lease.leaseId].result.error = f.failed.result.error.replaceAll(f.main.replaceAll('\\', '/'), f.worker.replaceAll('\\', '/'))
+  await assert.rejects(recover(), /잠금 경로/)
+  f.manager.state = structuredClone(original)
+  for (const [root, entry] of [[f.worker, 'index.lock'], [f.main, 'MERGE_HEAD'], [f.main, 'CHERRY_PICK_HEAD'],
+    [f.main, 'REBASE_HEAD'], [f.main, 'REVERT_HEAD'], [f.main, 'sequencer']]) {
+    const target = path.resolve(root, await git(root, ['rev-parse', '--git-path', entry]))
+    await writeFile(target, '진행 중인 Git 작업')
+    await assert.rejects(recover(), /진행 중인/)
+    assert.equal(await readFile(target, 'utf8'), '진행 중인 Git 작업')
+    await rm(target)
+  }
+  const sessionPath = path.join(f.worker, '.ai-session.json')
+  const session = await readFile(sessionPath, 'utf8')
+  await writeFile(sessionPath, JSON.stringify({ ...JSON.parse(session), leaseId: 'other' }))
+  await assert.rejects(recover(), /세션/)
+  await writeFile(sessionPath, session)
+  await put(f.main, 'base.txt', '사용자 추적 파일 변경\n')
+  await assert.rejects(recover(), /로컬 변경/)
+  assert.equal(await readFile(path.join(f.main, 'base.txt'), 'utf8'), '사용자 추적 파일 변경\n')
+  await git(f.main, ['restore', 'base.txt'])
+  f.manager.state.leases[f.lease.leaseId].checkpoints = []
+  await assert.rejects(recover(), /체크포인트/)
+  f.manager.state = structuredClone(original)
+  await put(f.worker, 'first.txt', '수동 후보 변경\n')
+  await git(f.worker, ['add', 'first.txt'])
+  await git(f.worker, ['commit', '--amend', '--no-edit'])
+  const forged = await git(f.worker, ['rev-parse', 'HEAD'])
+  await assert.rejects(recover(), /HEAD/)
+  // 오류·후보 해시까지 같이 바꿔도 완료 커밋의 tree 검증을 우회할 수 없다.
+  const lease = f.manager.state.leases[f.lease.leaseId]
+  lease.integrationHeadCommit = forged
+  lease.result.integrationHeadCommit = forged
+  lease.result.error = f.failed.result.error.replaceAll(f.failed.integrationHeadCommit, forged)
+  await assert.rejects(recover(), /적용 결과/)
+  assert.equal(lease.status, 'quarantined')
+  assert.equal(lease.integrationRecoveryHistory, undefined)
+})
+
+test('Git 잠금 재시도에서 새 기준의 실제 충돌은 격리 해제로 우회하지 않는다', realGit, async (t) => {
+  const f = await gitLockQuarantine(t)
+  await rm(f.lockPath)
+  await put(f.main, 'first.txt', '다른 업무의 충돌 변경\n')
+  await git(f.main, ['add', 'first.txt'])
+  await git(f.main, ['commit', '-m', 'conflicting main advance'])
+  const mainHead = await git(f.main, ['rev-parse', 'HEAD'])
+  await f.manager.recoverIntegrationGitLockFailure(f.lease.leaseId, localRecoveryScope)
+  const result = await f.manager.finalize(f.lease.leaseId, { childStatus: 'completed' })
+  assert.equal(result.status, 'awaiting-conflict-resolution')
+  assert.deepEqual(result.unmergedFiles, ['first.txt'])
+  assert.equal(await git(f.main, ['rev-parse', 'HEAD']), mainHead)
+  assert.equal(await readFile(path.join(f.main, 'first.txt'), 'utf8'), '다른 업무의 충돌 변경\n')
+  assert.equal(await git(f.worker, ['rev-parse', f.failed.integrationBranch]), f.failed.integrationHeadCommit)
+  assert.equal(f.manager.state.workspaces.fork2.status, 'resolving-integration-conflict')
+})
+
 test('로컬 변경 해소 후 부분 적용을 보존하고 완료 커밋을 한 번만 통합한다', realGit, async (t) => {
   const f = await localChangesQuarantine(t)
   const original = structuredClone(f.manager.state)
@@ -156,8 +329,9 @@ test('통합 재시도는 소유권·세션·체크포인트·수동 커밋 불�
   assert.equal(f.manager.state.leases[f.lease.leaseId].integrationRecoveryHistory, undefined)
 })
 
-test('통합 복구 API는 최신 승인·유휴 대화·정리된 fork를 확인하고 하위 AI 실행 없이 통합 대기로 전환한다', realGit, async (t) => {
-  const f = await localChangesQuarantine(t)
+for (const failureType of ['local-changes', 'integration-git-lock']) {
+test(`통합 복구 API(${failureType})는 최신 승인·유휴 대화를 확인하고 결과 해시를 보존하며 하위 AI 실행 없이 복구한다`, realGit, async (t) => {
+  const f = await (failureType === 'integration-git-lock' ? gitLockQuarantine : localChangesQuarantine)(t)
   const dataDirectory = path.join(f.root, 'server-data')
   await mkdir(dataDirectory)
   await writeFile(path.join(dataDirectory, '_workspace-pool.json'), JSON.stringify(f.manager.state))
@@ -218,10 +392,13 @@ test('통합 복구 API는 최신 승인·유휴 대화·정리된 fork를 확�
     runtimeState = 'idle'
     const dirty = await post(input)
     assert.equal(dirty.status, 409)
-    assert.match((await dirty.json()).error, /로컬 변경/)
+    assert.match((await dirty.json()).error, failureType === 'integration-git-lock' ? /Git 잠금/ : /로컬 변경/)
     assert.equal(JSON.parse(await readFile(path.join(dataDirectory, '_workspace-pool.json'), 'utf8')).leases[f.lease.leaseId].status, 'quarantined')
-    await rename(path.join(f.worker, 'base.txt'), path.join(f.root, 'api-user-backup.txt'))
-    await git(f.worker, ['restore', 'base.txt'])
+    if (failureType === 'integration-git-lock') await rm(f.lockPath)
+    else {
+      await rename(path.join(f.worker, 'base.txt'), path.join(f.root, 'api-user-backup.txt'))
+      await git(f.worker, ['restore', 'base.txt'])
+    }
     const response = await post(input)
     const body = await response.json()
     assert.equal(response.status, 202, JSON.stringify({ body, errors }))
@@ -245,6 +422,7 @@ test('통합 복구 API는 최신 승인·유휴 대화·정리된 fork를 확�
     await new Promise(resolve => upstream.close(resolve))
   }
 })
+}
 
 describe('미추적 파일 충돌 통합 복구', { concurrency: 3 }, () => {
 test('충돌 경로 조회 지연은 격리가 아니라 다음 폴링 대기로 보존한다', async (t) => {
