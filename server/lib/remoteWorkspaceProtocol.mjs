@@ -6,7 +6,7 @@ import { promisify } from 'node:util'
 import { replaceFileWithRetry } from './replaceFileWithRetry.mjs'
 
 const execute = promisify(execFile)
-export const REMOTE_WORKSPACE_VERSION = 1
+export const REMOTE_WORKSPACE_VERSION = 2
 export const ARTIFACT_CHUNK_BYTES = 256 * 1024
 export const REMOTE_WORKSPACE_ACTIONS = new Set(['prepare', 'bind', 'reuse', 'checkpoint', 'seal', 'release', 'quarantine', 'recover'])
 
@@ -58,6 +58,14 @@ export async function git(root, args, { timeoutMs = 120_000 } = {}) {
   return stdout.trimEnd()
 }
 
+export async function hasCommit(root, value) {
+  commitId(value)
+  try { await git(root, ['rev-parse', '--verify', '--quiet', `${value}^{commit}`]); return true } catch (error) {
+    if (error.code === 1) return false
+    throw error
+  }
+}
+
 // This lock is intentionally never stolen after a timeout or process restart.
 // An interrupted mutation requires inspection of its durable receipt and Git state.
 export async function acquireWorkspaceLock(root) {
@@ -89,6 +97,6 @@ export function ownershipMatches(expected, actual) {
 
 export function assignmentMatches(expected, actual) {
   return ownershipMatches(expected?.ownership, actual?.ownership)
-    && ['workspaceId', 'jobId', 'leaseId', 'projectRoot', 'branch', 'baseCommit']
+    && ['workspaceId', 'jobId', 'leaseId', 'projectRoot', 'branch', 'baseCommit', 'baselineCommit', 'baselineMode']
       .every((key) => expected?.[key] === actual?.[key])
 }

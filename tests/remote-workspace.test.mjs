@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -19,6 +19,7 @@ async function fixture(t) {
   await git(integration, ['config', 'user.name', 'MnP test'])
   await git(integration, ['config', 'user.email', 'mnp@example.invalid'])
   await writeFile(path.join(integration, '.gitignore'), '.ai-session.json\n')
+  await writeFile(path.join(integration, '.gitattributes'), '*.txt text eol=lf\n')
   await writeFile(path.join(integration, 'feature.txt'), 'baseline\n')
   await git(integration, ['add', '.']); await git(integration, ['commit', '-m', '[김용민] 테스트 기준선'])
   const originUrl = 'https://example.invalid/project.git'
@@ -67,6 +68,8 @@ test('실제 Git: 원격 prepare → checkpoint → staging 통합 → 반환 �
   const lease = await f.acquire()
   assert.equal(lease.ownership.machineId, 'macbook')
   assert.equal(lease.projectRoot, f.worker)
+  assert.equal(lease.baselineMode, 'present')
+  assert.equal(await jsonFile(path.join(f.remote.artifacts.directory(lease.leaseId, 'baseline'), 'manifest.json')), null)
   const snapshot = f.facade.publicSnapshot({ machineId: 'macbook', conversationId: 'conversation-1' })
   assert.equal(snapshot.workspaces.length, 1)
   assert.equal(snapshot.workspaces[0].assignedToCurrentConversation, true)
@@ -77,6 +80,11 @@ test('실제 Git: 원격 prepare → checkpoint → staging 통합 → 반환 �
   assert.equal(checkpoint.lease.ownership.generation, 1)
   const result = await f.remote.finalize(lease.leaseId, { childStatus: 'completed' })
   assert.equal(result.status, 'completed'); assert.equal(result.remoteReleased, true)
+  assert.equal(f.remote.state.leases[lease.leaseId].cleanupPending, false)
+  assert.equal(f.agent().state.leases[lease.leaseId].cleanupPending, false)
+  await assert.rejects(() => stat(path.join(f.remote.artifacts.root, lease.leaseId)), { code: 'ENOENT' })
+  await assert.rejects(() => stat(path.join(f.root, 'remote-shared', 'remote-runner', 'artifacts', lease.leaseId)), { code: 'ENOENT' })
+  await assert.rejects(() => stat(path.join(f.remote.root, 'staging', lease.leaseId)), { code: 'ENOENT' })
   assert.equal(await readFile(path.join(f.integration, 'feature.txt'), 'utf8'), 'remote change\n')
   assert.equal(await jsonFile(path.join(f.worker, '.ai-session.json')), null)
   assert.equal(JSON.stringify(f.local.state.leases), localBefore)
@@ -85,6 +93,78 @@ test('실제 Git: 원격 prepare → checkpoint → staging 통합 → 반환 �
   const next = await f.acquire('delegation-2')
   assert.equal(next.ownership.generation, 2)
   assert.notEqual(next.leaseId, lease.leaseId)
+})
+
+test('기준 커밋이 뒤처진 worker에는 전체 이력 대신 작은 증분 bundle만 전송한다', async (t) => {
+  const f = await fixture(t)
+  await writeFile(path.join(f.integration, 'feature.txt'), 'next baseline\n')
+  await git(f.integration, ['add', 'feature.txt']); await git(f.integration, ['commit', '-m', '[김용민] 기준선 변경'])
+  const baseCommit = await git(f.integration, ['rev-parse', 'HEAD'])
+  const lease = await f.acquire()
+  assert.equal(lease.baselineMode, 'delta')
+  assert.equal(lease.baseCommit, baseCommit)
+  assert.equal((await f.remote.artifacts.manifest(lease.leaseId, 'baseline')).size < 100_000, true)
+  assert.equal(await git(f.worker, ['rev-parse', 'HEAD']), baseCommit)
+})
+
+test('공통 기준을 확인할 수 없는 worker는 전체 이력 전송으로 우회하지 않는다', async (t) => {
+  const f = await fixture(t)
+  await writeFile(path.join(f.worker, 'feature.txt'), 'worker-only\n')
+  await git(f.worker, ['add', 'feature.txt']); await git(f.worker, ['commit', '-m', '[김용민] 원격 전용 변경'])
+  await f.observe()
+  await assert.rejects(() => f.acquire(), /REMOTE_WORKSPACE_BOOTSTRAP_REQUIRED/)
+  assert.equal(Object.keys(f.remote.state.leases).length, 0)
+})
+
+test('이전 전송 버전의 승인 기록은 새 버전에서 자동 재활성화되지 않는다', async (t) => {
+  const f = await fixture(t)
+  const approval = Object.values(f.remote.state.pools)[0]
+  approval.protocolVersion = 1
+  assert.equal(f.remote.snapshot('macbook').remotePools[0].approved, false)
+  await assert.rejects(() => f.acquire(), /REMOTE_WORKSPACE_POOL_NOT_APPROVED/)
+  assert.equal(Object.keys(f.remote.state.leases).length, 0)
+})
+
+test('결과 bundle은 기준 커밋 이후 변경만 담고 완료 후 모두 정리한다', async (t) => {
+  const f = await fixture(t), lease = await f.acquire()
+  await writeFile(path.join(f.worker, 'feature.txt'), 'small result\n')
+  await f.checkpoint(lease)
+  const sealed = await f.remote.command(f.remote.state.leases[lease.leaseId], 'seal', { checkpointRound: 1 })
+  assert.equal(sealed.status, 'sealed')
+  assert.equal(sealed.manifest.size < 100_000, true)
+  assert.equal((await stat(f.remote.artifacts.file(lease.leaseId, 'result'))).size, sealed.manifest.size)
+  const result = await f.remote.finalize(lease.leaseId, { childStatus: 'completed' })
+  assert.equal(result.status, 'completed')
+  await assert.rejects(() => stat(f.remote.artifacts.file(lease.leaseId, 'result')), { code: 'ENOENT' })
+})
+
+test('무변경 체크포인트는 빈 결과 bundle 없이 완료하고 worker를 반환한다', async (t) => {
+  const f = await fixture(t), lease = await f.acquire()
+  const checkpoint = await f.remote.checkpoint(lease.leaseId, { requestId: 'no-change', jobId: lease.jobId,
+    mapId: 'map', cardId: 'card', conversationId: 'conversation-1', paths: [], confirmNoChanges: true })
+  assert.equal(checkpoint.noChanges, true)
+  const result = await f.remote.finalize(lease.leaseId, { childStatus: 'completed' })
+  assert.equal(result.status, 'completed')
+  assert.equal(f.remote.state.leases[lease.leaseId].resultMode, 'present')
+  assert.equal(f.remote.state.leases[lease.leaseId].releaseMode, 'present')
+  assert.equal(await git(f.worker, ['rev-parse', 'HEAD']), lease.baseCommit)
+  await assert.rejects(() => stat(f.remote.artifacts.file(lease.leaseId, 'result')), { code: 'ENOENT' })
+})
+
+test('완료 후 산출물 정리가 실패하면 결과는 유지하고 다음 배정을 차단한 뒤 재시도한다', async (t) => {
+  const f = await fixture(t), lease = await f.acquire()
+  await writeFile(path.join(f.worker, 'feature.txt'), 'remote change\n'); await f.checkpoint(lease)
+  const cleanup = f.remote.artifacts.cleanup.bind(f.remote.artifacts)
+  f.remote.artifacts.cleanup = async () => { throw new Error('simulated cleanup failure') }
+  assert.equal((await f.remote.finalize(lease.leaseId, { childStatus: 'completed' })).status, 'completed')
+  assert.equal(f.remote.state.leases[lease.leaseId].cleanupPending, true)
+  await assert.rejects(() => f.acquire('delegation-2'), /REMOTE_WORKSPACE_CLEANUP_REQUIRED/)
+  f.remote.artifacts.cleanup = cleanup
+  await f.observe()
+  const next = await f.acquire('delegation-2')
+  assert.notEqual(next.leaseId, lease.leaseId)
+  assert.equal(f.remote.state.leases[lease.leaseId].cleanupPending, false)
+  await assert.rejects(() => stat(path.join(f.remote.artifacts.root, lease.leaseId)), { code: 'ENOENT' })
 })
 
 test('원격 결과 통합은 최신 main 미커밋 변경을 보존하고 자동 대기한다', async (t) => {
@@ -118,6 +198,7 @@ test('release 응답 유실은 통합 완료와 worker 반환을 구분하고 �
   f.lose('release')
   await assert.rejects(() => f.remote.finalize(lease.leaseId, { childStatus: 'completed' }), /lost response/)
   assert.equal(f.remote.state.leases[lease.leaseId].status, 'release-pending')
+  assert.ok(await jsonFile(path.join(f.remote.artifacts.directory(lease.leaseId, 'result'), 'manifest.json')))
   await assert.rejects(() => f.acquire('other'), /사용 가능한 원격 worker/)
   await f.restartAgent()
   const result = await f.remote.finalize(lease.leaseId, { childStatus: 'completed' })
@@ -133,6 +214,7 @@ test('원격 통합 충돌은 main을 보존하고 메인 staging 수동 복구�
   const result = await f.remote.finalize(lease.leaseId, { childStatus: 'completed' })
   assert.equal(result.status, 'quarantined'); assert.equal(result.reasonCode, 'REMOTE_INTEGRATION_CONFLICT_MANUAL_REVIEW')
   assert.notEqual(result.stagingRoot, f.worker)
+  assert.ok((await readFile(path.join(result.stagingRoot, '.git', 'objects', 'info', 'alternates'), 'utf8')).includes(path.basename(f.integration)))
   assert.equal(await readFile(path.join(f.integration, 'feature.txt'), 'utf8'), 'main change\n')
   await writeFile(path.join(result.stagingRoot, 'feature.txt'), 'merged result\n')
   await git(result.stagingRoot, ['add', 'feature.txt'])

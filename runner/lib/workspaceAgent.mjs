@@ -77,6 +77,16 @@ export async function createWorkspaceAgent({ registryFile, machineId, request, r
   const persist = () => saveJson(stateFile, state)
   const apiPath = (lease, kind) => `/api/machines/${machineId}/runner/workspace-artifacts/${lease.leaseId}/${kind}`
 
+  async function cleanupCompletedLease(leaseId) {
+    const stored = state.leases[leaseId]
+    if (!stored?.cleanupPending || stored.status !== 'completed'
+      || !Object.values(state.operations).some((item) => item.leaseId === leaseId && item.action === 'release' && item.state === 'completed')) return
+    await artifacts.cleanup(leaseId)
+    stored.cleanupPending = false
+    state.workspaces[stored.workspaceId] = { status: 'idle' }
+    await persist()
+  }
+
   async function download(lease, kind) {
     const manifest = artifacts.validate(await request(`${apiPath(lease, kind)}/manifest`, undefined, 'GET'))
     for (let index = 0; index * manifest.chunkBytes < manifest.size; index += 1) {
@@ -118,6 +128,9 @@ export async function createWorkspaceAgent({ registryFile, machineId, request, r
       || lease.ownership.machineId !== machineId || lease.ownership.poolId !== raw.poolId) throw workspaceError('MNP_WORKSPACE_ASSIGNMENT_MISMATCH')
     const current = state.workspaces[worker.id]
     if (current?.leaseId && current.leaseId !== lease.leaseId) throw workspaceError('REMOTE_WORKSPACE_ALREADY_LEASED')
+    if (Object.values(state.leases).some((item) => item.workspaceId === worker.id && item.cleanupPending)) {
+      throw workspaceError('REMOTE_WORKSPACE_CLEANUP_REQUIRED')
+    }
     const generation = Number(state.generations[worker.id] ?? 0)
     if (!Number.isSafeInteger(lease.ownership.generation) || lease.ownership.generation <= generation) throw workspaceError('REMOTE_WORKSPACE_FENCE_STALE')
     return workspaceLock(worker.root, async () => {
@@ -127,6 +140,13 @@ export async function createWorkspaceAgent({ registryFile, machineId, request, r
       if (!await runtimeIdle('', worker.root)) throw workspaceError('REMOTE_WORKSPACE_RUNTIME_ACTIVE')
       if (await git(worker.root, ['status', '--porcelain=v1', '--untracked-files=all'])) throw workspaceError('REMOTE_WORKSPACE_DIRTY')
       if (await git(worker.root, ['remote', 'get-url', 'origin']) !== raw.originUrl) throw workspaceError('REMOTE_WORKSPACE_ORIGIN_MISMATCH')
+      commitId(lease.baselineCommit)
+      if (!['present', 'delta'].includes(lease.baselineMode)
+        || await git(worker.root, ['rev-parse', 'HEAD']) !== lease.baselineCommit
+        || lease.baselineMode === 'present' && lease.baselineCommit !== lease.baseCommit
+        || lease.baselineMode === 'delta' && lease.baselineCommit === lease.baseCommit) {
+        throw workspaceError('REMOTE_WORKSPACE_BASELINE_MISMATCH')
+      }
       const owner = await jsonFile(await ownerFile(worker))
       if (owner && stableHash(owner) !== stableHash(identity)) throw workspaceError('REMOTE_WORKSPACE_OWNER_MISMATCH')
       await saveJson(await ownerFile(worker), { coordinatorId, machineId, poolId: raw.poolId })
@@ -134,11 +154,14 @@ export async function createWorkspaceAgent({ registryFile, machineId, request, r
       state.workspaces[worker.id] = { status: 'preparing', leaseId: lease.leaseId }
       state.leases[lease.leaseId] = { ...lease, status: 'preparing', checkpoints: [] }
       await persist()
-      const bundle = await download(lease, 'baseline')
-      await git(worker.root, ['bundle', 'verify', bundle])
-      await git(worker.root, ['fetch', '--no-tags', bundle, `refs/heads/${lease.baseBranch}`])
+      if (lease.baselineMode === 'delta') {
+        const bundle = await download(lease, 'baseline')
+        await git(worker.root, ['bundle', 'verify', bundle])
+        await git(worker.root, ['fetch', '--no-tags', bundle, `refs/heads/${lease.baseBranch}`])
+      }
       commitId(lease.baseCommit)
       await git(worker.root, ['cat-file', '-e', `${lease.baseCommit}^{commit}`])
+      await git(worker.root, ['merge-base', '--is-ancestor', lease.baselineCommit, lease.baseCommit])
       await git(worker.root, ['switch', '-c', lease.branch, lease.baseCommit])
       state.leases[lease.leaseId].status = 'leased'
       state.workspaces[worker.id].status = 'leased'
@@ -190,21 +213,31 @@ export async function createWorkspaceAgent({ registryFile, machineId, request, r
           await persist()
         }
         const file = artifacts.file(lease.leaseId, 'result')
-        await mkdir(path.dirname(file), { recursive: true })
-        await git(worker.root, ['bundle', 'create', file, `refs/heads/${lease.branch}`])
-        const manifest = await upload(lease, 'result')
+        const resultMode = head === lease.baseCommit ? 'present' : 'delta'
+        let manifest = null
+        if (resultMode === 'delta') {
+          await mkdir(path.dirname(file), { recursive: true })
+          await git(worker.root, ['bundle', 'create', file, `${lease.baseCommit}..refs/heads/${lease.branch}`])
+          if (await git(worker.root, ['rev-parse', 'HEAD']) !== head) throw workspaceError('REMOTE_WORKSPACE_RESULT_HEAD_MISMATCH')
+          manifest = await upload(lease, 'result')
+        }
         stored.sealed = true; stored.headCommit = head
+        stored.resultMode = resultMode
         await persist()
-        return { status: 'sealed', headCommit: head, checkpoints: stored.checkpoints, manifest, remoteDriftArchives: stored.remoteDriftArchives ?? [] }
+        return { status: 'sealed', headCommit: head, resultMode, checkpoints: stored.checkpoints, manifest,
+          remoteDriftArchives: stored.remoteDriftArchives ?? [] }
       }
       if (action === 'release') {
         if (!stored.sealed && options.cancel !== true) throw workspaceError('REMOTE_WORKSPACE_RELEASE_UNSEALED')
         if (await git(worker.root, ['status', '--porcelain=v1', '--untracked-files=all'])) throw workspaceError('REMOTE_WORKSPACE_DIRTY')
-        const bundle = await download(lease, 'release')
-        await git(worker.root, ['bundle', 'verify', bundle])
-        await git(worker.root, ['fetch', '--no-tags', bundle, `refs/heads/${lease.baseBranch}`])
         commitId(options.integratedCommit)
+        if (lease.releaseMode === 'delta') {
+          const bundle = await download(lease, 'release')
+          await git(worker.root, ['bundle', 'verify', bundle])
+          await git(worker.root, ['fetch', '--no-tags', bundle, `refs/heads/${lease.baseBranch}`])
+        } else if (lease.releaseMode !== 'present') throw workspaceError('REMOTE_WORKSPACE_TRANSFER_CONTRACT_MISMATCH')
         await git(worker.root, ['cat-file', '-e', `${options.integratedCommit}^{commit}`])
+        await git(worker.root, ['merge-base', '--is-ancestor', lease.baseCommit, options.integratedCommit])
         await git(worker.root, ['switch', '-C', `mnp/idle/${worker.id}`, options.integratedCommit])
         if (await git(worker.root, ['rev-parse', 'HEAD']) !== options.integratedCommit
           || await git(worker.root, ['branch', '--show-current']) !== `mnp/idle/${worker.id}`) throw workspaceError('REMOTE_WORKSPACE_RELEASE_MISMATCH')
@@ -215,7 +248,8 @@ export async function createWorkspaceAgent({ registryFile, machineId, request, r
         }
         // Keep the ownership marker so a second coordinator cannot silently claim this worker.
         await rm(path.join(worker.root, '.ai-session.json'))
-        stored.status = 'completed'; state.workspaces[worker.id] = { status: 'idle' }
+        stored.status = 'completed'; stored.cleanupPending = true
+        state.workspaces[worker.id] = { status: 'cleanup-pending' }
         await persist()
         return { released: true, idleCommit: options.integratedCommit, remoteDriftArchives: stored.remoteDriftArchives ?? [] }
       }
@@ -230,7 +264,10 @@ export async function createWorkspaceAgent({ registryFile, machineId, request, r
       const prior = state.operations[operationId]
       if (prior) {
         if (prior.fingerprint !== fingerprint) throw workspaceError('REMOTE_WORKSPACE_OPERATION_CONFLICT')
-        if (prior.state === 'completed') return prior.result
+        if (prior.state === 'completed') {
+          if (body.action === 'release') await cleanupCompletedLease(body.lease.leaseId).catch(() => {})
+          return prior.result
+        }
         if (prior.state === 'failed') throw workspaceError(prior.code)
         throw workspaceError('REMOTE_WORKSPACE_RECOVERY_REQUIRED')
       }
@@ -242,15 +279,17 @@ export async function createWorkspaceAgent({ registryFile, machineId, request, r
         || lease.ownership.generation < 1 || lease.branch !== `mnp/${lease.jobId}`) throw workspaceError('MNP_WORKSPACE_ASSIGNMENT_MISMATCH')
       commitId(lease.baseCommit)
       await git(workers[0].root, ['check-ref-format', '--branch', lease.baseBranch])
-      state.operations[operationId] = { fingerprint, state: 'started' }
+      state.operations[operationId] = { fingerprint, state: 'started', action: body.action, leaseId: lease.leaseId }
       await persist()
       try {
         const result = await mutate(body.action, lease, body.options ?? {})
-        state.operations[operationId] = { fingerprint, state: 'completed', result: structuredClone(result) }
+        state.operations[operationId] = { fingerprint, state: 'completed', action: body.action, leaseId: lease.leaseId, result: structuredClone(result) }
         await persist()
+        if (body.action === 'release') await cleanupCompletedLease(lease.leaseId).catch(() => {})
         return result
       } catch (error) {
-        state.operations[operationId] = { fingerprint, state: 'failed', code: error.reasonCode ?? error.code ?? 'REMOTE_WORKSPACE_OPERATION_FAILED' }
+        state.operations[operationId] = { fingerprint, state: 'failed', action: body.action, leaseId: lease.leaseId,
+          code: error.reasonCode ?? error.code ?? 'REMOTE_WORKSPACE_OPERATION_FAILED' }
         await persist()
         throw error
       }
@@ -258,6 +297,9 @@ export async function createWorkspaceAgent({ registryFile, machineId, request, r
   }
   async function report() {
     return exclusive(async () => {
+      for (const lease of Object.values(state.leases)) {
+        if (lease.cleanupPending) await cleanupCompletedLease(lease.leaseId).catch(() => {})
+      }
       const workspaces = []
       for (const worker of workers) {
         const session = await jsonFile(path.join(worker.root, '.ai-session.json'))

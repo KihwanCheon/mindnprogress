@@ -115,12 +115,14 @@ test('원격 workspace 보고·등록 승인은 인증·coordinator·digest를 �
     const cookie = await login(baseUrl), token = await registerMacbook(baseUrl, cookie)
     const heartbeat = await runnerRequest(baseUrl, token, '/api/machines/macbook/runner/heartbeat', {})
     assert.equal(heartbeat.response.status, 200)
-    const report = { version: 1, coordinatorId: heartbeat.body.coordinatorId, machineId: 'macbook', poolId: 'remote',
+    const report = { version: 2, coordinatorId: heartbeat.body.coordinatorId, machineId: 'macbook', poolId: 'remote',
       registryDigest: 'a'.repeat(64), originUrl, sharedRoot: '/sub-machine/shared',
       workspaces: [{ workspaceId: 'fork1', projectRoot: '/sub-machine/verified-repository', assetsPath: '/sub-machine/verified-repository/Assets',
         originUrl, headCommit: 'a'.repeat(40), status: 'idle', dirty: false, runtimeIdle: true, generation: 0 }] }
     const badReport = await runnerRequest(baseUrl, token, '/api/machines/macbook/runner/heartbeat', { workspacePool: { ...report, coordinatorId: 'different' } })
     assert.equal(badReport.response.status, 409)
+    assert.equal((await runnerRequest(baseUrl, token, '/api/machines/macbook/runner/heartbeat',
+      { workspacePool: { ...report, version: 1 } })).response.status, 409)
     assert.equal((await runnerRequest(baseUrl, token, '/api/machines/macbook/runner/heartbeat', { workspacePool: report })).response.status, 200)
     const snapshot = await userRequest(baseUrl, cookie, '/api/machines/macbook/workspace-pool')
     assert.equal(snapshot.body.remotePools[0].approved, false)

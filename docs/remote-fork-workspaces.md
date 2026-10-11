@@ -6,18 +6,20 @@
 
 메인 MnP는 등록 승인, worker 선택, 내구 lease, 결과 통합을 맡는다. Runner는 서브 머신의 명시적 registry를 읽어 실제 Git root/origin/HEAD/dirty/session/runtime 상태를 보고하고 준비·체크포인트·결과 봉인·격리·반환을 수행한다. AionCore는 원격 소유권을 응답에 그대로 보존하고, 실행 전 로컬 `.ai-session.json`을 대사한다.
 
-원격 lease에는 기존 `workspaceId/jobId/leaseId/projectRoot/branch/baseCommit` 외에 `ownership={coordinatorId,machineId,poolId,generation}`이 있다. 서로 다른 OS 경로를 메인 파일 시스템 경로로 사용하지 않는다. registry digest가 달라지면 새 등록 승인이 필요하다. 진행 중 lease가 있으면 registry 교체를 거절한다.
+원격 lease에는 기존 `workspaceId/jobId/leaseId/projectRoot/branch/baseCommit` 외에 `ownership={coordinatorId,machineId,poolId,generation}`이 있다. 서로 다른 OS 경로를 메인 파일 시스템 경로로 사용하지 않는다. registry digest나 전송 프로토콜 버전이 달라지면 새 등록 승인이 필요하다. 진행 중 lease가 있으면 registry·프로토콜 교체를 거절한다.
 
 ```text
-승인된 보고 → preparing → Runner prepare receipt → leased
-  → checkpoint → sealed + SHA256 검증 bundle
+승인된 보고 → 공통 Git 기준 확인 → preparing → Runner prepare receipt → leased
+  → checkpoint → sealed + SHA256 검증 증분 bundle
   → 메인 staging → 통합 검증/fast-forward → release-pending
-  → Runner 반환 receipt → completed
+  → Runner 반환 receipt → completed → 완료 산출물 정리
 ```
 
 명시적 체크포인트가 없으면 기존 보완 대화 흐름으로 돌아간다. 원격 체크포인트에는 `requestId`가 필수이며, 새 변경에는 새 ID, 동일 요청 재시도에는 같은 ID를 쓴다. 동일 ID의 다른 입력은 거절한다.
 
-기존 로컬 풀의 lease는 별도 유지한다. 메인 통합 잠금만 기존 manager의 직렬화 경로와 공유한다. 새 원격 결과는 서버 데이터 디렉터리의 `remote-workspaces/staging/<leaseId>/repository`에서 기존 체크포인트·dirty·untracked 충돌·HEAD/브랜치 이동 검사를 거친다. 네트워크가 끊겼다고 worker를 반환하거나 재배정하지 않는다.
+기존 로컬 풀의 lease는 별도 유지한다. 메인 통합 잠금만 기존 manager의 직렬화 경로와 공유한다. 새 원격 결과는 서버 데이터 디렉터리의 `remote-workspaces/staging/<leaseId>/repository`에서 기존 체크포인트·dirty·untracked 충돌·HEAD/브랜치 이동 검사를 거친다. staging의 Git 참조와 작업 트리는 독립적이지만 기준 Git 객체는 메인 저장소와 공유해 전체 팩을 매번 복제하지 않는다. staging의 전체 작업 트리 체크아웃은 여전히 임시 디스크를 차지하므로 운영 전 크기를 측정해야 한다. staging이 남아 있는 동안 메인 저장소의 객체 정리나 이력 재작성으로 필요한 기준 객체를 제거해서는 안 된다. 네트워크가 끊겼다고 worker를 반환하거나 재배정하지 않는다.
+
+전송 계약 v2에서는 Runner가 보고한 유휴 worker HEAD가 메인 기준 커밋과 같으면 기준선 bundle을 만들지 않는다. 뒤처져 있으면 해당 HEAD가 메인 기준 커밋의 조상인지 확인한 뒤 그 사이의 증분 bundle만 보낸다. 메인에서 공통 기준을 검증할 수 없으면 `REMOTE_WORKSPACE_BOOTSTRAP_REQUIRED`로 배정을 차단하며, 전체 이력 bundle로 자동 우회하지 않는다. 결과는 `baseCommit..작업 브랜치`, 반환은 `baseCommit..통합 브랜치` 범위의 증분 bundle이다. 무변경 결과나 Runner가 이미 보유한 통합 커밋은 bundle을 생략한다.
 
 ## 설정과 승인 순서
 
@@ -47,12 +49,12 @@ registry 예시의 경로는 실제 설정에 사용할 값이 아니라 계약 
 - `POST /api/machines/:machineId/runner/heartbeat`: 인증된 Runner의 `workspacePool` 보고. 메인이 받은 시각 기준 180초 뒤 만료한다. 보고 중단도 기존 풀을 일반 작업공간으로 바꾸지 않는다.
 - `GET/PUT /api/machines/:machineId/workspace-pool`: 소유자/관리자 전용 조회·승인. PUT `{poolId,registryDigest,enabled}`. 비활성화는 새 배정만 막고 기존 lease는 보존한다.
 - Runner 큐의 `POST /mnp/workspaces`: `{operationId,action,lease,options}`. 로컬 AionCore에 전달하지 않는 Runner 전용 경로다.
-- `GET .../runner/workspace-artifacts/:leaseId/{baseline|release}/manifest`, `/chunks/:index`: baseline/반환 bundle 다운로드.
+- `GET .../runner/workspace-artifacts/:leaseId/{baseline|release}/manifest`, `/chunks/:index`: 필요한 경우에만 기준선/반환 증분 bundle 다운로드.
 - `POST .../runner/workspace-artifacts/:leaseId/result/chunks/:index`, `/complete`: 결과 bundle 업로드. 인증된 머신과 lease 귀속을 검사한다.
 - `POST /api/machines/:machineId/workspace-pool/leases/:leaseId/retry-integration`: 메인 staging을 직접 검토·해결한 소유자/관리자만 `{confirmed:true,expectedHead:<검토한 staging HEAD>}`로 통합 복구한다. Mac 대화에 메인 staging 경로를 전달하지 않는다.
 - `POST /api/machines/:machineId/workspace-pool/leases/:leaseId/retry-preparation`: prepare 응답 유실로 보존된 원 위임에 대해 `{confirmed:true,expectedLeaseId,generation}`으로 같은 prepare receipt를 확인한다. 완료 receipt가 확인된 경우에만 원 위임을 다시 배정 대기로 돌린다. 중단된 started receipt를 강제 재실행하지 않는다.
 
-전송은 256KiB chunk와 전체 SHA256, 고정 크기·manifest 검증을 사용하며 bundle당 상한은 8GiB다. 중복 chunk는 같은 내용만 허용한다. Git bundle verify, 기준 커밋 조상 관계, 봉인 HEAD를 추가로 검증한다. 현재는 완전한 Git bundle을 사용한다. 실제 대형 저장소의 용량/전송 시간 검증 전에는 운영 활성화하지 않는다.
+전송은 256KiB chunk와 전체 SHA256, 고정 크기·manifest 검증을 사용하며 bundle당 상한은 8GiB다. 중복 chunk는 같은 내용만 허용한다. Git bundle verify는 수신 측의 선행 커밋 보유 여부까지 검사하며, 기준 커밋 조상 관계와 봉인 HEAD도 검증한다. 상한은 대용량 증분 전송을 허용한다는 뜻이 아니다. 실제 변경량·임시 디스크 여유·Windows↔Mac 전송 시간을 확인하기 전에는 운영 활성화하지 않는다.
 
 ## 실패와 복구
 
@@ -63,12 +65,13 @@ registry 예시의 경로는 실제 설정에 사용할 값이 아니라 계약 
 - 메인 dirty/untracked 충돌: 기존 manager의 통합 대기와 재검증을 사용한다. 사용자 파일을 정리하지 않는다.
 - 메인 staging 통합 충돌: 원격 Fork와 staging을 보존하고 `REMOTE_INTEGRATION_CONFLICT_MANUAL_REVIEW`로 격리한다. 자동 충돌 해결 대화를 Mac에 잘못 보내지 않는다. 통합 잠금은 명시적 복구 전까지 보존한다.
 - 통합 성공/반환 실패: `release-pending`으로 유지한다. 반환 ack 전까지 용량으로 계산하지 않는다.
+- 양쪽의 `completed` receipt가 영속 저장된 뒤 해당 lease의 bundle·chunk와 메인 staging을 정리한다. 정리 실패는 완료 결과를 뒤집지 않지만 `cleanup-pending`으로 새 배정을 막고 재시도한다. 중단된 `started` receipt, `release-pending`, 격리 상태의 산출물과 소유권 표시는 정리하지 않는다.
 
 `.git/mnp-remote-owner.json`과 `.git/mnp-local-owner.json`은 coordinator 간 경합을 막는 영구 소유권 표시다. 물리 Git 잠금과 Runner state mutation 잠금은 프로세스 간 원자적 mkdir로 획득한다. 장애 후 잠금을 시간만 보고 삭제하면 안 된다.
 
 ## 검증과 적용 전 조건
 
-실제 Git 임시 저장소 테스트는 prepare/checkpoint/메인 staging 통합/반환, generation 증가, dirty 대기, prepare/release 응답 유실과 재시작, 충돌 수동 복구, 기존 local 통합 잠금 보존, artifact 변조·중복·머신 귀속, 체크포인트 멱등성을 포함한다. AionUi bridge의 독립 테스트는 feature opt-in, 허용 경로, 로컬 API 전달 차단과 dispatch 소유권 거절을 포함한다.
+실제 Git 임시 저장소 테스트는 증분 기준선·결과·반환과 전체 이력 우회 차단, prepare/checkpoint/메인 staging 통합/반환, generation 증가, dirty 대기, prepare/release 응답 유실과 재시작, 완료 산출물 정리·정리 실패 재시도, 충돌 수동 복구, 기존 local 통합 잠금 보존, artifact 변조·중복·머신 귀속, 체크포인트 멱등성을 포함한다. AionUi bridge의 독립 테스트는 feature opt-in, 허용 경로, 로컬 API 전달 차단과 dispatch 소유권 거절을 포함한다.
 
 실제 메인 서버의 registry·진행 중 lease·최신 미커밋 변경은 현재 대화의 Runner relay 권한으로 조회할 수 없었다. Mac에서 발견한 integration/Fork의 미커밋 변경도 그대로 보존했다. 운영 적용 전에 메인 권한으로 최신 상태를 재확인하고, Rust 빌드/회귀 테스트와 실제 Windows↔Mac 전송·Unity 검증을 완료해야 한다. 이 Mac 환경에는 cargo/rustc가 없어 AionCore 변경을 컴파일했다고 보고하지 않는다.
 

@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir } from 'node:fs/promises'
+import { mkdir, rm } from 'node:fs/promises'
 import path from 'node:path'
 import { WorkspacePoolManager, WorkspacePoolUnavailableError, integrationWorktreeDirtyReasonCode } from './workspacePool.mjs'
 import { RemoteWorkspaceArtifacts } from './remoteWorkspaceArtifacts.mjs'
 import { aiDelegationWorkspaceLeaseMatches } from './aiDelegations.mjs'
-import { REMOTE_WORKSPACE_VERSION, identifier, commitId, git, jsonFile, saveJson, stableHash, workspaceError, assignmentMatches } from './remoteWorkspaceProtocol.mjs'
+import { REMOTE_WORKSPACE_VERSION, identifier, commitId, git, hasCommit, jsonFile, saveJson, stableHash, workspaceError, assignmentMatches } from './remoteWorkspaceProtocol.mjs'
 
 // Remote paths are identities reported by the authenticated Runner, never local paths.
 export class RemoteWorkspacePool {
@@ -64,14 +64,16 @@ export class RemoteWorkspacePool {
         await this.persist(); return this.snapshot(machineId)
       }
       const report = this.report(machineId)
-      if (!this.local.registry?.integration || report.poolId !== poolId || report.registryDigest !== registryDigest
+      if (!this.local.registry?.integration || report.version !== REMOTE_WORKSPACE_VERSION
+        || report.poolId !== poolId || report.registryDigest !== registryDigest
         || report.originUrl !== this.local.registry.originUrl
         || report.workspaces.some((worker) => worker.originUrl !== report.originUrl)) throw workspaceError('REMOTE_WORKSPACE_REGISTRATION_MISMATCH')
       const previous = this.state.pools[key]
-      if (previous && previous.registryDigest !== registryDigest
+      if (previous && (previous.registryDigest !== registryDigest || previous.protocolVersion !== REMOTE_WORKSPACE_VERSION)
         && Object.values(this.state.leases).some((lease) => lease.ownership.machineId === machineId
           && lease.poolId === poolId && lease.status !== 'completed')) throw workspaceError('REMOTE_WORKSPACE_REGISTRY_BUSY')
-      this.state.pools[key] = { enabled: true, machineId, poolId, registryDigest, originUrl: report.originUrl,
+      this.state.pools[key] = { enabled: true, machineId, poolId, registryDigest, protocolVersion: REMOTE_WORKSPACE_VERSION,
+        originUrl: report.originUrl,
         workspaces: report.workspaces.map((worker) => ({ ...worker })), approvedAt: new Date(this.now()).toISOString() }
       await this.persist(); return this.snapshot(machineId)
     })
@@ -84,8 +86,10 @@ export class RemoteWorkspacePool {
   pool(machineId) {
     if (!this.local.registry?.integration || !this.local.state) throw workspaceError('REMOTE_WORKSPACE_MAIN_POOL_UNAVAILABLE')
     const report = this.report(machineId)
+    if (report.version !== REMOTE_WORKSPACE_VERSION) throw workspaceError('REMOTE_WORKSPACE_RUNNER_VERSION_MISMATCH')
     const pool = this.state.pools[this.key(machineId, report.poolId)]
-    if (!pool?.enabled || pool.registryDigest !== report.registryDigest) throw workspaceError('REMOTE_WORKSPACE_POOL_NOT_APPROVED')
+    if (!pool?.enabled || pool.protocolVersion !== REMOTE_WORKSPACE_VERSION
+      || pool.registryDigest !== report.registryDigest) throw workspaceError('REMOTE_WORKSPACE_POOL_NOT_APPROVED')
     return { pool, report }
   }
   hasLease(id) { return Boolean(this.state?.leases[id]) }
@@ -102,7 +106,8 @@ export class RemoteWorkspacePool {
   snapshot(machineId) {
     const reports = Object.values(this.state?.reports ?? {}).filter((report) => !machineId || report.machineId === machineId)
     return { coordinatorId: this.state?.coordinatorId, remotePools: reports.map((report) => ({
-      ...report, approved: Boolean(this.state.pools[this.key(report.machineId, report.poolId)]?.enabled
+      ...report, approved: Boolean(report.version === REMOTE_WORKSPACE_VERSION && this.state.pools[this.key(report.machineId, report.poolId)]?.enabled
+        && this.state.pools[this.key(report.machineId, report.poolId)].protocolVersion === REMOTE_WORKSPACE_VERSION
         && this.state.pools[this.key(report.machineId, report.poolId)].registryDigest === report.registryDigest),
       stale: this.now() - report.receivedAt > 180_000,
       workspaces: report.workspaces.map((worker) => {
@@ -137,8 +142,27 @@ export class RemoteWorkspacePool {
       throw error
     }
   }
+  async cleanupCompletedLease(lease) {
+    if (lease.status !== 'completed' || !lease.cleanupPending) return
+    await this.artifacts.cleanup(lease.leaseId)
+    await rm(path.join(this.root, 'staging', lease.leaseId), { recursive: true, force: true, maxRetries: 6, retryDelay: 100 })
+    this.stages.delete(lease.leaseId)
+    for (const kind of ['baseline', 'result', 'release']) this.artifactQueues.delete(`${lease.leaseId}:${kind}`)
+    lease.cleanupPending = false
+    await this.persist()
+  }
+  async cleanupCompletedLeases() {
+    for (const lease of Object.values(this.state.leases)) {
+      if (lease.status === 'completed' && lease.cleanupPending) {
+        try { await this.cleanupCompletedLease(lease) } catch {
+          throw workspaceError('REMOTE_WORKSPACE_CLEANUP_REQUIRED')
+        }
+      }
+    }
+  }
   async acquire(options) {
     return this.exclusive(async () => {
+      await this.cleanupCompletedLeases()
       const { machineId, requestId, mapId, cardId, conversationId = '', cardLabel } = options
       identifier(requestId)
       const prior = Object.values(this.state.leases).find((lease) => lease.requestId === requestId)
@@ -166,19 +190,31 @@ export class RemoteWorkspacePool {
       const baseBranch = await git(integration.root, ['branch', '--show-current'])
       if (!baseBranch) throw workspaceError('REMOTE_WORKSPACE_BASE_BRANCH_INVALID')
       const baseCommit = commitId(await git(integration.root, ['rev-parse', 'HEAD']))
+      const baselineCommit = commitId(worker.headCommit)
+      if (baselineCommit !== baseCommit) {
+        if (!await hasCommit(integration.root, baselineCommit)) throw workspaceError('REMOTE_WORKSPACE_BOOTSTRAP_REQUIRED')
+        try { await git(integration.root, ['merge-base', '--is-ancestor', baselineCommit, baseCommit]) } catch (error) {
+          if (error.code === 1) throw workspaceError('REMOTE_WORKSPACE_BOOTSTRAP_REQUIRED')
+          throw error
+        }
+      }
+      const baselineMode = baselineCommit === baseCommit ? 'present' : 'delta'
       const jobId = `job-${randomUUID()}`, leaseId = `lease-${randomUUID()}`
       const generation = Math.max(worker.generation ?? 0, ...Object.values(this.state.leases).filter((item) => item.ownership.machineId === machineId && item.workspaceId === worker.workspaceId).map((item) => item.ownership.generation)) + 1
       const lease = { poolId: pool.poolId, workspaceId: worker.workspaceId, jobId, leaseId, requestId,
         ownership: { coordinatorId: this.state.coordinatorId, machineId, poolId: pool.poolId, generation },
         projectRoot: worker.projectRoot, sharedRoot: report.sharedRoot, assetsPath: worker.assetsPath, unityInstanceHash: worker.unityInstanceHash,
-        branch: `mnp/${jobId}`, baseBranch, baseCommit, mapId, cardId, cardLabel, conversationId,
+        branch: `mnp/${jobId}`, baseBranch, baseCommit, baselineCommit, baselineMode, mapId, cardId, cardLabel, conversationId,
         status: 'preparing', startedAt: new Date().toISOString(), checkpoints: [] }
       this.state.leases[leaseId] = lease
       await this.persist()
-      const file = this.artifacts.file(leaseId, 'baseline')
-      await mkdir(path.dirname(file), { recursive: true })
-      await git(integration.root, ['bundle', 'create', file, `refs/heads/${baseBranch}`])
-      await this.artifacts.publish(leaseId, 'baseline')
+      if (baselineMode === 'delta') {
+        const file = this.artifacts.file(leaseId, 'baseline')
+        await mkdir(path.dirname(file), { recursive: true })
+        await git(integration.root, ['bundle', 'create', file, `${baselineCommit}..refs/heads/${baseBranch}`])
+        if (await git(integration.root, ['rev-parse', 'HEAD']) !== baseCommit) throw workspaceError('REMOTE_WORKSPACE_BASE_MOVED')
+        await this.artifacts.publish(leaseId, 'baseline')
+      }
       const prepared = await this.command(lease, 'prepare')
       if (!assignmentMatches(lease, prepared.lease)) throw workspaceError('MNP_WORKSPACE_ASSIGNMENT_MISMATCH')
       lease.status = 'leased'; await this.persist()
@@ -253,13 +289,21 @@ export class RemoteWorkspacePool {
     await mkdir(root, { recursive: true })
     let state = await jsonFile(stateFile)
     if (!state) {
-      // Clone only into a new, server-owned staging directory, never the live remote Fork.
-      try { await git(this.local.registry.integration.root, ['clone', '--no-local', this.artifacts.file(lease.leaseId, 'result'), workerPath]) }
+      // Keep staging refs and worktree separate while borrowing the integration repo's immutable Git objects.
+      try { await git(this.local.registry.integration.root, ['clone', '--shared', '--no-checkout', '--single-branch', '--branch', lease.baseBranch,
+        this.local.registry.integration.root, workerPath]) }
       catch (error) { throw workspaceError('REMOTE_WORKSPACE_STAGING_RECOVERY_REQUIRED', error.message) }
       await git(workerPath, ['config', 'user.name', await git(this.local.registry.integration.root, ['config', 'user.name'])])
       await git(workerPath, ['config', 'user.email', await git(this.local.registry.integration.root, ['config', 'user.email'])])
       await git(workerPath, ['remote', 'set-url', 'origin', this.local.registry.originUrl])
-      await git(workerPath, ['switch', lease.branch])
+      if (lease.resultMode === 'delta') {
+        await git(workerPath, ['bundle', 'verify', this.artifacts.file(lease.leaseId, 'result')])
+        await git(workerPath, ['fetch', '--no-tags', this.artifacts.file(lease.leaseId, 'result'),
+          `refs/heads/${lease.branch}:refs/heads/${lease.branch}`])
+        await git(workerPath, ['switch', lease.branch])
+      } else if (lease.resultMode === 'present' && lease.headCommit === lease.baseCommit) {
+        await git(workerPath, ['switch', '-c', lease.branch, lease.baseCommit])
+      } else throw workspaceError('REMOTE_WORKSPACE_TRANSFER_CONTRACT_MISMATCH')
       if (await git(workerPath, ['rev-parse', 'HEAD']) !== lease.headCommit) throw workspaceError('REMOTE_WORKSPACE_RESULT_HEAD_MISMATCH')
       await git(workerPath, ['merge-base', '--is-ancestor', lease.baseCommit, lease.headCommit])
       const staged = { ...lease, projectRoot: workerPath, status: 'leased', result: null }
@@ -297,9 +341,14 @@ export class RemoteWorkspacePool {
           await this.persist(); return lease.result
         }
         if (sealed.status !== 'sealed') throw workspaceError('REMOTE_WORKSPACE_RESULT_INVALID')
-        const manifest = await this.artifacts.manifest(id, 'result')
-        if (stableHash(manifest) !== stableHash(sealed.manifest)) throw workspaceError('REMOTE_WORKSPACE_ARTIFACT_HASH_MISMATCH')
+        if (sealed.resultMode === 'delta') {
+          const manifest = await this.artifacts.manifest(id, 'result')
+          if (stableHash(manifest) !== stableHash(sealed.manifest)) throw workspaceError('REMOTE_WORKSPACE_ARTIFACT_HASH_MISMATCH')
+        } else if (sealed.resultMode !== 'present' || sealed.headCommit !== lease.baseCommit || sealed.manifest !== null) {
+          throw workspaceError('REMOTE_WORKSPACE_TRANSFER_CONTRACT_MISMATCH')
+        }
         lease.headCommit = commitId(sealed.headCommit); lease.checkpoints = sealed.checkpoints; lease.sealed = true
+        lease.resultMode = sealed.resultMode
         lease.remoteDriftArchives = sealed.remoteDriftArchives ?? []
         lease.status = 'waiting-integration'; await this.persist()
       }
@@ -323,17 +372,28 @@ export class RemoteWorkspacePool {
     await this.persist()
     const integration = this.local.registry.integration
     const integratedCommit = commitId(await git(integration.root, ['rev-parse', 'HEAD']))
-    const file = this.artifacts.file(lease.leaseId, 'release')
-    await mkdir(path.dirname(file), { recursive: true })
     if (!lease.releaseCommit) {
-      await git(integration.root, ['bundle', 'create', file, `refs/heads/${lease.baseBranch}`])
-      await this.artifacts.publish(lease.leaseId, 'release')
-      lease.releaseCommit = integratedCommit; await this.persist()
+      if (await git(integration.root, ['branch', '--show-current']) !== lease.baseBranch
+        || await git(integration.root, ['rev-parse', 'HEAD']) !== integratedCommit) throw workspaceError('REMOTE_WORKSPACE_BASE_MOVED')
+      const releaseMode = [lease.baseCommit, lease.headCommit].includes(integratedCommit) ? 'present' : 'delta'
+      if (releaseMode === 'delta') {
+        const file = this.artifacts.file(lease.leaseId, 'release')
+        await mkdir(path.dirname(file), { recursive: true })
+        await git(integration.root, ['bundle', 'create', file, `${lease.baseCommit}..refs/heads/${lease.baseBranch}`])
+        if (await git(integration.root, ['rev-parse', 'HEAD']) !== integratedCommit) throw workspaceError('REMOTE_WORKSPACE_BASE_MOVED')
+        await this.artifacts.publish(lease.leaseId, 'release')
+      }
+      lease.releaseMode = releaseMode; lease.releaseCommit = integratedCommit; await this.persist()
     }
+    if (!['present', 'delta'].includes(lease.releaseMode)) throw workspaceError('REMOTE_WORKSPACE_TRANSFER_CONTRACT_MISMATCH')
     const released = await this.command(lease, 'release', { integratedCommit: lease.releaseCommit })
     if (!released.released || released.idleCommit !== lease.releaseCommit) throw workspaceError('REMOTE_WORKSPACE_RELEASE_MISMATCH')
     lease.status = 'completed'; lease.result = { ...result, remoteReleased: true, remoteDriftArchives: released.remoteDriftArchives ?? lease.remoteDriftArchives ?? [] }
-    await this.persist(); return lease.result
+    lease.cleanupPending = true
+    await this.persist()
+    // A cleanup failure never turns a confirmed remote release back into an incomplete lease.
+    await this.cleanupCompletedLease(lease).catch(() => {})
+    return lease.result
   }
   async hold(lease, reason, details = {}) {
     if (lease.status === 'completed') return lease.result

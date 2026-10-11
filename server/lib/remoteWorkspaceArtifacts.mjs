@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { mkdir, open, readFile, rename, stat, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { ARTIFACT_CHUNK_BYTES, identifier, jsonFile, saveJson, workspaceError } from './remoteWorkspaceProtocol.mjs'
 
@@ -19,6 +19,10 @@ export class RemoteWorkspaceArtifacts {
     return path.join(this.root, leaseId, kind)
   }
   file(leaseId, kind) { return path.join(this.directory(leaseId, kind), 'artifact.bundle') }
+  async cleanup(leaseId) {
+    identifier(leaseId)
+    await rm(path.join(this.root, leaseId), { recursive: true, force: true, maxRetries: 6, retryDelay: 100 })
+  }
   async manifest(leaseId, kind) {
     const manifest = await jsonFile(path.join(this.directory(leaseId, kind), 'manifest.json'))
     if (!manifest) throw workspaceError('REMOTE_ARTIFACT_NOT_FOUND')
