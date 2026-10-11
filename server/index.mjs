@@ -33,6 +33,7 @@ import { createDoorayResponseIntegration } from './lib/doorayResponseIntegration
 import { createDoorayResponsePreferences } from './lib/doorayResponsePreferences.mjs'
 import { AI_EXECUTION_APPROVAL_INSTRUCTION, GROUP_APPROVAL_INSTRUCTION, GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION, AI_DELEGATION_FOLLOWUP_INSTRUCTION, AI_DELEGATION_REPORT_INSTRUCTION } from '../src/utils/aiApprovalInstructions.mjs'
 import { MNP_CONTEXT_BOOTSTRAP_INSTRUCTION } from '../src/utils/aiContextInstructions.mjs'
+import { applyMapContentPatch, MapContentPatchError } from '../src/utils/mapContentPatch.mjs'
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { hostname, networkInterfaces, tmpdir } from 'node:os'
@@ -7364,6 +7365,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
     if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method) && /^\/api\/(maps|groups|document-reconstructions|card-layouts)(\/|$)/.test(url.pathname)) {
       const isTransition = /^\/api\/maps\/[^/]+\/archive$/.test(url.pathname)
         || /^\/api\/maps\/[^/]+\/cards\/[^/]+\/move$/.test(url.pathname)
+        || /^\/api\/maps\/[^/]+\/content-patch$/.test(url.pathname)
         || /^\/api\/document-reconstructions\/(apply|[^/]+\/rollback)$/.test(url.pathname)
         || /^\/api\/card-layouts\/[^/]+\/apply$/.test(url.pathname)
       releaseDocumentMutation = await acquireDocumentMutation(isTransition)
@@ -12540,6 +12542,63 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         },
         ...(responseMode === 'full' ? { sourceMap: result.sourceMap, targetMap: result.targetMap } : {}),
       })
+    }
+
+    const mapContentPatchRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/content-patch$/)
+    if (mapContentPatchRoute && request.method === 'PATCH') {
+      const mapId = decodeURIComponent(mapContentPatchRoute[1])
+      if (!isValidMapId(mapId)) return sendJson(response, 400, { error: '올바르지 않은 문서 ID입니다.' })
+      const user = requireUser(request, response)
+      if (!user) return
+      if (!canEdit(user)) return sendJson(response, 403, { error: '뷰어는 마인드맵을 변경할 수 없습니다.' })
+      const existing = await readMap(mapId)
+      if (!existing || existing.trashedAt || existing.archivedAt) {
+        return sendJson(response, 404, { error: '활성 마인드맵을 찾을 수 없습니다.' })
+      }
+      const body = await readJsonBody(request)
+      const baseVersion = Number(body.baseVersion)
+      if (!Number.isInteger(baseVersion) || baseVersion < 1) {
+        return sendJson(response, 400, { error: '현재 문서 버전을 입력해 주세요.' })
+      }
+      if (baseVersion !== existing.version) {
+        return sendJson(response, 409, {
+          error: '다른 사용자가 먼저 문서를 변경했습니다.', code: 'VERSION_CONFLICT',
+          map: existing, summary: mapSummary(existing),
+        })
+      }
+      let patchedMap
+      try {
+        patchedMap = applyMapContentPatch(existing, body.patch)
+      } catch (error) {
+        if (error instanceof MapContentPatchError) return sendJson(response, 400, { error: error.message, code: error.code })
+        throw error
+      }
+      if (!isValidMap(patchedMap)) {
+        return sendJson(response, 400, { error: '올바르지 않은 마인드맵 데이터입니다.' })
+      }
+      const normalizedIncomingMap = reconcileSharedKnowledgeReviews(existing, normalizeMapForPersistence(patchedMap))
+      const contentChanged = JSON.stringify({ nodes: existing.nodes, edges: existing.edges }) !== JSON.stringify(normalizedIncomingMap)
+      if (!contentChanged) return sendJson(response, 200, { map: existing, summary: mapSummary(existing) })
+      const suppressedWorkNotificationNodeIds = new Set(
+        (Array.isArray(body.suppressWorkNotificationNodeIds) ? body.suppressWorkNotificationNodeIds : [])
+          .filter((nodeId) => typeof nodeId === 'string' && normalizedIncomingMap.nodes.some((node) => node.id === nodeId))
+          .slice(0, 100),
+      )
+      let map
+      try {
+        map = await saveMap(mapId, normalizedIncomingMap, user, undefined, undefined, 'content', { expectedVersion: baseVersion })
+      } catch (error) {
+        if (error?.code !== 'VERSION_CONFLICT') throw error
+        const latest = await readMap(mapId)
+        return sendJson(response, 409, {
+          error: '다른 사용자가 먼저 문서를 변경했습니다.', code: 'VERSION_CONFLICT',
+          map: latest, summary: mapSummary(latest),
+        })
+      }
+      await createWorkChangeNotifications(existing, map, user, suppressedWorkNotificationNodeIds)
+      await createWaitingReleaseNotifications(existing, map, user, { includeActor: hasValidIntegrationBearer(request) })
+      broadcastMapChange(request, mapId, 'content', user)
+      return sendJson(response, 200, { map, summary: mapSummary(map) })
     }
 
     const mapRoute = url.pathname.match(/^\/api\/maps\/([^/]+)$/)

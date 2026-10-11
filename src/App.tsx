@@ -66,6 +66,7 @@ import { shouldReconnectEventStream } from './utils/eventStreamHealth.mjs'
 import { aiConversationLinksFromData } from './utils/aiConversations.mjs'
 import { revisionReasonLabel, shouldRefreshMapContentForAction } from './utils/mapChangeMetadata.mjs'
 import { mapContentsEqual, reconcileRemoteMapContent } from './utils/mapDocumentSync.mjs'
+import { createMapContentPatch } from './utils/mapContentPatch.mjs'
 import { mapCacheKey, reclaimSynchronizedMapCaches, tryWriteMapCache } from './utils/mapLocalCache.mjs'
 import { mergeMapContent } from './utils/mergeMapContent.mjs'
 import { nextOverlappingNodeId, nodeOverlapPresentation } from './utils/nodeOverlap.mjs'
@@ -4290,10 +4291,10 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         suppressedNotificationNodeIds.forEach((nodeId) => current.delete(nodeId))
         if (current.size === 0) pastedNodeNotificationSuppressions.current.delete(savingMapId)
       }
-      void apiRequest<{ map: MapDocument; summary: MapSummary }>(`/api/maps/${encodeURIComponent(savingMapId)}`, {
-        method: 'PUT',
+      void apiRequest<{ map: MapDocument; summary: MapSummary }>(`/api/maps/${encodeURIComponent(savingMapId)}/content-patch`, {
+        method: 'PATCH',
         body: JSON.stringify({
-          map: localContent,
+          patch: createMapContentPatch(saveBase, localContent),
           baseVersion: saveBase.version,
           suppressWorkNotificationNodeIds: suppressedNotificationNodeIds,
         }),
@@ -4319,10 +4320,10 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                 return
               }
               const mergedContent = { nodes: merged.nodes, edges: merged.edges }
-              const result = await apiRequest<{ map: MapDocument; summary: MapSummary }>(`/api/maps/${encodeURIComponent(savingMapId)}`, {
-                method: 'PUT',
+              const result = await apiRequest<{ map: MapDocument; summary: MapSummary }>(`/api/maps/${encodeURIComponent(savingMapId)}/content-patch`, {
+                method: 'PATCH',
                 body: JSON.stringify({
-                  map: mergedContent,
+                  patch: createMapContentPatch(remote, mergedContent),
                   baseVersion: remote.version,
                   suppressWorkNotificationNodeIds: suppressedNotificationNodeIds,
                 }),
@@ -5928,9 +5929,13 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     setSaveError('')
 
     try {
-      const sourceMap = mapId === activeMapId && loadedMapId === activeMapId
-        ? { nodes, edges, version: serverBaseline.current?.version }
-        : (await apiRequest<{ map: MapDocument }>(`/api/maps/${encodeURIComponent(mapId)}`)).map
+      const active = mapId === activeMapId && loadedMapId === activeMapId
+      const remoteMap = active ? null : (await apiRequest<{ map: MapDocument }>(`/api/maps/${encodeURIComponent(mapId)}`)).map
+      const sourceMap = active
+        ? createPersistedMapContent(nodes, edges)
+        : remoteMap!
+      const baseline = active ? serverBaseline.current : remoteMap
+      if (!baseline || !Number.isInteger(baseline.version)) throw new Error('현재 문서 버전을 확인할 수 없습니다. 다시 열어 주세요.')
       const completedNodes = sourceMap.nodes.map((node) => node.data.kind === 'image' ? node : ({
         ...node,
         data: {
@@ -5941,9 +5946,9 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
           waitingItems: [],
         },
       }))
-      const result = await apiRequest<{ map: MapDocument; summary: MapSummary }>(`/api/maps/${encodeURIComponent(mapId)}`, {
-        method: 'PUT',
-        body: JSON.stringify({ map: { nodes: completedNodes, edges: sourceMap.edges }, baseVersion: sourceMap.version }),
+      const result = await apiRequest<{ map: MapDocument; summary: MapSummary }>(`/api/maps/${encodeURIComponent(mapId)}/content-patch`, {
+        method: 'PATCH',
+        body: JSON.stringify({ patch: createMapContentPatch(baseline, { nodes: completedNodes, edges: sourceMap.edges }), baseVersion: baseline.version }),
       })
       setDocuments((current) => current.map((document) => document.id === result.summary.id ? result.summary : document))
       if (mapId === activeMapId) {

@@ -24,6 +24,7 @@ import { imageCardLocalAccess } from './imageAccess.mjs'
 import { withDocumentGroupMetadata } from './documentGroupMetadata.mjs'
 import { MCP_TOOL_USAGE_DIRECTORY_NAME, createFileToolUsageRecorder } from '../server/lib/mcpToolUsage.mjs'
 import { formatAiConversationDisplay } from '../server/lib/aiConversationDisplay.mjs'
+import { createMapContentPatch } from '../src/utils/mapContentPatch.mjs'
 import { createMnpApiConnectionResolver } from './apiConnection.mjs'
 
 const projectDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -535,14 +536,13 @@ async function getDocument(mapId) {
   return (await apiRequest(`/api/maps/${encodeURIComponent(mapId)}`)).map
 }
 
-async function saveDocument(map, force = false, aiCardId = '') {
-  return apiRequest(`/api/maps/${encodeURIComponent(map.id)}`, {
-    method: 'PUT',
+async function saveDocument(before, map, aiCardId = '') {
+  return apiRequest(`/api/maps/${encodeURIComponent(map.id)}/content-patch`, {
+    method: 'PATCH',
     aiCardId,
     body: JSON.stringify({
-      map: { nodes: map.nodes, edges: map.edges },
-      baseVersion: map.version,
-      force,
+      patch: createMapContentPatch(before, map),
+      baseVersion: before.version,
     }),
   })
 }
@@ -551,9 +551,10 @@ async function mutateDocument(mapId, aiCardId, mutation, maxAttempts = 3) {
   let lastError = null
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const map = await getDocument(mapId)
+    const before = structuredClone(map)
     const result = mutation(map)
     try {
-      const saved = await saveDocument(map, false, aiCardId)
+      const saved = await saveDocument(before, map, aiCardId)
       return { saved, result }
     } catch (error) {
       lastError = error
@@ -1944,7 +1945,8 @@ async function main() {
       required: false,
     })
     const map = await getDocument(mapId)
-    const previousMap = responseMode === 'affected' ? structuredClone(map) : null
+    const before = structuredClone(map)
+    const previousMap = responseMode === 'affected' ? before : null
     const parent = resolvedParentCardId ? map.nodes.find((node) => node.id === resolvedParentCardId) : null
     if (resolvedParentCardId && !parent) throw new Error('상위 카드를 찾을 수 없습니다.')
     const siblingIds = new Set(resolvedParentCardId
@@ -1979,7 +1981,7 @@ async function main() {
       data: { relation: 'hierarchy' },
       markerEnd: { type: 'arrowclosed', width: 16, height: 16 },
     })
-    const saved = await saveDocument(map, false, resolvedParentCardId ?? '')
+    const saved = await saveDocument(before, map, resolvedParentCardId ?? '')
     const savedMap = saved.map
     if (responseMode === 'full') {
       return {
@@ -2020,7 +2022,8 @@ async function main() {
     const map = await getDocument(mapId)
     const node = map.nodes.find((item) => item.id === resolvedCardId)
     if (!node) throw new Error('카드를 찾을 수 없습니다.')
-    const previousMap = responseMode === 'affected' ? structuredClone(map) : null
+    const before = structuredClone(map)
+    const previousMap = responseMode === 'affected' ? before : null
     const checklistState = checklistProgressPatch(data.checklist)
     const nextData = {
       ...node.data,
@@ -2032,7 +2035,7 @@ async function main() {
       ? { ...nextData, waitingItems: [] }
       : nextData
     if (position) node.position = position
-    const saved = await saveDocument(map, false, resolvedCardId)
+    const saved = await saveDocument(before, map, resolvedCardId)
     const savedMap = saved.map
     const savedCard = savedMap.nodes.find((item) => item.id === resolvedCardId)
     if (!savedCard) throw new Error('저장 후 카드를 찾을 수 없습니다.')
@@ -2253,7 +2256,8 @@ async function main() {
     if (resolvedCardId === resolvedParentCardId || descendantsOf(resolvedCardId, map.edges).has(resolvedParentCardId)) {
       throw new Error('자기 자신이나 하위 카드 아래로 이동할 수 없습니다.')
     }
-    const previousMap = responseMode === 'affected' ? structuredClone(map) : null
+    const before = structuredClone(map)
+    const previousMap = responseMode === 'affected' ? before : null
     const previousParentCardId = map.edges
       .find((edge) => isHierarchyEdge(edge) && edge.target === resolvedCardId)?.source ?? null
     map.edges = map.edges.filter((edge) => isKnowledgeEdge(edge) || edge.target !== resolvedCardId)
@@ -2265,7 +2269,7 @@ async function main() {
       data: { relation: 'hierarchy' },
       markerEnd: { type: 'arrowclosed', width: 16, height: 16 },
     })
-    const saved = await saveDocument(map, false, resolvedCardId)
+    const saved = await saveDocument(before, map, resolvedCardId)
     const savedMap = saved.map
     if (responseMode === 'full') {
       return {
@@ -2321,7 +2325,8 @@ async function main() {
       throw new Error(`최상위 카드의 직계 자식이 ${rootChildIds.length}개여서 삭제할 수 없습니다. 최상위로 승격할 카드 하나만 남긴 뒤 다시 시도하세요.`)
     }
     const promotedRootCardId = rootChildIds[0] ?? null
-    const previousMap = responseMode === 'affected' ? structuredClone(map) : null
+    const before = structuredClone(map)
+    const previousMap = responseMode === 'affected' ? before : null
     const deletesRoot = target.data?.kind === 'root'
     const deletedIds = !deletesRoot && includeDescendants ? descendantsOf(resolvedCardId, map.edges) : new Set()
     deletedIds.add(resolvedCardId)
@@ -2333,7 +2338,7 @@ async function main() {
         ? { ...node, data: { ...node.data, kind: 'root' } }
         : node)
     map.edges = map.edges.filter((edge) => !deletedIds.has(edge.source) && !deletedIds.has(edge.target))
-    const saved = await saveDocument(map, false, resolvedCardId)
+    const saved = await saveDocument(before, map, resolvedCardId)
     const savedMap = saved.map
     if (responseMode === 'full') {
       return {
