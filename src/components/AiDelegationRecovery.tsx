@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { completedReplacementDelegations, type AiDelegationSummary } from '../utils/aiDelegationManagement.mjs'
-import { aiDelegationRequiresRecovery, isVisibleAiDelegation } from '../utils/aiDelegationStatus.mjs'
+import { aiDelegationDisplayItems, aiDelegationRequiresRecovery, isVisibleAiDelegation } from '../utils/aiDelegationStatus.mjs'
 import { groupDelegationPresentation, groupDelegationReportHint, type GroupDelegation } from '../utils/groupOverview.mjs'
 import './AiDelegationRecovery.css'
 
@@ -63,8 +63,8 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
   const previewedItemId = useRef<string | null>(null)
   const listUrl = `/api/maps/${encodeURIComponent(mapId)}/ai-delegations`
   const refresh = useCallback(async (signal?: AbortSignal) => {
-    const data = await request<{ delegations: Delegation[] }>(listUrl, { signal })
-    const relevant = data.delegations.filter((item) =>
+    const data = await request<{ delegations: Delegation[]; requestFailures?: Delegation[] }>(listUrl, { signal })
+    const relevant = aiDelegationDisplayItems(data.delegations, data.requestFailures).filter((item) =>
       (item.parentMapId ?? item.mapId) === mapId && item.parentCardId === cardId)
     if (mounted.current) {
       setItems(relevant)
@@ -178,15 +178,22 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
 
   const pending = items.filter(isVisibleAiDelegation)
   const recoveryCount = pending.filter((item) => aiDelegationRequiresRecovery(item) || item.recovery?.reportRetryAvailable).length
-  const activeCount = pending.length - recoveryCount
-  const sectionTitle = recoveryCount > 0
+  const requestFailureCount = pending.filter(item => item.kind === 'request-failure').length
+  const incompleteTaskCount = pending.filter(item => item.state === 'completed' && item.taskCompletion?.state === 'incomplete'
+    && !aiDelegationRequiresRecovery(item) && !item.recovery?.reportRetryAvailable).length
+  const activeCount = pending.length - recoveryCount - requestFailureCount - incompleteTaskCount
+  const sectionTitle = requestFailureCount || incompleteTaskCount ? 'AI 위임 현황 및 확인 사항' : recoveryCount > 0
     ? activeCount > 0 ? 'AI 위임 현황 및 복구' : 'AI 작업 복구'
     : 'AI 위임 진행 현황'
   const sectionCount = [
     activeCount > 0 ? `진행 중 ${activeCount}건` : '',
     recoveryCount > 0 ? `복구 필요 ${recoveryCount}건` : '',
+    requestFailureCount > 0 ? `접수 실패 ${requestFailureCount}건` : '',
+    incompleteTaskCount > 0 ? `업무 확인 ${incompleteTaskCount}건` : '',
   ].filter(Boolean).join(' · ') || '상태 확인'
-  const sectionSummary = recoveryCount > 0
+  const sectionSummary = requestFailureCount || incompleteTaskCount
+    ? '위임 실행 기록과 접수 실패 요청을 구분합니다. AI 실행 종료는 카드 업무·기록 완료를 뜻하지 않으며 자동 재실행하지 않습니다.'
+    : recoveryCount > 0
     ? activeCount > 0
       ? '진행 중인 AI 위임과 복구가 필요한 작업을 확인하고, 가능한 후속 조치를 할 수 있습니다.'
       : '복구가 필요한 위임의 오류를 확인하고, 가능한 작업 재개나 결과 전달을 진행할 수 있습니다.'
@@ -218,7 +225,8 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
       const closing = closeDraft?.id === item.id
       const retryIntegration = item.recovery?.recommendedAction === 'retry-integration'
       const correctResult = item.recovery?.recommendedAction === 'correct-integration-result'
-      const errorDetail = item.recoveryDispatchError || item.childError || item.workspaceError || item.workspaceResult?.error || item.integrationError || item.parentError
+      const requestFailure = item.kind === 'request-failure'
+      const errorDetail = (requestFailure ? `${item.reasonCode}: ${item.message}` : '') || item.recoveryDispatchError || item.childError || item.workspaceError || item.workspaceResult?.error || item.integrationError || item.parentError
       return <div
         className="ai-delegation-recovery-item"
         key={item.id}
@@ -238,13 +246,13 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
         <button
           type="button"
           className="ai-delegation-recovery-item-select"
-          aria-label={`${item.targetCardLabel} 카드 선택`}
-          title={`${item.targetCardLabel} 카드 선택`}
+          aria-label={`${item.targetCardLabel || item.targetCardId} 카드 선택`}
+          title={`${item.targetCardLabel || item.targetCardId} 카드 선택`}
           onClick={() => onSelectCard(item.mapId, item.targetCardId)}
         />
         <div className="ai-delegation-recovery-item-heading">
           <div>
-            <b>{item.targetCardLabel}</b>
+            <b>{item.targetCardLabel || item.targetCardId}</b>
             <small className="ai-delegation-recovery-id" title={item.id}>{item.id}</small>
           </div>
           <span>{groupDelegationPresentation(item).label}</span>
@@ -264,7 +272,7 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
             <button type="button" {...actionAccessibility('취소', actionHints.cancelClose)} disabled={busy} onClick={() => setCloseDraft(null)}>취소</button>
             <button type="button" {...actionAccessibility('보고하지 않고 종료', actionHints.confirmClose)} className="danger" disabled={busy || closeDraft.note.trim().length < 3} onClick={() => void closeDelegation(item)}>보고하지 않고 종료</button>
           </div>
-        </div> : <div className="ai-delegation-recovery-actions">
+        </div> : !requestFailure && <div className="ai-delegation-recovery-actions">
           <button type="button" {...actionAccessibility('상태 다시 확인', actionHints.refresh)} disabled={busy} onClick={() => void action(item, 'refresh')}>상태 다시 확인</button>
           {item.recovery?.recoveryAvailable && <button type="button" {...actionAccessibility(correctResult ? '통합 대기 결과 정정' : retryIntegration ? '통합 재시도' : '기존 작업 재개', correctResult ? actionHints.correctResult : retryIntegration ? actionHints.retryIntegration : actionHints.recover)} disabled={busy} onClick={() => void action(item, 'recover')}>{correctResult ? '통합 대기 결과 정정' : retryIntegration ? '통합 재시도' : '기존 작업 재개'}</button>}
           {item.recovery?.reportRetryAvailable && <button type="button" {...actionAccessibility('결과 전달 재시도', actionHints.retryReport)} disabled={busy} onClick={() => void action(item, 'retry-report')}>결과 전달 재시도</button>}

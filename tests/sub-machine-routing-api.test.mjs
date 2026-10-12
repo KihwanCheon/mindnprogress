@@ -113,6 +113,9 @@ function subMachineResponse(request, conversationId = 'conversation-on-mac') {
   if (request.pathname === '/api/internal/external-conversation-dispatches' && request.method === 'POST') {
     return { conversationId: 'delegated-on-mac', state: 'running', turnId: 'turn-1' }
   }
+  if (request.pathname.startsWith('/api/internal/external-conversation-dispatches/')) {
+    return { state: 'running', conversationId: request.pathname.endsWith('/ordinary-mac-resume') ? 'resume-on-mac' : 'delegated-on-mac' }
+  }
   if (request.pathname === '/api/internal/external-conversation-launches') {
     const callbackUrl = new URL(request.body.completionUrl)
     assert.equal(callbackUrl.hostname, '127.0.0.1')
@@ -155,6 +158,7 @@ test('새 대화와 일반 AI 위임의 전체 경로는 선택한 서브 머신
     env: {
       ...process.env,
       MNP_DATA_DIR: dataDirectory,
+      MNP_WORKSPACE_POOL_REGISTRY: path.join(dataDirectory, 'absent-workspaces.json'),
       MNP_API_HOST: '127.0.0.1',
       MNP_API_PORT: String(port),
       MNP_WEB_PORT: String(port),
@@ -167,8 +171,10 @@ test('새 대화와 일반 AI 위임의 전체 경로는 선택한 서브 머신
       MNP_ADMIN_EMAIL: adminEmail,
       MNP_ADMIN_PASSWORD: adminPassword,
     },
-    stdio: 'ignore',
+    stdio: ['ignore', 'ignore', 'pipe'],
   })
+  let diagnosticLog = ''
+  server.stderr.on('data', chunk => { diagnosticLog += chunk })
 
   try {
     await waitForServer(baseUrl)
@@ -211,8 +217,12 @@ test('새 대화와 일반 AI 위임의 전체 경로는 선택한 서브 머신
           type: 'mind',
           position: { x: 300, y: 0 },
           data: { label: '하위 작업', description: '', kind: 'task', progress: 0, status: 'planned' },
+        }, {
+          id: 'resume-child', type: 'mind', position: { x: 300, y: 200 },
+          data: { label: '이어갈 하위 작업', kind: 'task', isWork: true, progress: 0, status: 'planned' },
         }],
-        edges: [{ id: 'root-child', source: 'root-card', target: 'child-card', data: { relation: 'hierarchy' } }],
+        edges: [{ id: 'root-child', source: 'root-card', target: 'child-card', data: { relation: 'hierarchy' } },
+          { id: 'root-resume-child', source: 'root-card', target: 'resume-child', data: { relation: 'hierarchy' } }],
       },
     })
     assert.equal(created.response.status, 201)
@@ -404,6 +414,8 @@ test('새 대화와 일반 AI 위임의 전체 경로는 선택한 서브 머신
     assert.equal(delegated.body.delegation.targetHomeMachineId, 'macbook')
     assert.equal(delegated.body.delegation.targetConversationId, 'delegated-on-mac')
     assert.equal(delegatedDispatch.create.workspace, '/Users/editor/project')
+    assert.equal(delegatedDispatch.workspaceLease, undefined)
+    assert.equal(delegated.body.delegation.workspaceLease, null)
 
     const delegatedMap = (await request(baseUrl, cookie, `/api/maps/${mapId}`)).body.map
     const delegatedLink = delegatedMap.nodes.find((node) => node.id === 'child-card').data.aiConversations[0]
@@ -414,6 +426,79 @@ test('새 대화와 일반 AI 위임의 전체 경로는 선택한 서브 머신
     assert.equal(origins.find((origin) => origin.conversationId === 'legacy-main-conversation')?.homeMachineId, 'desk-win')
     assert.equal(origins.find((origin) => origin.conversationId === conversationId)?.homeMachineId, 'macbook')
     assert.equal(origins.find((origin) => origin.conversationId === 'delegated-on-mac')?.homeMachineId, 'macbook')
+
+    const resumeAttribution = await requestWithRunner(baseUrl, runnerToken,
+      request(baseUrl, cookie, '/api/integrations/aionui/attributions', 'POST', {
+        workspace: '/Users/editor/project', workspaceConfirmed: true, machineId: 'macbook',
+        agentId: 'claude', modelId: 'opus', mapId, cardId: 'resume-child',
+      }), operation => subMachineResponse(operation, 'resume-on-mac'))
+    assert.equal(resumeAttribution.response.status, 201)
+    const resumeLink = await requestWithRunner(baseUrl, runnerToken,
+      request(baseUrl, '', new URL(resumeAttribution.body.completionUrl).pathname, 'POST', { conversationId: 'resume-on-mac' }),
+      operation => subMachineResponse(operation, 'resume-on-mac'))
+    assert.equal(resumeLink.response.status, 200)
+    const candidates = await requestWithRunner(baseUrl, runnerToken,
+      request(baseUrl, cookie, `/api/maps/${mapId}/cards/resume-child/ai-conversations`),
+      operation => subMachineResponse(operation, 'resume-on-mac'))
+    const assessment = candidates.body.conversations.find(item => item.conversationId === 'resume-on-mac').contextHealth.assessmentId
+    const beforeResume = (await request(baseUrl, cookie, `/api/maps/${mapId}`)).body.map
+    let resumeDispatch
+    const resumed = await requestWithRunner(baseUrl, runnerToken,
+      request(baseUrl, cookie, `/api/maps/${mapId}/ai-delegations`, 'POST', {
+        targetCardId: 'resume-child', sourceRevision: beforeResume.version, strategy: 'resume', machineId: 'macbook',
+        conversationId: 'resume-on-mac', conversationAssessmentId: assessment,
+        instruction: '일반 Mac 작업공간에서 이어가세요.', decisionReason: '같은 업무의 후속 작업', idempotencyKey: 'ordinary-mac-resume',
+      }, { 'X-MnP-AI-Map-Id': mapId, 'X-MnP-AI-Card-Id': 'root-card', 'X-MnP-AI-Conversation-Id': conversationId }),
+      operation => {
+        if (operation.pathname === '/api/internal/external-conversation-dispatches' && operation.method === 'POST') {
+          resumeDispatch = operation.body
+          return { conversationId: 'resume-on-mac', state: 'running', turnId: 'resume-turn' }
+        }
+        if (operation.pathname.includes('/api/internal/external-conversation-dispatches/')) return { state: 'running', conversationId: 'delegated-on-mac' }
+        return subMachineResponse(operation, 'resume-on-mac')
+      })
+    assert.equal(resumed.response.status, 202, JSON.stringify(resumed.body))
+    assert.equal(resumeDispatch.strategy, 'resume')
+    assert.equal(resumeDispatch.workspaceLease, undefined)
+    assert.equal(resumed.body.delegation.targetHomeMachineId, 'macbook')
+    assert.equal(resumed.body.delegation.workspaceLease, null)
+
+    const remoteBefore = JSON.parse(await readFile(path.join(dataDirectory, '_remote-workspace-pools.json'), 'utf8'))
+    assert.deepEqual(remoteBefore.leases, {})
+    const observed = await request(baseUrl, '', '/api/machines/macbook/runner/heartbeat', 'POST', {
+      workspacePool: { version: 2, coordinatorId: remoteBefore.coordinatorId, machineId: 'macbook', poolId: 'managed-test',
+        registryDigest: 'a'.repeat(64), sharedRoot: '/isolated/shared', originUrl: 'https://example.invalid/project.git',
+        workspaces: [{ workspaceId: 'fork', projectRoot: '/isolated/managed-fork', headCommit: 'b'.repeat(40),
+          generation: 0, dirty: false, runtimeIdle: true }] },
+    }, { Authorization: `Bearer ${runnerToken}` })
+    assert.equal(observed.response.status, 200)
+    const beforeFailure = (await request(baseUrl, cookie, `/api/maps/${mapId}`)).body.map
+    const privateInstruction = '민감한 지시 전문은 진단 로그나 실패 기록에 저장하지 않습니다.'
+    let dispatchCount = 0
+    const rejected = await requestWithRunner(baseUrl, runnerToken,
+      request(baseUrl, cookie, `/api/maps/${mapId}/ai-delegations`, 'POST', {
+        targetCardId: 'child-card', sourceRevision: beforeFailure.version, strategy: 'new', machineId: 'macbook',
+        instruction: privateInstruction, decisionReason: '미승인 풀 보호 검증', idempotencyKey: 'rejected-managed-fork',
+        newConversation: { agentId: 'claude', modelId: 'opus', workspace: '/isolated/managed-fork' },
+      }, { 'X-MnP-AI-Map-Id': mapId, 'X-MnP-AI-Card-Id': 'root-card', 'X-MnP-AI-Conversation-Id': conversationId }),
+      operation => { if (operation.method === 'POST') dispatchCount++; return subMachineResponse(operation, conversationId) })
+    assert.equal(rejected.response.status, 409, JSON.stringify(rejected.body))
+    assert.equal(rejected.body.reasonCode, 'REMOTE_WORKSPACE_MAIN_POOL_UNAVAILABLE')
+    assert.equal(rejected.body.error, rejected.body.message)
+    assert.equal(rejected.body.requestFailure.executionState, 'not-started')
+    assert.equal(dispatchCount, 0)
+    const afterFailure = (await request(baseUrl, cookie, `/api/maps/${mapId}`)).body.map
+    assert.deepEqual(afterFailure, beforeFailure)
+    const finalList = (await request(baseUrl, cookie, `/api/maps/${mapId}/ai-delegations`)).body
+    assert.equal(finalList.delegations.length, 2)
+    assert.equal(finalList.delegations.some(item => item.id === 'rejected-managed-fork'), false)
+    assert.equal(finalList.requestFailures.length, 1)
+    assert.equal(finalList.requestFailures[0].reasonCode, rejected.body.reasonCode)
+    const failureRecords = await readFile(path.join(dataDirectory, '_ai-delegation-request-failures.json'), 'utf8')
+    assert.equal(failureRecords.includes(privateInstruction), false)
+    assert.equal(diagnosticLog.includes(privateInstruction), false)
+    assert.match(diagnosticLog, /rejected-managed-fork/)
+    assert.match(diagnosticLog, /REMOTE_WORKSPACE_MAIN_POOL_UNAVAILABLE/)
   } finally {
     await stopServer(server)
     await rm(dataDirectory, { recursive: true, force: true })

@@ -7,6 +7,13 @@ import { aiDelegationWorkspaceLeaseMatches } from './aiDelegations.mjs'
 import { REMOTE_WORKSPACE_VERSION, identifier, commitId, git, hasCommit, jsonFile, saveJson, stableHash, workspaceError, assignmentMatches } from './remoteWorkspaceProtocol.mjs'
 
 // Remote paths are identities reported by the authenticated Runner, never local paths.
+function workspaceIdentity(root) {
+  if (typeof root !== 'string' || !root.trim()) return null
+  const raw = root.trim().replaceAll('\\', '/')
+  const value = path.posix.normalize(raw).replace(/\/$/, '')
+  return /^[a-z]:\//i.test(raw) || raw.startsWith('//') ? value.toLowerCase() : value
+}
+
 export class RemoteWorkspacePool {
   constructor({ local, stateFile, mainMachineId, callRunner, now = () => Date.now() }) {
     Object.assign(this, { local, stateFile, mainMachineId, callRunner, now })
@@ -100,8 +107,15 @@ export class RemoteWorkspacePool {
   poolForWorkspace(root, machineId) {
     if (machineId && machineId === this.mainMachineId()) return null
     // Include unapproved observations so a managed Fork never falls through to ordinary dispatch.
-    return [...Object.values(this.state?.reports ?? {}), ...Object.values(this.state?.pools ?? {})].find((report) => (!machineId || report.machineId === machineId)
-      && report.workspaces.some((worker) => worker.projectRoot === root)) ?? null
+    const identity = workspaceIdentity(root)
+    if (!identity) return null
+    const report = [...Object.values(this.state?.reports ?? {}), ...Object.values(this.state?.pools ?? {})].find((item) => (!machineId || item.machineId === machineId)
+      && item.workspaces.some((worker) => workspaceIdentity(worker.projectRoot) === identity))
+    if (report) return report
+    // A missing observation must not turn an existing managed lease into ordinary dispatch.
+    const lease = Object.values(this.state?.leases ?? {}).find((item) => (!machineId || item.ownership.machineId === machineId)
+      && workspaceIdentity(item.projectRoot) === identity)
+    return lease ? { machineId: lease.ownership.machineId, poolId: lease.poolId, originUrl: lease.originUrl } : null
   }
   snapshot(machineId) {
     const reports = Object.values(this.state?.reports ?? {}).filter((report) => !machineId || report.machineId === machineId)
@@ -192,7 +206,8 @@ export class RemoteWorkspacePool {
       const { pool, report } = this.pool(machineId)
       const knownHint = this.local.poolForWorkspace(options.workspaceHint) ? null
         : this.poolForWorkspace(options.workspaceHint, machineId) ?? this.poolForWorkspace(options.workspaceHint)
-      if (knownHint && knownHint.originUrl !== pool.originUrl) throw workspaceError('REMOTE_WORKSPACE_SCOPE_MISMATCH')
+      if (knownHint && (knownHint.originUrl !== pool.originUrl || knownHint.machineId !== machineId
+        || knownHint.poolId !== pool.poolId)) throw workspaceError('REMOTE_WORKSPACE_SCOPE_MISMATCH')
       const changes = await this.local.integrationTrackedChanges()
       if (changes.dirty) throw new WorkspacePoolUnavailableError('통합 작업공간의 미커밋 변경을 먼저 정리해야 합니다.', changes.paths, integrationWorktreeDirtyReasonCode)
       const worker = report.workspaces.find((candidate) => candidate.status === 'idle' && !candidate.dirty && candidate.runtimeIdle
@@ -496,8 +511,20 @@ export function remoteWorkspaceFacade(local, remote) {
       ?? target.poolForWorkspace(root) ?? remote.poolForWorkspace(root)
     if (property === 'publicSnapshot') return (options) => options?.machineId && options.machineId !== remote.mainMachineId()
       ? remote.workspaceSnapshot(options) : ({ ...target.publicSnapshot(options), ...remote.snapshot() })
-    if (property === 'acquire') return (options) => options.machineId && options.machineId !== remote.mainMachineId()
-      ? remote.acquire(options) : target.acquire(options)
+    if (property === 'acquire') return (options) => {
+      const machineId = options.machineId || remote.mainMachineId()
+      const prior = Object.values(remote.state?.leases ?? {}).find((lease) => lease.requestId === options.requestId)
+      const managed = remote.poolForWorkspace(options.workspaceHint, machineId) ?? remote.poolForWorkspace(options.workspaceHint)
+      if (prior || managed) {
+        if ((prior?.ownership.machineId ?? managed.machineId) !== machineId) throw workspaceError('REMOTE_WORKSPACE_SCOPE_MISMATCH')
+        return remote.acquire({ ...options, machineId })
+      }
+      if (machineId !== remote.mainMachineId()) {
+        if (target.poolForWorkspace(options.workspaceHint)) throw workspaceError('REMOTE_WORKSPACE_SCOPE_MISMATCH')
+        return null
+      }
+      return target.acquire(options)
+    }
     if (methods.has(property)) return (id, ...args) => remote.hasLease(id) ? remote[property](id, ...args) : target[property](id, ...args)
     if (unsupported.has(property)) return (id, ...args) => {
       if (remote.hasLease(id)) throw workspaceError('REMOTE_WORKSPACE_EXPLICIT_RECOVERY_REQUIRED')

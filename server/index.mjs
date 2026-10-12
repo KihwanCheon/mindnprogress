@@ -1,5 +1,6 @@
 import { createServer } from 'node:http'
 import { normalizeUntrackedMetaRecovery } from './lib/workspaceMetaRecovery.mjs'
+import { createAiDelegationRequestFailures, safeDelegationFailureMessage, withDelegationTaskCompletion } from './lib/aiDelegationRequestFailures.mjs'
 import { createRuntimeLifecycle, installRuntimeShutdown } from './lib/runtimeLifecycle.mjs'
 import { retryDispatchStatus, throwIfRuntimeStopping } from './lib/runtimeStopping.mjs'
 import { createAiWorkspaceSettings } from './lib/aiWorkspaceSettings.mjs'
@@ -34,7 +35,7 @@ import { createDoorayResponsePreferences } from './lib/doorayResponsePreferences
 import { AI_EXECUTION_APPROVAL_INSTRUCTION, GROUP_APPROVAL_INSTRUCTION, GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION, AI_DELEGATION_FOLLOWUP_INSTRUCTION, AI_DELEGATION_REPORT_INSTRUCTION } from '../src/utils/aiApprovalInstructions.mjs'
 import { MNP_CONTEXT_BOOTSTRAP_INSTRUCTION } from '../src/utils/aiContextInstructions.mjs'
 import { applyMapContentPatch, MapContentPatchError } from '../src/utils/mapContentPatch.mjs'
-import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
+import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto'
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { hostname, networkInterfaces, tmpdir } from 'node:os'
 import path from 'node:path'
@@ -318,6 +319,8 @@ const aiConversationRuntimeRefreshes = new Map()
 const aiConversationRuntimeRequests = new Map()
 const aiConversationRuntimeSummaries = new Map()
 const aiDelegations = new Map()
+const aiDelegationRequestContexts = new WeakMap()
+let aiDelegationRequestFailures
 const aiDelegationActions = new Set()
 let aiDelegationWriteQueue = Promise.resolve()
 let aiDelegationPollRunning = false
@@ -2890,7 +2893,26 @@ async function loadGroupDocumentInstructions() {
   }
 }
 
-function sendAiDelegationResponse(response, statusCode, reasonCode, message, payload = {}) {
+async function sendAiDelegationResponse(response, statusCode, reasonCode, message, payload = {}) {
+  const context = aiDelegationRequestContexts.get(response)
+  if (statusCode >= 400) message = safeDelegationFailureMessage(message, context?.instruction)
+  if (statusCode >= 400 && context) {
+    console.warn('[AI delegation request failure]', JSON.stringify({ requestId: context.requestId,
+      delegationId: context.delegationId, mapId: context.mapId, parentMapId: context.parentMapId,
+      parentCardId: context.parentCardId, targetCardId: context.targetCardId,
+      parentHomeMachineId: context.parentHomeMachineId, targetHomeMachineId: context.targetHomeMachineId,
+      status: statusCode, reasonCode }))
+  }
+  if (statusCode >= 400 && context && !aiDelegations.has(context.delegationId)) {
+    try {
+      const failure = await aiDelegationRequestFailures.record(context, { status: statusCode, reasonCode, message })
+      payload = { ...payload, requestFailure: failure }
+      broadcastEvent({ type: 'ai-delegation-request-failed', requestFailure: failure })
+    } catch {
+      console.warn('[AI delegation request failure storage]', JSON.stringify({ requestId: context.requestId, reasonCode: 'REQUEST_FAILURE_STORAGE_FAILED' }))
+      payload = { ...payload, requestFailureRecorded: false }
+    }
+  }
   return sendJson(
     response,
     statusCode,
@@ -7178,6 +7200,9 @@ await loadAiConversationAttributions()
 await loadMachineRegistry()
 await loadAiConversationOrigins()
 await loadAiDelegations()
+aiDelegationRequestFailures = await createAiDelegationRequestFailures({
+  filePath: path.join(dataDirectory, '_ai-delegation-request-failures.json'), readJson: readStoredArray, writeJson: writeStoredArray,
+})
 await loadGroupDocumentInstructions()
 await loadAiWorkspaceHistories()
 await loadDistributedWorkSettings()
@@ -9705,13 +9730,17 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       if (!isValidMapId(mapId)) return sendJson(response, 400, { error: '문서 ID가 올바르지 않습니다.' })
       const parentCardId = String(url.searchParams.get('parentCardId') ?? '').trim()
       const targetCardId = String(url.searchParams.get('targetCardId') ?? '').trim()
-      const delegations = [...aiDelegations.values()]
+      const listed = [...aiDelegations.values()]
         .filter((delegation) => (delegation.mapId === mapId || delegation.parentMapId === mapId)
           && (!parentCardId || delegation.parentCardId === parentCardId)
           && (!targetCardId || delegation.targetCardId === targetCardId))
         .sort((first, second) => String(second.createdAt).localeCompare(String(first.createdAt)))
-        .map((delegation) => delegationPublicView(delegation, url.searchParams.get('includeResult') === 'true'))
-      return sendJson(response, 200, { mapId, delegations })
+      const maps = new Map(await Promise.all([...new Set(listed.map(item => item.mapId))]
+        .map(async id => [id, await readMap(id)])))
+      const delegations = listed.map(item => withDelegationTaskCompletion(
+        delegationPublicView(item, url.searchParams.get('includeResult') === 'true'), maps.get(item.mapId)))
+      const requestFailures = aiDelegationRequestFailures.list({ mapId, parentCardId, targetCardId, delegations: aiDelegations })
+      return sendJson(response, 200, { mapId, delegations, requestFailures })
     }
 
     if (aiDelegationsRoute && request.method === 'POST') {
@@ -9773,6 +9802,9 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       }
 
       const parentHomeMachineId = conversationHomeMachineId(source.conversationId, source)
+      const requestContext = { requestId: `request-${randomUUID()}`, delegationId: id, mapId, parentMapId,
+        parentCardId: source.cardId, targetCardId, parentHomeMachineId, strategy, instruction, dispatchStarted: false }
+      aiDelegationRequestContexts.set(response, requestContext)
       let targetHomeMachineId
       try {
         if (strategy === 'resume') {
@@ -9799,6 +9831,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         )
         throw error
       }
+      requestContext.targetHomeMachineId = targetHomeMachineId
       if (!await aionCoreSupportsExplicitCompletionAfterInterruption(targetHomeMachineId)) {
         const message = `${machineLabel(targetHomeMachineId)}의 AionCore가 중단 후 명시적 완료 신호를 지원하지 않습니다. AionCore를 최신 빌드로 재기동해 주세요.`
         return sendAiDelegationResponse(response, 503, 'AIONCORE_EXPLICIT_COMPLETION_UNAVAILABLE', message, {
@@ -9820,6 +9853,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         newConversation: body.newConversation,
       })
       const existingDelegation = aiDelegations.get(id)
+      requestContext.requestSignature = requestSignature
       if (existingDelegation) {
         if (existingDelegation.requestSignature !== requestSignature) {
           return sendAiDelegationResponse(response, 409, 'AI_DELEGATION_IDEMPOTENCY_CONFLICT',
@@ -9840,6 +9874,8 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           '상위 카드 또는 위임 대상 카드를 찾을 수 없습니다.')
       }
       const parentAttribution = delegationParentAttribution(request, source, parentCard, user)
+      requestContext.parentCardLabel = parentCard.data?.label ?? parentCard.id
+      requestContext.targetCardLabel = targetCard.data?.label ?? targetCard.id
       if (!parentAttribution?.conversationId
         || (source.conversationId && !isAiConversationLinked(parentCard.data, source.conversationId))) {
         return sendAiDelegationResponse(response, 409, 'AI_DELEGATION_ORIGIN_LINK_MISSING',
@@ -10107,7 +10143,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           const capabilities = await fetchAionCoreDispatchCapabilities(targetHomeMachineId)
           if (!(capabilities?.workspaceLeaseVersion >= 3) || capabilities?.remoteWorkspaceOwnership !== true) throw Object.assign(new Error('AionCore 원격 작업공간 소유권 지원이 필요합니다.'), { reasonCode: 'AIONCORE_REMOTE_WORKSPACE_UNAVAILABLE' })
         } catch (error) {
-          return sendAiDelegationResponse(response, 409, error.reasonCode ?? 'REMOTE_WORKSPACE_UNAVAILABLE', error.message, { targetHomeMachineId })
+          return sendAiDelegationResponse(response, error.status ?? 409, error.reasonCode ?? 'REMOTE_WORKSPACE_UNAVAILABLE', error.message, { targetHomeMachineId })
         }
       }
       if (expectsWorkspacePool) {
@@ -10200,7 +10236,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         })
       }
       try {
-        workspaceLease = crossDocument ? null : resumedDelegation?.workspaceLease?.leaseId
+        workspaceLease = crossDocument || !expectsWorkspacePool ? null : resumedDelegation?.workspaceLease?.leaseId
           ? await workspacePoolManager.reuseLease(resumedDelegation.workspaceLease.leaseId, {
               mapId,
               cardId: targetCard.id,
@@ -10312,6 +10348,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         : null
       let dispatch
       try {
+        requestContext.dispatchStarted = true
         dispatch = await fetchAionUiOn(targetHomeMachineId, '/api/internal/external-conversation-dispatches', {
           method: 'POST',
           timeoutMs: 30_000,
@@ -10344,6 +10381,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           aiAttributions.delete(sessionTokenKey(attributionToken))
           const definitelyRejected = Number.isInteger(error?.status)
             && error.status >= 400 && error.status < 500 && error.status !== 409 && error.status !== 429
+          requestContext.definitelyRejected = definitelyRejected
           await restoreAiDelegationResumeReservation(resumedDelegation, error)
           await Promise.all([
             persistAiAttributions(),
@@ -10534,7 +10572,15 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         repeated: false,
       })
       }
-      return await (crossDocument ? groupProjects.exclusive(runDelegation) : runDelegation())
+      try {
+        return await (crossDocument ? groupProjects.exclusive(runDelegation) : runDelegation())
+      } catch (error) {
+        throwIfRuntimeStopping(error, runtimeLifecycle.signal)
+        const expected = Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599
+        return sendAiDelegationResponse(response, expected ? error.status : 500,
+          error.reasonCode ?? error.code ?? 'AI_DELEGATION_REQUEST_FAILED',
+          expected ? error.message : 'AI 위임 요청 처리 중 서버 오류가 발생했습니다.')
+      }
     }
 
     const cardAiConversationOpenRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/cards\/([^/]+)\/ai-conversations\/([^/]+)\/open-url$/)

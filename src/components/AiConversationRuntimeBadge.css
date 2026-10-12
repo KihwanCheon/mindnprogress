@@ -135,6 +135,19 @@
   }
 }
 
+.node-topline > .ai-delegation-status-badge.task-incomplete {
+  color: #b77c13;
+  border-color: #c69238;
+  background: rgba(198, 146, 56, .12);
+  animation: none;
+}
+
+.mind-node.root .node-topline > .ai-delegation-status-badge.task-incomplete {
+  color: #fff1c7;
+  border-color: rgba(255, 228, 157, .5);
+  background: rgba(126, 83, 10, .2);
+}
+
 @keyframes ai-conversation-runtime-typing {
   0%, 60%, 100% { opacity: .45; transform: translateY(0); }
   30% { opacity: 1; transform: translateY(-3px); }

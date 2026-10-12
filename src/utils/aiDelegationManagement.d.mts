@@ -1,6 +1,11 @@
 export type AiDelegationSummary = {
   id: string
   state: string
+  kind?: 'request-failure'
+  resolvedByDelegationId?: string | null
+  requestedDelegationId?: string
+  executionState?: 'not-started' | 'unknown'
+  taskCompletion?: { state: 'completed' | 'incomplete'; status: string; progress: number; message: string }
   displayState?: string
   reasonCode?: string
   message?: string

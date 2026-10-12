@@ -7,9 +7,15 @@ export function aiDelegationRequiresRecovery(item) {
 }
 
 export function isVisibleAiDelegation(item) {
+  if (item?.kind === 'request-failure') return !item.resolvedByDelegationId
   return !terminalStates.has(item?.state)
     || aiDelegationRequiresRecovery(item)
     || item?.recovery?.reportRetryAvailable === true
+    || (item?.state === 'completed' && item?.taskCompletion?.state === 'incomplete')
+}
+
+export function aiDelegationDisplayItems(delegations = [], requestFailures = []) {
+  return [...delegations, ...requestFailures.filter(item => !item.resolvedByDelegationId)]
 }
 
 function usefulDetail(item) {
@@ -42,20 +48,28 @@ export function aiDelegationStatusByCard(delegations, mapId) {
 
   return Object.fromEntries([...grouped.entries()].map(([cardId, itemMap]) => {
     const items = [...itemMap.values()]
+    const requestFailures = items.filter(item => item.kind === 'request-failure')
+    const incompleteTasks = items.filter(item => item.state === 'completed' && item.taskCompletion?.state === 'incomplete'
+      && !aiDelegationRequiresRecovery(item) && !item.recovery?.reportRetryAvailable)
     const recovery = items.filter(aiDelegationRequiresRecovery)
     const report = items.filter((item) => !aiDelegationRequiresRecovery(item)
       && item.recovery?.reportRetryAvailable === true)
     const active = items.filter((item) => !aiDelegationRequiresRecovery(item)
       && item.recovery?.reportRetryAvailable !== true
+      && item.kind !== 'request-failure'
       && !terminalStates.has(item.state))
-    const kind = recovery.length > 0 ? 'recovery' : report.length > 0 ? 'report' : 'active'
-    const prioritized = (kind === 'recovery' ? recovery : kind === 'report' ? report : active)
+    const kind = recovery.length > 0 ? 'recovery' : report.length > 0 ? 'report'
+      : requestFailures.length > 0 ? 'request-failed' : active.length > 0 ? 'active' : 'attention'
+    const prioritized = (kind === 'recovery' ? recovery : kind === 'report' ? report
+      : kind === 'request-failed' ? requestFailures : kind === 'attention' ? incompleteTasks : active)
       .slice()
       .sort((left, right) => String(right.updatedAt ?? '').localeCompare(String(left.updatedAt ?? '')))
     const title = [
       active.length ? `AI 위임 진행 ${active.length}건` : '',
       recovery.length ? `AI 작업 복구 필요 ${recovery.length}건` : '',
       report.length ? `AI 결과 전달 필요 ${report.length}건` : '',
+      requestFailures.length ? `AI 위임 접수 실패 ${requestFailures.length}건` : '',
+      incompleteTasks.length ? `AI 실행 종료 · 카드 업무 미완료 ${incompleteTasks.length}건` : '',
       usefulDetail(prioritized[0]),
       '카드를 선택하면 세부 정보의 AI 위임 영역에서 확인할 수 있습니다.',
     ].filter(Boolean).join('\n')
@@ -65,6 +79,8 @@ export function aiDelegationStatusByCard(delegations, mapId) {
       activeCount: active.length,
       recoveryCount: recovery.length,
       reportCount: report.length,
+      requestFailureCount: requestFailures.length,
+      incompleteTaskCount: incompleteTasks.length,
       title,
     }]
   }))

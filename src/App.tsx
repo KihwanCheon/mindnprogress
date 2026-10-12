@@ -3760,12 +3760,12 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       if (controller.signal.aborted || inFlight) return
       inFlight = true
       try {
-        const result = await apiRequest<{ delegations: AiDelegationSummary[] }>(
+        const result = await apiRequest<{ delegations: AiDelegationSummary[]; requestFailures?: AiDelegationSummary[] }>(
           `/api/maps/${encodeURIComponent(activeMapId)}/ai-delegations`,
           { signal: controller.signal },
         )
         if (!controller.signal.aborted) {
-          setAiDelegationStatuses(aiDelegationStatusByCard(result.delegations, activeMapId))
+          setAiDelegationStatuses(aiDelegationStatusByCard([...result.delegations, ...(result.requestFailures ?? [])], activeMapId))
         }
       } catch {
         // 일시적인 조회 실패로 이미 확인한 복구 표시를 지우지 않는다.

@@ -92,11 +92,13 @@ export type AiConversationRuntime = {
 }
 
 export type AiDelegationCardStatus = {
-  kind: 'active' | 'recovery' | 'report'
+  kind: 'active' | 'recovery' | 'report' | 'request-failed' | 'attention'
   count: number
   activeCount: number
   recoveryCount: number
   reportCount: number
+  requestFailureCount?: number
+  incompleteTaskCount?: number
   title: string
 }
 
