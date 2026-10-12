@@ -116,6 +116,8 @@ export function aiDelegationResponseBody(statusCode, reasonCode, message, payloa
 }
 
 export function aiDelegationStateReason(delegation) {
+  if (delegation?.state === 'recovery-required' && !delegation.resultCorrection && delegation.recoveryDispatchRejection) return requiredAiDelegationReason(
+    'AI_DELEGATION_RECOVERY_CONVERSATION_BUSY', '대상 대화가 사용 중이어서 복구 실행을 시작하지 않았습니다. 기존 작업과 작업공간을 보존했으며 대화가 유휴 상태가 된 뒤 같은 위임을 복구하세요.')
   if (delegation?.resultCorrection?.phase === 'held') return requiredAiDelegationReason('AI_DELEGATION_RESULT_CORRECTION_HELD',
     '결과 정정 실행 또는 Git 상태를 확인할 수 없어 기존 작업공간과 통합 잠금을 보존합니다. 별도 증거 검토가 필요합니다.')
   const displayState = aiDelegationDisplayState(delegation)
@@ -442,6 +444,48 @@ export function retryableExternalLimitCategory(error) {
   return null
 }
 
+// busy는 새 실행이 시작되지 않은 접수 거절이다. 실행 턴이 있으면 이 예외를 적용하지 않는다.
+export function aiDelegationBusyDispatchRejected(dispatch, conversationId, operationId) {
+  return Boolean(conversationId && operationId && dispatch?.operationId === operationId
+    && dispatch.conversationId === conversationId && dispatch.state === 'failed' && !dispatch.turnId
+    && dispatch.errorMessage === `Conversation is busy: conversation ${conversationId} is already running`)
+}
+
+export function aiDelegationBusyRecoveryOperation(delegation) {
+  if (delegation?.resultCorrection) return null
+  const rejection = delegation?.recoveryDispatchRejection
+  if (delegation?.state === 'recovery-required' && rejection && delegation.recoveryOperationId === rejection.operationId
+    && aiDelegationBusyDispatchRejected(rejection, delegation.targetConversationId, rejection.operationId)) return rejection.operationId
+  // 이전 버전은 거절된 복구 요청을 child operation으로 바꾼 뒤 worker를 격리했다.
+  const result = delegation?.workspaceResult
+  const operationId = delegation?.recoveryOperationId
+  if (delegation?.state !== 'failed' || !operationId || delegation.childOperationId !== operationId
+    || !Number.isInteger(delegation.recoveryAttempt) || delegation.recoveryAttempt < 1 || delegation.childTurnId || result?.status !== 'quarantined'
+    || result.childStatus !== 'failed' || result.integratedCommit || result.integrationBranch
+    || result.unmergedFiles?.length || !['workspaceId', 'jobId', 'leaseId', 'branch', 'baseCommit'].every(key =>
+      typeof delegation.workspaceLease?.[key] === 'string' && Boolean(delegation.workspaceLease[key])
+      && result[key] === delegation.workspaceLease[key])
+    || result.mapId !== delegation.mapId || result.cardId !== delegation.targetCardId
+    || result.conversationId !== delegation.targetConversationId) return null
+  return aiDelegationBusyDispatchRejected({ operationId, conversationId: delegation.targetConversationId,
+    state: 'failed', errorMessage: result.childError }, delegation.targetConversationId, operationId) ? operationId : null
+}
+
+export function rejectedAiDelegationRecoveryPatch(delegation, pending, dispatch, at = new Date().toISOString()) {
+  if (!aiDelegationBusyDispatchRejected(dispatch, delegation.targetConversationId, pending.operationId)
+    || !aiDelegationWorkspaceLeaseMatches(pending.workspaceLease ?? null, dispatch.workspaceLease ?? null)) {
+    throw new Error('복구 접수 거절의 실행·대화·작업공간을 확인하지 못했습니다.')
+  }
+  const rejection = { operationId: pending.operationId, conversationId: dispatch.conversationId,
+    state: dispatch.state, errorMessage: dispatch.errorMessage, turnId: null, executionStarted: false, rejectedAt: at }
+  return { state: pending.integrationRecovery ? 'integration-recovery-required' : 'recovery-required',
+    pendingRecovery: null, recoveryWorkspaceLease: null, workspaceLease: pending.workspaceLease,
+    recoveryAttempt: pending.attempt, recoveryOperationId: pending.operationId,
+    recoverySourceState: pending.sourceState, recoveryRequiredAt: at, completedAt: null,
+    recoveryDispatchError: dispatch.errorMessage, recoveryDispatchRejection: rejection,
+    recoveryDispatchRejections: [...(delegation.recoveryDispatchRejections ?? []), rejection].slice(-20) }
+}
+
 export function localChangesIntegrationCommits(result) {
   if (result?.status !== 'quarantined' || result.childStatus !== 'completed'
     || result.integratedCommit || !result.integrationBranch || !result.integrationBaseCommit
@@ -469,6 +513,10 @@ export function aiDelegationRecoveryAvailability(delegation) {
   if (delegation?.resultCorrection?.phase === 'held') return { failurePhase: 'integration', failureCategory: 'integration-result-correction',
     recoveryAvailable: false, recommendedAction: 'inspect-failure' }
   if (delegation?.pendingRecovery) return { failurePhase: 'dispatch', failureCategory: 'unknown', recoveryAvailable: false, recommendedAction: 'refresh-status', recoveryTool: 'mindnprogress_refresh_ai_delegation' }
+  if (!delegation?.resultCorrection && aiDelegationBusyRecoveryOperation(delegation)) {
+    return { failurePhase: 'dispatch', failureCategory: 'recovery-dispatch-busy', recoveryAvailable: true,
+      recommendedAction: 'resume-existing', recoveryTool: 'mindnprogress_recover_ai_delegation' }
+  }
   if (delegation?.resultCorrection && (delegation.resultCorrection.phase === 'preparing'
     || ['recovery-required', 'waiting-child-resume'].includes(delegation.state))) {
     return { failurePhase: 'integration', failureCategory: 'integration-result-correction', recoveryAvailable: true,

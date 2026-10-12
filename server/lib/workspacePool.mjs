@@ -4,7 +4,7 @@ import { copyFile, lstat, mkdir, readFile, readlink, rename, rm, stat, writeFile
 import path from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { promisify } from 'node:util'
-import { aiDelegationWorkspaceLeaseMatches, integrationGitLockFailure, localChangesIntegrationCommits, retryableExternalLimitCategory } from './aiDelegations.mjs'
+import { aiDelegationBusyDispatchRejected, aiDelegationWorkspaceLeaseMatches, integrationGitLockFailure, localChangesIntegrationCommits, retryableExternalLimitCategory } from './aiDelegations.mjs'
 import { replaceFileWithRetry } from './replaceFileWithRetry.mjs'
 import { assertAiDelegationSourceCompletionLease } from './aiDelegationSourceCompletion.mjs'
 import { acquireWorkspaceLock, git as ownershipGit, jsonFile, saveJson } from './remoteWorkspaceProtocol.mjs'
@@ -1324,10 +1324,16 @@ export class WorkspacePoolManager {
     conversationId,
     failureCategory,
     confirmedDispatchLease,
+    rejectedDispatch,
   } = {}) {
     // 서버가 원본 operation 또는 만료 후 최초 위임 전문을 직접 검증한 경우에만 사용한다.
     // 요청 본문이나 AI가 주장한 대화 ID만으로 격리를 해제하지 않는다.
     const dispatchRecovery = failureCategory === 'confirmed-dispatch'
+    const busyRecovery = failureCategory === 'recovery-dispatch-busy'
+    if (busyRecovery && (!aiDelegationBusyDispatchRejected(rejectedDispatch, conversationId, rejectedDispatch?.operationId)
+      || !aiDelegationWorkspaceLeaseMatches(this.state?.leases?.[leaseId], rejectedDispatch.workspaceLease))) {
+      throw new WorkspacePoolUnavailableError('복구 접수 거절의 대화·작업공간 소유권을 확인하지 못했습니다.')
+    }
     if (dispatchRecovery && !aiDelegationWorkspaceLeaseMatches(this.state?.leases?.[leaseId], confirmedDispatchLease)) {
       throw new WorkspacePoolUnavailableError('기존 실행의 작업공간 소유권을 확인하지 못했습니다.')
     }
@@ -1338,7 +1344,7 @@ export class WorkspacePoolManager {
     return this.runExclusive(async () => {
       const normalizedLeaseId = String(leaseId ?? '').trim()
       const normalizedConversationId = String(conversationId ?? '').trim()
-      if (!dispatchRecovery && !['usage-limit', 'rate-limit', 'model-capacity'].includes(String(failureCategory ?? '').trim())) {
+      if (!dispatchRecovery && !busyRecovery && !['usage-limit', 'rate-limit', 'model-capacity'].includes(String(failureCategory ?? '').trim())) {
         throw new WorkspacePoolUnavailableError(
           '외부 사용량·요청 한도 또는 모델 용량 부족으로 확인된 격리 lease만 재활성화할 수 있습니다.',
           [],
@@ -1471,7 +1477,8 @@ export class WorkspacePoolManager {
       const recoveredAt = new Date().toISOString()
       lease.recoveryHistory ??= []
       lease.recoveryHistory.push({
-        type: dispatchRecovery ? 'confirmed-dispatch' : 'retryable-child-failure',
+        type: dispatchRecovery ? 'confirmed-dispatch' : busyRecovery ? 'rejected-recovery-dispatch' : 'retryable-child-failure',
+        ...(busyRecovery ? { rejectedOperationId: rejectedDispatch.operationId } : {}),
         previousStatus: lease.status,
         previousResult: lease.result,
         uncommittedChangesPreserved: Boolean(dirty),
@@ -1496,7 +1503,7 @@ export class WorkspacePoolManager {
         ...session,
         conversationId: normalizedConversationId,
         recovery: {
-          type: dispatchRecovery ? 'confirmed-dispatch' : 'retryable-child-failure',
+          type: dispatchRecovery ? 'confirmed-dispatch' : busyRecovery ? 'rejected-recovery-dispatch' : 'retryable-child-failure',
           recoveredAt,
         },
         updatedAt: recoveredAt,

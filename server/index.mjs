@@ -68,6 +68,9 @@ import {
   aiDelegationBlocksResume,
   aiDelegationClosureAvailability,
   aiDelegationRecoveryAvailability,
+  aiDelegationBusyDispatchRejected,
+  aiDelegationBusyRecoveryOperation,
+  rejectedAiDelegationRecoveryPatch,
   aiDelegationReportResult,
   aiDelegationLimitState,
   aiDelegationAttemptHistory,
@@ -3599,6 +3602,8 @@ async function latestAssistantResult(conversationId) {
 
 async function captureAiDelegationChildResult(delegation) {
   if (delegation?.childResultSnapshot) return delegation
+  // 실행 턴이 없는 접수 거절에 수동 작업의 최신 중간 답변을 결과로 붙이지 않는다.
+  if (!delegation?.childTurnId) return delegation
   const lastAttempt = Date.parse(String(delegation?.childResultCaptureAttemptedAt ?? ''))
   if (Number.isFinite(lastAttempt) && Date.now() - lastAttempt < 10_000) return delegation
   const result = await latestAssistantResult(delegation?.targetConversationId)
@@ -3943,6 +3948,9 @@ async function settlePendingAiRecovery(delegation, { allowDispatch = false } = {
     throw aiDelegationDispatchError('복구 실행의 operation·대화·작업공간·상태가 저장된 요청과 일치하지 않습니다.', 409)
   }
   if (!knownState) throw aiDelegationDispatchError('복구 실행 상태를 아직 확인할 수 없습니다.', 409)
+  if (!pending.resultCorrection && aiDelegationBusyDispatchRejected(dispatch, delegation.targetConversationId, pending.operationId)) {
+    return updateAiDelegation(delegation.id, rejectedAiDelegationRecoveryPatch(delegation, pending, dispatch))
+  }
   const now = new Date().toISOString()
   const runtime = pending.integrationRecovery ? { state: integrationDelegationState(dispatch.state), integrationOperationId: pending.operationId, integrationTurnId: dispatch.turnId ?? null } : {
     ...initialAiDelegationRuntime(dispatch, now), childOperationId: pending.operationId,
@@ -3962,13 +3970,25 @@ async function settlePendingAiRecovery(delegation, { allowDispatch = false } = {
     ...runtime, pendingRecovery: null, recoveryWorkspaceLease: null, recoveryAttempt: pending.attempt, recoveryOperationId: pending.operationId,
     ...(pending.resultCorrection ? { resultCorrection: { ...delegation.resultCorrection, phase: 'dispatched' } } : {}),
     recoverySourceState: pending.sourceState, workspaceLease: pending.workspaceLease,
-    recoveryDispatchError: null, parentError: null, parentDispatchState: null, completedAt: null,
+    recoveryDispatchError: null, recoveryDispatchRejection: null, parentError: null, parentDispatchState: null, completedAt: null,
   })
 }
 
 async function refreshSuspendedAiDelegation(delegation) {
   if (delegation.pendingRecovery) return settlePendingAiRecovery(delegation)
   if (['completed', 'superseded', 'closed'].includes(delegation.state)) return delegation
+  const rejectedRecovery = aiDelegationBusyRecoveryOperation(delegation)
+  if (delegation.recoveryDispatchRejection && rejectedRecovery) {
+    const dispatch = await readAiDelegationDispatchStatus(fetchAionUiOn, {
+      machineId: delegationTargetMachineId(delegation), operationId: rejectedRecovery, phase: 'recovery',
+    })
+    if (!aiDelegationBusyDispatchRejected(dispatch, delegation.targetConversationId, rejectedRecovery)
+      || !aiDelegationWorkspaceLeaseMatches(delegation.workspaceLease ?? null, dispatch.workspaceLease ?? null)) {
+      throw aiDelegationDispatchError('거절된 복구 요청의 기존 실행·대화·lease를 확인하지 못했습니다.', 409)
+    }
+    // 원 operation의 과거 실패를 다시 적용하거나 수동 작업의 최신 답변을 캡처하지 않는다.
+    return delegation
+  }
   const delivered = aiDelegationStoredReportDeliveryPatch(delegation)
   if (delivered) return updateAiDelegation(delegation.id, delivered)
   // 하위 실행이 이미 끝난 보고 대기를 과거 child operation 조회 실패로 막지 않는다.
@@ -8966,6 +8986,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       }
       const mapId = delegation.mapId
       const recoveryAvailability = aiDelegationRecoveryAvailability(delegation)
+      const busyRecoveryOperation = aiDelegationBusyRecoveryOperation(delegation)
       const retryIntegration = recoveryAvailability?.recoveryAvailable === true
         && recoveryAvailability.recommendedAction === 'retry-integration'
       const correctionAvailable = recoveryAvailability?.recommendedAction === 'correct-integration-result'
@@ -8986,6 +9007,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       const retryableParentWakeFailure = ['parent-wake-failed', 'failed', 'waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity'].includes(delegation.state)
         && recoveryAvailability?.recoveryAvailable === true
         && recoveryAvailability.recommendedAction === 'resume-existing'
+      const retryableChildRecovery = retryableParentWakeFailure || recoveryAvailability?.failureCategory === 'recovery-dispatch-busy'
       if (!['recovery-required', 'integration-recovery-required', 'waiting-child-resume'].includes(delegation.state)
         && !retryableParentWakeFailure && !retryIntegration && !correctionAvailable && !delegation.pendingRecovery
         && !delegation.resultCorrection) {
@@ -9034,6 +9056,10 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       if (delegation.pendingRecovery) {
         try {
           const updated = await settlePendingAiRecovery(delegation, { allowDispatch: resultCorrection })
+          if (updated.recoveryDispatchRejection?.operationId === updated.recoveryOperationId) return sendJson(response, 409, {
+            error: '대상 대화가 사용 중이어서 복구 실행을 시작하지 않았습니다. 기존 작업과 작업공간을 보존했습니다.',
+            code: 'AI_DELEGATION_RECOVERY_CONVERSATION_BUSY', delegation: delegationPublicView(updated), executionRequested: false,
+          })
           return sendJson(response, 202, { delegation: delegationPublicView(updated), repeated: true, recovery: { operationId: updated.recoveryOperationId, attempt: updated.recoveryAttempt, reusedConversation: true, reusedWorkspace: Boolean(updated.workspaceLease) } })
         } catch (shutdownError) {
           throwIfRuntimeStopping(shutdownError, runtimeLifecycle.signal)
@@ -9165,6 +9191,22 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         ? continuingCorrection ? boundedAionOperationId(delegation.id, `correct-${recoveryAttempt}`)
           : delegation.resultCorrection?.operationId ?? boundedAionOperationId(delegation.id, `correct-${recoveryAttempt}`)
         : boundedAionOperationId(delegation.id, `${integrationRecovery ? 'integrate-' : ''}recover-${recoveryAttempt}`)
+      let rejectedDispatch
+      if (busyRecoveryOperation) {
+        try {
+          rejectedDispatch = await readAiDelegationDispatchStatus(fetchAionUiOn, {
+            machineId: delegationTargetMachineId(delegation), operationId: busyRecoveryOperation, phase: 'recovery',
+          })
+          if (!aiDelegationBusyDispatchRejected(rejectedDispatch, delegation.targetConversationId, busyRecoveryOperation)
+            || !aiDelegationWorkspaceLeaseMatches(workspaceLease ?? null, rejectedDispatch.workspaceLease ?? null)) {
+            throw new Error('복구 접수 거절의 원 실행·대화·lease를 확인하지 못했습니다.')
+          }
+          await validateAiDelegationAction(request, aiDelegations.get(delegation.id), body, true)
+        } catch (error) {
+          throwIfRuntimeStopping(error, runtimeLifecycle.signal)
+          return sendJson(response, 409, { error: error.message, code: 'AI_DELEGATION_RECOVERY_REJECTION_UNCONFIRMED', executionRequested: false })
+        }
+      }
       if (workspaceLease?.leaseId) {
         let correctionIntentSaved = false
         try {
@@ -9237,7 +9279,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
                   ...scope, expectedLease: workspaceLease, operationId, instructionHash: delegation.resultCorrection.instructionHash,
                   ...(completionProof ? { expectedCompletionProof: completionProof } : {}),
                 }))
-          } else if (retryableParentWakeFailure && delegation.workspaceResult?.status === 'failed-clean' && !delegation.recoveryWorkspaceLease) {
+          } else if (retryableChildRecovery && delegation.workspaceResult?.status === 'failed-clean' && !delegation.recoveryWorkspaceLease) {
             const replacement = await workspacePoolManager.acquire({
               ...scope, cardLabel: targetCard.data.label, workspaceHint: workspaceLease.projectRoot,
               replacesLeaseId: workspaceLease.leaseId,
@@ -9245,19 +9287,20 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
             if (!replacement) throw new Error('복구할 작업공간 풀이 등록되어 있지 않습니다.')
             workspaceLease = await workspacePoolManager.reuseLease(replacement.leaseId, scope)
             replacedWorkspaceLease = true
-          } else workspaceLease = await (retryableParentWakeFailure
+          } else workspaceLease = await (retryableChildRecovery
             ? workspacePoolManager.reactivateQuarantinedLease(workspaceLease.leaseId, {
                 mapId,
                 cardId: targetCard.id,
                 conversationId: delegation.targetConversationId,
                 failureCategory: recoveryAvailability.failureCategory,
+                ...(rejectedDispatch ? { rejectedDispatch } : {}),
               })
             : workspacePoolManager.reuseLease(workspaceLease.leaseId, {
                 mapId,
                 cardId: targetCard.id,
                 conversationId: delegation.targetConversationId,
               }))
-          reactivatedWorkspaceLease = retryableParentWakeFailure && !replacedWorkspaceLease
+          reactivatedWorkspaceLease = retryableChildRecovery && !replacedWorkspaceLease
           selection.workspace = workspaceLease.projectRoot
           await updateAiDelegation(delegation.id, { recoveryWorkspaceLease: workspaceLease })
         } catch (error) {
@@ -9373,6 +9416,18 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         })
       }
 
+      if (!resultCorrection && aiDelegationBusyDispatchRejected(dispatch, delegation.targetConversationId, operationId)) {
+        aiAttributions.delete(sessionTokenKey(attributionToken))
+        await persistAiAttributions()
+        const current = aiDelegations.get(delegation.id)
+        const updated = await updateAiDelegation(delegation.id, rejectedAiDelegationRecoveryPatch(current,
+          current.pendingRecovery, dispatch))
+        return sendJson(response, 409, {
+          error: '대상 대화가 사용 중이어서 복구 실행을 시작하지 않았습니다. 기존 작업과 작업공간을 보존했습니다.',
+          code: 'AI_DELEGATION_RECOVERY_CONVERSATION_BUSY', delegation: delegationPublicView(updated), executionRequested: false,
+        })
+      }
+
       attribution.conversationId = delegation.targetConversationId
       const now = new Date().toISOString()
       const nextState = integrationRecovery
@@ -9386,6 +9441,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         pendingRecovery: null,
         recoveryWorkspaceLease: null,
         recoveryDispatchError: null,
+        recoveryDispatchRejection: null,
         childOperationId: integrationRecovery ? delegation.childOperationId : operationId,
         integrationOperationId: integrationRecovery ? operationId : delegation.integrationOperationId,
         recoveryAttempt,
@@ -9395,7 +9451,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         recoveryRequestedAt: now,
         recoveryRequiredAt: null,
         recoverySourceState: delegation.state,
-        recoveryFailureCategory: retryableParentWakeFailure
+        recoveryFailureCategory: retryableChildRecovery
           ? recoveryAvailability.failureCategory
           : delegation.recoveryFailureCategory,
         childError: integrationRecovery ? delegation.childError : null,
@@ -9403,7 +9459,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         integrationError: integrationRecovery ? null : delegation.integrationError,
         childTurnId: integrationRecovery ? delegation.childTurnId : (dispatch.turnId ?? null),
         integrationTurnId: integrationRecovery ? (dispatch.turnId ?? null) : delegation.integrationTurnId,
-        ...(retryableParentWakeFailure ? {
+        ...(retryableChildRecovery ? {
           childStatus: null,
           parentError: null,
           parentDispatchState: null,

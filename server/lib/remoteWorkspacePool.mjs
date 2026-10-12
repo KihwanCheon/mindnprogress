@@ -3,7 +3,7 @@ import { copyFile, lstat, mkdir, rm } from 'node:fs/promises'
 import path from 'node:path'
 import { WorkspacePoolManager, WorkspacePoolUnavailableError, integrationWorktreeDirtyReasonCode } from './workspacePool.mjs'
 import { RemoteWorkspaceArtifacts } from './remoteWorkspaceArtifacts.mjs'
-import { aiDelegationWorkspaceLeaseMatches } from './aiDelegations.mjs'
+import { aiDelegationBusyDispatchRejected, aiDelegationWorkspaceLeaseMatches } from './aiDelegations.mjs'
 import { REMOTE_WORKSPACE_VERSION, identifier, commitId, git, hasCommit, jsonFile, saveJson, stableHash, workspaceError, assignmentMatches } from './remoteWorkspaceProtocol.mjs'
 
 // Remote paths are identities reported by the authenticated Runner, never local paths.
@@ -452,7 +452,9 @@ export class RemoteWorkspacePool {
       if (!options?.mapId || !options.cardId || !options.conversationId) throw workspaceError('MNP_WORKSPACE_ASSIGNMENT_MISMATCH')
       const lease = this.scoped(id, options)
       if (!['quarantined', 'leased'].includes(lease.status)
-        || !['confirmed-dispatch', 'usage-limit', 'rate-limit', 'model-capacity'].includes(options.failureCategory)
+        || !['confirmed-dispatch', 'recovery-dispatch-busy', 'usage-limit', 'rate-limit', 'model-capacity'].includes(options.failureCategory)
+        || options.failureCategory === 'recovery-dispatch-busy' && (!aiDelegationBusyDispatchRejected(options.rejectedDispatch, options.conversationId, options.rejectedDispatch?.operationId)
+          || !aiDelegationWorkspaceLeaseMatches(lease, options.rejectedDispatch.workspaceLease))
         || options.failureCategory === 'confirmed-dispatch' && !aiDelegationWorkspaceLeaseMatches(lease, options.confirmedDispatchLease)) throw workspaceError('REMOTE_WORKSPACE_RECOVERY_PROOF_REQUIRED')
       if (lease.sealed) throw workspaceError('REMOTE_WORKSPACE_RESULT_SEALED')
       await this.command(lease, 'recover', { ...options, attempt: randomUUID() })
