@@ -1,7 +1,8 @@
 export type AiDelegationSummary = {
   id: string
   state: string
-  kind?: 'request-failure'
+  kind?: 'request-failure' | 'task-attention'
+  completedExecutionCount?: number
   resolvedByDelegationId?: string | null
   requestedDelegationId?: string
   executionState?: 'not-started' | 'unknown'

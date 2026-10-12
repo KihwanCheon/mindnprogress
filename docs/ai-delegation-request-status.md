@@ -27,15 +27,27 @@
 실행이 `completed`이고 대상이 실제 업무 카드이면 조회 시 현재 카드에서 `taskCompletion`을 계산한다. 이 정보는 조회 응답에만 추가하며 저장된 위임 상태·결과·카드 본문·댓글·체크리스트·진행률을 변경하지 않는다.
 
 - 카드가 `done/100%`: `taskCompletion.state=completed`. 품질·기록 검증을 대신하지 않는다.
-- 그 외 업무 상태: `taskCompletion.state=incomplete`. 화면에 **AI 실행 종료 · 카드 업무 미완료**로 표시한다. 실행 실패·격리·복구 필요로 재분류하지 않는다.
+- 그 외 업무 상태: `taskCompletion.state=incomplete`. 현재 카드 전체 상태를 나타내는 참고 정보이며, 과거 위임의 승인 범위가 미완료이거나 기록이 누락됐다는 판정이 아니다. 실행 실패·격리·복구 필요로 재분류하지 않는다.
 - 비업무 카드나 현재 카드 상태가 없는 과거 실행에는 업무 미완료를 임의 추정하지 않는다.
 
 카드와 세부 정보는 진행 중, 복구/보고 필요, 접수 실패, 실행 종료 후 업무 확인을 구분한다. 접수 실패 항목에는 실행·복구 버튼을 제공하지 않으며 상태 표시는 새 AI 실행을 요청하지 않는다.
+
+## 현재 현황과 완료 이력의 표시
+
+화면과 카드 배지는 같은 표시 집계를 사용하며, API의 원본 위임 배열과 저장 상태는 변경하지 않는다.
+
+- 진행 중·복구 필요·결과 전달 필요 항목은 개별 실행 단위로 유지한다. 최신 실행이 있다는 이유로 과거의 실제 복구·보고 필요 항목을 숨기지 않는다.
+- 일반 완료 실행은 현재 현황에서 제외하고 **완료된 실행 이력**에 최신순으로 모은다. 처음에는 접혀 있으며, 펼쳤을 때만 이력 행을 렌더링한다. 이력 열람은 AI 실행·수신 확인·상태 변경을 요청하지 않는다.
+- 동일 상위 문서·상위 카드·대상 문서·대상 카드의 최신 실행이 완료됐고 현재 카드 업무가 미완료이면 **카드 업무 미완료 · 확인 필요**를 카드당 1건만 표시한다. `task-attention`은 화면에서 만든 표시 사본이며 서버에 저장하거나 실행하지 않는다.
+- 같은 대상에 진행·복구·결과 전달 상태가 남아 있으면 그 상태를 우선하고 카드 미완료 안내를 중복 표시하지 않는다. 접수 실패 요청은 기존 실행과 별개로 유지한다.
+- 대표 실행은 갱신 시각이 아닌 위임 생성 시각으로 고른다. 최신 완료에 카드 상태가 없거나 후속 실행이 종료·대체·일반 실패 상태이면 과거 완료 기록으로 업무 미완료를 추정하지 않는다.
+- 업무 확인 건수는 실행 횟수가 아닌 카드 수다. 단계별 완료 이력은 복구 건수·진행 건수에 포함하지 않는다. 카드 단위 안내에는 재개·보고·종료 버튼을 제공하지 않는다.
+- 확인 사항이 모두 해소되면 기존 동작대로 현재 현황 영역과 카드 배지를 숨긴다. 원본 완료 이력은 조회 API에 그대로 남는다.
 
 ## 변경 파일
 
 - 서버: `server/index.mjs`, `server/lib/remoteWorkspacePool.mjs`, `server/lib/aiDelegationRequestFailures.mjs`.
 - 화면: `src/App.tsx`, `src/components/AiDelegationRecovery.tsx`, `src/components/AiConversationRuntimeBadge.tsx`, `src/components/AiConversationRuntimeBadge.css`, `src/types/mindMap.ts`, `src/utils/aiDelegationManagement.d.mts`, `src/utils/aiDelegationStatus.mjs`, `src/utils/aiDelegationStatus.d.mts`, `src/utils/groupOverview.mjs`.
-- 검증: `tests/sub-machine-routing-api.test.mjs`, `tests/remote-workspace-routing.test.mjs`, `tests/ai-delegation-request-failures.test.mjs`, `tests/ai-delegation-recovery-browser.test.mjs`.
+- 검증: `tests/sub-machine-routing-api.test.mjs`, `tests/remote-workspace-routing.test.mjs`, `tests/ai-delegation-request-failures.test.mjs`, `tests/ai-delegation-display-history.test.mjs`, `tests/ai-delegation-recovery-browser.test.mjs`.
 
-브라우저 검사는 격리된 프로필과 Vite 캐시를 사용한다. 테스트 데이터·레지스트리와 실제 운영 문서·위임·worker는 분리한다. 코드 수정 승인을 실제 운영 위임 실행이나 서버 재시작 승인으로 확대하지 않는다.
+브라우저 검사는 격리된 프로필과 Vite 캐시를 사용하고 필요한 React 의존성만 사전 준비해 운영 앱·검증 빌드 HTML의 전체 탐색을 피한다. 테스트 데이터·레지스트리와 실제 운영 문서·위임·worker는 분리한다. 코드 수정 승인을 실제 운영 위임 실행이나 서버 재시작 승인으로 확대하지 않는다.

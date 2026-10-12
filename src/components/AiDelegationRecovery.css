@@ -37,6 +37,43 @@
   font-size: 9px;
 }
 
+.ai-delegation-completed-history {
+  margin-top: 12px;
+  border-top: 1px solid var(--theme-border, #eeecf1);
+}
+
+.ai-delegation-completed-history > summary {
+  padding: 9px 0;
+  color: var(--theme-text-secondary, #5e5865);
+  cursor: pointer;
+}
+
+.ai-delegation-completed-history > summary:focus-visible {
+  outline: 2px solid var(--theme-accent, #6657d9);
+  outline-offset: 2px;
+}
+
+.ai-delegation-history-item .ai-delegation-recovery-item-heading > span {
+  color: var(--theme-text-muted, #8e8895);
+  background: var(--theme-surface, #f3f1f6);
+}
+
+.ai-delegation-history-date {
+  display: block;
+  margin-top: 5px;
+  color: var(--theme-text-muted, #8e8895);
+}
+
+.ai-delegation-history-instruction {
+  margin-top: 5px !important;
+}
+
+.ai-delegation-history-item .ai-delegation-recovery-error-detail {
+  color: var(--theme-text-secondary, #5e5865);
+  border-color: var(--theme-border, #eeecf1);
+  background: var(--theme-surface, #f3f1f6);
+}
+
 .ai-delegation-recovery-item {
   position: relative;
   margin-top: 10px;

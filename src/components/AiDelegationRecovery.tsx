@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { completedReplacementDelegations, type AiDelegationSummary } from '../utils/aiDelegationManagement.mjs'
-import { aiDelegationDisplayItems, aiDelegationRequiresRecovery, isVisibleAiDelegation } from '../utils/aiDelegationStatus.mjs'
+import { aiDelegationDisplayItems, aiDelegationDisplaySections, aiDelegationRequiresRecovery } from '../utils/aiDelegationStatus.mjs'
 import { groupDelegationPresentation, groupDelegationReportHint, type GroupDelegation } from '../utils/groupOverview.mjs'
 import './AiDelegationRecovery.css'
 
@@ -55,12 +55,13 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
+  const [historyOpen, setHistoryOpen] = useState(false)
   const [replacementIds, setReplacementIds] = useState<Record<string, string>>({})
   const [closeDraft, setCloseDraft] = useState<{ id: string; reason: CloseReason; note: string } | null>(null)
   const mounted = useRef(true)
   const acting = useRef(false)
   const sectionRef = useRef<HTMLElement | null>(null)
-  const previewedItemId = useRef<string | null>(null)
+  const previewedItem = useRef<{ id: string; history: boolean } | null>(null)
   const listUrl = `/api/maps/${encodeURIComponent(mapId)}/ai-delegations`
   const refresh = useCallback(async (signal?: AbortSignal) => {
     const data = await request<{ delegations: Delegation[]; requestFailures?: Delegation[] }>(listUrl, { signal })
@@ -88,6 +89,7 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
   }, [refresh])
 
   useEffect(() => () => onPreviewCards(null), [onPreviewCards])
+  useEffect(() => { setHistoryOpen(false) }, [mapId, cardId])
 
   async function action(item: Delegation, kind: 'refresh' | 'recover' | 'retry-report' | 'supersede') {
     if (acting.current) return
@@ -176,11 +178,10 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
     }
   }
 
-  const pending = items.filter(isVisibleAiDelegation)
+  const { currentItems: pending, completedHistory } = useMemo(() => aiDelegationDisplaySections(items), [items])
   const recoveryCount = pending.filter((item) => aiDelegationRequiresRecovery(item) || item.recovery?.reportRetryAvailable).length
   const requestFailureCount = pending.filter(item => item.kind === 'request-failure').length
-  const incompleteTaskCount = pending.filter(item => item.state === 'completed' && item.taskCompletion?.state === 'incomplete'
-    && !aiDelegationRequiresRecovery(item) && !item.recovery?.reportRetryAvailable).length
+  const incompleteTaskCount = pending.filter(item => item.kind === 'task-attention').length
   const activeCount = pending.length - recoveryCount - requestFailureCount - incompleteTaskCount
   const sectionTitle = requestFailureCount || incompleteTaskCount ? 'AI 위임 현황 및 확인 사항' : recoveryCount > 0
     ? activeCount > 0 ? 'AI 위임 현황 및 복구' : 'AI 작업 복구'
@@ -189,20 +190,23 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
     activeCount > 0 ? `진행 중 ${activeCount}건` : '',
     recoveryCount > 0 ? `복구 필요 ${recoveryCount}건` : '',
     requestFailureCount > 0 ? `접수 실패 ${requestFailureCount}건` : '',
-    incompleteTaskCount > 0 ? `업무 확인 ${incompleteTaskCount}건` : '',
+    incompleteTaskCount > 0 ? `업무 확인 ${incompleteTaskCount}개 카드` : '',
   ].filter(Boolean).join(' · ') || '상태 확인'
   const sectionSummary = requestFailureCount || incompleteTaskCount
-    ? '위임 실행 기록과 접수 실패 요청을 구분합니다. AI 실행 종료는 카드 업무·기록 완료를 뜻하지 않으며 자동 재실행하지 않습니다.'
+    ? '현재 위임·접수 실패와 카드 단위 확인 사항을 표시합니다. 단계별 실행 완료는 카드 전체 완료를 뜻하지 않으며, 완료 이력은 아래에서 펼쳐 볼 수 있습니다. 자동 재실행하지 않습니다.'
     : recoveryCount > 0
     ? activeCount > 0
       ? '진행 중인 AI 위임과 복구가 필요한 작업을 확인하고, 가능한 후속 조치를 할 수 있습니다.'
       : '복구가 필요한 위임의 오류를 확인하고, 가능한 작업 재개나 결과 전달을 진행할 수 있습니다.'
     : '진행 중인 AI 위임의 현재 상태를 확인할 수 있습니다.'
   useEffect(() => {
-    if (!previewedItemId.current || pending.some((item) => item.id === previewedItemId.current)) return
-    previewedItemId.current = null
+    const preview = previewedItem.current
+    if (!preview) return
+    const visibleItems = preview.history ? historyOpen ? completedHistory : [] : pending
+    if (visibleItems.some(item => item.id === preview.id)) return
+    previewedItem.current = null
     onPreviewCards(null)
-  }, [onPreviewCards, pending])
+  }, [onPreviewCards, historyOpen, pending, completedHistory])
   useEffect(() => {
     if (!focusRequestId || (!loaded && !error && !notice)) return
     const frame = window.requestAnimationFrame(() => {
@@ -213,33 +217,28 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
     return () => window.cancelAnimationFrame(frame)
   }, [error, focusRequestId, loaded, notice, onFocusHandled, pending.length])
   if (!pending.length && !error && !notice) return null
-  return <section ref={sectionRef} className="ai-delegation-recovery" aria-label={sectionTitle} tabIndex={-1}>
-    <div className="ai-delegation-recovery-heading">
-      <strong>{sectionTitle}</strong>
-      <small>{sectionCount}</small>
-    </div>
-    <p className="ai-delegation-recovery-summary">{sectionSummary}</p>
-    {pending.map((item) => {
-      const candidates = completedReplacementDelegations(item, items)
+  const renderItem = (item: Delegation, history = false) => {
+      const cardAttention = item.kind === 'task-attention'
+      const candidates = history || cardAttention ? [] : completedReplacementDelegations(item, items)
       const selectedReplacementId = replacementIds[item.id] ?? candidates[0]?.id ?? ''
       const closing = closeDraft?.id === item.id
       const retryIntegration = item.recovery?.recommendedAction === 'retry-integration'
       const correctResult = item.recovery?.recommendedAction === 'correct-integration-result'
       const requestFailure = item.kind === 'request-failure'
-      const errorDetail = (requestFailure ? `${item.reasonCode}: ${item.message}` : '') || item.recoveryDispatchError || item.childError || item.workspaceError || item.workspaceResult?.error || item.integrationError || item.parentError
+      const errorDetail = cardAttention ? '' : (requestFailure ? `${item.reasonCode}: ${item.message}` : '') || item.recoveryDispatchError || item.childError || item.workspaceError || item.workspaceResult?.error || item.integrationError || item.parentError
       return <div
-        className="ai-delegation-recovery-item"
+        className={`ai-delegation-recovery-item${history ? ' ai-delegation-history-item' : ''}`}
         key={item.id}
         onMouseEnter={() => {
-          previewedItemId.current = item.id
+          previewedItem.current = { id: item.id, history }
           onPreviewCards({
             parent: { mapId: item.parentMapId ?? item.mapId, cardId: item.parentCardId },
             target: { mapId: item.mapId, cardId: item.targetCardId },
           })
         }}
         onMouseLeave={() => {
-          if (previewedItemId.current !== item.id) return
-          previewedItemId.current = null
+          if (previewedItem.current?.id !== item.id || previewedItem.current.history !== history) return
+          previewedItem.current = null
           onPreviewCards(null)
         }}
       >
@@ -253,10 +252,12 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
         <div className="ai-delegation-recovery-item-heading">
           <div>
             <b>{item.targetCardLabel || item.targetCardId}</b>
-            <small className="ai-delegation-recovery-id" title={item.id}>{item.id}</small>
+            <small className="ai-delegation-recovery-id" title={item.id}>{cardAttention ? `완료된 실행 ${item.completedExecutionCount}건 · 카드 단위 확인` : item.id}</small>
           </div>
-          <span>{groupDelegationPresentation(item).label}</span>
+          <span>{history ? item.reportStatus === 'received' ? 'AI 실행 종료 · 결과 수신 완료' : 'AI 실행 종료' : groupDelegationPresentation(item).label}</span>
         </div>
+        {history && <small className="ai-delegation-history-date">{new Date(item.createdAt).toLocaleString('ko-KR')}</small>}
+        {history && item.instructionPreview && <p className="ai-delegation-history-instruction">{item.instructionPreview}</p>}
         {groupDelegationReportHint(item) && <p className="ai-delegation-recovery-guidance">{groupDelegationReportHint(item)}</p>}
         {errorDetail && <p className="ai-delegation-recovery-error-detail">{errorDetail}</p>}
         {candidates.length > 1 && <label className="ai-delegation-replacement">
@@ -265,23 +266,37 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
             {candidates.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.id}</option>)}
           </select>
         </label>}
-        {closing ? <div className="ai-delegation-close-form">
+        {!history && !cardAttention && closing ? <div className="ai-delegation-close-form">
           <label><span>종료 사유</span><select disabled={busy} value={closeDraft.reason} onChange={(event) => setCloseDraft({ ...closeDraft, reason: event.target.value as CloseReason })}>{Object.entries(closeReasonLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
           <label><span>감사 메모</span><textarea disabled={busy} maxLength={1000} rows={3} value={closeDraft.note} placeholder="복구하거나 결과를 보고하지 않고 종료하는 이유를 남겨 주세요." onChange={(event) => setCloseDraft({ ...closeDraft, note: event.target.value })} /></label>
           <div className="ai-delegation-recovery-actions">
             <button type="button" {...actionAccessibility('취소', actionHints.cancelClose)} disabled={busy} onClick={() => setCloseDraft(null)}>취소</button>
             <button type="button" {...actionAccessibility('보고하지 않고 종료', actionHints.confirmClose)} className="danger" disabled={busy || closeDraft.note.trim().length < 3} onClick={() => void closeDelegation(item)}>보고하지 않고 종료</button>
           </div>
-        </div> : !requestFailure && <div className="ai-delegation-recovery-actions">
+        </div> : !history && !cardAttention && !requestFailure && <div className="ai-delegation-recovery-actions">
           <button type="button" {...actionAccessibility('상태 다시 확인', actionHints.refresh)} disabled={busy} onClick={() => void action(item, 'refresh')}>상태 다시 확인</button>
           {item.recovery?.recoveryAvailable && <button type="button" {...actionAccessibility(correctResult ? '통합 대기 결과 정정' : retryIntegration ? '통합 재시도' : '기존 작업 재개', correctResult ? actionHints.correctResult : retryIntegration ? actionHints.retryIntegration : actionHints.recover)} disabled={busy} onClick={() => void action(item, 'recover')}>{correctResult ? '통합 대기 결과 정정' : retryIntegration ? '통합 재시도' : '기존 작업 재개'}</button>}
           {item.recovery?.reportRetryAvailable && <button type="button" {...actionAccessibility('결과 전달 재시도', actionHints.retryReport)} disabled={busy} onClick={() => void action(item, 'retry-report')}>결과 전달 재시도</button>}
           {candidates.length > 0 && <button type="button" {...actionAccessibility('후속 성공으로 종료', actionHints.supersede)} disabled={busy} onClick={() => void action(item, 'supersede')}>후속 성공으로 종료</button>}
           {item.closure?.closeAvailable && <button type="button" {...actionAccessibility('보고하지 않고 종료', actionHints.openClose)} className="danger" disabled={busy} onClick={() => setCloseDraft({ id: item.id, reason: item.workCompleted ? 'result-invalidated' : 'no-longer-needed', note: '' })}>보고하지 않고 종료</button>}
         </div>}
-        {item.closure?.reason === 'workspace-changes-preserved' && <p className="ai-delegation-recovery-guidance">보존할 작업공간 변경이 있어 종료할 수 없습니다. 기존 변경을 보존한 채 작업공간을 먼저 복구하세요.</p>}
+        {!history && !cardAttention && item.closure?.reason === 'workspace-changes-preserved' && <p className="ai-delegation-recovery-guidance">보존할 작업공간 변경이 있어 종료할 수 없습니다. 기존 변경을 보존한 채 작업공간을 먼저 복구하세요.</p>}
       </div>
-    })}
+  }
+  return <section ref={sectionRef} className="ai-delegation-recovery" aria-label={sectionTitle} tabIndex={-1}>
+    <div className="ai-delegation-recovery-heading">
+      <strong>{sectionTitle}</strong>
+      <small>{sectionCount}</small>
+    </div>
+    <p className="ai-delegation-recovery-summary">{sectionSummary}</p>
+    {pending.map(item => renderItem(item))}
+    {completedHistory.length > 0 && <details key={`${mapId}:${cardId}`} className="ai-delegation-completed-history" open={historyOpen} onToggle={event => setHistoryOpen(event.currentTarget.open)}>
+      <summary>완료된 실행 이력 {completedHistory.length}건</summary>
+      {historyOpen && <>
+        <p className="ai-delegation-recovery-summary">단계별 실행 이력입니다. 카드 전체 업무의 완료·품질 검증과 구분하며, 이력 열람은 AI를 실행하지 않습니다.</p>
+        {completedHistory.map(item => renderItem(item, true))}
+      </>}
+    </details>}
     {error && <p role="alert">{error}</p>}
     {notice && <p role="status">{notice}</p>}
   </section>

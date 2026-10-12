@@ -15,9 +15,11 @@ const root = createRoot(document.getElementById('root'));
 const originalFetch = window.fetch.bind(window);
 window.audit = { calls: [], confirm: true, fail: false, focus: null, selection: null, preview: null };
 window.requestFailures = [];
+window.extraDelegations = [];
 window.confirm = () => window.audit.confirm;
 const item = { id:'limited',mapId:'child-map',parentMapId:'parent-map',parentCardId:'parent',targetCardId:'child',targetCardLabel:'하위 작업',state:'waiting-usage-limit',createdAt:'2026-09-11',updatedAt:'current',recovery:{recoveryAvailable:true},childError:'사용량 초과' };
 const replacement = {...item,id:'replacement',state:'completed',createdAt:'2026-09-12',updatedAt:'replacement-current',workCompleted:true,recovery:null,childError:null};
+window.allDelegations = () => [item,replacement,...window.extraDelegations,{...item,id:'unrelated',targetCardId:'someone-else',parentCardId:'someone-else',targetCardLabel:'다른 카드 작업'}];
 window.fetch = async (url, init = {}) => {
   if (!String(url).startsWith('/api/')) return originalFetch(url, init);
   window.audit.calls.push({url,method:init.method || 'GET',body:init.body ? JSON.parse(init.body) : null});
@@ -25,7 +27,7 @@ window.fetch = async (url, init = {}) => {
     if (window.audit.fail) return new Response(JSON.stringify({error:'서버 상태가 변경되었습니다.'}),{status:409});
     return new Response(JSON.stringify({delegation:item}));
   }
-  if (url.endsWith('/ai-delegations')) return new Response(JSON.stringify({delegations:[item,replacement,{...item,id:'unrelated',targetCardId:'someone-else',parentCardId:'someone-else',targetCardLabel:'다른 카드 작업'}],requestFailures:window.requestFailures}));
+  if (url.endsWith('/ai-delegations')) return new Response(JSON.stringify({delegations:window.allDelegations(),requestFailures:window.requestFailures}));
   return new Response(JSON.stringify({map:{version:url.includes('parent-map') ? 7 : 9}}));
 };
 let sequence = 0;
@@ -33,7 +35,7 @@ const selectCard = (mapId,cardId) => { window.audit.selection = {mapId,cardId} }
 const previewCards = (cards) => { window.audit.preview = cards };
 window.renderChildRecovery = (props={}) => root.render(React.createElement(AiDelegationRecovery,{key:++sequence,mapId:'child-map',cardId:'child',onSelectCard:selectCard,onPreviewCards:previewCards,...props}));
 window.renderRecovery = (props={}) => root.render(React.createElement(React.Fragment,null,
-  React.createElement(AiDelegationStatusBadge,{status:aiDelegationStatusByCard([item,...window.requestFailures],'parent-map').parent}),
+  React.createElement(AiDelegationStatusBadge,{status:aiDelegationStatusByCard([...window.allDelegations(),...window.requestFailures],'parent-map').parent}),
   React.createElement(AiDelegationRecovery,{key:++sequence,mapId:'parent-map',cardId:'parent',onSelectCard:selectCard,onPreviewCards:previewCards,...props})));
 window.failedRecovery = () => {item.state='failed';item.workspaceResult=null;item.workspaceError=null;item.recovery={recoveryAvailable:true};item.childError='모델 용량 초과';window.renderRecovery()};
 window.quarantinedIntegration = () => {item.state='failed';item.childStatus='completed';item.workCompleted=false;item.reportPending=false;item.reportStatus=null;item.childError=null;item.parentError=null;item.workspaceError='로컬 변경으로 cherry-pick 실패';item.workspaceResult={status:'quarantined',childStatus:'completed'};item.recovery={recoveryAvailable:false,failureCategory:'non-retryable',recommendedAction:'inspect-failure'};item.closure={closeAvailable:false,reason:'workspace-changes-preserved'};window.renderRecovery()};
@@ -44,11 +46,20 @@ window.waitingReport = () => {item.state='waiting-parent';item.childError=null;i
 window.deliveringReport = () => {item.state='waking-parent';item.reportStatus='delivering';window.renderRecovery()};
 window.receivedReport = () => {item.state='completed';item.reportPending=false;item.reportStatus='received';item.recovery=null;item.closure=null;window.renderRecovery()};
 window.failedRequest = () => {window.requestFailures=[{id:'request-error',kind:'request-failure',state:'request-failed',mapId:'child-map',parentMapId:'parent-map',parentCardId:'parent',targetCardId:'child',targetCardLabel:'하위 작업',executionState:'not-started',reasonCode:'REMOTE_WORKSPACE_RUNNER_STALE',message:'원격 풀 보고 만료',createdAt:'2026-10-12',updatedAt:'2026-10-12'}];window.renderRecovery()};
-window.incompleteTask = () => {window.requestFailures=[];item.taskCompletion={state:'incomplete',status:'planned',progress:0,message:'AI 실행은 종료됐지만 카드 업무는 아직 미완료입니다.'};window.renderRecovery()};
+window.incompleteTask = () => {window.requestFailures=[];item.taskCompletion={state:'incomplete',status:'planned',progress:0,message:'AI 실행은 종료됐지만 카드 업무는 아직 미완료입니다.'};replacement.taskCompletion=item.taskCompletion;window.renderRecovery()};
+window.manyCompletedTasks = () => {
+  Object.assign(item,{childError:null,parentError:null,workspaceError:null,workspaceResult:null,instructionPreview:'개발 준비와 독립 검수 단계'});
+  window.extraDelegations=[
+    ...Array.from({length:53},(_,index)=>({...item,id:'history-'+index,createdAt:new Date(Date.UTC(2026,9,1,0,index)).toISOString()})),
+    ...Array.from({length:2},(_,index)=>({...item,id:'other-history-'+index,targetCardId:'other-child',targetCardLabel:'다른 하위 업무'})),
+  ];
+  window.renderRecovery();
+};
+window.continuingTask = () => {window.extraDelegations.push({...item,id:'follow-up',state:'waiting-workspace',createdAt:'2026-10-12',taskCompletion:undefined});window.renderRecovery()};
 window.fixtureReady = true;
 `
 
-test('상위 카드 복구 화면은 하위 카드를 제외하고 AI 없이 재개·보고 재시도를 구분한다', { skip: process.env.MNP_BROWSER_TEST !== '1', timeout: 120000 }, async () => {
+test('상위 카드 복구 화면은 하위 카드를 제외하고 AI 없이 재개·보고 재시도를 구분한다', { skip: process.env.MNP_BROWSER_TEST !== '1', timeout: 180000 }, async () => {
   const { createServer } = await import('vite')
   const react = (await import('@vitejs/plugin-react')).default
   const directory = await mkdtemp(path.join(tmpdir(), 'mnp-recovery-browser-'))
@@ -57,6 +68,8 @@ test('상위 카드 복구 화면은 하위 카드를 제외하고 AI 없이 재
     await rm(directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 150 })
   }
   const server = await createServer({ configFile: false, root: path.resolve(import.meta.dirname, '..'), cacheDir: path.join(directory, 'vite-cache'), logLevel: 'error',
+    // 격리 UI 검사에서 운영 앱과 검증 빌드의 HTML을 전체 탐색하지 않는다.
+    optimizeDeps: { noDiscovery: true, include: ['react', 'react/jsx-runtime', 'react/jsx-dev-runtime', 'react-dom/client'] },
     server: { host: '127.0.0.1', port: 0, hmr: false }, plugins: [react(), {
       name: 'recovery-fixture', resolveId: id => id === '/recovery-fixture.js' ? '\0recovery-fixture' : null,
       load: id => id === '\0recovery-fixture' ? fixture : null,
@@ -74,6 +87,11 @@ test('상위 카드 복구 화면은 하위 카드를 제외하고 AI 없이 재
   }
   try {
     await server.listen()
+    const fixtureUrl = `http://127.0.0.1:${server.httpServer.address().port}/recovery-check`
+    const fixtureResponse = await fetch(fixtureUrl, { signal: AbortSignal.timeout(30000) })
+    assert.equal(fixtureResponse.status, 200, '브라우저 실행 전에 격리 검사 페이지가 준비되어야 한다')
+    await fixtureResponse.text()
+    await server.transformRequest('/recovery-fixture.js')
     browser = spawn(process.env.MNP_TEST_BROWSER_EXE ?? 'C:/Program Files/Google/Chrome/Application/chrome.exe', [
       '--headless=new', '--no-first-run', '--no-default-browser-check', '--disable-gpu', '--disable-extensions', '--disable-background-networking',
       '--remote-debugging-port=0', `--user-data-dir=${directory}`, '--window-size=1000,800', 'about:blank',
@@ -100,7 +118,7 @@ test('상위 카드 복구 화면은 하위 카드를 제외하고 AI 없이 재
     }
     const click = label => evaluate(`Array.from(document.querySelectorAll('button')).find(b=>b.textContent===${JSON.stringify(label)}).click()`)
     const ready = () => waitFor(() => evaluate('Boolean(document.querySelector("button")) && !document.querySelector("button").disabled'))
-    await send('Page.navigate', { url: `http://127.0.0.1:${server.httpServer.address().port}/recovery-check` })
+    await send('Page.navigate', { url: fixtureUrl })
     await waitFor(() => evaluate('window.fixtureReady'))
     await evaluate('window.renderChildRecovery()')
     await waitFor(() => evaluate('window.audit.calls.some(c=>c.url==="/api/maps/child-map/ai-delegations")'))
@@ -213,10 +231,37 @@ test('상위 카드 복구 화면은 하위 카드를 제외하고 AI 없이 재
     assert.equal(await evaluate('document.querySelectorAll(".ai-delegation-recovery-actions button").length'), 0)
     assert.equal(await evaluate('window.audit.calls.filter(c=>c.method==="POST").length'), beforeRequestFailurePosts)
     await evaluate('window.incompleteTask()'); await ready()
-    assert.match(await evaluate('document.body.textContent'), /AI 실행 종료 · 카드 업무 미완료/)
-    assert.match(await evaluate('document.querySelector(".ai-delegation-recovery-heading")?.textContent'), /업무 확인 1건/)
+    assert.match(await evaluate('document.body.textContent'), /카드 업무 미완료 · 확인 필요/)
+    assert.match(await evaluate('document.querySelector(".ai-delegation-recovery-heading")?.textContent'), /업무 확인 1개 카드/)
     assert.equal(await evaluate('document.querySelector(".ai-delegation-status-badge")?.textContent'), 'AI 업무 확인 필요')
     assert.equal(await evaluate('Array.from(document.querySelectorAll("button")).some(b=>b.textContent==="기존 작업 재개")'), false)
+    assert.equal(await evaluate('window.audit.calls.filter(c=>c.method==="POST").length'), beforeRequestFailurePosts)
+    assert.equal(await evaluate('document.querySelectorAll(".ai-delegation-recovery-actions button").length'), 0)
+    await evaluate('window.manyCompletedTasks()'); await ready()
+    assert.match(await evaluate('document.querySelector(".ai-delegation-recovery-heading")?.textContent'), /업무 확인 2개 카드/)
+    assert.equal(await evaluate('document.querySelectorAll(".ai-delegation-recovery > .ai-delegation-recovery-item").length'), 2)
+    assert.match(await evaluate('document.querySelector(".ai-delegation-status-badge")?.title'), /카드 업무 확인 필요 2개 카드/)
+    assert.equal(await evaluate('document.querySelector(".ai-delegation-completed-history")?.open'), false)
+    assert.match(await evaluate('document.querySelector(".ai-delegation-completed-history > summary")?.textContent'), /완료된 실행 이력 57건/)
+    assert.equal(await evaluate('document.querySelectorAll(".ai-delegation-history-item").length'), 0, '접힌 이력은 행 렌더링도 하지 않는다')
+    await evaluate('document.querySelector(".ai-delegation-completed-history > summary").click()')
+    await waitFor(() => evaluate('document.querySelectorAll(".ai-delegation-history-item").length===57'))
+    assert.equal(await evaluate('Array.from(document.querySelectorAll(".ai-delegation-history-item .ai-delegation-recovery-item-heading > span")).some(node=>node.textContent.includes("카드 업무 미완료"))'), false)
+    assert.equal(await evaluate('document.querySelectorAll(".ai-delegation-history-item .ai-delegation-recovery-actions button").length'), 0)
+    await evaluate('window.audit.selection=null;document.querySelector(".ai-delegation-history-item .ai-delegation-recovery-item-select").click()')
+    assert.deepEqual(await evaluate('window.audit.selection'), { mapId: 'child-map', cardId: 'child' })
+    await evaluate(`document.querySelector('.ai-delegation-history-item').dispatchEvent(new MouseEvent('mouseover',{bubbles:true}))`)
+    assert.deepEqual(await evaluate('window.audit.preview'), {
+      parent: { mapId: 'parent-map', cardId: 'parent' }, target: { mapId: 'child-map', cardId: 'child' },
+    })
+    await evaluate('document.querySelector(".ai-delegation-completed-history > summary").click()')
+    await waitFor(() => evaluate('document.querySelectorAll(".ai-delegation-history-item").length===0 && window.audit.preview===null'))
+    await evaluate('window.continuingTask()'); await ready()
+    assert.match(await evaluate('document.querySelector(".ai-delegation-recovery-heading")?.textContent'), /진행 중 1건 · 업무 확인 1개 카드/)
+    assert.equal(await evaluate('document.querySelectorAll(".ai-delegation-recovery > .ai-delegation-recovery-item").length'), 2)
+    assert.equal(await evaluate('document.querySelector(".ai-delegation-status-badge")?.textContent'), 'AI 위임 중')
+    assert.match(await evaluate('document.querySelector(".ai-delegation-status-badge")?.title'), /카드 업무 확인 필요 1개 카드/)
+    assert.equal(await evaluate('document.querySelectorAll(".ai-delegation-recovery-actions button").length'), 1, '실제 진행 항목의 상태 확인만 제공한다')
     assert.equal(await evaluate('window.audit.calls.filter(c=>c.method==="POST").length'), beforeRequestFailurePosts)
   } finally {
     if (send && socket?.readyState === WebSocket.OPEN) await send('Browser.close').catch(() => {})

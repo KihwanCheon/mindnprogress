@@ -8,14 +8,49 @@ export function aiDelegationRequiresRecovery(item) {
 
 export function isVisibleAiDelegation(item) {
   if (item?.kind === 'request-failure') return !item.resolvedByDelegationId
+  if (item?.kind === 'task-attention') return item.taskCompletion?.state === 'incomplete'
   return !terminalStates.has(item?.state)
     || aiDelegationRequiresRecovery(item)
     || item?.recovery?.reportRetryAvailable === true
-    || (item?.state === 'completed' && item?.taskCompletion?.state === 'incomplete')
 }
 
 export function aiDelegationDisplayItems(delegations = [], requestFailures = []) {
   return [...delegations, ...requestFailures.filter(item => !item.resolvedByDelegationId)]
+}
+
+function targetScopeKey(item) {
+  if (!item?.mapId || !item.parentCardId || !item.targetCardId) return null
+  return JSON.stringify([item.parentMapId ?? item.mapId, item.parentCardId, item.mapId, item.targetCardId])
+}
+
+function newestExecutionFirst(left, right) {
+  // Refreshing an old execution must not make it the latest assignment.
+  return String(right.createdAt ?? '').localeCompare(String(left.createdAt ?? ''))
+    || String(right.id).localeCompare(String(left.id))
+}
+
+export function aiDelegationDisplaySections(items = []) {
+  const records = [...new Map((items ?? []).filter(item => item?.id).map(item => [item.id, item])).values()]
+  const currentItems = records.filter(isVisibleAiDelegation)
+  const currentTargets = new Set(currentItems.filter(item => item.kind !== 'request-failure').map(targetScopeKey))
+  const completedHistory = records.filter(item => item.state === 'completed' && !isVisibleAiDelegation(item))
+    .sort(newestExecutionFirst)
+  const historyByTarget = new Map()
+  const latestByTarget = new Map()
+  for (const item of records.filter(item => !item.kind).sort(newestExecutionFirst)) {
+    const key = targetScopeKey(item)
+    if (key && !latestByTarget.has(key)) latestByTarget.set(key, item)
+  }
+  for (const item of completedHistory) {
+    const key = targetScopeKey(item)
+    if (key) historyByTarget.set(key, (historyByTarget.get(key) ?? 0) + 1)
+  }
+  for (const [key, latest] of latestByTarget) {
+    if (currentTargets.has(key) || latest.state !== 'completed' || latest.taskCompletion?.state !== 'incomplete') continue
+    // This is a card-level presentation copy, never a new execution or stored state.
+    currentItems.push({ ...latest, kind: 'task-attention', completedExecutionCount: historyByTarget.get(key) ?? 0 })
+  }
+  return { currentItems, completedHistory }
 }
 
 function usefulDetail(item) {
@@ -37,7 +72,7 @@ function currentMapParentCardId(item, mapId) {
 
 export function aiDelegationStatusByCard(delegations, mapId) {
   const grouped = new Map()
-  for (const item of delegations ?? []) {
+  for (const item of aiDelegationDisplaySections(delegations).currentItems) {
     if (!item?.id || !isVisibleAiDelegation(item)) continue
     const cardId = currentMapParentCardId(item, mapId)
     if (!cardId) continue
@@ -49,8 +84,7 @@ export function aiDelegationStatusByCard(delegations, mapId) {
   return Object.fromEntries([...grouped.entries()].map(([cardId, itemMap]) => {
     const items = [...itemMap.values()]
     const requestFailures = items.filter(item => item.kind === 'request-failure')
-    const incompleteTasks = items.filter(item => item.state === 'completed' && item.taskCompletion?.state === 'incomplete'
-      && !aiDelegationRequiresRecovery(item) && !item.recovery?.reportRetryAvailable)
+    const incompleteTasks = items.filter(item => item.kind === 'task-attention')
     const recovery = items.filter(aiDelegationRequiresRecovery)
     const report = items.filter((item) => !aiDelegationRequiresRecovery(item)
       && item.recovery?.reportRetryAvailable === true)
@@ -69,7 +103,7 @@ export function aiDelegationStatusByCard(delegations, mapId) {
       recovery.length ? `AI 작업 복구 필요 ${recovery.length}건` : '',
       report.length ? `AI 결과 전달 필요 ${report.length}건` : '',
       requestFailures.length ? `AI 위임 접수 실패 ${requestFailures.length}건` : '',
-      incompleteTasks.length ? `AI 실행 종료 · 카드 업무 미완료 ${incompleteTasks.length}건` : '',
+      incompleteTasks.length ? `카드 업무 확인 필요 ${incompleteTasks.length}개 카드` : '',
       usefulDetail(prioritized[0]),
       '카드를 선택하면 세부 정보의 AI 위임 영역에서 확인할 수 있습니다.',
     ].filter(Boolean).join('\n')

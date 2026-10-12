@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createAiDelegationRequestFailures, safeDelegationFailureMessage, withDelegationTaskCompletion } from '../server/lib/aiDelegationRequestFailures.mjs'
-import { aiDelegationDisplayItems, aiDelegationStatusByCard, isVisibleAiDelegation } from '../src/utils/aiDelegationStatus.mjs'
+import { aiDelegationDisplayItems, aiDelegationDisplaySections, aiDelegationStatusByCard, isVisibleAiDelegation } from '../src/utils/aiDelegationStatus.mjs'
 import { groupDelegationPresentation } from '../src/utils/groupOverview.mjs'
 
 const context = { requestId: 'request-1', delegationId: 'delegation-1', mapId: 'map-test', parentMapId: 'map-test',
@@ -57,12 +57,14 @@ test('실행 완료와 카드 업무 미완료는 분리하고 기존 완료 상
   assert.equal(item.state, 'completed')
   assert.equal(item.workCompleted, true)
   assert.equal(item.taskCompletion.state, 'incomplete')
-  assert.equal(isVisibleAiDelegation(item), true)
+  assert.equal(isVisibleAiDelegation(item), false, '과거 완료 기록 자체는 현재 현황으로 표시하지 않는다')
+  const attention = aiDelegationDisplaySections([item]).currentItems[0]
+  assert.equal(isVisibleAiDelegation(attention), true)
   const badge = aiDelegationStatusByCard([item], 'map-test').parent
   assert.equal(badge.kind, 'attention')
   assert.equal(badge.activeCount, 0)
   assert.equal(badge.recoveryCount, 0)
-  assert.equal(groupDelegationPresentation(item).tone, 'warning')
+  assert.equal(groupDelegationPresentation(attention).tone, 'warning')
   assert.deepEqual({ delegation, map }, originals)
   map.nodes[0].data = { isWork: true, status: 'done', progress: 100 }
   assert.equal(isVisibleAiDelegation(withDelegationTaskCompletion(delegation, map)), false)

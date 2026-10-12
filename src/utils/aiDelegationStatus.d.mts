@@ -6,6 +6,10 @@ type DelegationRecoveryState = Pick<AiDelegationSummary, 'state' | 'workspaceRes
 export function aiDelegationRequiresRecovery(item?: DelegationRecoveryState | null): boolean
 export function isVisibleAiDelegation(item?: DelegationRecoveryState | null): boolean
 export function aiDelegationDisplayItems<T extends AiDelegationSummary>(delegations?: T[], requestFailures?: T[]): T[]
+export function aiDelegationDisplaySections<T extends AiDelegationSummary>(items?: T[]): {
+  currentItems: T[]
+  completedHistory: T[]
+}
 
 export function aiDelegationStatusByCard(
   delegations: AiDelegationSummary[],

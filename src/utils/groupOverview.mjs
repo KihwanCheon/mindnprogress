@@ -45,8 +45,8 @@ export function groupDelegationPresentation(item) {
     label: item.executionState === 'unknown' ? '접수 미확인 · 실행 여부 확인 필요' : '위임 접수 실패 · 실행하지 않음',
     tone: 'danger', attention: true,
   }
-  if (item.state === 'completed' && item.taskCompletion?.state === 'incomplete') return {
-    label: 'AI 실행 종료 · 카드 업무 미완료', tone: 'warning', attention: true,
+  if (item.kind === 'task-attention') return {
+    label: '카드 업무 미완료 · 확인 필요', tone: 'warning', attention: true,
   }
   const state = item.displayState ?? item.state
   const quarantined = item.workspaceResult?.status === 'quarantined' && aiDelegationRequiresRecovery(item)
@@ -67,7 +67,7 @@ export function groupDelegationReportHint(item) {
   if (item?.kind === 'request-failure') return item.executionState === 'unknown'
     ? '실행 기록과 별개의 요청 오류입니다. 전달 여부를 확인하지 못했으므로 새 요청을 자동으로 실행하지 않습니다.'
     : '실행 기록과 별개의 접수 실패 요청입니다. 담당 상위 AI가 원인을 확인한 뒤 다시 요청할 수 있으며 자동 재실행하지 않습니다.'
-  if (item?.state === 'completed' && item.taskCompletion?.state === 'incomplete') return item.taskCompletion.message
+  if (item?.kind === 'task-attention') return `카드 전체 업무가 아직 완료되지 않았습니다. 완료된 실행 ${item.completedExecutionCount ?? 1}건은 단계별 완료일 수 있으며, 기록 누락이나 실행 실패를 뜻하지 않습니다. 카드의 남은 업무와 완료 조건을 확인하세요. 자동 재실행하지 않습니다.`
   if (item?.workspaceResult?.status === 'result-correction-held') return '결과 정정 실행 또는 Git 상태를 확인할 수 없어 자료와 통합 잠금을 보존합니다. 별도 증거 검토가 필요합니다.'
   if (item?.recovery?.recommendedAction === 'correct-integration-result') return '원 담당 AI에게 통합 대기 결과 정정을 요청할 수 있습니다. 기존 후보와 이력, 통합 사용자 파일을 보존하며 새 변경 체크포인트 이후에만 다시 통합합니다.'
   if (item?.workspaceResult?.status === 'quarantined' && aiDelegationRequiresRecovery(item)) {
