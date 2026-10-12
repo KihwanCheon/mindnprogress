@@ -34,6 +34,8 @@ test('로그인 계정의 실제 서버 API에서 제안 접수·삭제 초기�
     { id: 'worker', root: path.join(directory, 'worker'), role: 'worker', enabled: true },
   ] }))
   const operations = new Map()
+  const dispatchStates = new Map()
+  const manualMessages = new Map()
   const created = []
   const paths = []
   const mcpNames = ['MindNProgress', 'unityMCP', 'docker-dooray-mcp', 'pptx-mcp']
@@ -95,6 +97,7 @@ test('로그인 계정의 실제 서버 API에서 제안 접수·삭제 초기�
     }
     const messageMatch = url.pathname.match(/^\/api\/conversations\/([^/]+)\/messages$/)
     if (messageMatch) {
+      if (manualMessages.has(messageMatch[1])) return send({ items: manualMessages.get(messageMatch[1]), has_more_before: false })
       if (messageMatch[1] === 'approved-work') return send(url.searchParams.has('before') ? {
         items: [{ id: 'approval-user', position: 'right', type: 'text', created_at: 1, content: { content: '2단계 분석 계획 승인. 기존 결과는 재사용하세요.' } }], has_more_before: false,
       } : { items: [{ id: 'approval-answer', position: 'left', type: 'text', created_at: 2, content: { content: '문서 구성 완료. 남은 분석만 진행합니다.\n- attributionToken: secret-only-for-test-1234567890' } }], has_more_before: true, oldest_cursor: 'earlier-page' })
@@ -135,7 +138,8 @@ test('로그인 계정의 실제 서버 API에서 제안 접수·삭제 초기�
       return send({ conversationId: body.targetConversationId, operationId: body.operationId, state: 'completed' }, 202)
     }
     const dispatch = url.pathname.match(/^\/api\/internal\/external-conversation-dispatches\/([^/]+)$/)
-    if (dispatch && operations.has(dispatch[1])) return send({ conversationId: operations.get(dispatch[1]).targetConversationId, operationId: dispatch[1], state: 'completed' })
+    if (dispatch && operations.has(dispatch[1])) return send({ conversationId: operations.get(dispatch[1]).targetConversationId,
+      operationId: dispatch[1], state: dispatchStates.get(dispatch[1]) ?? 'completed', turnId: 'original-test-turn', errorMessage: '모델 용량 초과' })
     if (url.pathname === '/api/internal/conversation-runtimes/active') return send({ items: [] })
     const archive = url.pathname.match(/^\/api\/sidebar\/conversation\/([^/]+)\/archive$/)
     if (archive && request.method === 'POST') { assert.notEqual(archive[1], 'existing-chat'); archived.push(archive[1]); return send(null) }
@@ -592,4 +596,50 @@ test('로그인 계정의 실제 서버 API에서 제안 접수·삭제 초기�
   const afterRecovery = JSON.parse(await readFile(responseFile, 'utf8'))
   assert.equal(afterRecovery.jobs.length, responseState.jobs.length)
   assert.deepEqual(afterRecovery.jobs.filter((job) => job.id !== legacy.id), responseState.jobs.filter((job) => job.id !== legacy.id))
+
+  // 모델 실패 뒤 사용자가 같은 전용 대화에서 이어 완료한 제안도 실행 없이 회수한다.
+  const manual = structuredClone(legacy)
+  Object.assign(manual, { id: 'manual-result-test', conversationPolicy: 'dedicated', status: 'failed', error: '모델 용량 초과',
+    createdAt: new Date(Date.now() - 180_000).toISOString(), updatedAt: new Date().toISOString() })
+  manual.operation = { id: `${manual.id}-route-3-0`, kind: 'router', machineId: manual.settings.machineId,
+    conversationId: 'manual-proposal-chat', dispatchAttempted: true, settings: structuredClone(manual.settings),
+    prompt: '현재 요청의 제안만 작성하고 실제 실행은 하지 마세요.' }
+  manual.router.conversationId = manual.operation.conversationId
+  const manualProposal = '수동 이어가기의 최종 제안\n\n원문과 공백을 그대로 회수합니다.  \n'
+  const manualDecision = { kind: 'proposal', reason: '지금은 승인이나 실행 없이 검토 자료만 제시합니다.', questions: [], approval: null }
+  operations.set(manual.operation.id, { operationId: manual.operation.id, targetConversationId: manual.operation.conversationId })
+  dispatchStates.set(manual.operation.id, 'failed')
+  extraByConversation.set(manual.operation.conversationId, { mnpDoorayResponseId: manual.id, mnpDoorayUserId: 'user-admin',
+    mnpDoorayOperationId: `${manual.id}-route-0-0`, workspace: manual.settings.proposalWorkspace })
+  manualMessages.set(manual.operation.conversationId, [
+    { id: 'original-input', conversation_id: manual.operation.conversationId, position: 'right', type: 'text', status: 'finish',
+      created_at: Date.now() - 120_000, content: { content: manual.operation.prompt } },
+    { id: 'manual-final', conversation_id: manual.operation.conversationId, position: 'left', type: 'text', status: 'finish', hidden: false,
+      created_at: Date.now() - 60_000, backend_turn_id: 'manual-final-turn', content: { content: JSON.stringify({
+        requestId: manual.operation.id, action: 'direct', mapId: 'map-test', cardId: 'task1', conversationId: null,
+        requestSummary: '최종 검토 자료 제안', reason: '현재 담당 카드의 검토 범위', proposal: manualProposal, decision: manualDecision,
+      }) } },
+  ])
+  const stateBeforeManual = JSON.parse(await readFile(responseFile, 'utf8'))
+  stateBeforeManual.jobs.unshift(manual)
+  await writeFile(responseFile, JSON.stringify(stateBeforeManual))
+  const beforeManualPaths = paths.length
+  const manualUrl = `${endpoint}/${manual.id}/recover-result`
+  const recoveredManualResponse = await fetch(manualUrl, { method: 'POST', headers: integrationHeaders,
+    body: JSON.stringify({ expectedUpdatedAt: manual.updatedAt, proposal: '클라이언트의 다른 제안은 채택하지 않는다.' }) })
+  const recoveredManual = await recoveredManualResponse.json()
+  assert.equal(recoveredManualResponse.status, 200, JSON.stringify(recoveredManual))
+  assert.equal(recoveredManual.job.status, 'proposal')
+  assert.equal(recoveredManual.job.proposal, manualProposal)
+  assert.equal(recoveredManual.job.proposalSource, 'router')
+  assert.equal(recoveredManual.job.approval, null)
+  assert.deepEqual(recoveredManual.job.decision, manualDecision)
+  const manualStored = JSON.parse(await readFile(responseFile, 'utf8')).jobs.find(job => job.id === manual.id)
+  assert.equal(manualStored.resultRecovery.previousError, '모델 용량 초과')
+  assert.equal(manualStored.resultRecovery.dispatchState, 'failed')
+  assert.equal(manualStored.resultRecovery.resultBackendTurnId, 'manual-final-turn')
+  assert.ok(paths.slice(beforeManualPaths).every(entry => entry.startsWith('GET ')))
+  assert.equal(await readFile(path.join(directory, 'map-test.json'), 'utf8'), mapBefore)
+  assert.equal((await fetch(manualUrl, { method: 'POST', headers: integrationHeaders,
+    body: JSON.stringify({ expectedUpdatedAt: manual.updatedAt }) })).status, 200)
 })

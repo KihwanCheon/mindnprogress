@@ -27,6 +27,8 @@ const storedRestartInterruption = (job) => job?.status === 'failed' && job.opera
 const finishRestartRecovery = (job) => job.restartRecovery?.active ? {
   restartRecovery: { ...job.restartRecovery, active: false, completedAt: new Date().toISOString() },
 } : {}
+const canRecoverDoorayResult = (job) => job?.status === 'failed' && ['router', 'review'].includes(job.operation?.kind)
+  && Boolean(job.operation.conversationId && job.operation.dispatchAttempted) && !job.completedAt && !job.approval
 
 export async function readDoorayResponseSource(item, config, requesterOptions) {
   const { request } = createDoorayRequester(config, requesterOptions)
@@ -148,7 +150,7 @@ export function buildDoorayRoutingDispatchPrompt(job, operationId, maps) {
   }
 }
 
-export function parseDoorayAiResult(messages, operationId) {
+function findDoorayAiResultMessage(messages, operationId) {
   for (const message of [...messages].reverse()) {
     if (message.position !== 'left' || !['text', 'tips'].includes(message.type)) continue
     const content = typeof message.content === 'string' ? message.content : message.content?.content ?? message.content?.text ?? ''
@@ -157,11 +159,15 @@ export function parseDoorayAiResult(messages, operationId) {
     for (const chunk of chunks) {
       try {
         const result = JSON.parse(chunk)
-        if (result?.requestId === operationId) return result
+        if (result?.requestId === operationId) return { result, message }
       } catch { /* 다른 텍스트나 이전 턴의 답변은 결과로 사용하지 않는다. */ }
     }
   }
   return null
+}
+
+export function parseDoorayAiResult(messages, operationId) {
+  return findDoorayAiResultMessage(messages, operationId)?.result ?? null
 }
 
 export function validateDoorayRoute(result, maps) {
@@ -219,8 +225,7 @@ export function publicDoorayResponse(job) {
     homeMachineId: handoff?.machineId ?? job.review?.machineId ?? job.settings.machineId,
     homeMachineRole: handoff?.homeMachineRole ?? job.operation?.settings?.machineRole ?? job.settings.machineRole ?? 'main',
     canRetry: job.status === 'failed' && !job.restartRecovery?.exhausted && Boolean(job.operation?.conversationId || job.operation?.dispatchAttempted),
-    canRecoverResult: job.status === 'failed' && job.error === unlinkedConversationError && job.operation?.kind === 'router'
-      && Boolean(job.operation.conversationId && job.operation.dispatchAttempted) && !job.completedAt && !job.approval,
+    canRecoverResult: canRecoverDoorayResult(job),
     recoveringAfterRestart: Boolean(job.restartRecovery?.active && !job.completedAt),
     completedAt: job.completedAt ?? null, archiveStatus: job.archiveStatus ?? null, archiveError: job.archiveError ?? '',
     handedOffAt: job.handoff && job.handoff.attempt === job.attempt ? job.handoff.sentAt ?? null : null,
@@ -265,6 +270,7 @@ export function createDoorayResponseService(deps) {
   const running = new Set()
   const reviewOwners = new Map()
   const checkedAt = new Map()
+  const resultCheckedAt = new Map()
   const userFile = (userId) => {
     if (!/^[a-zA-Z0-9_-]{1,120}$/.test(userId)) throw error('사용자 ID가 올바르지 않습니다.')
     return path.join(deps.directory, `${userId}.json`)
@@ -521,23 +527,41 @@ export function createDoorayResponseService(deps) {
       const operation = job.operation
       await deps.authorize?.(user, operation.machineId)
       // 재요청 경로와 분리한다. 실행 기록이 만료되어도 AI를 다시 실행하지 않는다.
-      const dispatch = await deps.getDispatch(operation)
-      if (dispatch.state !== 'completed' || dispatch.conversationId !== operation.conversationId) {
+      let dispatch
+      try { dispatch = await deps.getDispatch(operation) }
+      catch (failure) {
+        // 만료된 영수증도 새 실행으로 대체하지 않는다. 원 지시와 수동 완료의 엄격한 대사만 허용한다.
+        if (failure.status !== 404 || failure.code !== 'NOT_FOUND' || job.conversationPolicy !== 'dedicated') throw failure
+        dispatch = { state: 'expired', conversationId: operation.conversationId, operationId: operation.id }
+      }
+      if (dispatch.conversationId !== operation.conversationId || (dispatch.operationId && dispatch.operationId !== operation.id)
+        || !['completed', 'failed', 'waiting_resume', 'recovery_required', 'expired'].includes(dispatch.state)) {
         throw error('기존 대화의 실행 완료를 확인하지 못했습니다. AI를 다시 실행하지 않았습니다.', 409)
       }
-      const result = parseDoorayAiResult(await deps.messages(operation), operation.id)
+      const messages = await deps.messages(operation)
+      const match = findDoorayAiResultMessage(messages, operation.id)
+      const result = match?.result
       if (!result || !text(result.proposal).trim()) throw error('이번 요청의 완료 제안을 찾지 못했습니다. AI를 다시 실행하지 않았습니다.', 409)
-      const resolved = resolveDoorayRoutingResult(result, await deps.loadMaps())
+      const evidence = dispatch.state === 'completed' && job.error === unlinkedConversationError ? { method: 'completed-dispatch' }
+        : await deps.manualResultEvidence?.(user, operation, job, match.message, messages)
+      if (!evidence) throw error('수동 이어가기의 최종 답변과 전용 대화 귀속을 확인하지 못했습니다. AI를 다시 실행하지 않았습니다.', 409)
+      const maps = await deps.loadMaps()
+      const resolved = operation.kind === 'review' ? resolveDoorayRoutingResult(job.route, maps)
+        : result.action === 'clarify' ? { route: null, routingWarning: null }
+          : resolveDoorayRoutingResult(result, maps)
       const outcome = readDoorayDecision(result.decision, 'proposal')
       const recovered = await update(userId, (state) => {
         const current = state.jobs.find((entry) => entry.id === id)
         if (!current || current.updatedAt !== expectedUpdatedAt || current.operation?.id !== operation.id
+          || current.operation?.conversationId !== operation.conversationId || current.operation?.machineId !== operation.machineId
           || !publicDoorayResponse(current).canRecoverResult) throw error('대응 기록이 변경되어 복구를 중단했습니다.', 409)
         const recoveredAt = new Date().toISOString()
-        Object.assign(current, resolved, outcome, { proposal: result.proposal, proposalSource: 'router',
-          routingResult: { operationId: operation.id, result }, error: '', updatedAt: recoveredAt,
+        Object.assign(current, resolved, outcome, { proposal: result.proposal, proposalSource: operation.kind,
+          ...(operation.kind === 'router' ? { routingResult: { operationId: operation.id, result } } : {}), error: '', updatedAt: recoveredAt,
           resultRecovery: { previousUpdatedAt: expectedUpdatedAt, operationId: operation.id,
-            conversationId: operation.conversationId, proposalHash: digest(result.proposal), recoveredAt },
+            conversationId: operation.conversationId, proposalHash: digest(result.proposal), recoveredAt,
+            previousStatus: job.status, previousError: job.error, dispatchState: dispatch.state, dispatchTurnId: dispatch.turnId ?? null,
+            ...evidence },
           ...finishRestartRecovery(current) })
         return current
       })
@@ -771,7 +795,7 @@ export function createDoorayResponseService(deps) {
     },
     async retry(userId, id) {
       const existing = (await read(userId)).jobs.find((job) => job.id === id)
-      if (existing && publicDoorayResponse(existing).canRecoverResult) return recoverResult(userId, id, existing.updatedAt)
+      if (existing?.error === unlinkedConversationError && publicDoorayResponse(existing).canRecoverResult) return recoverResult(userId, id, existing.updatedAt)
       await refreshDeleted(userId, (job) => job.id === id, true)
       await update(userId, (state) => {
         const job = state.jobs.find((entry) => entry.id === id)
@@ -822,17 +846,41 @@ export function createDoorayResponseService(deps) {
       try {
         const files = await readdir(deps.directory).catch((failure) => { if (failure.code === 'ENOENT') return []; throw failure })
         const tasks = []
+        const recoveryTasks = []
+        const recoveryKeys = new Set()
+        const now = deps.now?.() ?? Date.now()
         for (const file of files.filter((file) => /^[a-zA-Z0-9_-]+\.json$/.test(file))) {
           const userId = file.slice(0, -5)
-          for (const job of (await read(userId)).jobs.filter((job) => activeStates.has(job.status) || storedRestartInterruption(job))) {
-            tasks.push([userId, job.id, Boolean(job.operation?.kind === 'review'), job.createdAt])
+          for (const job of (await read(userId)).jobs) {
+            if (activeStates.has(job.status) || storedRestartInterruption(job)) {
+              tasks.push([userId, job.id, Boolean(job.operation?.kind === 'review'), job.createdAt])
+            } else if (canRecoverDoorayResult(job)) {
+              const key = `${userId}:${job.id}`
+              recoveryKeys.add(key)
+              const checked = resultCheckedAt.get(key)
+              if (!checked || checked.operationId !== job.operation.id || now - checked.at >= 30_000) {
+                recoveryTasks.push({ key, job, userId, checkedAt: checked?.at ?? 0 })
+              }
+            }
           }
         }
+        for (const key of resultCheckedAt.keys()) if (!recoveryKeys.has(key)) resultCheckedAt.delete(key)
         tasks.sort((a, b) => Number(b[2]) - Number(a[2]) || a[3].localeCompare(b[3]))
+        // 실패 항목은 결과 조회만 수행한다. 활성 요청을 우선하고 오래 확인하지 않은 두 건씩 순환한다.
+        for (const candidate of recoveryTasks.sort((a, b) => a.checkedAt - b.checkedAt).slice(0, 2)) {
+          resultCheckedAt.set(candidate.key, { at: now, operationId: candidate.job.operation.id })
+          tasks.push([candidate.userId, candidate.job.id, false, candidate.job.createdAt, candidate.job.updatedAt])
+        }
         // 특정 계정의 긴 요청이 다른 계정의 상태 갱신을 막지 않도록 제한된 동시성으로 실행한다.
         let cursor = 0
         await Promise.all(Array.from({ length: Math.min(4, tasks.length) }, async () => {
-          while (cursor < tasks.length) { const task = tasks[cursor++]; await tick(task[0], task[1]) }
+          while (cursor < tasks.length) {
+            const task = tasks[cursor++]
+            if (task[4]) {
+              // 답변 없음·실행 중·조회 실패 시 원래 실패 사유와 기록을 유지한다. 재전송하지 않는다.
+              await recoverResult(task[0], task[1], task[4]).catch(() => {})
+            } else await tick(task[0], task[1])
+          }
         }))
       } finally { polling = false }
     },

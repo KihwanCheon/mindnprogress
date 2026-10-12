@@ -44,6 +44,31 @@ export function selectDoorayResponseMcps(servers) {
   })
 }
 
+export function doorayManualResultRecoveryEvidence({ user, operation, job, message, messages, conversation, normalizeRuntime }) {
+  const extra = conversation?.extra ?? {}
+  const workspace = operation.settings?.proposalWorkspace ?? job.settings?.proposalWorkspace
+  const runtime = conversation?.runtime ?? {}
+  const requestedAt = Date.parse(job.createdAt)
+  const original = textValue(operation.prompt) && messages?.find(input => input.position === 'right' && input.type === 'text'
+    && input.conversation_id === operation.conversationId && input.content === operation.prompt)
+  if (job.conversationPolicy !== 'dedicated' || job.userId !== user.id || !workspace || conversation?.id !== operation.conversationId
+    || !operation.id.startsWith(`${job.id}-`) || extra.mnpDoorayResponseId !== job.id || extra.mnpDoorayUserId !== user.id
+    || !textValue(extra.mnpDoorayOperationId) || !extra.mnpDoorayOperationId.startsWith(`${job.id}-`) || extra.workspace !== workspace
+    || normalizeRuntime(operation.conversationId, conversation)?.state !== 'idle'
+    || runtime.is_processing || runtime.isProcessing || Number(runtime.pending_confirmations ?? runtime.pendingConfirmations ?? 0) > 0
+    || (runtime.task_status && runtime.task_status !== 'finished')
+    || message?.conversation_id !== operation.conversationId || message.position !== 'left' || message.type !== 'text'
+    || message.status !== 'finish' || message.hidden === true || !textValue(message.id) || !textValue(message.backend_turn_id)
+    || !original || !Number.isFinite(requestedAt) || !Number.isFinite(Number(original.created_at)) || Number(original.created_at) < requestedAt
+    || !Number.isFinite(Number(message.created_at)) || Number(message.created_at) < Number(original.created_at)) {
+    throw fail('수동 이어가기의 최종 답변·전용 대화·사용자·작업 위치를 확인하지 못했습니다. AI를 다시 실행하지 않았습니다.')
+  }
+  return { method: 'manual-continuation', requestMessageId: original.id, resultMessageId: message.id, resultBackendTurnId: message.backend_turn_id,
+    resultCreatedAt: new Date(Number(message.created_at)).toISOString() }
+}
+
+function textValue(value) { return typeof value === 'string' && value.trim() }
+
 export async function prepareDoorayResponseMcps(call, normalizeRuntime, operation) {
   const catalog = await call(operation.machineId, '/api/mcp/servers')
   const required = selectDoorayResponseMcps(catalog)
@@ -313,6 +338,10 @@ export function createDoorayResponseIntegration(d) {
     },
     dispatch: (op) => dispatchDoorayResponseRequest(call, readConversation, op, policy),
     getDispatch: (op) => call(op.machineId, `/api/internal/external-conversation-dispatches/${encodeURIComponent(op.id)}`),
+    async manualResultEvidence(user, operation, job, message, messages) {
+      const conversation = await readConversation(operation.machineId, operation.conversationId)
+      return doorayManualResultRecoveryEvidence({ user, operation, job, message, messages, conversation, normalizeRuntime: d.normalizeAiConversationRuntime })
+    },
     async messages(op) {
       const response = await call(op.machineId, `/api/conversations/${encodeURIComponent(op.conversationId)}/messages?limit=200&content_mode=full`)
       return (Array.isArray(response?.items) ? response.items : Array.isArray(response) ? response : [])

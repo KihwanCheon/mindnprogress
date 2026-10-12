@@ -65,7 +65,7 @@ export function DoorayResponseInbox({ response, onOpenConversation, onOpenCard, 
               {executionHandoffs.map((entry) => <button type="button" key={entry.id} onClick={() => onOpenConversation({ ...job, ...entry.conversation! })}>인계 대화 보기 · {entry.target.documentTitle}</button>)}
               {approvalConversation && <button type="button" disabled={completing || refining} onClick={() => setExecutionHandoffId(job.id)}>새 문서의 상위 카드에서 이어가기</button>}
               {['proposal', 'needs-approval', 'approved'].includes(job.status) && job.route && <button type="button" disabled={completing || refining} onClick={() => setHandoffId(job.id)}>담당 카드로 전달하기</button>}
-              {job.canRecoverResult ? <button type="button" disabled={recovering || completing || refining} onClick={() => {
+              {job.canRecoverResult ? <button type="button" title="현재 요청의 완료 답변만 확인해 회수합니다. AI를 다시 실행하거나 제안을 승인하지 않습니다." disabled={recovering || completing || refining} onClick={() => {
                 setRecovering(true)
                 void response.recoverResult(job).finally(() => setRecovering(false))
               }}>{recovering ? '완료 답변 확인 중…' : '완료 답변 복구'}</button>
