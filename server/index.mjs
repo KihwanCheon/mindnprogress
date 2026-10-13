@@ -172,6 +172,7 @@ import {
 } from './lib/aiDelegations.mjs'
 import { verifyAiDelegationOriginalMessage } from './lib/aiDelegationDispatchRecovery.mjs'
 import { AiDelegationSourceCompletionError, assertAiDelegationSourceCompletionLease, readAiDelegationSourceCompletionProof } from './lib/aiDelegationSourceCompletion.mjs'
+import { readAiDelegationInterruptedProof } from './lib/aiDelegationInterruptedRecovery.mjs'
 import { buildSharedKnowledgeAudit } from './lib/sharedKnowledgeAudit.mjs'
 import {
   GlobalSearchInputError,
@@ -2794,12 +2795,15 @@ function delegationRecoveryInstruction(delegation, instruction, recovery = null,
   const externalLimitRecovery = ['usage-limit', 'rate-limit', 'model-capacity'].includes(recovery?.failureCategory)
   const userStopRecovery = recovery?.failureCategory === 'user-stop'
   const resultCorrection = recovery?.failureCategory === 'integration-result-correction'
+  const interruptedRecovery = recovery?.failureCategory === 'upstream-interrupted'
   const title = resultCorrection ? '통합 대기 결과 정정'
+    : interruptedRecovery ? 'AI 연결 중단 후 위임 복구'
     : recovery?.failureCategory === 'model-capacity'
     ? '모델 실행 용량 확보 후 위임 복구'
     : externalLimitRecovery ? '외부 사용량 제한 해제 후 위임 복구'
       : userStopRecovery ? '사용자 중지 후 위임 재개' : '재시작 후 위임 복구'
   const reason = resultCorrection ? '사용자가 기존 담당자에게 통합 대기 결과의 정정을 명시적으로 요청했습니다.'
+    : interruptedRecovery ? '이전 AI 실행은 응답 스트림 연결 중단으로 실패했고, 사용자가 보존된 같은 대화와 작업공간에서 미완료 작업의 재개를 승인했습니다.'
     : externalLimitRecovery
     ? `이전 실행은 ${recovery.failureCategory === 'rate-limit' ? '요청 한도' : recovery.failureCategory === 'model-capacity' ? '선택 모델의 실행 용량 부족' : '사용량 한도'}로 중단됐고, 사용자가 원인 해소를 확인한 뒤 같은 대화와 작업공간의 재개를 요청했습니다.`
     : userStopRecovery ? '사용자가 중지했던 기존 위임을 같은 대화에서 다시 이어가도록 요청했습니다.'
@@ -9192,6 +9196,22 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           : delegation.resultCorrection?.operationId ?? boundedAionOperationId(delegation.id, `correct-${recoveryAttempt}`)
         : boundedAionOperationId(delegation.id, `${integrationRecovery ? 'integrate-' : ''}recover-${recoveryAttempt}`)
       let rejectedDispatch
+      let interruptedProof
+      if (retryableChildRecovery && recoveryAvailability.failureCategory === 'upstream-interrupted' && delegation.workspaceLease?.leaseId) {
+        try {
+          interruptedProof = await readAiDelegationInterruptedProof(fetchAionUiOn, {
+            machineId: delegationTargetMachineId(delegation), delegation,
+            origin: aiConversationOrigins.get(delegation.targetConversationId),
+          })
+          await validateAiDelegationAction(request, aiDelegations.get(delegation.id), body, true)
+        } catch (error) {
+          throwIfRuntimeStopping(error, runtimeLifecycle.signal)
+          return sendJson(response, error.status ?? 409, { error: error.message,
+            code: error.code ?? 'AI_DELEGATION_INTERRUPTED_SOURCE_UNCONFIRMED',
+            ...(error.proofHoldReason ? { proofHoldReason: error.proofHoldReason } : {}),
+            executionRequested: false, storedStatePreserved: true })
+        }
+      }
       if (busyRecoveryOperation) {
         try {
           rejectedDispatch = await readAiDelegationDispatchStatus(fetchAionUiOn, {
@@ -9294,6 +9314,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
                 conversationId: delegation.targetConversationId,
                 failureCategory: recoveryAvailability.failureCategory,
                 ...(rejectedDispatch ? { rejectedDispatch } : {}),
+                ...(interruptedProof ? { interruptedProof } : {}),
               })
             : workspacePoolManager.reuseLease(workspaceLease.leaseId, {
                 mapId,
@@ -9371,6 +9392,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         pendingRecovery: { operationId, attempt: recoveryAttempt, sourceState: delegation.state, integrationRecovery, resultCorrection, workspaceLease,
           ...(resultCorrection ? { dispatchBody } : {}), requestedAt: new Date().toISOString() },
         attemptHistory: aiDelegationAttemptHistory(delegation, '사용자가 승인 범위의 기존 작업 재개 요청'),
+        ...(interruptedProof ? { interruptedRecoveryProof: interruptedProof } : {}),
       })
       try {
         dispatch = await fetchAionUiOn(delegationTargetMachineId(delegation), '/api/internal/external-conversation-dispatches', {

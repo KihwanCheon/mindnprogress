@@ -160,6 +160,12 @@ export function aiDelegationStateReason(delegation) {
         : result.waitingReason}${paths.length ? `\n충돌/변경 파일:\n${paths.join('\n')}` : ''}`,
     )
   }
+  if (displayState === 'parent-wake-failed' && !aiDelegationSucceeded(delegation)) {
+    return requiredAiDelegationReason('AI_DELEGATION_PARENT_WAKE_FAILED',
+      (delegation.workspaceResult?.childStatus ?? delegation.childStatus) === 'failed'
+        ? '하위 AI 실행이 중단됐으며 상위 AI로의 실패 보고도 전달하지 못했습니다. 보존된 작업의 복구가 필요합니다.'
+        : '하위 업무 또는 필요한 통합을 완료하지 못했으며 상위 AI로의 상태 보고도 전달하지 못했습니다. 보존된 작업의 복구 상태를 확인하세요.')
+  }
   const configured = AI_DELEGATION_STATE_REASONS[displayState]
   if (configured) return requiredAiDelegationReason(configured.reasonCode, configured.message)
   return requiredAiDelegationReason(
@@ -444,6 +450,11 @@ export function retryableExternalLimitCategory(error) {
   return null
 }
 
+export function retryableAiExecutionFailureCategory(error) {
+  return retryableExternalLimitCategory(error)
+    ?? (/^stream disconnected before completion(?::|$)/iu.test(String(error ?? '').trim()) ? 'upstream-interrupted' : null)
+}
+
 // busy는 새 실행이 시작되지 않은 접수 거절이다. 실행 턴이 있으면 이 예외를 적용하지 않는다.
 export function aiDelegationBusyDispatchRejected(dispatch, conversationId, operationId) {
   return Boolean(conversationId && operationId && dispatch?.operationId === operationId
@@ -556,7 +567,7 @@ export function aiDelegationRecoveryAvailability(delegation) {
   }
 
   const childFailure = delegation?.workspaceResult?.childError ?? delegation?.childError
-  const failureCategory = retryableExternalLimitCategory(childFailure)
+  const failureCategory = retryableAiExecutionFailureCategory(childFailure)
   const hasRecoverableWorkspace = Boolean(
     delegation?.workspaceLease?.leaseId
     && ['quarantined', 'failed-clean'].includes(delegation?.workspaceResult?.status)

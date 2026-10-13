@@ -4,6 +4,7 @@ import path from 'node:path'
 import { WorkspacePoolManager, WorkspacePoolUnavailableError, integrationWorktreeDirtyReasonCode } from './workspacePool.mjs'
 import { RemoteWorkspaceArtifacts } from './remoteWorkspaceArtifacts.mjs'
 import { aiDelegationBusyDispatchRejected, aiDelegationWorkspaceLeaseMatches } from './aiDelegations.mjs'
+import { assertAiDelegationInterruptedLease } from './aiDelegationInterruptedRecovery.mjs'
 import { REMOTE_WORKSPACE_VERSION, identifier, commitId, git, hasCommit, jsonFile, saveJson, stableHash, workspaceError, assignmentMatches } from './remoteWorkspaceProtocol.mjs'
 
 // Remote paths are identities reported by the authenticated Runner, never local paths.
@@ -451,13 +452,17 @@ export class RemoteWorkspacePool {
     return this.exclusive(async () => {
       if (!options?.mapId || !options.cardId || !options.conversationId) throw workspaceError('MNP_WORKSPACE_ASSIGNMENT_MISMATCH')
       const lease = this.scoped(id, options)
+      if (options.failureCategory === 'upstream-interrupted') assertAiDelegationInterruptedLease(lease, options.interruptedProof, options)
       if (!['quarantined', 'leased'].includes(lease.status)
-        || !['confirmed-dispatch', 'recovery-dispatch-busy', 'usage-limit', 'rate-limit', 'model-capacity'].includes(options.failureCategory)
+        || !['confirmed-dispatch', 'recovery-dispatch-busy', 'upstream-interrupted', 'usage-limit', 'rate-limit', 'model-capacity'].includes(options.failureCategory)
         || options.failureCategory === 'recovery-dispatch-busy' && (!aiDelegationBusyDispatchRejected(options.rejectedDispatch, options.conversationId, options.rejectedDispatch?.operationId)
           || !aiDelegationWorkspaceLeaseMatches(lease, options.rejectedDispatch.workspaceLease))
         || options.failureCategory === 'confirmed-dispatch' && !aiDelegationWorkspaceLeaseMatches(lease, options.confirmedDispatchLease)) throw workspaceError('REMOTE_WORKSPACE_RECOVERY_PROOF_REQUIRED')
       if (lease.sealed) throw workspaceError('REMOTE_WORKSPACE_RESULT_SEALED')
       await this.command(lease, 'recover', { ...options, attempt: randomUUID() })
+      if (options.failureCategory === 'upstream-interrupted' && lease.result) {
+        lease.recoveryHistory = [...(lease.recoveryHistory ?? []), { interruptedProof: options.interruptedProof, previousResult: lease.result }].slice(-20)
+      }
       lease.status = 'leased'; lease.result = null; await this.persist()
       return this.publicLease(lease)
     })
