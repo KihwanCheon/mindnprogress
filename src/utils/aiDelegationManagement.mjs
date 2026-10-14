@@ -1,3 +1,16 @@
+export function requestFailureReplacementDelegations(failure, delegations) {
+  if (failure?.kind !== 'request-failure' || failure.resolvedByDelegationId
+    || failure.executionState !== 'not-started' || failure.phase !== 'preflight'
+    || !failure.targetHomeMachineId) return []
+  return (Array.isArray(delegations) ? delegations : []).filter(candidate => !candidate.kind
+    && candidate.id !== failure.id && candidate.mapId === failure.mapId
+    && (candidate.parentMapId ?? candidate.mapId) === (failure.parentMapId ?? failure.mapId)
+    && candidate.parentCardId === failure.parentCardId && candidate.targetCardId === failure.targetCardId
+    && candidate.targetHomeMachineId === failure.targetHomeMachineId
+    && String(candidate.createdAt ?? '') >= String(failure.createdAt ?? ''))
+    .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
+}
+
 export function completedReplacementDelegations(delegation, delegations) {
   const parentMapId = delegation?.parentMapId ?? delegation?.mapId
   const failedCleanLimit = ['waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity'].includes(delegation?.state)

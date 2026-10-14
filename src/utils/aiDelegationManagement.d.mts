@@ -6,6 +6,8 @@ export type AiDelegationSummary = {
   resolvedByDelegationId?: string | null
   requestedDelegationId?: string
   executionState?: 'not-started' | 'unknown'
+  phase?: 'preflight' | 'dispatch'
+  targetHomeMachineId?: string
   taskCompletion?: { state: 'completed' | 'incomplete'; status: string; progress: number; message: string }
   displayState?: string
   reasonCode?: string
@@ -19,6 +21,7 @@ export type AiDelegationSummary = {
   targetCardLabel?: string
   parentConversationId?: string
   targetConversationId?: string
+  instructionPreview?: string
   createdAt: string
   updatedAt: string
   childStatus?: string | null
@@ -50,6 +53,7 @@ export type AiDelegationSummary = {
 }
 
 export function completedReplacementDelegations(delegation: AiDelegationSummary, delegations: AiDelegationSummary[]): AiDelegationSummary[]
+export function requestFailureReplacementDelegations(failure: AiDelegationSummary, delegations: AiDelegationSummary[]): AiDelegationSummary[]
 export function delegationHierarchyPathNodeIds(
   parentCardId: string,
   targetCardId: string,

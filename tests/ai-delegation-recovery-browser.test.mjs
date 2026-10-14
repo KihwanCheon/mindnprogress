@@ -25,6 +25,11 @@ window.fetch = async (url, init = {}) => {
   window.audit.calls.push({url,method:init.method || 'GET',body:init.body ? JSON.parse(init.body) : null});
   if (init.method === 'POST') {
     if (window.audit.fail) return new Response(JSON.stringify({error:'서버 상태가 변경되었습니다.'}),{status:409});
+    if(String(url).includes('/ai-delegation-request-failures/') && String(url).endsWith('/resolve')) {
+      const body=JSON.parse(init.body), failure=window.requestFailures.find(f=>String(url).includes('/'+f.id+'/'));
+      failure.resolvedByDelegationId=body.replacementDelegationId;
+      return new Response(JSON.stringify({requestFailure:failure,executionRequested:false,cardChanged:false}));
+    }
     if (window.audit.integrationQueue && String(url).endsWith('/recover')) {
       item.integrationRecoveryRequest={requestId:JSON.parse(init.body).recoveryRequestId,status:'checking',reasonCode:'CHECKING',message:'보존된 완료 결과를 검증 중입니다. 같은 요청을 반복하지 마세요.'};
       item.recovery={recoveryAvailable:false,recommendedAction:'refresh-status'};
@@ -54,6 +59,10 @@ window.waitingReport = () => {item.state='waiting-parent';item.childError=null;i
 window.deliveringReport = () => {item.state='waking-parent';item.reportStatus='delivering';window.renderRecovery()};
 window.receivedReport = () => {item.state='completed';item.reportPending=false;item.reportStatus='received';item.recovery=null;item.closure=null;window.renderRecovery()};
 window.failedRequest = () => {window.requestFailures=[{id:'request-error',kind:'request-failure',state:'request-failed',mapId:'child-map',parentMapId:'parent-map',parentCardId:'parent',targetCardId:'child',targetCardLabel:'하위 작업',executionState:'not-started',reasonCode:'REMOTE_WORKSPACE_RUNNER_STALE',message:'원격 풀 보고 만료',createdAt:'2026-10-12',updatedAt:'2026-10-12'}];window.renderRecovery()};
+window.retryableRequest = () => {
+  window.requestFailures=[{id:'retryable-request',kind:'request-failure',state:'request-failed',mapId:'child-map',parentMapId:'parent-map',parentCardId:'parent',targetCardId:'child',targetCardLabel:'하위 작업',phase:'preflight',executionState:'not-started',targetHomeMachineId:'main',reasonCode:'AI_DELEGATION_VERSION_CONFLICT',message:'문서 버전 충돌',createdAt:'2026-09-11T12:00:00Z',updatedAt:'failure-current'}];
+  replacement.targetHomeMachineId='main';replacement.state='running';replacement.instructionPreview='같은 업무의 재접수 지시';window.renderRecovery();
+};
 window.incompleteTask = () => {window.requestFailures=[];item.taskCompletion={state:'incomplete',status:'planned',progress:0,message:'AI 실행은 종료됐지만 카드 업무는 아직 미완료입니다.'};replacement.taskCompletion=item.taskCompletion;window.renderRecovery()};
 window.manyCompletedTasks = () => {
   Object.assign(item,{childError:null,parentError:null,workspaceError:null,workspaceResult:null,instructionPreview:'개발 준비와 독립 검수 단계'});
@@ -255,12 +264,33 @@ test('상위 카드 복구 화면은 하위 카드를 제외하고 AI 없이 재
     assert.equal(await evaluate('document.querySelector(".ai-delegation-status-badge")?.textContent'), 'AI 위임 접수 실패')
     assert.equal(await evaluate('document.querySelectorAll(".ai-delegation-recovery-actions button").length'), 0)
     assert.equal(await evaluate('window.audit.calls.filter(c=>c.method==="POST").length'), beforeRequestFailurePosts)
+    await evaluate('window.retryableRequest()')
+    await ready()
+    assert.match(await evaluate('document.body.textContent'), /정상 재접수로 해제/)
+    await evaluate('window.audit.confirm=false')
+    await click('정상 재접수로 해제')
+    assert.equal(await evaluate('window.audit.calls.filter(c=>c.method==="POST").length'), beforeRequestFailurePosts)
+    await evaluate('window.audit.confirm=true')
+    await click('정상 재접수로 해제')
+    await waitFor(() => evaluate('window.audit.calls.some(c=>c.url.endsWith("/retryable-request/resolve"))'))
+    await ready()
+    const resolutionPost = await evaluate('window.audit.calls.filter(c=>c.method==="POST").at(-1)')
+    assert.equal(resolutionPost.url, '/api/maps/parent-map/ai-delegation-request-failures/retryable-request/resolve')
+    assert.equal(resolutionPost.body.replacementDelegationId, 'replacement')
+    assert.equal(resolutionPost.body.confirmSameWork, true)
+    assert.equal(resolutionPost.body.expectedUpdatedAt, 'failure-current')
+    assert.equal(await evaluate('window.requestFailures.length'), 1)
+    assert.equal(await evaluate('window.requestFailures[0].resolvedByDelegationId'), 'replacement')
+    assert.equal(await evaluate('window.allDelegations().find(item=>item.id==="replacement").state'), 'running')
+    assert.equal(await evaluate('document.body.textContent.includes("retryable-request")'), false)
+    await evaluate('window.allDelegations().find(item=>item.id==="replacement").state="completed"')
+    const afterResolutionPosts = beforeRequestFailurePosts + 1
     await evaluate('window.incompleteTask()'); await ready()
     assert.match(await evaluate('document.body.textContent'), /카드 업무 미완료 · 확인 필요/)
     assert.match(await evaluate('document.querySelector(".ai-delegation-recovery-heading")?.textContent'), /업무 확인 1개 카드/)
     assert.equal(await evaluate('document.querySelector(".ai-delegation-status-badge")?.textContent'), 'AI 업무 확인 필요')
     assert.equal(await evaluate('Array.from(document.querySelectorAll("button")).some(b=>b.textContent==="기존 작업 재개")'), false)
-    assert.equal(await evaluate('window.audit.calls.filter(c=>c.method==="POST").length'), beforeRequestFailurePosts)
+    assert.equal(await evaluate('window.audit.calls.filter(c=>c.method==="POST").length'), afterResolutionPosts)
     assert.equal(await evaluate('document.querySelectorAll(".ai-delegation-recovery-actions button").length'), 0)
     await evaluate('window.manyCompletedTasks()'); await ready()
     assert.match(await evaluate('document.querySelector(".ai-delegation-recovery-heading")?.textContent'), /업무 확인 2개 카드/)
@@ -287,7 +317,7 @@ test('상위 카드 복구 화면은 하위 카드를 제외하고 AI 없이 재
     assert.equal(await evaluate('document.querySelector(".ai-delegation-status-badge")?.textContent'), 'AI 위임 중')
     assert.match(await evaluate('document.querySelector(".ai-delegation-status-badge")?.title'), /카드 업무 확인 필요 1개 카드/)
     assert.equal(await evaluate('document.querySelectorAll(".ai-delegation-recovery-actions button").length'), 1, '실제 진행 항목의 상태 확인만 제공한다')
-    assert.equal(await evaluate('window.audit.calls.filter(c=>c.method==="POST").length'), beforeRequestFailurePosts)
+    assert.equal(await evaluate('window.audit.calls.filter(c=>c.method==="POST").length'), afterResolutionPosts)
   } finally {
     if (send && socket?.readyState === WebSocket.OPEN) await send('Browser.close').catch(() => {})
     for (const item of pending.values()) clearTimeout(item.timer)

@@ -7604,6 +7604,35 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       }
       return sendJson(response, 404, { error: '지원하지 않는 재구성 작업입니다.' })
     }
+    const failureResolutionRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/ai-delegation-request-failures\/([^/]+)\/resolve$/)
+    if (failureResolutionRoute && request.method === 'POST') {
+      const user = requireUser(request, response)
+      if (!user) return
+      if (!canEdit(user)) return sendAiDelegationResponse(response, 403, 'AI_DELEGATION_EDITOR_REQUIRED', '편집자만 접수 실패 기록을 처리할 수 있습니다.')
+      const mapId = decodeURIComponent(failureResolutionRoute[1])
+      const failureId = decodeURIComponent(failureResolutionRoute[2])
+      const failure = aiDelegationRequestFailures.get(failureId)
+      if (!failure || failure.parentMapId !== mapId) return sendAiDelegationResponse(response, 404, 'AI_DELEGATION_REQUEST_FAILURE_NOT_FOUND', '접수 실패 기록을 찾을 수 없습니다.')
+      const [parent, target] = await Promise.all([readMap(mapId), readMap(failure.mapId)])
+      if (!parent || !target || parent.trashedAt || target.trashedAt
+        || !parent.nodes.some(node => node.id === failure.parentCardId)
+        || !target.nodes.some(node => node.id === failure.targetCardId)) return sendAiDelegationResponse(response, 404, 'AI_DELEGATION_CARD_NOT_FOUND', '접수 실패의 상위 또는 대상 카드를 찾을 수 없습니다.')
+      const body = await readJsonBody(request)
+      try {
+        const result = await aiDelegationRequestFailures.resolve({
+          mapId, failureId, replacementDelegationId: String(body.replacementDelegationId ?? '').trim(),
+          expectedUpdatedAt: body.expectedUpdatedAt, confirmSameWork: body.confirmSameWork,
+          note: body.note, actorId: user.id,
+        }, aiDelegations)
+        broadcastEvent({ type: 'ai-delegation-request-resolved', mapId, requestFailure: result.requestFailure })
+        return sendAiDelegationResponse(response, 200, 'AI_DELEGATION_REQUEST_FAILURE_RESOLVED',
+          '정상 재접수와 연결해 현재 실패 표시를 해제했습니다. 실패 이력·카드·AI 실행은 보존했습니다.',
+          { ...result, executionRequested: false, cardChanged: false })
+      } catch (error) {
+        if (!error?.reasonCode) throw error
+        return sendAiDelegationResponse(response, error.status, error.reasonCode, error.message)
+      }
+    }
     const actionRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/ai-delegations\/([^/]+)\/(recover|refresh|retry-report|finalize-coordination|supersede|close)$/)
     if (actionRoute && request.method === 'POST') {
       const id = decodeURIComponent(actionRoute[2])
@@ -9973,7 +10002,8 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
 
       const parentHomeMachineId = conversationHomeMachineId(source.conversationId, source)
       const requestContext = { requestId: `request-${randomUUID()}`, delegationId: id, mapId, parentMapId,
-        parentCardId: source.cardId, targetCardId, parentHomeMachineId, strategy, instruction, dispatchStarted: false }
+        parentCardId: source.cardId, parentConversationId: source.conversationId,
+        targetCardId, parentHomeMachineId, strategy, instruction, dispatchStarted: false }
       aiDelegationRequestContexts.set(response, requestContext)
       let targetHomeMachineId
       try {

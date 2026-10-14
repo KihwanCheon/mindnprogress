@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import test from 'node:test'
 import { createAiDelegationRequestFailures, safeDelegationFailureMessage, withDelegationTaskCompletion } from '../server/lib/aiDelegationRequestFailures.mjs'
 import { aiDelegationDisplayItems, aiDelegationDisplaySections, aiDelegationStatusByCard, isVisibleAiDelegation } from '../src/utils/aiDelegationStatus.mjs'
 import { groupDelegationPresentation } from '../src/utils/groupOverview.mjs'
 
 const context = { requestId: 'request-1', delegationId: 'delegation-1', mapId: 'map-test', parentMapId: 'map-test',
-  parentCardId: 'parent', targetCardId: 'child', targetHomeMachineId: 'mac', requestSignature: 'same-request', instruction: '비공개 지시 전문' }
+  parentCardId: 'parent', targetCardId: 'child', targetHomeMachineId: 'mac', strategy: 'new', requestSignature: 'same-request', instruction: '비공개 지시 전문' }
 const failure = { status: 409, reasonCode: 'REMOTE_WORKSPACE_RUNNER_STALE', message: '원격 풀 보고가 만료됐습니다.' }
 
 test('요청 실패는 실행과 별개로 직렬 저장하고 재시작 후에도 이유를 조회한다', async () => {
@@ -47,6 +48,98 @@ test('같은 요청의 실제 접수 이후에도 실패 이력은 남지만 현
   assert.equal(items[0].requestSignature, undefined)
   delegations.get(context.delegationId).requestSignature = 'different-request'
   assert.equal(ledger.list({ mapId: 'map-test', delegations })[0].resolvedByDelegationId, null)
+})
+
+function memoryLedger(initial = []) {
+  let disk = structuredClone(initial)
+  const dependencies = { filePath: 'isolated', readJson: async () => structuredClone(disk),
+    writeJson: async (_file, records) => { disk = structuredClone(records) } }
+  return { dependencies, disk: () => structuredClone(disk) }
+}
+
+test('버전 충돌 뒤 키·서명이 바뀌어도 동일 지시·상위·머신의 정상 재접수는 표시를 해제한다', async () => {
+  const memory = memoryLedger()
+  const ledger = await createAiDelegationRequestFailures(memory.dependencies)
+  const original = await ledger.record({ ...context, parentConversationId: 'parent-conversation' }, {
+    ...failure, reasonCode: 'AI_DELEGATION_VERSION_CONFLICT',
+  })
+  const accepted = { ...context, id: 'revision-2', requestSignature: 'changed-revision',
+    parentConversationId: 'parent-conversation', strategy: original.strategy,
+    instructionHash: createHash('sha256').update(context.instruction).digest('hex'),
+    state: 'running', createdAt: '2999-01-01' }
+  const originals = structuredClone(accepted)
+  const delegations = new Map([[accepted.id, accepted]])
+  const item = ledger.list({ mapId: context.mapId, delegations })[0]
+  assert.equal(item.resolvedByDelegationId, accepted.id)
+  assert.equal(aiDelegationStatusByCard([item], context.mapId)[context.parentCardId], undefined)
+  assert.equal(item.instructionHash, undefined)
+  assert.equal(item.requestSignature, undefined)
+  assert.deepEqual(accepted, originals)
+  const restarted = await createAiDelegationRequestFailures(memory.dependencies)
+  assert.equal(restarted.list({ mapId: context.mapId, delegations })[0].resolvedByDelegationId, accepted.id)
+  for (const delta of [{ instructionHash: 'different-work' }, { parentConversationId: 'another-parent' },
+    { targetHomeMachineId: 'another-machine' }, { targetCardId: 'another-card' }, { strategy: 'resume' },
+    { createdAt: '2000-01-01' }]) {
+    delegations.set(accepted.id, { ...accepted, ...delta })
+    assert.equal(ledger.list({ mapId: context.mapId, delegations })[0].resolvedByDelegationId, null)
+  }
+})
+
+test('실행 불확실·다른 오류·근거 없는 레거시는 새 키의 접수로 자동 해제하지 않는다', async () => {
+  for (const mode of ['unknown', 'other-error', 'legacy']) {
+    const memory = memoryLedger()
+    const ledger = await createAiDelegationRequestFailures(memory.dependencies)
+    await ledger.record({ ...context, parentConversationId: mode === 'legacy' ? undefined : 'parent',
+      dispatchStarted: mode === 'unknown' }, { ...failure,
+      reasonCode: mode === 'other-error' ? failure.reasonCode : 'AI_DELEGATION_VERSION_CONFLICT' })
+    const accepted = { ...context, id: 'new-key', requestSignature: 'new-signature', parentConversationId: 'parent',
+      instructionHash: createHash('sha256').update(context.instruction).digest('hex'), createdAt: '2999-01-01' }
+    assert.equal(ledger.list({ mapId: context.mapId, delegations: new Map([[accepted.id, accepted]]) })[0].resolvedByDelegationId, null)
+  }
+})
+
+test('레거시 실패는 명시 확인으로 진행 중 재접수에 연결하고 원 오류·실행을 보존한다', async () => {
+  const memory = memoryLedger()
+  const ledger = await createAiDelegationRequestFailures(memory.dependencies)
+  const record = await ledger.record(context, failure)
+  const accepted = { ...context, id: 'new-key', requestSignature: 'new-signature', state: 'running', createdAt: '2999-01-01' }
+  const before = structuredClone(accepted)
+  const delegations = new Map([[accepted.id, accepted]])
+  const body = { mapId: context.mapId, failureId: record.id, replacementDelegationId: accepted.id,
+    expectedUpdatedAt: record.updatedAt, confirmSameWork: true, note: '승인된 동일 업무 재접수 확인', actorId: 'editor' }
+  for (const patch of [{ expectedUpdatedAt: 'stale' }, { confirmSameWork: false },
+    { replacementDelegationId: 'missing' }, { mapId: 'other-map' }]) {
+    await assert.rejects(ledger.resolve({ ...body, ...patch }, delegations))
+  }
+  for (const patch of [{ targetCardId: 'another-card' }, { targetHomeMachineId: 'another-machine' },
+    { parentCardId: 'another-parent' }, { mapId: 'another-map' }, { parentMapId: 'another-parent-map' },
+    { createdAt: '2000-01-01' }, { requestSignature: null }]) {
+    delegations.set(accepted.id, { ...accepted, ...patch })
+    await assert.rejects(ledger.resolve(body, delegations), { reasonCode: 'AI_DELEGATION_REQUEST_FAILURE_REPLACEMENT_INVALID' })
+  }
+  delegations.set(accepted.id, accepted)
+  const result = await ledger.resolve(body, delegations)
+  assert.equal(result.repeated, false)
+  assert.equal(result.requestFailure.resolvedByDelegationId, accepted.id)
+  assert.equal(result.requestFailure.state, 'request-failed')
+  assert.equal(result.requestFailure.message, failure.message)
+  assert.equal(result.requestFailure.resolution.actorId, 'editor')
+  assert.deepEqual(delegations.get(accepted.id), before)
+  assert.equal((await ledger.resolve(body, delegations)).repeated, true)
+  await assert.rejects(ledger.resolve({ ...body, replacementDelegationId: 'another' }, delegations),
+    { reasonCode: 'AI_DELEGATION_REQUEST_FAILURE_ALREADY_RESOLVED' })
+  const restarted = await createAiDelegationRequestFailures(memory.dependencies)
+  assert.equal(restarted.list({ mapId: context.mapId, delegations })[0].resolvedByDelegationId, accepted.id)
+  assert.equal(memory.disk().length, 1)
+})
+
+test('실행 여부가 불확실한 실패는 사용자 확인이 있어도 해제하지 않는다', async () => {
+  const ledger = await createAiDelegationRequestFailures(memoryLedger().dependencies)
+  const record = await ledger.record({ ...context, dispatchStarted: true }, failure)
+  const accepted = { ...context, id: 'new-key', createdAt: '2999-01-01' }
+  await assert.rejects(ledger.resolve({ mapId: context.mapId, failureId: record.id, expectedUpdatedAt: record.updatedAt,
+    replacementDelegationId: accepted.id, confirmSameWork: true, note: '재접수 확인', actorId: 'editor' },
+  new Map([[accepted.id, accepted]])), { reasonCode: 'AI_DELEGATION_REQUEST_FAILURE_EXECUTION_UNCERTAIN' })
 })
 
 test('실행 완료와 카드 업무 미완료는 분리하고 기존 완료 상태·원문은 바꾸지 않는다', () => {

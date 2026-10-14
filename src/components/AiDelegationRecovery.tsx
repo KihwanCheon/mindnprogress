@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { completedReplacementDelegations, type AiDelegationSummary } from '../utils/aiDelegationManagement.mjs'
+import { completedReplacementDelegations, requestFailureReplacementDelegations, type AiDelegationSummary } from '../utils/aiDelegationManagement.mjs'
 import { aiDelegationDisplayItems, aiDelegationDisplaySections, aiDelegationRequiresRecovery } from '../utils/aiDelegationStatus.mjs'
 import { groupDelegationPresentation, groupDelegationReportHint, type GroupDelegation } from '../utils/groupOverview.mjs'
 import { integrationRecoveryPending, integrationRecoveryUnconfirmed, reconcileIntegrationRecoveryRequests, submitIntegrationRecovery } from '../utils/aiIntegrationRecovery.mjs'
@@ -24,6 +24,7 @@ const actionHints = {
   correctResult: '원 담당 AI가 같은 worker에서 자기 결과를 정정하고 새 체크포인트를 만듭니다. 통합 사용자 파일은 보존하며 결과 정정은 품질 승인이나 삭제 권한이 아닙니다.',
   retryReport: '완료된 하위 작업은 다시 실행하지 않고 저장된 결과만 상위 AI에 전달합니다. 상위 AI는 결과 검토를 위해 실행됩니다.',
   supersede: '이 위임을 완료 처리하지 않고 선택한 후속 성공 위임으로 대체되었다는 이력을 남겨 닫습니다. 카드·코드·작업공간은 변경하지 않으며 UI에서 되돌릴 수 없습니다.',
+  resolveRequest: '같은 업무가 정상 재접수됐음을 확인해 접수 실패 표시만 해제합니다. 원 실패 이력·카드·진행 중 AI는 변경하지 않습니다.',
   openClose: '결과 전달과 완료 처리를 포기하고 위임 기록만 닫는 절차를 엽니다. 바로 종료되지 않으며 사유·감사 메모 입력과 최종 확인이 필요합니다.',
   cancelClose: '사용자 종료 입력을 취소합니다. 위임 상태와 저장된 결과는 변경되지 않습니다.',
   confirmClose: '결과를 상위 AI에 보고하지 않고 위임을 사용자 종료 상태로 닫습니다. 완료로 기록하지 않고 카드·코드·작업공간은 변경하지 않으며 UI에서 되돌릴 수 없습니다.',
@@ -94,7 +95,7 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
   useEffect(() => () => onPreviewCards(null), [onPreviewCards])
   useEffect(() => { setHistoryOpen(false) }, [mapId, cardId])
 
-  async function action(item: Delegation, kind: 'refresh' | 'recover' | 'retry-report' | 'supersede' | 'recheck-integration') {
+  async function action(item: Delegation, kind: 'refresh' | 'recover' | 'retry-report' | 'supersede' | 'recheck-integration' | 'resolve-request') {
     if (acting.current) return
     if (kind === 'recheck-integration') {
       if (!integrationRecoveryUnconfirmed(item)) return
@@ -116,9 +117,9 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
       return
     }
     if (kind === 'recover' && (integrationRecoveryPending(item) || integrationRecoveryUnconfirmed(item))) return
-    const candidates = completedReplacementDelegations(item, items)
+    const candidates = kind === 'resolve-request' ? requestFailureReplacementDelegations(item, items) : completedReplacementDelegations(item, items)
     const replacementId = replacementIds[item.id] ?? candidates[0]?.id
-    if (kind === 'supersede' && !replacementId) return
+    if ((kind === 'supersede' || kind === 'resolve-request') && !replacementId) return
     const retryIntegration = item.recovery?.recommendedAction === 'retry-integration'
     const correctResult = item.recovery?.recommendedAction === 'correct-integration-result'
     const confirmation = kind === 'recover'
@@ -127,6 +128,8 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
         : '중단 원인이 해소되었고 기존 승인 범위에서 작업을 이어갈까요? 현재 변경을 확인하고 남은 작업만 같은 AI 대화에서 진행합니다.'
       : kind === 'retry-report'
         ? '하위 작업을 재실행하지 않고 저장된 결과를 상위 AI에 다시 전달할까요? 상위 AI가 결과 검토를 위해 실행됩니다.'
+        : kind === 'resolve-request'
+          ? `실패했던 동일 업무가 ${replacementId}으로 정상 재접수됐나요? 원 실패 이력은 남기고 현재 실패 표시만 해제합니다. 진행 중 위임은 유지하며 AI를 실행하거나 업무를 완료 처리하지 않습니다.`
         : kind === 'supersede'
           ? `이 위임을 완료 처리하지 않고 후속 성공 위임 ${replacementId}으로 대체됐다는 이력을 남겨 종료할까요?`
           : ''
@@ -136,6 +139,16 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
     setFeedback(current => ({ ...current, [item.id]: { message: kind === 'recover' ? '복구 요청을 접수하고 있습니다. 잠시 기다려 주세요.' : '요청을 처리하고 있습니다.' } }))
     try {
       const parentMapId = item.parentMapId ?? item.mapId
+      if (kind === 'resolve-request') {
+        await request(`/api/maps/${encodeURIComponent(parentMapId)}/ai-delegation-request-failures/${encodeURIComponent(item.id)}/resolve`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+            expectedUpdatedAt: item.updatedAt, replacementDelegationId: replacementId, confirmSameWork: true,
+            note: '사용자가 선택한 후속 위임이 동일 업무의 정상 재접수임을 확인했습니다.',
+          }),
+        })
+        if (mounted.current) setNotice('정상 재접수와 연결해 실패 표시를 해제했습니다. 실패 이력과 AI 실행은 보존했습니다.')
+        return
+      }
       const [parent, target, group] = await Promise.all([
         request<{ map: { version: number } }>(`/api/maps/${encodeURIComponent(parentMapId)}`),
         request<{ map: { version: number } }>(`/api/maps/${encodeURIComponent(item.mapId)}`),
@@ -259,12 +272,13 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
   if (!pending.length && !error && !notice) return null
   const renderItem = (item: Delegation, history = false) => {
       const cardAttention = item.kind === 'task-attention'
-      const candidates = history || cardAttention ? [] : completedReplacementDelegations(item, items)
+      const requestFailure = item.kind === 'request-failure'
+      const candidates = history || cardAttention ? [] : requestFailure
+        ? requestFailureReplacementDelegations(item, items) : completedReplacementDelegations(item, items)
       const selectedReplacementId = replacementIds[item.id] ?? candidates[0]?.id ?? ''
       const closing = closeDraft?.id === item.id
       const retryIntegration = item.recovery?.recommendedAction === 'retry-integration'
       const correctResult = item.recovery?.recommendedAction === 'correct-integration-result'
-      const requestFailure = item.kind === 'request-failure'
       const checking = integrationRecoveryPending(item)
       const unconfirmed = integrationRecoveryUnconfirmed(item)
       const actionFeedback = item.integrationRecoveryRequest?.status === 'failed'
@@ -308,11 +322,17 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
         {errorDetail && <p className="ai-delegation-recovery-error-detail">{errorDetail}</p>}
         {!history && actionFeedback && <p className="ai-delegation-action-feedback" role={actionFeedback.error ? 'alert' : 'status'}>{actionFeedback.message}</p>}
         {candidates.length > 1 && <label className="ai-delegation-replacement">
-          <span>완료된 후속 위임</span>
+          <span>{requestFailure ? '동일 업무의 정상 재접수' : '완료된 후속 위임'}</span>
           <select disabled={busy} value={selectedReplacementId} onChange={(event) => setReplacementIds((current) => ({ ...current, [item.id]: event.target.value }))}>
             {candidates.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.id}</option>)}
           </select>
         </label>}
+        {requestFailure && candidates.length > 0 && <>
+          <p className="ai-delegation-history-instruction">{candidates.find(candidate => candidate.id === selectedReplacementId)?.instructionPreview}</p>
+          <div className="ai-delegation-recovery-actions">
+            <button type="button" {...actionAccessibility('정상 재접수로 해제', actionHints.resolveRequest)} disabled={busy} onClick={() => void action(item, 'resolve-request')}>정상 재접수로 해제</button>
+          </div>
+        </>}
         {!history && !cardAttention && closing ? <div className="ai-delegation-close-form">
           <label><span>종료 사유</span><select disabled={busy} value={closeDraft.reason} onChange={(event) => setCloseDraft({ ...closeDraft, reason: event.target.value as CloseReason })}>{Object.entries(closeReasonLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
           <label><span>감사 메모</span><textarea disabled={busy} maxLength={1000} rows={3} value={closeDraft.note} placeholder="복구하거나 결과를 보고하지 않고 종료하는 이유를 남겨 주세요." onChange={(event) => setCloseDraft({ ...closeDraft, note: event.target.value })} /></label>
