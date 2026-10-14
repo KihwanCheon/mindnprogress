@@ -209,7 +209,7 @@ test(`Git 잠금 복구 접수 후 main 진행(${alreadyApplied ? '기존 후보
 })
 }
 
-test('Git 잠금 재시도 후보 생성 중 재시작은 일부 체크포인트만 완료로 반영하지 않는다', async () => {
+for (const failureType of ['integration-git-lock', 'integration-head-changed']) test(`${failureType} 재시도 후보 생성 중 재시작은 일부 체크포인트만 완료로 반영하지 않는다`, async () => {
   const base = 'a'.repeat(40), first = 'b'.repeat(40), head = 'c'.repeat(40), candidate = 'd'.repeat(40)
   const workspace = { root: 'worker' }, integration = { root: 'main' }
   const calls = []
@@ -224,7 +224,7 @@ test('Git 잠금 재시도 후보 생성 중 재시작은 일부 체크포인트
   } })
   const lease = { branch: 'source', baseCommit: base, headCommit: head, integrationBaseCommit: base,
     integrationHeadCommit: null, commits: [first, head], checkpoints: [{ commit: first }, { commit: head }],
-    integrationRecoveryHistory: [{ type: 'integration-git-lock' }] }
+    integrationRecoveryHistory: [{ type: failureType }] }
   await assert.rejects(manager.applyIntegration(lease, workspace, integration), /커밋 수/)
   assert.equal(lease.integrationHeadCommit, null)
   assert.ok(calls.length > 0)
@@ -361,10 +361,11 @@ test('통합 재시도는 소유권·세션·체크포인트·수동 커밋 불�
   assert.equal(f.manager.state.leases[f.lease.leaseId].integrationRecoveryHistory, undefined)
 })
 
-for (const failureType of ['local-changes', 'integration-git-lock', 'integration-git-lock-meta']) {
+for (const failureType of ['local-changes', 'integration-git-lock', 'integration-git-lock-meta', 'integration-head-changed']) {
 test(`통합 복구 API(${failureType})는 최신 승인·유휴 대화를 확인하고 결과 해시를 보존하며 하위 AI 실행 없이 복구한다`, realGit, async (t) => {
-  const gitLock = failureType.startsWith('integration-git-lock')
+  const gitLock = failureType !== 'local-changes'
   const f = await (gitLock ? gitLockQuarantine : localChangesQuarantine)(t)
+  if (failureType === 'integration-head-changed') f.manager.state.leases[f.lease.leaseId].result.error = '통합 직전에 통합 작업공간의 HEAD가 변경되었습니다.'
   let untrackedMetaRecovery
   if (failureType === 'integration-git-lock-meta') {
     await rm(f.lockPath)
@@ -450,7 +451,7 @@ test(`통합 복구 API(${failureType})는 최신 승인·유휴 대화를 확�
       assert.equal((await post({ ...input, untrackedMetaRecovery: { ...untrackedMetaRecovery, path: '../outside.cs.meta' } })).status, 400)
       assert.equal((await post({ ...input, untrackedMetaRecovery: { ...untrackedMetaRecovery, expectedSha256: 'a'.repeat(64) } })).status, 409)
       assert.equal((await post({ ...input, untrackedMetaRecovery: undefined })).status, 409)
-    } else if (!gitLock) {
+    } else if (!gitLock || failureType === 'integration-head-changed') {
       assert.equal((await post({ ...input, untrackedMetaRecovery: { path: 'Assets/Guard.cs.meta', expectedSha256: 'a'.repeat(64), mainCommit: 'b'.repeat(40) } })).status, 400)
     }
     const response = await post(input)

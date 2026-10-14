@@ -518,6 +518,14 @@ export function integrationGitLockFailure(result) {
   return { candidateCommit: command[1], lockPath: lock[1] }
 }
 
+export function integrationHeadChangedFailure(result) {
+  if (result?.status !== 'quarantined' || result.childStatus !== 'completed' || result.integratedCommit
+    || !result.integrationBranch || result.conflictRound || result.unmergedFiles?.length
+    || !['통합 직전에 통합 작업공간의 HEAD가 변경되었습니다.', '충돌 해결 중 통합 작업공간의 HEAD가 변경되었습니다.'].includes(String(result.error ?? '').trim())
+    || !['headCommit', 'integrationBaseCommit', 'integrationHeadCommit'].every(key => /^[a-f0-9]{40}$/u.test(String(result[key] ?? '')))) return null
+  return { candidateCommit: result.integrationHeadCommit }
+}
+
 export function aiDelegationRecoveryAvailability(delegation) {
   if (delegation?.resultCorrection && (['completed', 'superseded', 'closed'].includes(delegation.state)
     || aiDelegationSucceeded(delegation))) return null
@@ -551,6 +559,11 @@ export function aiDelegationRecoveryAvailability(delegation) {
   if (delegation.state === 'failed' && delegation.workspaceLease?.leaseId
     && integrationGitLockFailure(delegation.workspaceResult)) {
     return { failurePhase: 'integration', failureCategory: 'integration-git-lock', recoveryAvailable: true,
+      recommendedAction: 'retry-integration', recoveryTool: 'mindnprogress_recover_ai_delegation' }
+  }
+  if (delegation.state === 'failed' && delegation.workspaceLease?.leaseId
+    && integrationHeadChangedFailure(delegation.workspaceResult)) {
+    return { failurePhase: 'integration', failureCategory: 'integration-head-changed', recoveryAvailable: true,
       recommendedAction: 'retry-integration', recoveryTool: 'mindnprogress_recover_ai_delegation' }
   }
   if (['recovery-required', 'integration-recovery-required', 'waiting-child-resume'].includes(delegation.state)) {

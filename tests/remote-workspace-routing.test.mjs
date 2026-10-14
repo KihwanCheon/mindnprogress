@@ -20,6 +20,18 @@ test('일반 Mac 경로는 풀 없이 null을 반환하고 Windows worker를 선
   assert.deepEqual(f.counts(), { localCalls: 0, remoteCalls: 0 })
 })
 
+test('HEAD 변경 복구와 공통 내부 복구는 원격 lease를 로컬 manager로 우회시키지 않는다', () => {
+  const f = fixture()
+  f.remote.state.leases['remote-lease'] = { ownership: { machineId: 'mac' } }
+  for (const method of ['recoverIntegrationHeadChangedFailure', 'recoverCheckpointIntegrationFailure']) {
+    let calls = 0
+    f.facade[method] = () => { calls++; return 'local-head-recovery' }
+    assert.throws(() => f.facade[method]('remote-lease', {}), { reasonCode: 'REMOTE_WORKSPACE_EXPLICIT_RECOVERY_REQUIRED' })
+    assert.equal(calls, 0)
+    assert.equal(f.facade[method]('local-lease', {}), 'local-head-recovery')
+  }
+})
+
 test('관리 대상 원격 경로는 미승인·만료 보고에서도 일반 실행으로 우회하지 않는다', () => {
   const f = fixture()
   const report = { machineId: 'mac', poolId: 'mac-pool', version: 2, receivedAt: 500000,

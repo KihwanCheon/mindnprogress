@@ -9117,7 +9117,8 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           if (runtime.state !== 'idle') return sendJson(response, 409, { error: `대상 대화가 ${runtime.state} 상태이므로 지금 통합을 재시도할 수 없습니다.`, runtime })
           await validateAiDelegationAction(request, aiDelegations.get(delegation.id), body, true)
           const recoverIntegration = recoveryAvailability.failureCategory === 'integration-git-lock'
-            ? 'recoverIntegrationGitLockFailure' : 'recoverLocalChangesIntegrationFailure'
+            ? 'recoverIntegrationGitLockFailure' : recoveryAvailability.failureCategory === 'integration-head-changed'
+              ? 'recoverIntegrationHeadChangedFailure' : 'recoverLocalChangesIntegrationFailure'
           const workspaceResult = await workspacePoolManager[recoverIntegration](
             delegation.workspaceLease.leaseId,
             { mapId, cardId: delegation.targetCardId, conversationId: delegation.targetConversationId },
