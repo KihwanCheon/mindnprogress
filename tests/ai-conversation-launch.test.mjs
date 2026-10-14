@@ -4,6 +4,7 @@ import {
   AI_EDITOR_REQUEST_MAX_LENGTH,
   aiConversationTitle,
   buildAiConversationPrompt,
+  buildAiDelegationModelInstruction,
   combineAiEditorRequest,
   buildSharedKnowledgeCleanupLaunch,
   buildSharedKnowledgeCleanupRequest,
@@ -172,6 +173,33 @@ test('자동 적용 내용 뒤에 사용자 입력을 붙여 기존 편집자 �
   )
   assert.equal(combineAiEditorRequest('자동 적용 내용', '   '), '자동 적용 내용')
   assert.equal(combineAiEditorRequest('', '사용자 요청'), '사용자 요청')
+})
+
+test('위임 모델은 선택한 항목만 전문에 추가하고 모두 비우면 기존 요청을 유지한다', () => {
+  assert.equal(buildAiDelegationModelInstruction(), '')
+  assert.equal(buildAiDelegationModelInstruction({ agentName: '', model: '이전 모델' }), '')
+  const agentOnly = buildAiDelegationModelInstruction({ agentName: 'Claude Code' })
+  assert.equal(agentOnly, '하위 카드에 업무를 위임할 때 다음 AI 설정을 사용하세요: AI 종류 `Claude Code`.')
+  const withModel = buildAiDelegationModelInstruction({ agentName: 'Claude Code', model: 'Opus' })
+  assert.equal(withModel, '하위 카드에 업무를 위임할 때 다음 AI 설정을 사용하세요: AI 종류 `Claude Code`, 모델 `Opus`.')
+  for (const [key, label, value] of [['mode', '권한', '편집 허용'], ['thoughtLevel', '사고 수준', '높음']]) {
+    const instruction = buildAiDelegationModelInstruction({ agentName: 'Claude Code', [key]: value })
+    assert.ok(instruction.includes(`${label} \`${value}\``))
+    assert.ok(!instruction.includes('모델 `'), '권한·사고 수준을 고르더라도 모델은 자동 지정하지 않는다')
+  }
+  assert.equal(combineAiEditorRequest('기본 요청', '추가 요청', false, ''), '기본 요청\n\n추가 요청')
+  assert.equal(combineAiEditorRequest('기본 요청', '추가 요청', false, withModel), `기본 요청\n\n${withModel}\n\n추가 요청`)
+})
+
+test('기본 전문이 길어도 위임 설정을 자르지 않고 긴 승인 전문도 보존한다', () => {
+  const instruction = buildAiDelegationModelInstruction({ agentName: 'Claude Code', model: 'Opus', mode: '편집 허용', thoughtLevel: '높음' })
+  const ordinary = '가'.repeat(AI_EDITOR_REQUEST_MAX_LENGTH)
+  const preview = combineAiEditorRequest(ordinary, '', false, instruction)
+  const request = combineAiEditorRequest(ordinary, '사용자 추가 요청', false, instruction)
+  assert.equal(preview, `${ordinary}\n\n${instruction}`)
+  assert.equal(request, `${preview}\n\n사용자 추가 요청`)
+  const approval = `${ordinary}승인 전문 마지막 조건`
+  assert.equal(combineAiEditorRequest(approval, '추가 요청', true, instruction), `${approval}\n\n${instruction}\n\n추가 요청`)
 })
 
 test('전문 조립에 필요한 값이 없으면 실패로 알린다', () => {

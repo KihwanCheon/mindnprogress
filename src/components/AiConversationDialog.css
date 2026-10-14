@@ -30,6 +30,9 @@
 .ai-auto-request textarea { color: #6f6877; border-color: #e5e1e9; background: #f5f3f7; }
 .ai-auto-request textarea:focus { border-color: #d7d1de; box-shadow: none; }
 .ai-dialog-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; }
+.ai-delegation-model-content { display: grid; gap: 12px; padding: 11px 13px; }
+.ai-delegation-model-content > p { margin: 0; color: var(--theme-text-muted, #777080); font-size: 10px; line-height: 1.5; }
+.ai-delegation-model-content select:disabled { opacity: .5; cursor: not-allowed; }
 .ai-workspace-field { display: grid; gap: 8px; }
 .ai-workspace-section > .ai-workspace-field { padding: 11px 13px; }
 .ai-workspace-field > small { font-size: 8px; font-weight: 500; line-height: 1.45; }

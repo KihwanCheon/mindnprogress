@@ -82,8 +82,17 @@ export function normalizeAiAutomaticRequest(value, preserveFull = false) {
   return request
 }
 
-export function combineAiEditorRequest(automaticRequest, userInput, preserveFull = false) {
-  return [normalizeAiAutomaticRequest(automaticRequest, preserveFull), normalizeAiEditorRequest(userInput)]
+export function buildAiDelegationModelInstruction({ agentName, model, mode, thoughtLevel } = {}) {
+  if (!text(agentName)) return ''
+  const settings = [
+    ['AI 종류', agentName], ['모델', model], ['권한', mode], ['사고 수준', thoughtLevel],
+  ].filter(([, value]) => text(value)).map(([label, value]) => `${label} \`${text(value)}\``)
+  return `하위 카드에 업무를 위임할 때 다음 AI 설정을 사용하세요: ${settings.join(', ')}.`
+}
+
+export function combineAiEditorRequest(automaticRequest, userInput, preserveFull = false, delegationInstruction = '') {
+  // 기본 전문의 길이 제한을 먼저 적용해 뒤에 붙는 사용자 선택 설정이 잘리지 않게 한다.
+  return [normalizeAiAutomaticRequest(automaticRequest, preserveFull), text(delegationInstruction), normalizeAiEditorRequest(userInput)]
     .filter(Boolean)
     .join('\n\n')
 }
