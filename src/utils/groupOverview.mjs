@@ -48,6 +48,7 @@ export function groupDelegationPresentation(item) {
   if (item.kind === 'task-attention') return {
     label: '카드 업무 미완료 · 확인 필요', tone: 'warning', attention: true,
   }
+  if (['queued', 'checking'].includes(item.integrationRecoveryRequest?.status)) return { label: '통합 재시도 검증 중', tone: 'active', attention: false }
   const state = item.displayState ?? item.state
   const quarantined = item.workspaceResult?.status === 'quarantined' && aiDelegationRequiresRecovery(item)
   const attention = quarantined || attentionStates.has(state) || item.recovery?.recoveryAvailable === true || item.recovery?.reportRetryAvailable === true
@@ -64,6 +65,8 @@ export function groupDelegationPresentation(item) {
 }
 
 export function groupDelegationReportHint(item) {
+  if (['queued', 'checking'].includes(item?.integrationRecoveryRequest?.status)) return item.integrationRecoveryRequest.message
+  if (item?.integrationRecoveryRequest?.status === 'failed') return item.integrationRecoveryRequest.message
   if (item?.kind === 'request-failure') return item.executionState === 'unknown'
     ? '실행 기록과 별개의 요청 오류입니다. 전달 여부를 확인하지 못했으므로 새 요청을 자동으로 실행하지 않습니다.'
     : '실행 기록과 별개의 접수 실패 요청입니다. 담당 상위 AI가 원인을 확인한 뒤 다시 요청할 수 있으며 자동 재실행하지 않습니다.'

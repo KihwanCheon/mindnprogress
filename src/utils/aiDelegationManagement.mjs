@@ -6,7 +6,11 @@ export function completedReplacementDelegations(delegation, delegations) {
   const completedReportFailure = !delegation?.groupId
     && delegation?.state === 'parent-wake-failed'
     && delegation?.workCompleted === true
-  if (!failedCleanLimit && !completedReportFailure) return []
+  const failedCleanDatabaseDispatch = ['failed', 'parent-wake-failed'].includes(delegation?.state)
+    && delegation?.recovery?.failureCategory === 'dispatch-database-transient'
+    && delegation?.recovery?.recoveryAvailable === true && delegation?.workspaceResult?.status === 'failed-clean'
+  if (['queued', 'checking'].includes(delegation?.integrationRecoveryRequest?.status)
+    || (!failedCleanLimit && !failedCleanDatabaseDispatch && !completedReportFailure)) return []
   return (Array.isArray(delegations) ? delegations : [])
     .filter((candidate) => candidate?.id !== delegation?.id
       && candidate?.state === 'completed'

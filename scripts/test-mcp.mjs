@@ -666,6 +666,8 @@ async function main() {
     assert.match(toolDescription('mindnprogress_recover_ai_delegation'), /upstream-interrupted.*복구를 승인.*원 실행이 만료.*원 지시·계정·카드·lease/)
     assert.match(toolDescription('mindnprogress_recover_ai_delegation'), /waiting-model-capacity/)
     assert.match(toolDescription('mindnprogress_recover_ai_delegation'), /main HEAD 변경.*retry-integration.*하위 AI 작업은 다시 실행하지 않습니다/)
+    assert.match(toolDescription('mindnprogress_recover_ai_delegation'), /queued.*비동기.*recoveryRequestId/)
+    assert.match(toolDescription('mindnprogress_recover_ai_delegation'), /dispatch-database-transient.*복구를 승인/)
     assert.match(toolDescription('mindnprogress_manage_comment'), /\[진행\].*\[차단\].*\[결과\].*240자 이하.*detail/)
     assert.match(guide.guide.dataModel.workFields.checklist, /완료 비율.*진행률과 상태/)
 
@@ -1510,7 +1512,19 @@ async function main() {
     const recoveredList = await invoke('mindnprogress_list_ai_delegations', { mapId, parentCardId: 'task-a', targetCardId: delegatedChild.id })
     const recoveredCurrent = recoveredList.delegations.find((item) => item.id === recoveredRun.delegation.id)
     assert.ok(recoveredCurrent?.updatedAt, '복구 뒤 실제 위임 목록에서 최신 updatedAt을 확인해야 합니다.')
-    await invoke('mindnprogress_refresh_ai_delegation', { mapId, delegationId: recoveredRun.delegation.id, expectedUpdatedAt: recoveredCurrent.updatedAt })
+    let refreshCurrent = recoveredCurrent
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await invoke('mindnprogress_refresh_ai_delegation', { mapId, delegationId: recoveredRun.delegation.id, expectedUpdatedAt: refreshCurrent.updatedAt })
+        break
+      } catch (error) {
+        if (attempt === 2 || !/위임 상태가 변경됐습니다\. 상태를 다시 확인하세요\./u.test(error.message)) throw error
+        // 자동 폴링의 starting→running 변경과 경합하면 조회만 갱신한다. 복구/실행 요청은 재전달하지 않는다.
+        const latest = await invoke('mindnprogress_list_ai_delegations', { mapId, parentCardId: 'task-a', targetCardId: delegatedChild.id })
+        refreshCurrent = latest.delegations.find(item => item.id === recoveredRun.delegation.id)
+        assert.ok(refreshCurrent?.updatedAt)
+      }
+    }
     await invokeExpectError('mindnprogress_retry_ai_delegation_report', { mapId, delegationId: recoveredRun.delegation.id, expectedUpdatedAt: recoveredCurrent.updatedAt }, /작업 완료|상태가 변경/)
     await invokeExpectError('mindnprogress_finalize_ai_coordination', { mapId, delegationId: recoveredRun.delegation.id, expectedUpdatedAt: recoveredCurrent.updatedAt }, /문서 조정 전용|상태가 변경/)
     await invokeExpectError('mindnprogress_supersede_ai_delegation', { mapId, delegationId: recoveredRun.delegation.id, replacementDelegationId: recoveredRun.delegation.id, expectedUpdatedAt: recoveredCurrent.updatedAt }, /후속 위임|상태가 변경/)

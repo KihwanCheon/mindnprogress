@@ -1,5 +1,6 @@
 import { createServer } from 'node:http'
 import { normalizeUntrackedMetaRecovery } from './lib/workspaceMetaRecovery.mjs'
+import { createIntegrationRecoveryQueue, integrationRecoveryPending, integrationRecoveryPublicView } from './lib/aiIntegrationRecovery.mjs'
 import { createAiDelegationRequestFailures, safeDelegationFailureMessage, withDelegationTaskCompletion } from './lib/aiDelegationRequestFailures.mjs'
 import { createRuntimeLifecycle, installRuntimeShutdown } from './lib/runtimeLifecycle.mjs'
 import { retryDispatchStatus, throwIfRuntimeStopping } from './lib/runtimeStopping.mjs'
@@ -69,6 +70,7 @@ import {
   aiDelegationClosureAvailability,
   aiDelegationRecoveryAvailability,
   aiDelegationBusyDispatchRejected,
+  assertAiDelegationDatabaseRejection,
   aiDelegationBusyRecoveryOperation,
   rejectedAiDelegationRecoveryPatch,
   aiDelegationReportResult,
@@ -2796,7 +2798,9 @@ function delegationRecoveryInstruction(delegation, instruction, recovery = null,
   const userStopRecovery = recovery?.failureCategory === 'user-stop'
   const resultCorrection = recovery?.failureCategory === 'integration-result-correction'
   const interruptedRecovery = recovery?.failureCategory === 'upstream-interrupted'
+  const databaseRecovery = recovery?.failureCategory === 'dispatch-database-transient'
   const title = resultCorrection ? '통합 대기 결과 정정'
+    : databaseRecovery ? '실행 전 DB 접수 오류 후 위임 복구'
     : interruptedRecovery ? 'AI 연결 중단 후 위임 복구'
     : recovery?.failureCategory === 'model-capacity'
     ? '모델 실행 용량 확보 후 위임 복구'
@@ -2842,6 +2846,7 @@ ${instruction.trim()}`
 
 function delegationPublicView(delegation, includeResult = false) {
   const publicDelegation = { ...delegation }
+  if (publicDelegation.integrationRecoveryRequest) publicDelegation.integrationRecoveryRequest = integrationRecoveryPublicView(publicDelegation.integrationRecoveryRequest)
   delete publicDelegation.instructionHash
   delete publicDelegation.recoveryInstructionHash
   delete publicDelegation.requestSignature
@@ -3392,6 +3397,7 @@ async function reconcileAiDelegationWorkspaceLeases() {
       || delegation.childStatus !== 'completed'
       || delegation.workspaceResult?.status !== 'quarantined'
       || delegation.pendingRecovery
+      || integrationRecoveryPending(delegation)
       || !delegation.workspaceLease?.leaseId) continue
     if (activeAiDelegationsForConversation(aiDelegations.values(), {
       mapId: delegation.mapId, targetCardId: delegation.targetCardId,
@@ -3776,11 +3782,15 @@ async function ensureCheckpointRequiredNotification(delegation, workspaceResult)
 }
 
 async function validateAiDelegationAction(request, delegation, body, approvalRequired = false, { requireConversationLinks = true } = {}) {
+  const human = !hasValidIntegrationBearer(request) && Boolean(getSignedInUser(request))
+  const source = human ? null : delegationSourceForRequest(integrationRequestScope(request), delegation.parentMapId ?? delegation.mapId)
+  return validateAiDelegationScope(delegation, body, { human, source }, approvalRequired, { requireConversationLinks })
+}
+
+async function validateAiDelegationScope(delegation, body, { human, source }, approvalRequired = false, { requireConversationLinks = true } = {}) {
   const fail = (message, status = 409) => { throw Object.assign(new Error(message), { status, groupProjectError: true }) }
   const parentMapId = delegation.parentMapId ?? delegation.mapId
-  const human = !hasValidIntegrationBearer(request) && Boolean(getSignedInUser(request))
   if (!human) {
-    const source = delegationSourceForRequest(integrationRequestScope(request), parentMapId)
     if (!source || source.cardId !== delegation.parentCardId) fail('이 위임을 관리하는 상위 카드에서만 처리할 수 있습니다.', 403)
     const ownerMap = await readMap(parentMapId)
     const owner = ownerMap?.nodes.find((node) => node.id === delegation.parentCardId)
@@ -3803,6 +3813,79 @@ async function validateAiDelegationAction(request, delegation, body, approvalReq
   if (human && (body.expectedUpdatedAt !== delegation.updatedAt || body.sourceRevision !== parent.version || body.targetRevision !== map.version)) fail('문서 또는 위임 상태가 변경됐습니다. 최신 내용을 불러오세요.')
   if (approvalRequired && human && body.confirmApprovedScope !== true) fail('기존 승인 계획과 현재 범위가 같음을 사용자가 확인해야 재개할 수 있습니다.', 400)
   return { human, map, parent, target }
+}
+
+function settledIntegrationRecoveryResult(delegation, recovery) {
+  const lease = workspacePoolManager.state?.leases?.[delegation.workspaceLease?.leaseId]
+  const history = lease?.integrationRecoveryHistory?.at(-1)
+  const expectedType = recovery.failureCategory === 'workspace-local-changes' ? 'local-changes' : recovery.failureCategory
+  const result = lease?.result
+  if (!lease || history?.type !== expectedType || !(Date.parse(history.recoveredAt) >= Date.parse(recovery.requestedAt))
+    || !history.previousResult || !['waiting-integration', 'completed'].includes(result?.status)
+    || !['waiting-integration', 'completed'].includes(lease.status)
+    || lease.mapId !== delegation.mapId || lease.cardId !== delegation.targetCardId || lease.conversationId !== delegation.targetConversationId
+    || lease.jobId !== delegation.workspaceLease.jobId || lease.workspaceId !== delegation.workspaceLease.workspaceId
+    || !Object.entries(delegation.workspaceResult).every(([key, value]) => JSON.stringify(history.previousResult[key]) === JSON.stringify(value))) return null
+  return result
+}
+
+const integrationRecoveryQueue = createIntegrationRecoveryQueue({
+  get: id => aiDelegations.get(id), save: async (id, patch) => {
+    const previous = aiDelegations.get(id)
+    try { return await updateAiDelegation(id, patch) } catch (error) {
+      if (aiDelegations.get(id)?.integrationRecoveryRequest === patch.integrationRecoveryRequest) aiDelegations.set(id, previous)
+      throw error
+    }
+  },
+  isStopping: () => runtimeLifecycle.signal.aborted, failureMessage: error => safeDelegationFailureMessage(error.message),
+  check: async (delegation, recovery) => {
+    // pool 내구 기록은 승인된 같은 요청의 검증 완료 증거다. 응답/위임 기록 저장 유실 후 새 Git 작업을 만들지 않는다.
+    if (settledIntegrationRecoveryResult(delegation, recovery)) return
+    const user = users.find(candidate => candidate.id === recovery.authorization.editorId && candidate.active !== false)
+    if (!canEdit(user)) throw Object.assign(new Error('통합 재시도 요청 계정의 편집 권한을 확인할 수 없습니다.'), { reasonCode: 'AI_DELEGATION_INTEGRATION_RECOVERY_PERMISSION_CHANGED' })
+    const competing = activeAiDelegationsForConversation(aiDelegations.values(), {
+      mapId: delegation.mapId, targetCardId: delegation.targetCardId, targetConversationId: delegation.targetConversationId, excludeId: delegation.id,
+    })
+    if (competing.length) throw Object.assign(new Error('같은 대화에서 다른 위임이 진행 중입니다.'), { code: 'AI_DELEGATION_ALREADY_ACTIVE' })
+    if (aiDelegationReportResult(delegation).availability === 'integrity-failed') throw Object.assign(new Error('기존 완료 결과의 해시 또는 실행 턴이 변경됐습니다.'), { code: 'AI_DELEGATION_RESULT_INTEGRITY_FAILED' })
+    await validateAiDelegationScope(delegation, { ...recovery.scope, expectedUpdatedAt: delegation.updatedAt }, recovery.authorization, true)
+    const conversation = await fetchAiConversationRuntime(delegation.targetConversationId)
+    const runtime = normalizeAiConversationRuntime(delegation.targetConversationId, conversation)
+    if (runtime.state !== 'idle') throw Object.assign(new Error(`대상 대화가 ${runtime.state} 상태이므로 통합을 재시도할 수 없습니다.`), { reasonCode: 'AI_DELEGATION_RECOVERY_CONVERSATION_BUSY' })
+  },
+  recover: (delegation, recovery) => {
+    const settled = settledIntegrationRecoveryResult(delegation, recovery)
+    if (settled) return settled
+    const method = recovery.failureCategory === 'integration-git-lock' ? 'recoverIntegrationGitLockFailure'
+      : recovery.failureCategory === 'integration-head-changed' ? 'recoverIntegrationHeadChangedFailure' : 'recoverLocalChangesIntegrationFailure'
+    return workspacePoolManager[method](delegation.workspaceLease.leaseId,
+      { mapId: delegation.mapId, cardId: delegation.targetCardId, conversationId: delegation.targetConversationId },
+      ...(recovery.untrackedMetaRecovery ? [{ untrackedMetaRecovery: recovery.untrackedMetaRecovery }] : []))
+  },
+  successPatch: (delegation, workspaceResult) => ({
+    state: workspaceResult.status === 'completed' ? 'waiting-parent' : 'waiting-integration', childError: workspaceResult.childError ?? null,
+    workspaceResult, workspaceError: null, integrationError: null,
+    parentDispatchState: null, parentTurnId: null, parentError: null, parentResource: null,
+    wakeOperationId: null, reportReceipt: null, reportWaitReason: null, reportArchive: null,
+    reportPayloadHash: null, reportResultAvailability: null, reportResultHash: null,
+    reportResultTurnId: null, reportPreparedAt: null, completedAt: null,
+    integrationRecoveryRequestedAt: delegation.integrationRecoveryRequest.requestedAt,
+    attemptHistory: aiDelegationAttemptHistory(delegation, '사용자가 통합 차단 원인 해소 후 완료 커밋의 통합 재시도 요청'),
+  }),
+})
+
+function startIntegrationRecovery(id) {
+  if (aiDelegationActions.has(id) || runtimeLifecycle.signal.aborted || integrationRecoveryQueue.running.has(id)) return
+  aiDelegationActions.add(id)
+  void runtimeLifecycle.track(() => integrationRecoveryQueue.run(id)).catch(error => {
+    if (!runtimeLifecycle.signal.aborted) console.warn('[AI integration recovery]', { delegationId: id, code: error.code ?? 'RECOVERY_STORAGE_FAILED' })
+  }).finally(() => aiDelegationActions.delete(id))
+}
+
+function integrationRecoveryResponse(response, receipt) {
+  return sendJson(response, 202, { delegation: delegationPublicView(receipt.delegation), repeated: receipt.repeated,
+    recovery: { kind: 'retry-integration', requestId: receipt.delegation.integrationRecoveryRequest.requestId,
+      status: receipt.delegation.integrationRecoveryRequest.status, reusedWorkspace: true, reusedConversation: true, childReexecuted: false } })
 }
 
 async function recoverExpiredAiDelegationDispatch(delegation, machineId) {
@@ -7524,10 +7607,17 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
     const actionRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/ai-delegations\/([^/]+)\/(recover|refresh|retry-report|finalize-coordination|supersede|close)$/)
     if (actionRoute && request.method === 'POST') {
       const id = decodeURIComponent(actionRoute[2])
-      for (let attempt = 0; aiDelegationPollRunning && attempt < 100; attempt++) await new Promise((resolve) => setTimeout(resolve, 25))
-      if (aiDelegationPollRunning || aiDelegationActions.has(id)) return sendJson(response, 409, { error: '위임 상태를 처리 중입니다. 잠시 후 다시 확인하세요.', code: 'AI_DELEGATION_ACTION_BUSY' })
-      aiDelegationActions.add(id)
-      delegationActionId = id
+      const current = aiDelegations.get(id)
+      const asynchronousRecovery = (actionRoute[3] === 'recover' && (current?.integrationRecoveryRequest
+        || aiDelegationRecoveryAvailability(current)?.recommendedAction === 'retry-integration'))
+        || (actionRoute[3] === 'refresh' && integrationRecoveryPending(current))
+      if (!asynchronousRecovery) for (let attempt = 0; aiDelegationPollRunning && attempt < 100; attempt++) await new Promise((resolve) => setTimeout(resolve, 25))
+      if ((!asynchronousRecovery && aiDelegationPollRunning)
+        || (aiDelegationActions.has(id) && !(asynchronousRecovery && integrationRecoveryPending(current)))) return sendJson(response, 409, { error: '위임 상태를 처리 중입니다. 잠시 후 다시 확인하세요.', code: 'AI_DELEGATION_ACTION_BUSY' })
+      if (!aiDelegationActions.has(id)) {
+        aiDelegationActions.add(id)
+        delegationActionId = id
+      }
       if (actionRoute[3] !== 'recover') {
         const user = requireUser(request, response)
         if (!user) return
@@ -7540,6 +7630,9 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         const supersede = actionRoute[3] === 'supersede'
         const close = actionRoute[3] === 'close'
         const validated = await validateAiDelegationAction(request, delegation, body, retryReport || finalizeCoordination, { requireConversationLinks: !supersede && !close })
+        if (actionRoute[3] === 'refresh' && integrationRecoveryPending(delegation)) return sendJson(response, 200, {
+          delegation: delegationPublicView(delegation), executionRequested: false, cardChanged: false,
+        })
         if (!retryReport && !finalizeCoordination && !supersede && !close) {
           if (body.acknowledgeResultHash !== undefined) {
             const source = delegationSourceForRequest(integrationRequestScope(request), delegation.parentMapId ?? delegation.mapId)
@@ -7584,7 +7677,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           const replacementId = String(body.replacementDelegationId ?? '').trim()
           const replacement = aiDelegations.get(replacementId)
           if (!aiDelegationCanBeSupersededBy(delegation, replacement)) {
-            return sendJson(response, 409, { error: '같은 상위 카드와 대상 카드에서 나중에 성공한 위임이며, 기존 실행이 결과 보고 실패 또는 변경 없는 한도 중단인 경우에만 후속 위임으로 종료할 수 있습니다.' })
+            return sendJson(response, 409, { error: '같은 상위 카드와 대상 카드에서 나중에 성공한 위임이며, 기존 실행이 결과 보고 실패·변경 없는 한도 중단·실행 전 무변경 DB 접수 실패인 경우에만 후속 위임으로 종료할 수 있습니다.' })
           }
           await ensureAiDelegationTerminalResolutionIdle(delegation)
           const supersededAt = new Date().toISOString()
@@ -9000,6 +9093,15 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           code: 'AI_DELEGATION_RECOVERY_ORIGIN_MISMATCH',
         })
       }
+      const body = await readJsonBody(request)
+      const recoveryAuthorization = { editorId: user.id, human: humanAction,
+        source: humanAction ? null : { mapId: parentMapId, cardId: source.cardId, conversationId: source.conversationId ?? null } }
+      try {
+        const repeated = integrationRecoveryQueue.repeat(delegation.id, body, recoveryAuthorization)
+        if (repeated) return integrationRecoveryResponse(response, repeated)
+      } catch (error) {
+        return sendJson(response, error.status ?? 409, { error: error.message, code: error.code })
+      }
       if (delegation.resultCorrection && (['completed', 'superseded', 'closed'].includes(delegation.state)
         || aiDelegationSucceeded(delegation))) {
         return sendJson(response, 409, {
@@ -9029,7 +9131,6 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         })
       }
 
-      const body = await readJsonBody(request)
       const instruction = String(body.instruction ?? '').trim()
       const resultCorrection = body.recoveryMode === 'correct-integration-result'
       let untrackedMetaRecovery
@@ -9112,34 +9213,11 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           if (aiDelegationReportResult(delegation).availability === 'integrity-failed') {
             return sendJson(response, 409, { error: '기존 완료 결과의 해시 또는 실행 턴이 변경되어 통합 재시도를 거부합니다.', code: 'AI_DELEGATION_RESULT_INTEGRITY_FAILED' })
           }
-          const conversation = await fetchAiConversationRuntime(delegation.targetConversationId)
-          const runtime = normalizeAiConversationRuntime(delegation.targetConversationId, conversation)
-          if (runtime.state !== 'idle') return sendJson(response, 409, { error: `대상 대화가 ${runtime.state} 상태이므로 지금 통합을 재시도할 수 없습니다.`, runtime })
-          await validateAiDelegationAction(request, aiDelegations.get(delegation.id), body, true)
-          const recoverIntegration = recoveryAvailability.failureCategory === 'integration-git-lock'
-            ? 'recoverIntegrationGitLockFailure' : recoveryAvailability.failureCategory === 'integration-head-changed'
-              ? 'recoverIntegrationHeadChangedFailure' : 'recoverLocalChangesIntegrationFailure'
-          const workspaceResult = await workspacePoolManager[recoverIntegration](
-            delegation.workspaceLease.leaseId,
-            { mapId, cardId: delegation.targetCardId, conversationId: delegation.targetConversationId },
-            ...(untrackedMetaRecovery ? [{ untrackedMetaRecovery }] : []),
-          )
-          const current = aiDelegations.get(delegation.id)
-          const repeated = current.state === 'waiting-integration'
-          const updated = repeated ? current : await updateAiDelegation(delegation.id, {
-            state: 'waiting-integration', childError: workspaceResult.childError ?? null,
-            workspaceResult, workspaceError: null, integrationError: null,
-            parentDispatchState: null, parentTurnId: null, parentError: null, parentResource: null,
-            wakeOperationId: null, reportReceipt: null, reportWaitReason: null, reportArchive: null,
-            reportPayloadHash: null, reportResultAvailability: null, reportResultHash: null,
-            reportResultTurnId: null, reportPreparedAt: null, completedAt: null,
-            integrationRecoveryRequestedAt: new Date().toISOString(),
-            attemptHistory: aiDelegationAttemptHistory(delegation, '사용자가 통합 차단 원인 해소 후 완료 커밋의 통합 재시도 요청'),
-          })
-          return sendJson(response, 202, {
-            delegation: delegationPublicView(updated), repeated,
-            recovery: { kind: 'retry-integration', reusedWorkspace: true, reusedConversation: true, childReexecuted: false },
-          })
+          const receipt = await integrationRecoveryQueue.accept(delegation.id,
+            body, recoveryAuthorization, recoveryAvailability.failureCategory, { untrackedMetaRecovery })
+          // 승인·요청 ID를 영속 저장한 뒤 응답한다. 긴 Git 검증은 HTTP 수명과 분리한다.
+          setImmediate(() => startIntegrationRecovery(delegation.id))
+          return integrationRecoveryResponse(response, receipt)
         } catch (error) {
           throwIfRuntimeStopping(error, runtimeLifecycle.signal)
           const message = `통합을 재시도하지 못했습니다: ${error?.message ?? String(error)}`
@@ -9198,6 +9276,19 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         : boundedAionOperationId(delegation.id, `${integrationRecovery ? 'integrate-' : ''}recover-${recoveryAttempt}`)
       let rejectedDispatch
       let interruptedProof
+      if (retryableChildRecovery && recoveryAvailability.failureCategory === 'dispatch-database-transient') {
+        try {
+          rejectedDispatch = await readAiDelegationDispatchStatus(fetchAionUiOn, {
+            machineId: delegationTargetMachineId(delegation), operationId: delegation.childOperationId, phase: 'recovery',
+          })
+          const storedLease = workspacePoolManager.state?.leases?.[workspaceLease?.leaseId]
+          assertAiDelegationDatabaseRejection(delegation, rejectedDispatch, storedLease)
+          await validateAiDelegationAction(request, aiDelegations.get(delegation.id), body, true)
+        } catch (error) {
+          throwIfRuntimeStopping(error, runtimeLifecycle.signal)
+          return sendJson(response, 409, { error: error.message, code: 'AI_DELEGATION_DATABASE_REJECTION_UNCONFIRMED', executionRequested: false, storedStatePreserved: true })
+        }
+      }
       if (retryableChildRecovery && recoveryAvailability.failureCategory === 'upstream-interrupted' && delegation.workspaceLease?.leaseId) {
         try {
           interruptedProof = await readAiDelegationInterruptedProof(fetchAionUiOn, {
@@ -12878,6 +12969,10 @@ runtimeLifecycle.interval(() => {
 runtimeLifecycle.interval(() => refreshVisibleAiConversationRuntimes(), aiConversationRuntimePollIntervalMs, 'AI conversation runtime poll')
 
 runtimeLifecycle.interval(() => pollAiDelegations(), aiDelegationPollIntervalMs, 'AI delegation poll')
+
+runtimeLifecycle.interval(() => {
+  for (const delegation of aiDelegations.values()) if (integrationRecoveryPending(delegation)) startIntegrationRecovery(delegation.id)
+}, aiDelegationPollIntervalMs, 'AI integration recovery queue')
 
 runtimeLifecycle.interval(() => pollGroupDocumentInstructions(), aiDelegationPollIntervalMs, 'Group document instruction poll')
 

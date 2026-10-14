@@ -1,12 +1,16 @@
+import { integrationRecoveryPending } from './aiIntegrationRecovery.mjs'
+
 const terminalStates = new Set(['completed', 'failed', 'superseded', 'closed'])
 const resolvedStates = new Set(['completed', 'superseded', 'closed'])
 
 export function aiDelegationRequiresRecovery(item) {
+  if (integrationRecoveryPending(item)) return false
   return item?.recovery?.recoveryAvailable === true
     || (!resolvedStates.has(item?.state) && item?.workspaceResult?.status === 'quarantined')
 }
 
 export function isVisibleAiDelegation(item) {
+  if (integrationRecoveryPending(item)) return true
   if (item?.kind === 'request-failure') return !item.resolvedByDelegationId
   if (item?.kind === 'task-attention') return item.taskCompletion?.state === 'incomplete'
   return !terminalStates.has(item?.state)
@@ -91,7 +95,7 @@ export function aiDelegationStatusByCard(delegations, mapId) {
     const active = items.filter((item) => !aiDelegationRequiresRecovery(item)
       && item.recovery?.reportRetryAvailable !== true
       && item.kind !== 'request-failure'
-      && !terminalStates.has(item.state))
+      && (!terminalStates.has(item.state) || integrationRecoveryPending(item)))
     const kind = recovery.length > 0 ? 'recovery' : report.length > 0 ? 'report'
       : requestFailures.length > 0 ? 'request-failed' : active.length > 0 ? 'active' : 'attention'
     const prioritized = (kind === 'recovery' ? recovery : kind === 'report' ? report

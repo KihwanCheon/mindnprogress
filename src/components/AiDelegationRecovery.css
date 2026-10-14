@@ -177,6 +177,18 @@
   margin-top: 9px;
 }
 
+.ai-delegation-action-feedback {
+  margin: 8px 0;
+  padding: 8px;
+  border: 1px solid var(--theme-border, #e8e5ed);
+  border-radius: 6px;
+  color: var(--theme-text);
+  background: var(--theme-surface-raised, #faf9fc);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ai-delegation-action-feedback[role="alert"] { color: var(--theme-danger, #b42332); }
+
 .ai-delegation-recovery-actions button {
   min-height: 27px;
   padding: 5px 8px;

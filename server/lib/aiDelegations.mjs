@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { integrationRecoveryPending } from './aiIntegrationRecovery.mjs'
 
 export const AI_DELEGATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_:-]{0,127}$/
 export const AI_DELEGATION_WAIT_POLL_DELAYS_MS = Object.freeze([3_000, 5_000, 10_000, 30_000])
@@ -116,6 +117,10 @@ export function aiDelegationResponseBody(statusCode, reasonCode, message, payloa
 }
 
 export function aiDelegationStateReason(delegation) {
+  if (integrationRecoveryPending(delegation)) return requiredAiDelegationReason(
+    delegation.integrationRecoveryRequest.reasonCode, delegation.integrationRecoveryRequest.message)
+  if (['failed', 'parent-wake-failed'].includes(delegation?.state) && aiDelegationDatabaseRecoveryCandidate(delegation)) return requiredAiDelegationReason(
+    'AI_DELEGATION_DATABASE_DISPATCH_FAILED', 'AI 실행 전 DB 접수 오류로 시작되지 않은 실패가 기록돼 있습니다. 원 접수 기록을 검증해 수동 재개하거나 완료된 후속 위임을 확인하세요. 자동 재실행하지 않습니다.')
   if (delegation?.state === 'recovery-required' && !delegation.resultCorrection && delegation.recoveryDispatchRejection) return requiredAiDelegationReason(
     'AI_DELEGATION_RECOVERY_CONVERSATION_BUSY', '대상 대화가 사용 중이어서 복구 실행을 시작하지 않았습니다. 기존 작업과 작업공간을 보존했으며 대화가 유휴 상태가 된 뒤 같은 위임을 복구하세요.')
   if (delegation?.resultCorrection?.phase === 'held') return requiredAiDelegationReason('AI_DELEGATION_RESULT_CORRECTION_HELD',
@@ -451,8 +456,37 @@ export function retryableExternalLimitCategory(error) {
 }
 
 export function retryableAiExecutionFailureCategory(error) {
+  if (/^Internal error: Database error: error returned from database: \(code: 1\) cannot start a transaction within a transaction$/iu.test(String(error ?? '').trim())) return 'dispatch-database-transient'
   return retryableExternalLimitCategory(error)
     ?? (/^stream disconnected before completion(?::|$)/iu.test(String(error ?? '').trim()) ? 'upstream-interrupted' : null)
+}
+
+export function aiDelegationDatabaseDispatchRejected(dispatch, conversationId, operationId) {
+  return Boolean(conversationId && operationId && dispatch?.operationId === operationId
+    && dispatch.conversationId === conversationId && dispatch.state === 'failed' && !dispatch.turnId
+    && retryableAiExecutionFailureCategory(dispatch.errorMessage) === 'dispatch-database-transient')
+}
+
+export function aiDelegationDatabaseRecoveryCandidate(delegation) {
+  const result = delegation?.workspaceResult, lease = delegation?.workspaceLease
+  return Boolean(!delegation?.childTurnId && delegation?.childOperationId && delegation?.childStatus === 'failed'
+    && result?.status === 'failed-clean' && result.childStatus === 'failed' && !result.integratedCommit && !result.integrationBranch
+    && result.headCommit === lease?.baseCommit && !result.unmergedFiles?.length
+    && retryableAiExecutionFailureCategory(result.childError) === 'dispatch-database-transient'
+    && ['workspaceId', 'jobId', 'leaseId', 'branch', 'baseCommit'].every(key => lease?.[key] && result[key] === lease[key])
+    && result.mapId === delegation.mapId && result.cardId === delegation.targetCardId && result.conversationId === delegation.targetConversationId)
+}
+
+export function assertAiDelegationDatabaseRejection(delegation, dispatch, storedLease) {
+  if (!aiDelegationDatabaseRecoveryCandidate(delegation)
+    || !aiDelegationDatabaseDispatchRejected(dispatch, delegation.targetConversationId, delegation.childOperationId)
+    || dispatch.errorMessage !== delegation.workspaceResult.childError
+    || !aiDelegationWorkspaceLeaseMatches(delegation.workspaceLease, dispatch.workspaceLease)
+    || !aiDelegationWorkspaceLeaseMatches(delegation.workspaceLease, storedLease)
+    || storedLease?.mapId !== delegation.mapId || storedLease.cardId !== delegation.targetCardId || storedLease.conversationId !== delegation.targetConversationId
+    || !['cancelled', 'failed-clean'].includes(storedLease.status)
+    || JSON.stringify(storedLease.result) !== JSON.stringify(delegation.workspaceResult)
+    || storedLease.checkpoints?.length) throw Object.assign(new Error('원 DB 접수 실패·실행 턴 없음·무변경 반환을 확인하지 못했습니다.'), { status: 409, code: 'AI_DELEGATION_DATABASE_REJECTION_UNCONFIRMED' })
 }
 
 // busy는 새 실행이 시작되지 않은 접수 거절이다. 실행 턴이 있으면 이 예외를 적용하지 않는다.
@@ -527,6 +561,8 @@ export function integrationHeadChangedFailure(result) {
 }
 
 export function aiDelegationRecoveryAvailability(delegation) {
+  if (integrationRecoveryPending(delegation)) return { failurePhase: 'integration', failureCategory: 'integration-recovery-pending',
+    recoveryAvailable: false, recommendedAction: 'refresh-status', recoveryTool: 'mindnprogress_refresh_ai_delegation' }
   if (delegation?.resultCorrection && (['completed', 'superseded', 'closed'].includes(delegation.state)
     || aiDelegationSucceeded(delegation))) return null
   if (delegation?.resultCorrection?.phase === 'held') return { failurePhase: 'integration', failureCategory: 'integration-result-correction',
@@ -586,9 +622,10 @@ export function aiDelegationRecoveryAvailability(delegation) {
     && ['quarantined', 'failed-clean'].includes(delegation?.workspaceResult?.status)
     && delegation?.workspaceResult?.childStatus === 'failed',
   )
-  const canResume = Boolean(failureCategory && (hasRecoverableWorkspace || !delegation?.workspaceLease?.leaseId))
+  const canResume = failureCategory === 'dispatch-database-transient' ? aiDelegationDatabaseRecoveryCandidate(delegation)
+    : Boolean(failureCategory && (hasRecoverableWorkspace || !delegation?.workspaceLease?.leaseId))
   return {
-    failurePhase: 'child',
+    failurePhase: failureCategory === 'dispatch-database-transient' ? 'dispatch' : 'child',
     failureCategory: failureCategory ?? 'non-retryable',
     recoveryAvailable: canResume,
     recommendedAction: canResume
@@ -637,11 +674,12 @@ export function aiDelegationWorkPending(delegation) {
 }
 
 export function aiDelegationIsTerminal(delegation) {
+  if (integrationRecoveryPending(delegation)) return false
   return AI_DELEGATION_TERMINAL_STATES.has(String(delegation?.state ?? ''))
 }
 
 export function aiDelegationClosureAvailability(delegation) {
-  if (!delegation || aiDelegationIsTerminal(delegation) || delegation.pendingRecovery) return null
+  if (!delegation || aiDelegationIsTerminal(delegation) || delegation.pendingRecovery || integrationRecoveryPending(delegation)) return null
   if (delegation.groupId) return { closeAvailable: false, reason: 'group-managed' }
   if (delegation.state === 'parent-wake-failed' && aiDelegationSucceeded(delegation)) {
     return { closeAvailable: true, reason: 'completed-child-report-abandonment' }
@@ -659,10 +697,11 @@ export function aiDelegationClosureAvailability(delegation) {
 
 export function aiDelegationCanBeSupersededBy(delegation, replacement) {
   const failedCleanLimit = ['waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity'].includes(delegation?.state)
+  const failedCleanDatabaseDispatch = ['failed', 'parent-wake-failed'].includes(delegation?.state) && aiDelegationDatabaseRecoveryCandidate(delegation)
   const completedReportFailure = !delegation?.groupId
     && delegation?.state === 'parent-wake-failed'
     && aiDelegationSucceeded(delegation)
-  if (!failedCleanLimit && !completedReportFailure) return false
+  if (integrationRecoveryPending(delegation) || (!failedCleanLimit && !failedCleanDatabaseDispatch && !completedReportFailure)) return false
   if (!replacement || replacement.id === delegation.id || replacement.state !== 'completed' || !aiDelegationSucceeded(replacement)) return false
   if ((replacement.groupId ?? null) !== (delegation.groupId ?? null)) return false
   if (replacement.mapId !== delegation.mapId
@@ -683,6 +722,7 @@ export function completedAiDelegationReplacement(delegation, delegations) {
 }
 
 export function aiDelegationDisplayState(delegation) {
+  if (integrationRecoveryPending(delegation)) return 'integration-recovery-checking'
   if (delegation.pendingRecovery) return 'recovery-dispatch-pending'
   return aiDelegationLimitState(delegation) ?? delegation.state
 }
@@ -716,7 +756,7 @@ export function activeAiDelegationsForConversation(delegations, {
       && delegation?.mapId === mapId
       && delegation?.targetCardId === targetCardId
       && delegation?.targetConversationId === targetConversationId
-      && ACTIVE_AI_DELEGATION_STATES.has(delegation?.state))
+      && (ACTIVE_AI_DELEGATION_STATES.has(delegation?.state) || integrationRecoveryPending(delegation)))
     .sort((first, second) => String(second.createdAt ?? '').localeCompare(String(first.createdAt ?? '')))
 }
 

@@ -9,6 +9,7 @@ import { AiConversationRuntimeBadge } from './AiConversationRuntimeBadge'
 import { groupOverviewFilters, groupWaitingCategories } from '../utils/groupWaiting.mjs'
 import { GroupWaitingReasons, type GroupWaitingReviewInput } from './GroupWaitingReasons'
 import { groupPlanningSources, groupPlanningSourceSummary, groupPlanningBaseline, groupProjectCriteriaEqual, withGroupPlanningSources } from '../utils/groupPlanningSources.mjs'
+import { submitIntegrationRecovery, reconcileIntegrationRecoveryRequests } from '../utils/aiIntegrationRecovery.mjs'
 import { GroupPlanningSourceEditor, GroupPlanningSourceList } from './GroupPlanningSources'
 import './GroupOverview.css'
 
@@ -30,7 +31,7 @@ const formatTime = (value: string) => new Date(value).toLocaleString()
 async function request<T>(url: string, clientId: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(url, { ...options, headers: { 'Content-Type': 'application/json', 'X-MNP-Client': clientId, ...options.headers } })
   const result = await response.json()
-  if (!response.ok) throw new Error(result.error || '그룹 정보를 처리하지 못했습니다.')
+  if (!response.ok) throw Object.assign(new Error(result.error || '그룹 정보를 처리하지 못했습니다.'), { status: response.status, code: result.code })
   return result
 }
 
@@ -67,6 +68,7 @@ export function GroupOverview({ groupId, name, membershipKey, editable, clientId
     try {
       const value = await request<GroupContext>(baseUrl, clientId)
       if (!mounted.current || sequence !== loadSequence.current) return
+      reconcileIntegrationRecoveryRequests(value.delegations)
       setContext(value)
       const previousBase = draftBase.current
       draftBase.current = value.project
@@ -206,12 +208,25 @@ export function GroupOverview({ groupId, name, membershipKey, editable, clientId
       : action === 'finalize-coordination'
         ? '문서 조정 AI의 실행만 종료해 현재 결과를 총괄 AI에 전달합니다. 카드 상태·진행률·외부 대기와 실제 미완료 하위 위임은 그대로 유지합니다. 변경 없이 한도에 막힌 과거 시도에 같은 카드의 완료된 후속 위임이 있으면 그 과거 시도만 후속 성공 이력으로 함께 정리합니다. 이 상태로 조정 실행을 종료할까요?'
         : action === 'supersede'
-          ? `과거 한도 대기 위임을 완료 처리하지 않고, 성공한 후속 위임 ${replacement?.id}으로 이어졌다는 감사 이력을 남겨 종료합니다. 카드와 작업공간은 변경하지 않습니다. 계속할까요?`
+          ? `과거 미완료 위임을 완료 처리하지 않고, 성공한 후속 위임 ${replacement?.id}으로 이어졌다는 감사 이력을 남겨 종료합니다. 카드와 작업공간은 변경하지 않습니다. 계속할까요?`
         : item.resultAvailability === 'captured'
           ? '하위 작업은 재실행하지 않고 캡처된 기존 완료 결과를 총괄 AI에 전달합니다. 총괄 AI가 실행 중이면 전달 순서를 기다립니다. 기존 승인 범위에서 결과를 검토하도록 재개할까요?'
           : '하위 작업은 재실행하지 않습니다. 이 위임의 결과 원문이 캡처되지 않았거나 무결성을 확인할 수 없어, 다른 작업의 최신 응답 대신 작업공간·체크포인트·통합 메타데이터만 총괄 AI에 전달합니다. 계속할까요?')) return
     setBusy(true); setError(''); setNotice('')
     try {
+      if (action === 'recover' && retryIntegration) {
+        const result = await submitIntegrationRecovery({ ...item, parentMapId: coordinator.id }, {
+          expectedUpdatedAt: item.updatedAt, sourceRevision: coordinator.version, targetRevision: target.version,
+          groupVersion: context.project.version, confirmApprovedScope: true,
+          instruction: '사용자가 통합 차단 원인 해소 후 기존 승인 범위의 완료 커밋 통합 재시도를 요청했습니다.',
+        }, (url, init) => request(url, clientId, init))
+        if (mounted.current) {
+          if (result.delegation?.integrationRecoveryRequest?.status === 'failed') setError(`${target.title}: ${result.message}`)
+          else setNotice(`${target.title}: ${result.message}`)
+        }
+        await refresh()
+        return
+      }
       const actionResult = await request<{ supersededDelegations?: Array<{ delegationId: string; replacementDelegationId: string }> }>(`/api/maps/${encodeURIComponent(coordinator.id)}/ai-delegations/${encodeURIComponent(item.id)}/${action}`, clientId, { method: 'POST', body: JSON.stringify({
         expectedUpdatedAt: item.updatedAt, sourceRevision: coordinator.version, targetRevision: target.version,
         groupVersion: context.project.version, confirmApprovedScope: action !== 'refresh',
@@ -310,7 +325,7 @@ export function GroupOverview({ groupId, name, membershipKey, editable, clientId
                 {delegation.displayState && <button disabled={aiDisabled} onClick={() => void delegationAction(delegation, 'refresh')}>상태 다시 확인</button>}
                 {delegation.displayState && delegation.recovery?.recoveryAvailable && <button disabled={aiDisabled} onClick={() => void delegationAction(delegation, 'recover')}>{delegation.recovery.recommendedAction === 'correct-integration-result' ? '통합 대기 결과 정정' : delegation.recovery.recommendedAction === 'retry-integration' ? '통합 재시도' : '승인 범위 작업 재개'}</button>}
                 {delegation.coordinationOnly && (delegation.state === 'waiting-document-work' || (delegation.state === 'recovery-required' && delegation.result)) && <button disabled={aiDisabled} onClick={() => void delegationAction(delegation, 'finalize-coordination')}>대기 유지하고 조정 종료</button>}
-                {['waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity'].includes(delegation.state) && completedReplacement(delegation) && <button disabled={aiDisabled} onClick={() => void delegationAction(delegation, 'supersede')}>후속 성공으로 종료</button>}
+                {(['waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity'].includes(delegation.state) || delegation.recovery?.failureCategory === 'dispatch-database-transient') && completedReplacement(delegation) && <button disabled={aiDisabled} onClick={() => void delegationAction(delegation, 'supersede')}>후속 성공으로 종료</button>}
                 {delegation.recovery?.reportRetryAvailable && <button disabled={aiDisabled} onClick={() => void delegationAction(delegation, 'retry-report')}>결과 전달 재시도</button>}
               </div></div>}
             </div>

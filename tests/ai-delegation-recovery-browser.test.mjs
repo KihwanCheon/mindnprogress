@@ -25,6 +25,12 @@ window.fetch = async (url, init = {}) => {
   window.audit.calls.push({url,method:init.method || 'GET',body:init.body ? JSON.parse(init.body) : null});
   if (init.method === 'POST') {
     if (window.audit.fail) return new Response(JSON.stringify({error:'서버 상태가 변경되었습니다.'}),{status:409});
+    if (window.audit.integrationQueue && String(url).endsWith('/recover')) {
+      item.integrationRecoveryRequest={requestId:JSON.parse(init.body).recoveryRequestId,status:'checking',reasonCode:'CHECKING',message:'보존된 완료 결과를 검증 중입니다. 같은 요청을 반복하지 마세요.'};
+      item.recovery={recoveryAvailable:false,recommendedAction:'refresh-status'};
+      if(window.audit.loseIntegrationResponse) throw new DOMException('timed out','TimeoutError');
+      return new Response(JSON.stringify({delegation:item}),{status:202});
+    }
     return new Response(JSON.stringify({delegation:item}));
   }
   if (url.endsWith('/ai-delegations')) return new Response(JSON.stringify({delegations:window.allDelegations(),requestFailures:window.requestFailures}));
@@ -39,8 +45,10 @@ window.renderRecovery = (props={}) => root.render(React.createElement(React.Frag
   React.createElement(AiDelegationRecovery,{key:++sequence,mapId:'parent-map',cardId:'parent',onSelectCard:selectCard,onPreviewCards:previewCards,...props})));
 window.failedRecovery = () => {item.state='failed';item.workspaceResult=null;item.workspaceError=null;item.recovery={recoveryAvailable:true};item.childError='모델 용량 초과';window.renderRecovery()};
 window.quarantinedIntegration = () => {item.state='failed';item.childStatus='completed';item.workCompleted=false;item.reportPending=false;item.reportStatus=null;item.childError=null;item.parentError=null;item.workspaceError='로컬 변경으로 cherry-pick 실패';item.workspaceResult={status:'quarantined',childStatus:'completed'};item.recovery={recoveryAvailable:false,failureCategory:'non-retryable',recommendedAction:'inspect-failure'};item.closure={closeAvailable:false,reason:'workspace-changes-preserved'};window.renderRecovery()};
-window.resolvedQuarantine = state => {item.state=state;item.recovery=null;window.renderRecovery()};
+window.resolvedQuarantine = state => {delete item.integrationRecoveryRequest;item.state=state;item.recovery=null;window.renderRecovery()};
 window.retryIntegration = () => {item.recovery={recoveryAvailable:true,failureCategory:'workspace-local-changes',recommendedAction:'retry-integration'};window.renderRecovery()};
+window.newIntegrationRequest = () => {delete item.integrationRecoveryRequest;item.recovery={recoveryAvailable:true,failureCategory:'workspace-local-changes',recommendedAction:'retry-integration'};window.renderRecovery()};
+window.blockIntegrationRequest = () => {item.integrationRecoveryRequest.status='failed';item.integrationRecoveryRequest.message='통합 재시도를 시작하지 못했습니다: 사용자 변경 원본을 보존해야 합니다.';item.recovery={recoveryAvailable:true,recommendedAction:'retry-integration'};window.renderRecovery()};
 window.reportOnly = () => {item.state='parent-wake-failed';item.childError=null;item.parentError='보고 사용량 초과';item.workCompleted=true;item.reportPending=true;item.recovery={recoveryAvailable:false,reportRetryAvailable:true};item.closure={closeAvailable:true,reason:'completed-child-report-abandonment'};window.renderRecovery()};
 window.waitingReport = () => {item.state='waiting-parent';item.childError=null;item.parentError=null;item.workCompleted=true;item.reportPending=true;item.reportStatus='waiting';item.reportWaitReason='parent-busy';item.recovery=null;item.closure=null;window.renderRecovery()};
 window.deliveringReport = () => {item.state='waking-parent';item.reportStatus='delivering';window.renderRecovery()};
@@ -147,7 +155,7 @@ test('상위 카드 복구 화면은 하위 카드를 제외하고 AI 없이 재
     await evaluate('window.audit.selection=null')
     await click('상태 다시 확인')
     assert.equal(await evaluate('window.audit.selection'), null)
-    await waitFor(() => evaluate('Boolean(document.querySelector("[role=status]"))')); await ready()
+    await waitFor(() => evaluate('Boolean(document.querySelector(".ai-delegation-recovery > [role=status]"))')); await ready()
     let posts = await evaluate('window.audit.calls.filter(c=>c.method==="POST")')
     assert.equal(posts[0].url, '/api/maps/parent-map/ai-delegations/limited/refresh')
     assert.equal(posts[0].body.sourceRevision, 7)
@@ -155,7 +163,7 @@ test('상위 카드 복구 화면은 하위 카드를 제외하고 AI 없이 재
     await evaluate('window.audit.confirm=false'); await click('기존 작업 재개')
     assert.equal(await evaluate('window.audit.calls.filter(c=>c.method==="POST").length'), 1)
     await evaluate('window.audit.confirm=true'); await click('기존 작업 재개')
-    await waitFor(() => evaluate('document.querySelector("[role=status]")?.textContent.includes("재개를 접수")')); await ready()
+    await waitFor(() => evaluate('document.querySelector(".ai-delegation-recovery > [role=status]")?.textContent.includes("재개를 접수")')); await ready()
     posts = await evaluate('window.audit.calls.filter(c=>c.method==="POST")')
     assert.ok(posts[1].url.endsWith('/recover'))
     assert.equal(posts[1].body.expectedUpdatedAt, 'current')
@@ -169,10 +177,10 @@ test('상위 카드 복구 화면은 하위 카드를 제외하고 AI 없이 재
     assert.match(await evaluate('Array.from(document.querySelectorAll("button")).find(b=>b.textContent==="후속 성공으로 종료").title'), /완료 처리하지 않고/)
     assert.match(await evaluate('Array.from(document.querySelectorAll("button")).find(b=>b.textContent==="보고하지 않고 종료").title'), /바로 종료되지 않으며/)
     await click('결과 전달 재시도')
-    await waitFor(() => evaluate('document.querySelector("[role=status]")?.textContent.includes("재전달을 접수")'))
+    await waitFor(() => evaluate('document.querySelector(".ai-delegation-recovery > [role=status]")?.textContent.includes("재전달을 접수")'))
     assert.ok((await evaluate('window.audit.calls.filter(c=>c.method==="POST").at(-1).url')).endsWith('/retry-report'))
     await click('후속 성공으로 종료')
-    await waitFor(() => evaluate('document.querySelector("[role=status]")?.textContent.includes("후속 성공 위임")'))
+    await waitFor(() => evaluate('document.querySelector(".ai-delegation-recovery > [role=status]")?.textContent.includes("후속 성공 위임")'))
     let last = await evaluate('window.audit.calls.filter(c=>c.method==="POST").at(-1)')
     assert.ok(last.url.endsWith('/supersede'))
     assert.equal(last.body.replacementDelegationId, 'replacement')
@@ -183,7 +191,7 @@ test('상위 카드 복구 화면은 하위 카드를 제외하고 AI 없이 재
     await evaluate(`(() => { const textarea=document.querySelector('.ai-delegation-close-form textarea');Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(textarea,'되돌린 결과이므로 상위 보고 없이 종료합니다.');textarea.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:'종료'})); })()`)
     await waitFor(() => evaluate('!Array.from(document.querySelectorAll("button")).find(b=>b.textContent==="보고하지 않고 종료").disabled'))
     await click('보고하지 않고 종료')
-    await waitFor(() => evaluate('document.querySelector("[role=status]")?.textContent.includes("사용자 종료 상태")'))
+    await waitFor(() => evaluate('document.querySelector(".ai-delegation-recovery > [role=status]")?.textContent.includes("사용자 종료 상태")'))
     last = await evaluate('window.audit.calls.filter(c=>c.method==="POST").at(-1)')
     assert.ok(last.url.endsWith('/close'))
     assert.equal(last.body.confirmClosedWithoutCompletion, true)
@@ -204,11 +212,28 @@ test('상위 카드 복구 화면은 하위 카드를 제외하고 AI 없이 재
     await evaluate('window.audit.confirm=false'); await click('통합 재시도')
     assert.equal(await evaluate('window.audit.calls.filter(c=>c.method==="POST").length'), beforeQuarantinePosts)
     await evaluate('window.audit.confirm=true'); await click('통합 재시도')
-    await waitFor(() => evaluate('document.querySelector("[role=status]")?.textContent.includes("통합 재시도를 접수")')); await ready()
+    await waitFor(() => evaluate('document.querySelector(".ai-delegation-recovery > [role=status]")?.textContent.includes("통합 재시도 요청을 접수")')); await ready()
     const integrationPost = await evaluate('window.audit.calls.filter(c=>c.method==="POST").at(-1)')
     assert.ok(integrationPost.url.endsWith('/recover'))
     assert.match(integrationPost.body.instruction, /완료 커밋 통합 재시도/)
     assert.equal(integrationPost.body.confirmApprovedScope, true)
+    assert.equal(typeof integrationPost.body.recoveryRequestId, 'string')
+    await evaluate('window.audit.integrationQueue=true;window.newIntegrationRequest()'); await ready()
+    await click('통합 재시도'); await ready()
+    await waitFor(() => evaluate('document.querySelector(".ai-delegation-action-feedback")?.textContent.includes("검증 중")'))
+    assert.match(await evaluate('document.querySelector(".ai-delegation-recovery-item-heading > span")?.textContent'), /통합 재시도 검증 중/)
+    assert.equal(await evaluate('Array.from(document.querySelectorAll("button")).some(b=>b.textContent==="통합 재시도")'), false)
+    const queuedPosts = await evaluate('window.audit.calls.filter(c=>c.method==="POST").length')
+    await click('상태 다시 확인'); await ready()
+    assert.equal(await evaluate('window.audit.calls.filter(c=>c.method==="POST").length'), queuedPosts)
+    await evaluate('window.blockIntegrationRequest()'); await ready()
+    assert.match(await evaluate('document.querySelector(".ai-delegation-recovery-item [role=alert]")?.textContent'), /사용자 변경 원본/)
+    assert.match(await evaluate('document.querySelector(".ai-delegation-recovery-item [role=alert]").closest(".ai-delegation-recovery-item").textContent'), /하위 작업/)
+    await evaluate('window.audit.loseIntegrationResponse=true;window.newIntegrationRequest()'); await ready()
+    await click('통합 재시도'); await ready()
+    await waitFor(() => evaluate('document.querySelector(".ai-delegation-action-feedback")?.textContent.includes("검증 중")'))
+    assert.equal(await evaluate('window.audit.calls.filter(c=>c.method==="POST").length'), queuedPosts + 1, '응답 유실 뒤 자동 POST를 반복하지 않는다')
+    await evaluate('window.audit.integrationQueue=false;window.audit.loseIntegrationResponse=false')
     for (const state of ['completed', 'superseded', 'closed']) {
       await evaluate(`window.resolvedQuarantine(${JSON.stringify(state)})`)
       await waitFor(() => evaluate('!document.querySelector(".ai-delegation-recovery") && !document.querySelector(".ai-delegation-status-badge")'))

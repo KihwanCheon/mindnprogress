@@ -24,6 +24,10 @@
 
 ## 실행 종료와 카드 업무 완료
 
+통합 재시도는 HTTP 202와 `integrationRecoveryRequest.requestId/status/message/reasonCode`를 먼저 저장·반환한다. `queued`·`checking`은 검증 접수/진행이며 통합 성공이 아니다. UI는 클릭 항목에 진행·오류를 표시한다. 긴 Git 검증은 HTTP와 일반 위임 폴링 밖에서 실행하며 실패해도 원 위임 결과·체크포인트를 보존한다. 승인된 미완료 요청은 재시작 후 같은 ID·lease로 다시 대사한다. 응답 유실 시 자동 재POST하지 않고 조회하며, 접수 미확인이 계속되면 사용자가 **동일 요청 재확인**으로 같은 ID·본문만 전달할 수 있다. 확정된 실패의 원인 해소 뒤 새 승인 요청에는 새 `recoveryRequestId`를 쓴다. 실행·결과·카드·권한·기준 변경과 사용자 파일은 기존 안전 검증으로 차단한다.
+
+실행 턴 없이 정확한 `cannot start a transaction within a transaction` 내부 DB 접수 오류로 `failed-clean` 반환된 위임은 `dispatch-database-transient` 수동 복구 후보다. 원 dispatch의 실패·턴 없음·오류·대화·lease와 pool의 무변경 반환·체크포인트 없음이 일치해야 한다. 다른 DB 오류·실행된 턴·원 기록 만료·부분 저장을 추정해 복구하지 않는다. 이미 완료된 같은 카드의 후속 성공이 있으면 사용자 확인으로 과거 실패만 연결 종료할 수 있고, 원 실패를 완료로 바꾸거나 자동 실행하지 않는다. AionCore 트랜잭션 원인 수정은 별도 범위다.
+
 완료 체크포인트의 통합 직전 main HEAD가 달라져 격리된 결과는 `integration-head-changed / retry-integration`으로 분류한다. 보존된 source·후보·세션·점유·체크포인트와 후보의 각 커밋 tree를 검증한 뒤 최신 main 기준의 별도 후보로 재통합한다. 원 후보가 이미 main의 조상이면 중복 적용하지 않는다. 사용자 변경·진행 중 Git·미해결 충돌은 우회하지 않으며 원 실패와 후보는 보존한다. 하위 구현을 재실행하거나 같은 카드의 다른 위임 완료만으로 실패를 종료하지 않는다. 원격 lease는 기존 원격 복구 경로를 사용하며 로컬 manager로 우회하지 않는다.
 
 `stream disconnected before completion`으로 실패한 실행은 `upstream-interrupted` 수동 복구 대상이다. 자동 재실행하지 않고, 사용자 승인·최신 문서·유휴 대화 검증 후 같은 대화와 lease에서 재개한다. 실제 원 dispatch의 실패·턴·대화·lease·오류를 대사한다. 명시적인 `EXTERNAL_DISPATCH_NOT_FOUND`로 기록이 만료됐으면 최초 위임 시도에 한해 완전한 유한 페이지 원문에서 해당 job 시간창의 사용자 전문을 하나로 확인한다. 기존 대화 재사용(`resume`)도 지원하지만 원 지시 hash·시작 계정/카드·lease·브랜치·기준 커밋이 모두 같아야 한다. 불완전/변경된 이력, 다른 404, 후속 복구 실행의 만료는 거부한다. 증거에는 ID·hash만 보존하고 지시 전문·인증 정보를 저장하거나 반환하지 않는다.

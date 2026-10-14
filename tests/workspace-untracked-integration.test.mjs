@@ -432,15 +432,31 @@ test(`통합 복구 API(${failureType})는 최신 승인·유휴 대화를 확�
     const endpoint = baseUrl + '/api/maps/map-test/ai-delegations/local-integration/recover'
     const input = { instruction: '로컬 변경을 해소했으므로 완료 커밋의 통합만 재시도합니다.', expectedUpdatedAt: now, sourceRevision: 1, targetRevision: 1, confirmApprovedScope: true,
       ...(untrackedMetaRecovery ? { untrackedMetaRecovery } : {}) }
-    const post = body => fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(body) })
+    let lastInput
+    const post = async body => {
+      const latest = (await (await fetch(baseUrl + '/api/maps/map-test/ai-delegations', { headers })).json()).delegations[0]
+      lastInput = { ...body, expectedUpdatedAt: body.expectedUpdatedAt === now ? latest.updatedAt : body.expectedUpdatedAt,
+        recoveryRequestId: 'request-' + Date.now() + '-' + Math.random().toString(36).slice(2) }
+      return fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(lastInput) })
+    }
+    const settle = async response => {
+      assert.equal(response.status, 202)
+      const accepted = await response.json()
+      for (let attempt = 0; attempt < 400; attempt++) {
+        const latest = (await (await fetch(baseUrl + '/api/maps/map-test/ai-delegations', { headers })).json()).delegations[0]
+        if (['failed', 'accepted'].includes(latest.integrationRecoveryRequest?.status)) return latest
+        await new Promise(resolve => setTimeout(resolve, 100))
+      }
+      throw new Error(JSON.stringify({ accepted, errors }))
+    }
     assert.equal((await post({ ...input, expectedUpdatedAt: 'stale' })).status, 409)
     assert.equal((await post({ ...input, confirmApprovedScope: false })).status, 400)
     runtimeState = 'running'
-    assert.equal((await post(input)).status, 409)
+    assert.match((await settle(await post(input))).integrationRecoveryRequest.message, /running/)
     runtimeState = 'idle'
-    const dirty = await post(input)
-    assert.equal(dirty.status, 409)
-    assert.match((await dirty.json()).error, gitLock ? /Git 잠금/ : /로컬 변경/)
+    const dirty = await settle(await post(input))
+    assert.equal(dirty.integrationRecoveryRequest.status, 'failed')
+    assert.match(dirty.integrationRecoveryRequest.message, gitLock ? /Git 잠금/ : /로컬 변경/)
     assert.equal(JSON.parse(await readFile(path.join(dataDirectory, '_workspace-pool.json'), 'utf8')).leases[f.lease.leaseId].status, 'quarantined')
     if (gitLock) await rm(f.lockPath)
     else {
@@ -449,17 +465,19 @@ test(`통합 복구 API(${failureType})는 최신 승인·유휴 대화를 확�
     }
     if (untrackedMetaRecovery) {
       assert.equal((await post({ ...input, untrackedMetaRecovery: { ...untrackedMetaRecovery, path: '../outside.cs.meta' } })).status, 400)
-      assert.equal((await post({ ...input, untrackedMetaRecovery: { ...untrackedMetaRecovery, expectedSha256: 'a'.repeat(64) } })).status, 409)
-      assert.equal((await post({ ...input, untrackedMetaRecovery: undefined })).status, 409)
+      assert.equal((await settle(await post({ ...input, untrackedMetaRecovery: { ...untrackedMetaRecovery, expectedSha256: 'a'.repeat(64) } }))).integrationRecoveryRequest.status, 'failed')
+      assert.equal((await settle(await post({ ...input, untrackedMetaRecovery: undefined }))).integrationRecoveryRequest.status, 'failed')
     } else if (!gitLock || failureType === 'integration-head-changed') {
       assert.equal((await post({ ...input, untrackedMetaRecovery: { path: 'Assets/Guard.cs.meta', expectedSha256: 'a'.repeat(64), mainCommit: 'b'.repeat(40) } })).status, 400)
     }
     const response = await post(input)
-    const body = await response.json()
+    const body = await response.clone().json()
     assert.equal(response.status, 202, JSON.stringify({ body, errors }))
     assert.equal(body.recovery.kind, 'retry-integration')
     assert.equal(body.recovery.childReexecuted, false)
-    assert.equal(body.delegation.state, 'waiting-integration')
+    assert.equal(body.recovery.status, 'queued')
+    const settled = await settle(response)
+    assert.equal(settled.state, 'waiting-integration')
     const saved = JSON.parse(await readFile(path.join(dataDirectory, '_ai-delegations.json'), 'utf8'))[0]
     assert.equal(saved.childOperationId, delegation.childOperationId)
     assert.equal(saved.childResultSnapshot, resultText)
@@ -467,7 +485,9 @@ test(`통합 복구 API(${failureType})는 최신 승인·유휴 대화를 확�
     assert.equal(saved.childTurnId, delegation.childTurnId)
     assert.equal(saved.workspaceLease.leaseId, f.lease.leaseId)
     assert.equal(saved.attemptHistory.length, 1)
-    assert.equal((await post(input)).status, 409, '중복 요청이 새 하위 실행을 만들면 안 된다.')
+    const duplicate = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(lastInput) })
+    assert.equal(duplicate.status, 202, '같은 요청은 새 하위 실행 없이 기존 receipt로 확인한다.')
+    assert.equal((await duplicate.json()).repeated, true)
     assert.deepEqual(posts, [])
     if (untrackedMetaRecovery) {
       const pool = JSON.parse(await readFile(path.join(dataDirectory, '_workspace-pool.json'), 'utf8'))

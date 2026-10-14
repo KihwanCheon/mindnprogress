@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { completedReplacementDelegations, type AiDelegationSummary } from '../utils/aiDelegationManagement.mjs'
 import { aiDelegationDisplayItems, aiDelegationDisplaySections, aiDelegationRequiresRecovery } from '../utils/aiDelegationStatus.mjs'
 import { groupDelegationPresentation, groupDelegationReportHint, type GroupDelegation } from '../utils/groupOverview.mjs'
+import { integrationRecoveryPending, integrationRecoveryUnconfirmed, reconcileIntegrationRecoveryRequests, submitIntegrationRecovery } from '../utils/aiIntegrationRecovery.mjs'
 import './AiDelegationRecovery.css'
 
 type Delegation = GroupDelegation & AiDelegationSummary & {
@@ -35,7 +36,7 @@ function actionAccessibility(label: string, hint: string) {
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { credentials: 'include', ...init, signal: init?.signal ?? AbortSignal.timeout(65_000) })
   const body = await response.json()
-  if (!response.ok) throw new Error(body.error ?? 'AI 작업 상태를 확인하지 못했습니다.')
+  if (!response.ok) throw Object.assign(new Error(body.error ?? 'AI 작업 상태를 확인하지 못했습니다.'), { status: response.status, code: body.code })
   return body as T
 }
 
@@ -55,6 +56,7 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
+  const [feedback, setFeedback] = useState<Record<string, { error?: boolean; message: string }>>({})
   const [historyOpen, setHistoryOpen] = useState(false)
   const [replacementIds, setReplacementIds] = useState<Record<string, string>>({})
   const [closeDraft, setCloseDraft] = useState<{ id: string; reason: CloseReason; note: string } | null>(null)
@@ -67,6 +69,7 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
     const data = await request<{ delegations: Delegation[]; requestFailures?: Delegation[] }>(listUrl, { signal })
     const relevant = aiDelegationDisplayItems(data.delegations, data.requestFailures).filter((item) =>
       (item.parentMapId ?? item.mapId) === mapId && item.parentCardId === cardId)
+    reconcileIntegrationRecoveryRequests(relevant)
     if (mounted.current) {
       setItems(relevant)
       setLoaded(true)
@@ -91,8 +94,28 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
   useEffect(() => () => onPreviewCards(null), [onPreviewCards])
   useEffect(() => { setHistoryOpen(false) }, [mapId, cardId])
 
-  async function action(item: Delegation, kind: 'refresh' | 'recover' | 'retry-report' | 'supersede') {
+  async function action(item: Delegation, kind: 'refresh' | 'recover' | 'retry-report' | 'supersede' | 'recheck-integration') {
     if (acting.current) return
+    if (kind === 'recheck-integration') {
+      if (!integrationRecoveryUnconfirmed(item)) return
+      acting.current = true; setBusy(true)
+      try {
+        const result = await submitIntegrationRecovery(item, {}, request)
+        if (mounted.current) setFeedback(current => ({ ...current, [item.id]: { message: result.message } }))
+      } catch (reason) {
+        if (mounted.current) setFeedback(current => ({ ...current, [item.id]: { error: true, message: reason instanceof Error ? reason.message : '접수 재확인 실패' } }))
+      } finally {
+        try { await refresh() } catch { /* 동일 요청 자료와 안내를 보존한다. */ }
+        acting.current = false
+        if (mounted.current) setBusy(false)
+      }
+      return
+    }
+    if (kind === 'refresh' && (item.integrationRecoveryRequest || integrationRecoveryUnconfirmed(item))) {
+      try { await refresh() } catch (reason) { setFeedback(current => ({ ...current, [item.id]: { error: true, message: reason instanceof Error ? reason.message : '접수 상태 조회 실패' } })) }
+      return
+    }
+    if (kind === 'recover' && (integrationRecoveryPending(item) || integrationRecoveryUnconfirmed(item))) return
     const candidates = completedReplacementDelegations(item, items)
     const replacementId = replacementIds[item.id] ?? candidates[0]?.id
     if (kind === 'supersede' && !replacementId) return
@@ -110,6 +133,7 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
     if (confirmation && !window.confirm(confirmation)) return
     acting.current = true
     setBusy(true); setError(''); setNotice('')
+    setFeedback(current => ({ ...current, [item.id]: { message: kind === 'recover' ? '복구 요청을 접수하고 있습니다. 잠시 기다려 주세요.' : '요청을 처리하고 있습니다.' } }))
     try {
       const parentMapId = item.parentMapId ?? item.mapId
       const [parent, target, group] = await Promise.all([
@@ -117,8 +141,7 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
         request<{ map: { version: number } }>(`/api/maps/${encodeURIComponent(item.mapId)}`),
         item.groupId ? request<{ project: { version: number } }>(`/api/groups/${encodeURIComponent(item.groupId)}`) : Promise.resolve(null),
       ])
-      await request(`/api/maps/${encodeURIComponent(parentMapId)}/ai-delegations/${encodeURIComponent(item.id)}/${kind}`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+      const body = {
           expectedUpdatedAt: item.updatedAt, sourceRevision: parent.map.version, targetRevision: target.map.version,
           ...(group ? { groupVersion: group.project.version } : {}),
           confirmApprovedScope: kind === 'recover' || kind === 'retry-report',
@@ -128,14 +151,31 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
             ? '사용자가 통합 차단 원인 해소 후 기존 승인 범위의 완료 커밋 통합 재시도를 요청했습니다.'
             : '사용자가 카드에서 기존 승인 범위의 작업 재개를 요청했습니다. 현재 카드, 최근 대화, 할당된 작업공간과 변경을 확인하세요. 완료된 작업이나 외부 처리는 반복하지 말고 미완료 부분만 이어가세요. 기준이나 범위가 바뀌었다면 변경안을 제안하세요.' } : {}),
           ...(kind === 'supersede' ? { replacementDelegationId: replacementId, confirmSupersededByCompletedDelegation: true } : {}),
-        }),
-      })
+        }
+      if (kind === 'recover' && retryIntegration) {
+        const result = await submitIntegrationRecovery(item, body, request)
+        if (mounted.current) {
+          const failed = result.delegation?.integrationRecoveryRequest?.status === 'failed'
+          setFeedback(current => ({ ...current, [item.id]: { error: failed, message: result.message } }))
+          if (failed) setError(result.message); else setNotice(result.message)
+        }
+        return
+      } else {
+        await request(`/api/maps/${encodeURIComponent(parentMapId)}/ai-delegations/${encodeURIComponent(item.id)}/${kind}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        })
+        if (mounted.current) setFeedback(current => ({ ...current, [item.id]: { message: '요청을 처리했습니다. 최신 위임 상태를 확인하세요.' } }))
+      }
       if (mounted.current) setNotice(kind === 'refresh' ? '기존 실행 상태를 확인했습니다.'
         : kind === 'recover' ? correctResult ? '원 담당자의 통합 대기 결과 정정을 접수했습니다.' : retryIntegration ? '완료된 커밋의 통합 재시도를 접수했습니다.' : '기존 작업의 재개를 접수했습니다.'
           : kind === 'retry-report' ? '완료 결과의 재전달을 접수했습니다.'
             : '후속 성공 위임과 연결해 종료했습니다.')
     } catch (reason) {
-      if (mounted.current) setError(reason instanceof Error ? reason.message : '복구 요청 실패')
+      if (mounted.current) {
+        const message = reason instanceof Error ? reason.message : '복구 요청 실패'
+        setError(message)
+        setFeedback(current => ({ ...current, [item.id]: { error: true, message } }))
+      }
     } finally {
       if (mounted.current) {
         try { await refresh() } catch { /* 작업 오류 메시지를 보존한다. */ }
@@ -225,6 +265,12 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
       const retryIntegration = item.recovery?.recommendedAction === 'retry-integration'
       const correctResult = item.recovery?.recommendedAction === 'correct-integration-result'
       const requestFailure = item.kind === 'request-failure'
+      const checking = integrationRecoveryPending(item)
+      const unconfirmed = integrationRecoveryUnconfirmed(item)
+      const actionFeedback = item.integrationRecoveryRequest?.status === 'failed'
+        ? { error: true, message: item.integrationRecoveryRequest.message }
+        : checking ? { message: item.integrationRecoveryRequest!.message }
+          : unconfirmed ? { message: '접수 여부를 확인 중입니다. 다시 실행하지 않고 상태를 조회합니다.' } : feedback[item.id]
       const errorDetail = cardAttention ? '' : (requestFailure ? `${item.reasonCode}: ${item.message}` : '') || item.recoveryDispatchError || item.childError || item.workspaceError || item.workspaceResult?.error || item.integrationError || item.parentError
       return <div
         className={`ai-delegation-recovery-item${history ? ' ai-delegation-history-item' : ''}`}
@@ -260,6 +306,7 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
         {history && item.instructionPreview && <p className="ai-delegation-history-instruction">{item.instructionPreview}</p>}
         {groupDelegationReportHint(item) && <p className="ai-delegation-recovery-guidance">{groupDelegationReportHint(item)}</p>}
         {errorDetail && <p className="ai-delegation-recovery-error-detail">{errorDetail}</p>}
+        {!history && actionFeedback && <p className="ai-delegation-action-feedback" role={actionFeedback.error ? 'alert' : 'status'}>{actionFeedback.message}</p>}
         {candidates.length > 1 && <label className="ai-delegation-replacement">
           <span>완료된 후속 위임</span>
           <select disabled={busy} value={selectedReplacementId} onChange={(event) => setReplacementIds((current) => ({ ...current, [item.id]: event.target.value }))}>
@@ -275,7 +322,8 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
           </div>
         </div> : !history && !cardAttention && !requestFailure && <div className="ai-delegation-recovery-actions">
           <button type="button" {...actionAccessibility('상태 다시 확인', actionHints.refresh)} disabled={busy} onClick={() => void action(item, 'refresh')}>상태 다시 확인</button>
-          {item.recovery?.recoveryAvailable && <button type="button" {...actionAccessibility(correctResult ? '통합 대기 결과 정정' : retryIntegration ? '통합 재시도' : '기존 작업 재개', correctResult ? actionHints.correctResult : retryIntegration ? actionHints.retryIntegration : actionHints.recover)} disabled={busy} onClick={() => void action(item, 'recover')}>{correctResult ? '통합 대기 결과 정정' : retryIntegration ? '통합 재시도' : '기존 작업 재개'}</button>}
+          {unconfirmed && <button type="button" title="새 요청 ID를 만들지 않고 이전에 승인한 동일 요청의 접수 여부를 재확인합니다." disabled={busy} onClick={() => void action(item, 'recheck-integration')}>동일 요청 재확인</button>}
+          {item.recovery?.recoveryAvailable && <button type="button" {...actionAccessibility(correctResult ? '통합 대기 결과 정정' : retryIntegration ? '통합 재시도' : '기존 작업 재개', correctResult ? actionHints.correctResult : retryIntegration ? actionHints.retryIntegration : actionHints.recover)} disabled={busy || checking || unconfirmed} onClick={() => void action(item, 'recover')}>{correctResult ? '통합 대기 결과 정정' : retryIntegration ? '통합 재시도' : '기존 작업 재개'}</button>}
           {item.recovery?.reportRetryAvailable && <button type="button" {...actionAccessibility('결과 전달 재시도', actionHints.retryReport)} disabled={busy} onClick={() => void action(item, 'retry-report')}>결과 전달 재시도</button>}
           {candidates.length > 0 && <button type="button" {...actionAccessibility('후속 성공으로 종료', actionHints.supersede)} disabled={busy} onClick={() => void action(item, 'supersede')}>후속 성공으로 종료</button>}
           {item.closure?.closeAvailable && <button type="button" {...actionAccessibility('보고하지 않고 종료', actionHints.openClose)} className="danger" disabled={busy} onClick={() => setCloseDraft({ id: item.id, reason: item.workCompleted ? 'result-invalidated' : 'no-longer-needed', note: '' })}>보고하지 않고 종료</button>}

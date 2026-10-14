@@ -28,6 +28,7 @@ export type AiDelegationSummary = {
   parentDispatchState?: string | null
   parentError?: string | null
   recoveryDispatchError?: string | null
+  integrationRecoveryRequest?: { requestId: string; status: 'queued' | 'checking' | 'accepted' | 'failed'; message: string; reasonCode: string; requestedAt: string; startedAt?: string | null; completedAt?: string | null } | null
   result?: string
   resultAvailability?: 'captured' | 'unavailable' | 'integrity-failed'
   workCompleted?: boolean
