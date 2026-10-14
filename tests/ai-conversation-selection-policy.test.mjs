@@ -1,15 +1,32 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { AI_CONVERSATION_SELECTION_INSTRUCTION, aiConversationSelectionRules } from '../mcp/aiConversationSelectionPolicy.mjs'
+import { AI_CONVERSATION_SELECTION_INSTRUCTION, aiConversationSelectionInstruction, aiConversationSelectionRules as selectionRules } from '../mcp/aiConversationSelectionPolicy.mjs'
 import { blockedAiModelLabels } from '../server/lib/aiModelPolicy.mjs'
 
+function aiConversationSelectionRules() {
+  return selectionRules({ contextReuseGuardEnabled: true })
+}
+
 test('초기 안내도 같은 카드의 연속 검수 재사용과 독립성 구분을 전달한다', () => {
-  assert.match(AI_CONVERSATION_SELECTION_INSTRUCTION, /같은 카드의 연속 작업·검수는 관련 기존 대화를 우선/)
-  assert.match(AI_CONVERSATION_SELECTION_INSTRUCTION, /독립 검수는 구현자와 검수자의 분리이며 매번 새 대화를 뜻하지 않습니다/)
-  assert.match(AI_CONVERSATION_SELECTION_INSTRUCTION, /입력 파일·구현 담당자·검수 단계 변경만으로 새 대화를 만들지 마세요/)
-  assert.match(AI_CONVERSATION_SELECTION_INSTRUCTION, /포화·상태 확인 불가·금지 모델·호환 불가·역할 충돌/)
-  assert.match(AI_CONVERSATION_SELECTION_INSTRUCTION, /caution은 정확히 이어지는 작은 후속 작업/)
-  assert.doesNotMatch(AI_CONVERSATION_SELECTION_INSTRUCTION, /caution·saturated·unknown 또는 독립 검수·새 범위는 새 대화를 선택/)
+  const instruction = aiConversationSelectionInstruction({ contextReuseGuardEnabled: true })
+  assert.match(instruction, /같은 카드의 연속 작업·검수는 관련 기존 대화를 우선/)
+  assert.match(instruction, /독립 검수는 구현자와 검수자의 분리이며 매번 새 대화를 뜻하지 않습니다/)
+  assert.match(instruction, /입력 파일·구현 담당자·검수 단계 변경만으로 새 대화를 만들지 마세요/)
+  assert.match(instruction, /포화·상태 확인 불가·금지 모델·호환 불가·역할 충돌/)
+  assert.match(instruction, /caution은 정확히 이어지는 작은 후속 작업/)
+  assert.doesNotMatch(instruction, /caution·saturated·unknown 또는 독립 검수·새 범위는 새 대화를 선택/)
+})
+
+test('기본 OFF 안내는 높은 문맥 지표와 상태 미확인 때문에 대화를 교체하지 않도록 한다', () => {
+  const rules = selectionRules()
+  assert.match(AI_CONVERSATION_SELECTION_INSTRUCTION, /컨텍스트 기준 새 대화 전환은 임시로 OFF/)
+  assert.match(rules.preferResume, /문맥 크기·사용률·실행 턴 수·연속 재사용 횟수·통계 미확인만을 이유로 새 대화를 만들지/)
+  assert.doesNotMatch(rules.chooseNew, /saturated·unknown|caution은/)
+  assert.match(rules.exclude, /available=false.*resumeAllowed=false/)
+  assert.ok(rules.exclude.includes(blockedAiModelLabels()))
+  assert.match(rules.busy, /같은 업무의 새 대화를 열거나 새 위임을 자동 예약하지/)
+  assert.match(rules.preferResume, /workspaceBinding=pool-rebindable.*workspacePoolId/)
+  assert.match(rules.preferResume, /resume에는 선택한 대화의 contextHealth\.assessmentId/)
 })
 
 test('최신순 정렬과 무관하게 관련 후보를 비교하고 선택한 대화의 평가를 사용한다', () => {

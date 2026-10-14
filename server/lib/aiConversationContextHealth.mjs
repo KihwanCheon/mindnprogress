@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto'
 import { aiModelPolicy, aiModelPolicyRevision, blockedAiModelLabels, isAiModelBlocked } from './aiModelPolicy.mjs'
 
+// 임시 중지 스위치다. true로 되돌리면 서버 차단과 MCP 선택 안내를 함께 복원한다.
+// 문맥 지표 수집·평가와 금지 모델 등 다른 재사용 안전 조건은 계속 유지한다.
+export const AI_CONVERSATION_CONTEXT_REUSE_GUARD_ENABLED = false
+
 export const AI_CONVERSATION_CONTEXT_THRESHOLDS = Object.freeze({
   cautionUsageRatio: 0.65,
   saturatedUsageRatio: 0.8,
@@ -30,7 +34,9 @@ function reason(code, message) {
   return { code, message }
 }
 
-export function assessAiConversationContextHealth(input, observedAt = new Date().toISOString()) {
+export function assessAiConversationContextHealth(input, observedAt = new Date().toISOString(), {
+  contextReuseGuardEnabled = AI_CONVERSATION_CONTEXT_REUSE_GUARD_ENABLED,
+} = {}) {
   const usage = contextUsage(input?.usage)
   const conversationTurnCount = finiteCount(input?.conversationTurnCount ?? input?.messageCount)
   const conversationTurnCountExact = input?.conversationTurnCountExact === true
@@ -94,8 +100,8 @@ export function assessAiConversationContextHealth(input, observedAt = new Date()
     : state === 'unknown'
       ? [reason('CONVERSATION_CONTEXT_HEALTH_UNAVAILABLE', '대화 메시지 이력을 확인하지 못했습니다.')]
       : [...cautionReasons, ...coverageReasons]
-  const recommendation = state === 'healthy' || state === 'unverified' ? 'resume' : 'new'
-  const resumeAllowed = state === 'healthy' || state === 'unverified' || state === 'caution'
+  const recommendation = !contextReuseGuardEnabled || state === 'healthy' || state === 'unverified' ? 'resume' : 'new'
+  const resumeAllowed = !contextReuseGuardEnabled || state === 'healthy' || state === 'unverified' || state === 'caution'
   const metrics = {
     contextUsed: usage.used,
     contextSize: usage.size,
@@ -125,8 +131,9 @@ export function assessAiConversationContextHealth(input, observedAt = new Date()
     modifiedAt: input?.modifiedAt ?? null,
     metrics,
     state,
+    contextReuseGuardEnabled,
   })).digest('hex')
-  const message = state === 'healthy'
+  const assessedMessage = state === 'healthy'
     ? '현재 문맥 상태에서 같은 업무 흐름의 후속 작업은 이어갈 수 있습니다.'
     : state === 'unverified'
       ? usage.used === null
@@ -137,9 +144,13 @@ export function assessAiConversationContextHealth(input, observedAt = new Date()
       : state === 'saturated'
         ? '대화 문맥이 포화 기준에 도달해 일반적인 새 위임은 새 대화로 시작해야 합니다.'
         : '대화 문맥 상태를 확인하지 못해 일반적인 새 위임은 새 대화로 시작해야 합니다.'
+  const message = contextReuseGuardEnabled ? assessedMessage
+    : '컨텍스트 기준 새 대화 전환은 임시로 OFF입니다. 문맥 지표는 참고용이며 크기·길이·통계 미확인만으로 새 대화를 요구하거나 이어가기를 차단하지 않습니다.'
+      + (state === 'healthy' || state === 'unverified' ? ` ${assessedMessage}` : '')
 
   return {
     state,
+    contextReuseGuardEnabled,
     recommendation,
     resumeAllowed,
     assessmentId,

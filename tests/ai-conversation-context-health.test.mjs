@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { applyAiConversationDelegationModelPolicy, assessAiConversationContextHealth, isAiDelegationModelBlocked } from '../server/lib/aiConversationContextHealth.mjs'
+import { AI_CONVERSATION_CONTEXT_REUSE_GUARD_ENABLED, applyAiConversationDelegationModelPolicy, assessAiConversationContextHealth as assessContextHealth, isAiDelegationModelBlocked } from '../server/lib/aiConversationContextHealth.mjs'
+
+// 기존 ON 판정은 보존해 임시 중지를 되돌릴 때 같은 기준으로 복원되는지 검증한다.
+function assessAiConversationContextHealth(input, observedAt) {
+  return assessContextHealth(input, observedAt, { contextReuseGuardEnabled: true })
+}
 
 const base = {
   conversationId: 'conversation-a',
@@ -12,6 +17,57 @@ const base = {
   delegationCount: 1,
   consecutiveResumeCount: 1,
 }
+
+test('공통 스위치는 기본 OFF이며 높은 문맥 사용률을 이유로 새 대화를 요구하지 않는다', () => {
+  const result = assessContextHealth({ ...base, usage: { used: 190_000, size: 200_000 } })
+  assert.equal(AI_CONVERSATION_CONTEXT_REUSE_GUARD_ENABLED, false)
+  assert.equal(result.contextReuseGuardEnabled, false)
+  assert.equal(result.state, 'saturated', '관측 지표와 판정 자체는 참고용으로 남긴다.')
+  assert.equal(result.metrics.contextUsageRatio, 0.95)
+  assert.deepEqual(result.reasonCodes, ['CONVERSATION_CONTEXT_USAGE_HIGH'])
+  assert.equal(result.resumeAllowed, true)
+  assert.equal(result.recommendation, 'resume')
+  assert.match(result.message, /임시로 OFF/)
+  assert.doesNotMatch(result.message, /새 대화로 시작해야/)
+})
+
+test('OFF에서는 주의·긴 대화·연속 재사용·통계 미확인도 교체 사유로 삼지 않는다', () => {
+  for (const input of [
+    { ...base, usage: { used: 140_000, size: 200_000 } },
+    { ...base, usage: {}, conversationTurnCount: 100, consecutiveResumeCount: 15 },
+    { ...base, usage: {}, conversationTurnCount: null, conversationTurnCountExact: false },
+  ]) {
+    const result = assessContextHealth(input)
+    assert.equal(result.contextReuseGuardEnabled, false)
+    assert.equal(result.resumeAllowed, true)
+    assert.equal(result.recommendation, 'resume')
+  }
+})
+
+test('OFF를 다시 ON으로 바꾸면 기존 포화 차단을 복원하고 이전 평가 ID를 구분한다', () => {
+  const input = { ...base, usage: { used: 190_000, size: 200_000 } }
+  const off = assessContextHealth(input)
+  const on = assessContextHealth(input, undefined, { contextReuseGuardEnabled: true })
+  assert.equal(on.contextReuseGuardEnabled, true)
+  assert.equal(on.resumeAllowed, false)
+  assert.equal(on.recommendation, 'new')
+  assert.deepEqual(off.metrics, on.metrics)
+  assert.notEqual(off.assessmentId, on.assessmentId)
+})
+
+test('컨텍스트 스위치가 OFF여도 금지 모델은 기존·실행 모델 양쪽에서 재사용을 차단한다', () => {
+  const contextHealth = assessContextHealth({ ...base, usage: { used: 190_000, size: 200_000 } })
+  for (const modelId of ['gpt-5.6-sol', 'gpt-6-sol', 'gpt-6.0-sol']) {
+    for (const models of [{ linkedModelId: modelId, runtimeModelId: 'gpt-6.1-sol' },
+      { linkedModelId: 'gpt-6.1-sol', runtimeModelId: modelId }]) {
+      const blocked = applyAiConversationDelegationModelPolicy(contextHealth, models)
+      assert.equal(blocked.contextReuseGuardEnabled, false)
+      assert.equal(blocked.resumeAllowed, false)
+      assert.equal(blocked.recommendation, 'new')
+      assert.ok(blocked.reasonCodes.includes('CONVERSATION_MODEL_REUSE_BLOCKED'))
+    }
+  }
+})
 
 test('짧고 사용량이 낮은 대화는 같은 업무 후속 작업의 이어가기를 허용한다', () => {
   const result = assessAiConversationContextHealth(base, '2026-09-22T01:00:00.000Z')

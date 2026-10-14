@@ -133,6 +133,7 @@ function subMachineResponse(request, conversationId = 'conversation-on-mac') {
     }
   }
   if (request.pathname === `/api/conversations/${conversationId}/usage`) {
+    if (conversationId === 'resume-on-mac') return { used: 190_000, size: 200_000 }
     return { used: 8_000, size: 200_000 }
   }
   if (request.pathname.startsWith(`/api/conversations/${conversationId}/messages`)) {
@@ -440,7 +441,12 @@ test('새 대화와 일반 AI 위임의 전체 경로는 선택한 서브 머신
     const candidates = await requestWithRunner(baseUrl, runnerToken,
       request(baseUrl, cookie, `/api/maps/${mapId}/cards/resume-child/ai-conversations`),
       operation => subMachineResponse(operation, 'resume-on-mac'))
-    const assessment = candidates.body.conversations.find(item => item.conversationId === 'resume-on-mac').contextHealth.assessmentId
+    const resumeHealth = candidates.body.conversations.find(item => item.conversationId === 'resume-on-mac').contextHealth
+    assert.equal(resumeHealth.contextReuseGuardEnabled, false)
+    assert.equal(resumeHealth.state, 'saturated')
+    assert.equal(resumeHealth.resumeAllowed, true)
+    assert.equal(resumeHealth.recommendation, 'resume')
+    const assessment = resumeHealth.assessmentId
     const beforeResume = (await request(baseUrl, cookie, `/api/maps/${mapId}`)).body.map
     let resumeDispatch
     const resumed = await requestWithRunner(baseUrl, runnerToken,
