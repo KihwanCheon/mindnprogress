@@ -54,6 +54,7 @@ window.resolvedQuarantine = state => {delete item.integrationRecoveryRequest;ite
 window.retryIntegration = () => {item.recovery={recoveryAvailable:true,failureCategory:'workspace-local-changes',recommendedAction:'retry-integration'};window.renderRecovery()};
 window.newIntegrationRequest = () => {delete item.integrationRecoveryRequest;item.recovery={recoveryAvailable:true,failureCategory:'workspace-local-changes',recommendedAction:'retry-integration'};window.renderRecovery()};
 window.blockIntegrationRequest = () => {item.integrationRecoveryRequest.status='failed';item.integrationRecoveryRequest.message='통합 재시도를 시작하지 못했습니다: 사용자 변경 원본을 보존해야 합니다.';item.recovery={recoveryAvailable:true,recommendedAction:'retry-integration'};window.renderRecovery()};
+window.competingIntegration = () => {item.recovery={recoveryAvailable:false,recommendedAction:'retry-integration',blockedReasonCode:'AI_DELEGATION_ALREADY_ACTIVE',message:'같은 카드·대화의 다른 위임이 진행 중입니다.'};item.closure={closeAvailable:true,workspaceReleaseRequired:true,reason:'preserve-integration-result'};window.renderRecovery()};
 window.reportOnly = () => {item.state='parent-wake-failed';item.childError=null;item.parentError='보고 사용량 초과';item.workCompleted=true;item.reportPending=true;item.recovery={recoveryAvailable:false,reportRetryAvailable:true};item.closure={closeAvailable:true,reason:'completed-child-report-abandonment'};window.renderRecovery()};
 window.waitingReport = () => {item.state='waiting-parent';item.childError=null;item.parentError=null;item.workCompleted=true;item.reportPending=true;item.reportStatus='waiting';item.reportWaitReason='parent-busy';item.recovery=null;item.closure=null;window.renderRecovery()};
 window.deliveringReport = () => {item.state='waking-parent';item.reportStatus='delivering';window.renderRecovery()};
@@ -87,7 +88,7 @@ test('상위 카드 복구 화면은 하위 카드를 제외하고 AI 없이 재
   const server = await createServer({ configFile: false, root: path.resolve(import.meta.dirname, '..'), cacheDir: path.join(directory, 'vite-cache'), logLevel: 'error',
     // 격리 UI 검사에서 운영 앱과 검증 빌드의 HTML을 전체 탐색하지 않는다.
     optimizeDeps: { noDiscovery: true, include: ['react', 'react/jsx-runtime', 'react/jsx-dev-runtime', 'react-dom/client'] },
-    server: { host: '127.0.0.1', port: 0, hmr: false }, plugins: [react(), {
+    server: { host: '127.0.0.1', port: 0, hmr: false, watch: null }, plugins: [react(), {
       name: 'recovery-fixture', resolveId: id => id === '/recovery-fixture.js' ? '\0recovery-fixture' : null,
       load: id => id === '\0recovery-fixture' ? fixture : null,
       configureServer(vite) { vite.middlewares.use('/recovery-check', async (_req, res) => {
@@ -238,10 +239,21 @@ test('상위 카드 복구 화면은 하위 카드를 제외하고 AI 없이 재
     await evaluate('window.blockIntegrationRequest()'); await ready()
     assert.match(await evaluate('document.querySelector(".ai-delegation-recovery-item [role=alert]")?.textContent'), /사용자 변경 원본/)
     assert.match(await evaluate('document.querySelector(".ai-delegation-recovery-item [role=alert]").closest(".ai-delegation-recovery-item").textContent'), /하위 작업/)
+    assert.match(await evaluate('document.body.textContent'), /이전 복구 시도.*현재 Git 상태를 실시간 확인한 결과는 아닙니다/)
+    await evaluate('window.competingIntegration()'); await ready()
+    assert.match(await evaluate('document.body.textContent'), /현재 차단 사유: 같은 카드/)
+    assert.equal(await evaluate('Array.from(document.querySelectorAll("button")).some(b=>b.textContent==="통합 재시도")'), false)
+    await click('결과 보존 후 반환')
+    await evaluate(`(() => { const textarea=document.querySelector('.ai-delegation-close-form textarea');Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(textarea,'기존 통합 결과를 보존하고 반환합니다.');textarea.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:'반환'})); })()`)
+    await waitFor(() => evaluate('!Array.from(document.querySelectorAll("button")).find(b=>b.textContent==="보고하지 않고 종료").disabled'))
+    await click('보고하지 않고 종료'); await ready()
+    await waitFor(() => evaluate('window.audit.calls.filter(c=>c.method==="POST").at(-1)?.body.confirmPreserveWorkspaceResult===true'))
+    assert.ok((await evaluate('window.audit.calls.filter(c=>c.method==="POST").at(-1).url')).endsWith('/close'))
+    await evaluate('window.allDelegations()[0].closure=null')
     await evaluate('window.audit.loseIntegrationResponse=true;window.newIntegrationRequest()'); await ready()
     await click('통합 재시도'); await ready()
     await waitFor(() => evaluate('document.querySelector(".ai-delegation-action-feedback")?.textContent.includes("검증 중")'))
-    assert.equal(await evaluate('window.audit.calls.filter(c=>c.method==="POST").length'), queuedPosts + 1, '응답 유실 뒤 자동 POST를 반복하지 않는다')
+    assert.equal(await evaluate('window.audit.calls.filter(c=>c.method==="POST").length'), queuedPosts + 2, '명시적 반환 1회 이후에도 응답 유실 뒤 자동 POST를 반복하지 않는다')
     await evaluate('window.audit.integrationQueue=false;window.audit.loseIntegrationResponse=false')
     for (const state of ['completed', 'superseded', 'closed']) {
       await evaluate(`window.resolvedQuarantine(${JSON.stringify(state)})`)

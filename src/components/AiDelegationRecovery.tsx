@@ -200,7 +200,9 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
 
   async function closeDelegation(item: Delegation) {
     if (acting.current || !closeDraft || closeDraft.id !== item.id || closeDraft.note.trim().length < 3) return
-    if (!window.confirm('이 위임을 완료 처리하거나 결과를 전달하지 않고 사용자 종료 상태로 전환합니다. 카드·코드·작업공간과 실행 이력은 그대로 보존됩니다. 계속할까요?')) return
+    if (!window.confirm(item.closure?.workspaceReleaseRequired
+      ? '이 위임의 통합을 종료하고 작업공간을 반환할까요? 원본 커밋·부분 통합 후보·실패 이력은 보존합니다. 업무를 완료 처리하거나 결과를 main에 통합하지 않으며 다른 위임은 유지합니다.'
+      : '이 위임을 완료 처리하거나 결과를 전달하지 않고 사용자 종료 상태로 전환합니다. 카드·코드·작업공간과 실행 이력은 그대로 보존됩니다. 계속할까요?')) return
     acting.current = true
     setBusy(true); setError(''); setNotice('')
     try {
@@ -214,11 +216,14 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
           expectedUpdatedAt: item.updatedAt, sourceRevision: parent.map.version, targetRevision: target.map.version,
           reason: closeDraft.reason, note: closeDraft.note.trim(),
           confirmClosedWithoutCompletion: true, confirmResultReportDiscarded: true,
+          ...(item.closure?.workspaceReleaseRequired ? { confirmPreserveWorkspaceResult: true } : {}),
         }),
       })
       if (mounted.current) {
         setCloseDraft(null)
-        setNotice('완료나 결과 전달로 기록하지 않고 사용자 종료 상태로 전환했습니다.')
+        setNotice(item.closure?.workspaceReleaseRequired
+          ? '결과를 보존하고 작업공간을 반환했습니다. 업무 완료나 결과 전달로 기록하지 않았습니다.'
+          : '완료나 결과 전달로 기록하지 않고 사용자 종료 상태로 전환했습니다.')
       }
     } catch (reason) {
       if (mounted.current) setError(reason instanceof Error ? reason.message : 'AI 위임을 종료하지 못했습니다.')
@@ -282,7 +287,7 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
       const checking = integrationRecoveryPending(item)
       const unconfirmed = integrationRecoveryUnconfirmed(item)
       const actionFeedback = item.integrationRecoveryRequest?.status === 'failed'
-        ? { error: true, message: item.integrationRecoveryRequest.message }
+        ? { error: true, message: `이전 복구 시도 (${item.integrationRecoveryRequest.completedAt || item.integrationRecoveryRequest.requestedAt}): ${item.integrationRecoveryRequest.message} 현재 Git 상태를 실시간 확인한 결과는 아닙니다.` }
         : checking ? { message: item.integrationRecoveryRequest!.message }
           : unconfirmed ? { message: '접수 여부를 확인 중입니다. 다시 실행하지 않고 상태를 조회합니다.' } : feedback[item.id]
       const errorDetail = cardAttention ? '' : (requestFailure ? `${item.reasonCode}: ${item.message}` : '') || item.recoveryDispatchError || item.childError || item.workspaceError || item.workspaceResult?.error || item.integrationError || item.parentError
@@ -319,6 +324,7 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
         {history && <small className="ai-delegation-history-date">{new Date(item.createdAt).toLocaleString('ko-KR')}</small>}
         {history && item.instructionPreview && <p className="ai-delegation-history-instruction">{item.instructionPreview}</p>}
         {groupDelegationReportHint(item) && <p className="ai-delegation-recovery-guidance">{groupDelegationReportHint(item)}</p>}
+        {!history && item.recovery?.blockedReasonCode && <p className="ai-delegation-recovery-guidance">현재 차단 사유: {item.recovery.message}</p>}
         {errorDetail && <p className="ai-delegation-recovery-error-detail">{errorDetail}</p>}
         {!history && actionFeedback && <p className="ai-delegation-action-feedback" role={actionFeedback.error ? 'alert' : 'status'}>{actionFeedback.message}</p>}
         {candidates.length > 1 && <label className="ai-delegation-replacement">
@@ -334,11 +340,12 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
           </div>
         </>}
         {!history && !cardAttention && closing ? <div className="ai-delegation-close-form">
+          {item.closure?.workspaceReleaseRequired && <p>원본 커밋·부분 통합 결과·실패 이력을 보존하고 작업공간을 반환합니다. main 반영이나 업무 완료 처리는 하지 않습니다.</p>}
           <label><span>종료 사유</span><select disabled={busy} value={closeDraft.reason} onChange={(event) => setCloseDraft({ ...closeDraft, reason: event.target.value as CloseReason })}>{Object.entries(closeReasonLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
           <label><span>감사 메모</span><textarea disabled={busy} maxLength={1000} rows={3} value={closeDraft.note} placeholder="복구하거나 결과를 보고하지 않고 종료하는 이유를 남겨 주세요." onChange={(event) => setCloseDraft({ ...closeDraft, note: event.target.value })} /></label>
           <div className="ai-delegation-recovery-actions">
             <button type="button" {...actionAccessibility('취소', actionHints.cancelClose)} disabled={busy} onClick={() => setCloseDraft(null)}>취소</button>
-            <button type="button" {...actionAccessibility('보고하지 않고 종료', actionHints.confirmClose)} className="danger" disabled={busy || closeDraft.note.trim().length < 3} onClick={() => void closeDelegation(item)}>보고하지 않고 종료</button>
+            <button type="button" {...actionAccessibility('보고하지 않고 종료', item.closure?.workspaceReleaseRequired ? '결과와 실패 이력을 보존하고 작업공간만 반환합니다. main 통합·업무 완료·후속 AI 중지는 하지 않습니다.' : actionHints.confirmClose)} className="danger" disabled={busy || closeDraft.note.trim().length < 3} onClick={() => void closeDelegation(item)}>보고하지 않고 종료</button>
           </div>
         </div> : !history && !cardAttention && !requestFailure && <div className="ai-delegation-recovery-actions">
           <button type="button" {...actionAccessibility('상태 다시 확인', actionHints.refresh)} disabled={busy} onClick={() => void action(item, 'refresh')}>상태 다시 확인</button>
@@ -346,7 +353,7 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
           {item.recovery?.recoveryAvailable && <button type="button" {...actionAccessibility(correctResult ? '통합 대기 결과 정정' : retryIntegration ? '통합 재시도' : '기존 작업 재개', correctResult ? actionHints.correctResult : retryIntegration ? actionHints.retryIntegration : actionHints.recover)} disabled={busy || checking || unconfirmed} onClick={() => void action(item, 'recover')}>{correctResult ? '통합 대기 결과 정정' : retryIntegration ? '통합 재시도' : '기존 작업 재개'}</button>}
           {item.recovery?.reportRetryAvailable && <button type="button" {...actionAccessibility('결과 전달 재시도', actionHints.retryReport)} disabled={busy} onClick={() => void action(item, 'retry-report')}>결과 전달 재시도</button>}
           {candidates.length > 0 && <button type="button" {...actionAccessibility('후속 성공으로 종료', actionHints.supersede)} disabled={busy} onClick={() => void action(item, 'supersede')}>후속 성공으로 종료</button>}
-          {item.closure?.closeAvailable && <button type="button" {...actionAccessibility('보고하지 않고 종료', actionHints.openClose)} className="danger" disabled={busy} onClick={() => setCloseDraft({ id: item.id, reason: item.workCompleted ? 'result-invalidated' : 'no-longer-needed', note: '' })}>보고하지 않고 종료</button>}
+          {item.closure?.closeAvailable && <button type="button" {...actionAccessibility(item.closure.workspaceReleaseRequired ? '결과 보존 후 반환' : '보고하지 않고 종료', item.closure.workspaceReleaseRequired ? '보존 반환 사유 입력 창을 엽니다. 마지막 확인 전에는 작업공간을 변경하지 않습니다.' : actionHints.openClose)} className="danger" disabled={busy} onClick={() => setCloseDraft({ id: item.id, reason: item.workCompleted ? 'result-invalidated' : 'no-longer-needed', note: '' })}>{item.closure.workspaceReleaseRequired ? '결과 보존 후 반환' : '보고하지 않고 종료'}</button>}
         </div>}
         {!history && !cardAttention && item.closure?.reason === 'workspace-changes-preserved' && <p className="ai-delegation-recovery-guidance">보존할 작업공간 변경이 있어 종료할 수 없습니다. 기존 변경을 보존한 채 작업공간을 먼저 복구하세요.</p>}
       </div>

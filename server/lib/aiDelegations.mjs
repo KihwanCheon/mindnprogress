@@ -88,7 +88,7 @@ const AI_DELEGATION_STATE_REASONS = Object.freeze({
   },
   closed: {
     reasonCode: 'AI_DELEGATION_CLOSED',
-    message: '보존할 실행 결과 없이 위임 기록을 종료했습니다.',
+    message: '업무 완료나 결과 전달로 처리하지 않고 위임 기록을 종료했습니다.',
   },
   'parent-wake-failed': {
     reasonCode: 'AI_DELEGATION_PARENT_WAKE_FAILED',
@@ -536,7 +536,7 @@ export function localChangesIntegrationCommits(result) {
     || result.integratedCommit || !result.integrationBranch || !result.integrationBaseCommit
     || result.conflictRound || result.unmergedFiles?.length) return null
   const error = String(result.error ?? '')
-  const command = error.match(/^Command failed: git cherry-pick((?: [a-f0-9]{40})+)\r?\n/iu)
+  const command = error.match(/^Command failed: git(?: -c core\.autocrlf=(?:false|input))? cherry-pick((?: [a-f0-9]{40})+)\r?\n/iu)
   if (!command || !/local changes[^\n]*would be overwritten by (?:cherry-pick|merge)/iu.test(error)) return null
   return command[1].trim().split(/\s+/)
 }
@@ -679,6 +679,11 @@ export function aiDelegationIsTerminal(delegation) {
 }
 
 export function aiDelegationClosureAvailability(delegation) {
+  if (delegation?.state === 'failed' && !delegation.groupId && !delegation.pendingRecovery
+    && !integrationRecoveryPending(delegation) && !delegation.resultCorrection && !delegation.workspaceLease?.ownership
+    && delegation.workspaceLease?.leaseId && localChangesIntegrationCommits(delegation.workspaceResult)) {
+    return { closeAvailable: true, reason: 'preserve-integration-result', workspaceReleaseRequired: true }
+  }
   if (!delegation || aiDelegationIsTerminal(delegation) || delegation.pendingRecovery || integrationRecoveryPending(delegation)) return null
   if (delegation.groupId) return { closeAvailable: false, reason: 'group-managed' }
   if (delegation.state === 'parent-wake-failed' && aiDelegationSucceeded(delegation)) {
@@ -693,6 +698,26 @@ export function aiDelegationClosureAvailability(delegation) {
     }
   }
   return { closeAvailable: false, reason: 'execution-or-recovery-still-active' }
+}
+
+export function preservedIntegrationReleaseClosure(delegation, lease) {
+  const result = lease?.result
+  const receipt = result?.preservedRelease
+  if (delegation?.state !== 'failed' || delegation.pendingRecovery || integrationRecoveryPending(delegation)
+    || !aiDelegationClosureAvailability(delegation)?.workspaceReleaseRequired
+    || lease?.status !== 'cancelled' || result?.status !== 'released-preserved' || receipt?.phase !== 'released'
+    || !receipt.releasedAt || !receipt.reason || result.integratedCommit
+    || lease.leaseId !== delegation.workspaceLease?.leaseId || result.leaseId !== lease.leaseId
+    || lease.jobId !== result.jobId || lease.mapId !== delegation.mapId || result.mapId !== delegation.mapId
+    || lease.cardId !== delegation.targetCardId || result.cardId !== delegation.targetCardId
+    || lease.conversationId !== delegation.targetConversationId || result.conversationId !== delegation.targetConversationId
+    || result.previousResult?.headCommit !== delegation.workspaceResult?.headCommit
+    || receipt.sourceHead !== delegation.workspaceResult?.headCommit) return null
+  return { state: 'closed', workspaceResult: result, workspaceReleasedAt: receipt.releasedAt,
+    closedAt: receipt.releasedAt, closedByUserId: receipt.approvedByUserId ?? null,
+    closedByOperator: receipt.approvedByOperator ?? null, closureSourceState: delegation.state,
+    closureReason: 'no-longer-needed', closureNote: receipt.reason,
+    closureSource: 'workspace-pool-preserved-release', reportApprovalRequired: false, reportCancelledAt: receipt.releasedAt }
 }
 
 export function aiDelegationCanBeSupersededBy(delegation, replacement) {

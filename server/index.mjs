@@ -68,6 +68,7 @@ import {
   aiDelegationWaitPollDue,
   aiDelegationBlocksResume,
   aiDelegationClosureAvailability,
+  preservedIntegrationReleaseClosure,
   aiDelegationRecoveryAvailability,
   aiDelegationBusyDispatchRejected,
   assertAiDelegationDatabaseRejection,
@@ -2865,6 +2866,13 @@ function delegationPublicView(delegation, includeResult = false) {
   publicDelegation.reportArchived = aiDelegationReportArchived(delegation)
   publicDelegation.reportArchivePending = aiDelegationReportArchivePending(delegation)
   const recovery = aiDelegationRecoveryAvailability(delegation)
+  if (recovery?.recoveryAvailable) {
+    const competing = activeAiDelegationsForConversation(aiDelegations.values(), { mapId: delegation.mapId,
+      targetCardId: delegation.targetCardId, targetConversationId: delegation.targetConversationId, excludeId: delegation.id })
+    if (competing.length) Object.assign(recovery, { recoveryAvailable: false,
+      blockedReasonCode: 'AI_DELEGATION_ALREADY_ACTIVE', blockedByDelegationId: competing[0].id,
+      message: '같은 카드·대화의 다른 위임이 진행 중이므로 기존 작업을 재개하거나 통합할 수 없습니다. 현재 위임의 종료를 기다리거나, 불필요한 과거 작업은 결과를 보존하고 반환하세요.' })
+  }
   if (recovery) publicDelegation.recovery = recovery
   const closure = aiDelegationClosureAvailability(delegation)
   if (closure) publicDelegation.closure = closure
@@ -3346,6 +3354,12 @@ async function dispatchPreparedAiDelegation({
 }
 
 async function reconcileAiDelegationWorkspaceLeases() {
+  // 풀 반환은 저장됐지만 위임 저장 전에 중단된 경우의 내구 receipt 대사.
+  // 후속 위임/새 lease는 건드리지 않고 명시적으로 반환된 과거 기록만 종료한다.
+  for (const delegation of aiDelegations.values()) {
+    const closure = preservedIntegrationReleaseClosure(delegation, workspacePoolManager.state?.leases?.[delegation.workspaceLease?.leaseId])
+    if (closure) await updateAiDelegation(delegation.id, closure)
+  }
   const legacyIntegrationDirtyFailures = [...aiDelegations.values()].filter((delegation) =>
     delegation.state === 'failed'
     && delegation.childStatus === 'rejected'
@@ -3981,7 +3995,7 @@ async function restoreConfirmedAiDelegationDispatch(delegation, map, parentMap, 
   return { delegation: updated, map: updatedMap }
 }
 
-async function ensureAiDelegationTerminalResolutionIdle(delegation) {
+async function ensureAiDelegationTerminalResolutionIdle(delegation, { completedIntegration = false } = {}) {
   const operationId = delegation.state === 'parent-wake-failed'
     ? delegation.wakeOperationId
     : delegation.childOperationId
@@ -4000,6 +4014,13 @@ async function ensureAiDelegationTerminalResolutionIdle(delegation) {
   if (['starting', 'running', 'waiting_resource', 'waiting_resume'].includes(dispatch?.state)) {
     throw Object.assign(new Error('AionUi에 아직 실행 또는 재개 대기 중인 작업이 있어 위임을 종료할 수 없습니다. 해당 대화를 먼저 중지하거나 마무리하세요.'), { status: 409, groupProjectError: true })
   }
+  if (completedIntegration && dispatch?.state === 'completed') {
+    if (dispatch.conversationId !== delegation.targetConversationId || dispatch.turnId !== delegation.childTurnId) {
+      throw Object.assign(new Error('종료된 실행의 대화·턴이 기존 위임과 다릅니다.'), { status: 409, groupProjectError: true })
+    }
+    return
+  }
+  if (completedIntegration) throw Object.assign(new Error('기존 통합 대상 실행의 완료 상태를 확인할 수 없어 반환하지 않았습니다.'), { status: 409, groupProjectError: true })
   if (dispatch?.state === 'completed') {
     throw Object.assign(new Error('저장된 기록보다 실행 상태가 앞서 있습니다. 상태 다시 확인 후 처리하세요.'), { status: 409, groupProjectError: true })
   }
@@ -7689,16 +7710,35 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
               ? '작업공간에 보존할 변경이 있어 위임을 종료할 수 없습니다. 기존 작업을 복구하거나 작업공간을 먼저 안전하게 정리하세요.'
               : '실행 또는 복구 가능성이 남은 위임은 사용자 종료할 수 없습니다. 상태를 다시 확인하세요.' })
           }
-          await ensureAiDelegationTerminalResolutionIdle(delegation)
+          const releasePreserved = closure.workspaceReleaseRequired === true
+          if (releasePreserved && body.confirmPreserveWorkspaceResult !== true) return sendJson(response, 400, {
+            error: '미통합 결과와 부분 후보를 보존하고 작업공간만 반환할지 명시적으로 확인해야 합니다.' })
+          if (releasePreserved && [...aiDelegations.values()].some(other => other.id !== id
+            && other.workspaceLease?.leaseId === delegation.workspaceLease.leaseId && !aiDelegationIsTerminal(other))) {
+            return sendJson(response, 409, { error: '같은 lease를 사용 중인 다른 위임이 있어 반환할 수 없습니다.' })
+          }
+          await ensureAiDelegationTerminalResolutionIdle(delegation, { completedIntegration: releasePreserved })
+          let workspaceResult = delegation.workspaceResult
+          if (releasePreserved) {
+            try {
+              workspaceResult = await workspacePoolManager.releasePreservedIntegrationFailure(delegation.workspaceLease.leaseId,
+                { mapId: delegation.mapId, cardId: delegation.targetCardId, conversationId: delegation.targetConversationId, userId: user.id }, { reason: note })
+            } catch (error) {
+              const reasonCode = typeof error.reasonCode === 'string' ? error.reasonCode
+                : typeof error.code === 'string' ? error.code : 'INTEGRATION_RECOVERY_UNSAFE'
+              return sendJson(response, 409, { error: error.message, message: error.message, reasonCode })
+            }
+          }
           const closedAt = new Date().toISOString()
           const updated = await updateAiDelegation(id, {
             state: 'closed', closedAt, closedByUserId: user.id,
             closureSourceState: delegation.state, closureReason: reason, closureNote: note,
             reportApprovalRequired: false, reportCancelledAt: closedAt,
+            ...(releasePreserved ? { workspaceResult, workspaceReleasedAt: closedAt } : {}),
           })
           return sendJson(response, 200, {
             delegation: delegationPublicView(updated), childExecutionRequested: false,
-            resultReported: false, cardChanged: false, workspaceChanged: false,
+            resultReported: false, cardChanged: false, workspaceChanged: releasePreserved,
           })
         }
         if (supersede) {

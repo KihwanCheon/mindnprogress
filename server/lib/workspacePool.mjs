@@ -188,9 +188,16 @@ async function exists(file) {
   }
 }
 
-async function defaultGitRunner(cwd, args, { timeoutMs = 0 } = {}) {
+async function defaultGitRunner(cwd, args, { timeoutMs = 0, lfCheckout = false } = {}) {
   try {
-    const result = await execFileAsync('git', args, {
+    let command = args
+    if (lfCheckout) {
+      let autoCrlf = ''
+      try { autoCrlf = (await execFileAsync('git', ['config', '--get', 'core.autocrlf'], { cwd, windowsHide: true })).stdout.trim() }
+      catch (error) { if (error?.code !== 1) throw error }
+      if (autoCrlf.toLowerCase() === 'true') command = ['-c', 'core.autocrlf=input', ...args]
+    }
+    const result = await execFileAsync('git', command, {
       cwd,
       windowsHide: true,
       maxBuffer: 256 * 1024 * 1024,
@@ -379,7 +386,7 @@ export class WorkspacePoolManager {
     return result
   }
 
-  async initialize({ unconfirmedLeaseIds = [] } = {}) {
+  async initialize({ unconfirmedLeaseIds = [], recoverWorkspaces = true } = {}) {
     return this.runExclusive(async () => {
       const rawRegistry = await readJson(this.registryFile, null)
       if (!rawRegistry) return false
@@ -395,6 +402,8 @@ export class WorkspacePoolManager {
       }
       this.state.workspaces ??= {}
       this.state.leases ??= {}
+      // 서버가 중지된 유지보수에서는 대상 lease만 명시적으로 처리한다.
+      if (!recoverWorkspaces) return true
       for (const leaseId of unconfirmedLeaseIds) {
         const lease = this.state.leases[leaseId]
         if (lease?.status === 'quarantined') lease.executionUnconfirmed = true
@@ -1720,7 +1729,14 @@ export class WorkspacePoolManager {
     return [...blocked].sort()
   }
 
-  async recoverLocalChangesIntegrationFailure(leaseId, scope) {
+  async releasePreservedIntegrationFailure(leaseId, scope, { reason } = {}) {
+    if (typeof reason !== 'string' || reason.trim().length < 3 || reason.length > 1000) {
+      throw new WorkspacePoolUnavailableError('결과 보존 반환에는 명시적인 사용자 종료 사유가 필요합니다.', [], 'INTEGRATION_RECOVERY_UNSAFE')
+    }
+    return this.recoverLocalChangesIntegrationFailure(leaseId, scope, { releaseReason: reason.trim() })
+  }
+
+  async recoverLocalChangesIntegrationFailure(leaseId, scope, { releaseReason } = {}) {
     return this.runExclusive(async () => {
       const lease = this.state?.leases?.[leaseId]
       const workspace = this.registry?.workers.find((item) => item.id === lease?.workspaceId)
@@ -1729,6 +1745,8 @@ export class WorkspacePoolManager {
       const reject = (message) => { throw new WorkspacePoolUnavailableError(message, [], 'INTEGRATION_RECOVERY_UNSAFE') }
       if (!lease || !scope || lease.mapId !== scope.mapId || lease.cardId !== scope.cardId
         || lease.conversationId !== scope.conversationId) reject('복구할 위임과 작업공간 lease의 소유권이 일치하지 않습니다.')
+      if (releaseReason && lease.status === 'cancelled' && lease.result?.status === 'released-preserved') return lease.result
+      if (lease.preservedRelease && !releaseReason) reject('결과 보존 반환을 시작한 위임은 통합 재시도 대신 반환을 마무리해야 합니다.')
       if (lease.status === 'waiting-integration' && current?.status === 'waiting-integration'
         && current.leaseId === leaseId && lease.result?.recoveredFromQuarantine
         && lease.integrationRecoveryHistory?.at(-1)?.type === 'local-changes') return lease.result
@@ -1742,15 +1760,17 @@ export class WorkspacePoolManager {
         || lease.integrationBaseCommit !== result.integrationBaseCommit
         || normalizedPath(lease.projectRoot) !== normalizedPath(workspace.root)
         || lease.integrationWorkspaceId !== integration.id) reject('로컬 변경으로 중단된 통합과 현재 작업공간 배정을 확인할 수 없습니다.')
+      if (releaseReason && (lease.resultCorrection || await this.isRemotelyOwned(workspace))) reject('결과 정정 또는 원격 소유 작업공간은 이 반환 경로로 처리할 수 없습니다.')
       const [metadata, session] = await Promise.all([
         readJson(path.join(workspace.root, '.ai-workspace.json'), null),
         readJson(path.join(workspace.root, '.ai-session.json'), null),
       ])
+      const resumedRelease = releaseReason && lease.preservedRelease?.phase === 'prepared' && session === null
       if (metadata?.workspaceId !== workspace.id || normalizedPath(metadata?.projectRoot) !== normalizedPath(workspace.root)
-        || session?.workspaceId !== lease.workspaceId || session?.jobId !== lease.jobId
+        || (!resumedRelease && (session?.workspaceId !== lease.workspaceId || session?.jobId !== lease.jobId
         || session?.leaseId !== leaseId || session?.conversationId !== lease.conversationId
         || session?.branch !== lease.branch || session?.baseCommit !== lease.baseCommit
-        || normalizedPath(session?.projectRoot) !== normalizedPath(workspace.root)) reject('작업공간 메타데이터 또는 AI 세션이 변경되었습니다. 기존 배정을 먼저 확인하세요.')
+        || normalizedPath(session?.projectRoot) !== normalizedPath(workspace.root)))) reject('작업공간 메타데이터 또는 AI 세션이 변경되었습니다. 기존 배정을 먼저 확인하세요.')
       const [dirty, branch, head, workHead, mainBranch, unmerged] = await Promise.all([
         this.git(workspace.root, ['status', '--porcelain', '--untracked-files=all']),
         this.git(workspace.root, ['branch', '--show-current']),
@@ -1801,6 +1821,42 @@ export class WorkspacePoolManager {
       // 재구성 전에 부분 적용 결과도 참조로 보존한다. 사용자 변경은 삭제하거나 되돌리지 않는다.
       const backupRef = `refs/mnp/integration-recovery/${lease.jobId}/${Number(lease.integrationAttempt ?? 1)}`
       await this.git(workspace.root, ['update-ref', backupRef, head])
+      if (releaseReason) {
+        // 반환은 성공/통합이 아니다. 소스와 부분 후보, 실패 원문을 모두 보존하고
+        // 현재 checkout도 바꾸지 않는다. 다음 배정이 정상 준비 절차로 최신 main을 가져온다.
+        const sourceRef = `refs/mnp/preserved-results/${lease.jobId}/source`
+        await this.git(workspace.root, ['update-ref', sourceRef, lease.headCommit])
+        lease.preservedRelease ??= { phase: 'prepared', reason: releaseReason, preparedAt: new Date().toISOString(),
+          sourceRef, sourceHead: lease.headCommit, backupRef, preservedHead: head,
+          approvedByUserId: scope.userId ?? null, approvedByOperator: scope.operator ?? null }
+        await this.persist()
+        if (sequencer) await this.git(workspace.root, ['cherry-pick', '--quit'])
+        if (await this.git(workspace.root, ['status', '--porcelain', '--untracked-files=all'])
+          || await this.git(workspace.root, ['rev-parse', 'HEAD']) !== head) reject('반환 직전 작업공간이 변경되어 격리를 유지합니다.')
+        const latestSession = await readJson(path.join(workspace.root, '.ai-session.json'), null)
+        if (latestSession && JSON.stringify(latestSession) !== JSON.stringify(session)) reject('반환 직전 AI 세션이 변경되었습니다.')
+        await rm(path.join(workspace.root, '.ai-session.json'), { force: true })
+        const releasedAt = new Date().toISOString()
+        const released = await this.writeResult(lease, { status: 'released-preserved', childStatus: 'completed',
+          integratedCommit: null, previousResult: result, preservedRelease: { ...lease.preservedRelease, phase: 'released', releasedAt }, completedAt: releasedAt })
+        lease.status = 'cancelled'
+        lease.result = released
+        lease.preservedRelease = released.preservedRelease
+        const priorIntegrationLeaseId = this.state.integrationLeaseId
+        if (this.state.integrationLeaseId === leaseId) this.state.integrationLeaseId = null
+        this.state.workspaces[workspace.id] = { status: 'idle', idleCommit: head, idleBranch: branch,
+          lastJobId: lease.jobId, lastLeaseId: leaseId, updatedAt: releasedAt }
+        try { await this.persist() } catch (error) {
+          // 최종 상태 저장 실패 시 같은 프로세스에서도 준비 단계부터 재검증한다.
+          lease.status = 'quarantined'
+          lease.result = result
+          lease.preservedRelease = { ...lease.preservedRelease, phase: 'prepared' }
+          this.state.integrationLeaseId = priorIntegrationLeaseId
+          this.state.workspaces[workspace.id] = current
+          throw error
+        }
+        return released
+      }
       if (sequencer) await this.git(workspace.root, ['cherry-pick', '--quit'])
       lease.integrationHeadCommit = null
       lease.integrationRecoveryHistory = [...(lease.integrationRecoveryHistory ?? []), {
@@ -2356,6 +2412,7 @@ export class WorkspacePoolManager {
     return this.runExclusive(async () => {
       const lease = this.state?.leases?.[leaseId]
       if (!lease) return null
+      if (lease.status === 'cancelled' && lease.result?.status === 'released-preserved') return lease.result
       if (lease.status === 'result-correction-held') return lease.result ?? null
       if (['completed', 'quarantined'].includes(lease.status)) return lease.result ?? null
       if (lease.resultCorrection && lease.resultCorrection.phase !== 'completed') {
@@ -2635,7 +2692,10 @@ export class WorkspacePoolManager {
           && integrationBranch !== lease.integrationRecoveryHistory.at(-1).preservedBranch
         await this.git(workspace.root, ['switch', freshRecoveryCandidate ? '-c' : '-C', integrationBranch, integrationBaseCommit])
         try {
-          await this.git(workspace.root, ['cherry-pick', ...commits])
+          // 중간 커밋에서 text → -text가 바뀔 때 자동 CRLF checkout이
+          // 로컬 변경으로 오인되지 않도록 이 재생 명령의 checkout 변환만 끈다.
+          // input은 기존 CRLF 파일의 입력 정규화를 유지한다(false는 이를 dirty로 만든다).
+          await this.git(workspace.root, ['cherry-pick', ...commits], { lfCheckout: true })
         } catch (error) {
           const unmerged = await this.git(workspace.root, ['diff', '--name-only', '--diff-filter=U'])
           if (unmerged) return await this.awaitConflictResolution(lease, workspace, unmerged)
@@ -2727,6 +2787,7 @@ export class WorkspacePoolManager {
     return this.runExclusive(async () => {
       const lease = this.state?.leases?.[leaseId]
       if (!lease) return null
+      if (lease.status === 'cancelled' && lease.result?.status === 'released-preserved') return lease.result
       if (lease.status === 'result-correction-held') return lease.result ?? null
       if (lease.resultCorrection?.phase === 'correcting' || lease.resultCorrection?.phase === 'preparing') return lease.result ?? null
       if (['completed', 'quarantined'].includes(lease.status)) return lease.result ?? null
@@ -3090,6 +3151,7 @@ export class WorkspacePoolManager {
     return this.runExclusive(async () => {
       const lease = this.state?.leases?.[leaseId]
       if (!lease) return null
+      if (lease.status === 'cancelled' && lease.result?.status === 'released-preserved') return lease.result
       if (lease.status === 'result-correction-held') return lease.result ?? null
       if (lease.resultCorrection && lease.resultCorrection.phase !== 'completed') {
         const workspace = this.registry.workers.find((item) => item.id === lease.workspaceId)

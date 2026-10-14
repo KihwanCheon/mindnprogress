@@ -43,8 +43,11 @@ export type AiDelegationSummary = {
     reportRetryAvailable?: boolean
     failureCategory?: string
     recommendedAction?: string
+    blockedReasonCode?: string
+    blockedByDelegationId?: string
+    message?: string
   } | null
-  closure?: { closeAvailable: boolean; reason?: string } | null
+  closure?: { closeAvailable: boolean; reason?: string; workspaceReleaseRequired?: boolean } | null
   closedAt?: string
   closedByUserId?: string
   closureReason?: string
