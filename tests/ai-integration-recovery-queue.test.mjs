@@ -64,6 +64,15 @@ test('검증 차단은 원 실패 결과를 바꾸지 않고 요청별 오류를
   assert.equal(next.delegation.integrationRecoveryRequestHistory[0].reasonCode, 'INTEGRATION_RECOVERY_UNSAFE')
 })
 
+test('Git 종료 코드 숫자는 공개 reasonCode로 사용하지 않는다', async () => {
+  const f = fixture({ check: async () => { throw Object.assign(new Error('Git 저장소 오류'), { code: 128 }) } })
+  await f.queue.accept('job', body, authorization, 'integration-head-changed')
+  await f.queue.run('job')
+  assert.equal(f.get().integrationRecoveryRequest.reasonCode, 'AI_DELEGATION_INTEGRATION_RECOVERY_FAILED')
+  assert.match(f.get().integrationRecoveryRequest.message, /Git 저장소 오류/)
+  assert.equal(f.calls(), 0)
+})
+
 test('재시작은 승인된 checking 요청만 이어 확인하고 중단 중 새 실패를 만들지 않는다', async () => {
   const f = fixture()
   await f.queue.accept('job', body, authorization, 'integration-head-changed')

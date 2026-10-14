@@ -2195,9 +2195,9 @@ async function main() {
     })
   })
 
-  registerTool(server, 'mindnprogress_supersede_ai_delegation', '사용자가 명시적으로 요청한 경우에만, 사용량·요청 한도 또는 모델 용량 부족으로 끝난 과거 위임을 같은 상위 카드와 대상 카드에서 나중에 성공한 위임으로 대체 종료합니다. 과거 위임의 작업공간이 failed-clean 또는 cancelled여서 보존할 변경이 없어야 하며, 카드를 수정하거나 AI를 재실행하지 않고 superseded 감사 이력만 기록합니다.', {
+  registerTool(server, 'mindnprogress_supersede_ai_delegation', '사용자가 명시적으로 요청한 경우에만, 사용량·요청 한도·모델 용량 부족 또는 실행 전 DB 접수 오류(dispatch-database-transient)로 끝난 과거 위임을 같은 상위 카드와 대상 카드에서 나중에 성공한 위임으로 대체 종료합니다. DB 접수 실패는 실행 턴이 없고 정확한 트랜잭션 중첩 오류로 failed-clean 반환된 기록만 지원합니다. 과거 위임의 작업공간이 failed-clean 또는 cancelled여서 보존할 변경이 없어야 합니다. 하위 업무가 완료됐으나 결과 보고만 실패한 일반 위임도 지원합니다. 원 실패를 완료로 바꾸거나 카드를 수정하거나 AI를 재실행하지 않고 superseded 감사 이력만 기록합니다.', {
     mapId: z.string().min(1).describe('과거 위임을 시작한 상위 문서 ID'),
-    delegationId: z.string().regex(AI_DELEGATION_ID_PATTERN).describe('waiting-usage-limit, waiting-rate-limit 또는 waiting-model-capacity인 과거 위임 ID'),
+    delegationId: z.string().regex(AI_DELEGATION_ID_PATTERN).describe('변경 없는 한도·모델 용량 중단, 실행 전 DB 접수 실패 또는 완료 결과의 보고 실패인 과거 위임 ID'),
     replacementDelegationId: z.string().regex(AI_DELEGATION_ID_PATTERN).describe('같은 카드에서 나중에 작업과 결과 전달을 완료한 후속 위임 ID'),
     expectedUpdatedAt: z.string().min(1).describe('과거 위임 목록에서 확인한 최신 updatedAt'),
   }, async ({ mapId, delegationId, replacementDelegationId, expectedUpdatedAt }) => {

@@ -114,7 +114,8 @@ export function createIntegrationRecoveryQueue({ get, save, check, recover, succ
         if (error.integrationRecoveryStorageError) throw error // 저장 불확실성을 실행 실패로 바꾸지 않는다. 같은 내구 요청으로 재대사한다.
         if (get(id)?.integrationRecoveryRequest?.requestId !== request.requestId) return
         await persist(id, { integrationRecoveryRequest: { ...request, status: 'failed', completedAt: new Date().toISOString(),
-          reasonCode: error.reasonCode ?? error.code ?? 'AI_DELEGATION_INTEGRATION_RECOVERY_FAILED',
+          reasonCode: typeof error.reasonCode === 'string' && error.reasonCode ? error.reasonCode
+            : typeof error.code === 'string' && error.code ? error.code : 'AI_DELEGATION_INTEGRATION_RECOVERY_FAILED',
           message: `통합 재시도를 시작하지 못했습니다: ${failureMessage(error)}` } })
       }
     }).finally(() => running.delete(id))

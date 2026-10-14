@@ -38,7 +38,10 @@ test('완료된 원 후보가 있는 정확한 HEAD 변경만 구현 재실행 �
 async function fixture(t, options = {}) {
   // 실제 Git 프로세스 대신 결정적인 응답으로 원 manager의 모든 복구 검증·기록을 실행한다.
   const root = await mkdtemp(path.join(tmpdir(), 'mnp-head-recovery-'))
-  t.after(() => rm(root, { recursive: true, force: true }))
+  t.after(async () => {
+    assert.ok(path.resolve(root).startsWith(path.join(path.resolve(tmpdir()), 'mnp-head-recovery-')))
+    await rm(root, { recursive: true, force: true })
+  })
   const mainRoot = path.join(root, 'main'), workerRoot = path.join(root, 'worker'), sharedRoot = path.join(root, 'shared')
   await Promise.all([mkdir(mainRoot), mkdir(workerRoot), mkdir(sharedRoot)])
   const r = result(), calls = []
@@ -57,6 +60,7 @@ async function fixture(t, options = {}) {
       if (args[1] === 'HEAD') return cwd === mainRoot ? options.mainHead ?? newMain : options.head ?? candidate
       if (args[1] === `refs/heads/${lease.branch}`) return options.workHead ?? source
       if (args.includes('--quiet')) {
+        if (cwd === mainRoot && args.at(-1) === `${candidate}^{commit}` && options.alreadyIntegrated) return candidate
         if (args.at(-1).startsWith('refs/heads/') && options.existingRetryBranch) return '9'.repeat(40)
         return notFound()
       }
@@ -99,6 +103,8 @@ test('최신 main을 기준으로 새 후보를 예약하고 원 실패·후보�
   assert.equal(history.mainHeadAtRecovery, newMain)
   assert.ok(f.calls.some(c => c.args[0] === 'update-ref' && c.args[1].endsWith('/head-changed-1') && c.args[2] === candidate))
   assert.equal(f.calls.some(c => ['switch', 'cherry-pick', 'reset', 'clean', 'commit', 'merge'].includes(c.args[0])), false)
+  assert.equal(f.calls.some(c => c.cwd === f.main.root && c.args[0] === 'merge-base' && c.args[2] === candidate), false,
+    'worker에만 있는 후보는 main의 ancestor 검사로 전달하면 안 된다.')
   assert.deepEqual(await f.manager.recoverIntegrationHeadChangedFailure(f.lease.leaseId, scope), recovered)
   const stored = JSON.parse(await readFile(path.join(f.root, 'state.json'), 'utf8'))
   assert.equal(stored.leases[f.lease.leaseId].integrationRecoveryHistory[0].preservedHead, candidate)

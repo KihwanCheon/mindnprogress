@@ -668,6 +668,7 @@ async function main() {
     assert.match(toolDescription('mindnprogress_recover_ai_delegation'), /main HEAD 변경.*retry-integration.*하위 AI 작업은 다시 실행하지 않습니다/)
     assert.match(toolDescription('mindnprogress_recover_ai_delegation'), /queued.*비동기.*recoveryRequestId/)
     assert.match(toolDescription('mindnprogress_recover_ai_delegation'), /dispatch-database-transient.*복구를 승인/)
+    assert.match(toolDescription('mindnprogress_supersede_ai_delegation'), /dispatch-database-transient.*실행 턴이 없고.*failed-clean/)
     assert.match(toolDescription('mindnprogress_manage_comment'), /\[진행\].*\[차단\].*\[결과\].*240자 이하.*detail/)
     assert.match(guide.guide.dataModel.workFields.checklist, /완료 비율.*진행률과 상태/)
 

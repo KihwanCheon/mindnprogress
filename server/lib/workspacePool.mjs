@@ -1841,6 +1841,19 @@ export class WorkspacePoolManager {
     }
   }
 
+  async integrationCommitApplied(integration, candidate, mainHead) {
+    // 검증된 후보가 worker에만 존재할 수 있다. main에 없는 객체를 ancestor 검사에 넣으면
+    // 미반영(false)이 아니라 Git 오류(128)가 된다. 객체 부재와 실제 Git 오류를 구분한다.
+    let resolved
+    try { resolved = await this.git(integration.root, ['rev-parse', '--verify', '--quiet', `${candidate}^{commit}`]) }
+    catch (error) { if (error?.code === 1) return false; throw error }
+    if (resolved !== candidate) throw new WorkspacePoolUnavailableError('main에서 확인한 후보 커밋이 보존된 후보와 다릅니다.', [], 'INTEGRATION_RECOVERY_UNSAFE')
+    try {
+      await this.git(integration.root, ['merge-base', '--is-ancestor', candidate, mainHead])
+      return true
+    } catch (error) { if (error?.code === 1) return false; throw error }
+  }
+
   async recoverIntegrationGitLockFailure(leaseId, scope, { untrackedMetaRecovery } = {}) {
     return this.recoverCheckpointIntegrationFailure(leaseId, scope, { failureType: 'integration-git-lock', untrackedMetaRecovery })
   }
@@ -1918,11 +1931,7 @@ export class WorkspacePoolManager {
         || result.headCommit !== lease.headCommit || mainBranch !== lease.baseBranch) reject('보존된 작업 브랜치 또는 통합 후보 HEAD가 변경되었습니다.')
       await this.validateIntegrationCheckpointCandidate(lease, workspace, head)
       await this.git(integration.root, ['merge-base', '--is-ancestor', lease.integrationBaseCommit, mainHead])
-      let alreadyIntegrated = false
-      try {
-        await this.git(integration.root, ['merge-base', '--is-ancestor', head, mainHead])
-        alreadyIntegrated = true
-      } catch (error) { if (error?.code !== 1) throw error }
+      const alreadyIntegrated = await this.integrationCommitApplied(integration, head, mainHead)
       const recoveryNumber = (lease.integrationRecoveryHistory?.length ?? 0) + 1
       const backupRef = `refs/mnp/integration-recovery/${lease.jobId}/${failureType === 'integration-git-lock' ? 'git-lock' : 'head-changed'}-${recoveryNumber}`
       const retryBranch = alreadyIntegrated || mainHead === lease.integrationBaseCommit
@@ -2861,10 +2870,7 @@ export class WorkspacePoolManager {
     const recovery = lease.integrationRecoveryHistory?.at(-1)
     if (checkpointIntegrationRecoveryTypes.has(recovery?.type) && recovery.preservedHead === integrationHead) {
       // 반영 응답 유실 뒤 main이 더 진행됐어도 같은 후보를 다시 적용하지 않는다.
-      try {
-        await this.git(integration.root, ['merge-base', '--is-ancestor', integrationHead, currentIntegrationHead])
-        return currentIntegrationHead
-      } catch (error) { if (error?.code !== 1) throw error }
+      if (await this.integrationCommitApplied(integration, integrationHead, currentIntegrationHead)) return currentIntegrationHead
     }
     if (currentIntegrationHead !== lease.integrationBaseCommit) {
       throw new Error('충돌 해결 중 통합 작업공간의 HEAD가 변경되었습니다.')
