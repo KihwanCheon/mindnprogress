@@ -88,6 +88,17 @@ test('Git 잠금 통합 실패는 하위 재실행이 아닌 통합 재시도로
   assert.match(groupDelegationReportHint(item), /완료된 하위 AI 작업과 커밋을 그대로 사용/)
 })
 
+test('Fork 통합 후보의 변경은 main 정리 자동 대기와 구분해 명시적 재시도로 안내한다', () => {
+  const item = { state: 'failed', childStatus: 'completed', workspaceResult: { status: 'quarantined' },
+    recovery: { recoveryAvailable: true, failureCategory: 'integration-candidate-worktree-dirty', recommendedAction: 'retry-integration' } }
+  assert.equal(groupDelegationPresentation(item).label, '통합 복구 필요')
+  assert.match(groupDelegationReportHint(item), /main이 아니라 Fork/)
+  assert.match(groupDelegationReportHint(item), /현재 파일을 확인/)
+  assert.match(groupDelegationReportHint(item), /원본 보존·정리 후 통합 재시도/)
+  assert.match(groupDelegationReportHint(item), /하위 AI는 다시 실행하지 않습니다/)
+  assert.doesNotMatch(groupDelegationReportHint(item), /자동으로 통합/)
+})
+
 test('업무 대기와 AI 확인 대기는 위임 완료 집계와 별도로 필터링한다', () => {
   const waiting = { ...document('wait', '스토리'), work: { total: 5, done: 2, waiting: 1 } }
   const confirmation = { ...document('confirm', '승인'), runtime: { state: 'waiting-confirmation' } }

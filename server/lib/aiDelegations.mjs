@@ -560,6 +560,25 @@ export function integrationHeadChangedFailure(result) {
   return { candidateCommit: result.integrationHeadCommit }
 }
 
+export const integrationCandidateDirtyReasonCode = 'integration-candidate-worktree-dirty'
+
+export function integrationCandidateWorktreeFailure(result) {
+  if (result?.status !== 'quarantined' || result.childStatus !== 'completed' || result.childError
+    || result.integratedCommit || !result.integrationBranch || result.conflictRound || result.unmergedFiles?.length
+    || !['headCommit', 'integrationBaseCommit'].every(key => /^[a-f0-9]{40}$/u.test(String(result[key] ?? '')))) return null
+  const failure = result.integrationFailure
+  const legacy = !failure && result.error === '통합 브랜치에 커밋되지 않은 변경이 남아 있습니다.'
+  if (!legacy && (failure?.reasonCode !== integrationCandidateDirtyReasonCode
+    || failure.phase !== 'candidate-worktree' || failure.workspaceId !== result.workspaceId
+    || failure.branch !== result.integrationBranch)) return null
+  const candidateCommit = result.integrationHeadCommit ?? failure?.candidateCommit ?? null
+  if ((candidateCommit && !/^[a-f0-9]{40}$/u.test(candidateCommit))
+    || (!legacy && (!candidateCommit || failure.candidateCommit !== candidateCommit))) return null
+  // 구버전은 후보 HEAD를 저장하기 전에 실패했다. 복구 시 현재 HEAD를 그대로 신뢰하지 않고
+  // 모든 원 체크포인트를 적용한 tree와 각 부모 커밋을 공통 검증기로 대조한다.
+  return { candidateCommit }
+}
+
 export function aiDelegationRecoveryAvailability(delegation) {
   if (integrationRecoveryPending(delegation)) return { failurePhase: 'integration', failureCategory: 'integration-recovery-pending',
     recoveryAvailable: false, recommendedAction: 'refresh-status', recoveryTool: 'mindnprogress_refresh_ai_delegation' }
@@ -600,6 +619,11 @@ export function aiDelegationRecoveryAvailability(delegation) {
   if (delegation.state === 'failed' && delegation.workspaceLease?.leaseId
     && integrationHeadChangedFailure(delegation.workspaceResult)) {
     return { failurePhase: 'integration', failureCategory: 'integration-head-changed', recoveryAvailable: true,
+      recommendedAction: 'retry-integration', recoveryTool: 'mindnprogress_recover_ai_delegation' }
+  }
+  if (delegation.state === 'failed' && delegation.workspaceLease?.leaseId
+    && integrationCandidateWorktreeFailure(delegation.workspaceResult)) {
+    return { failurePhase: 'integration', failureCategory: integrationCandidateDirtyReasonCode, recoveryAvailable: true,
       recommendedAction: 'retry-integration', recoveryTool: 'mindnprogress_recover_ai_delegation' }
   }
   if (['recovery-required', 'integration-recovery-required', 'waiting-child-resume'].includes(delegation.state)) {

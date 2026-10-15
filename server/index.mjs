@@ -3876,7 +3876,8 @@ const integrationRecoveryQueue = createIntegrationRecoveryQueue({
     const settled = settledIntegrationRecoveryResult(delegation, recovery)
     if (settled) return settled
     const method = recovery.failureCategory === 'integration-git-lock' ? 'recoverIntegrationGitLockFailure'
-      : recovery.failureCategory === 'integration-head-changed' ? 'recoverIntegrationHeadChangedFailure' : 'recoverLocalChangesIntegrationFailure'
+      : recovery.failureCategory === 'integration-head-changed' ? 'recoverIntegrationHeadChangedFailure'
+      : recovery.failureCategory === 'integration-candidate-worktree-dirty' ? 'recoverIntegrationCandidateWorktreeFailure' : 'recoverLocalChangesIntegrationFailure'
     return workspacePoolManager[method](delegation.workspaceLease.leaseId,
       { mapId: delegation.mapId, cardId: delegation.targetCardId, conversationId: delegation.targetConversationId },
       ...(recovery.untrackedMetaRecovery ? [{ untrackedMetaRecovery: recovery.untrackedMetaRecovery }] : []))

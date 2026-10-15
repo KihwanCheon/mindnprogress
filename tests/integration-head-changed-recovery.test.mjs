@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { aiDelegationRecoveryAvailability, integrationHeadChangedFailure } from '../server/lib/aiDelegations.mjs'
+import { aiDelegationRecoveryAvailability, integrationHeadChangedFailure, integrationCandidateWorktreeFailure, integrationCandidateDirtyReasonCode } from '../server/lib/aiDelegations.mjs'
 import { WorkspacePoolManager } from '../server/lib/workspacePool.mjs'
 
 const base = 'a'.repeat(40), source = 'b'.repeat(40), candidate = 'c'.repeat(40)
@@ -35,6 +35,41 @@ test('완료된 원 후보가 있는 정확한 HEAD 변경만 구현 재실행 �
   assert.equal(aiDelegationRecoveryAvailability({ ...delegation, state: 'completed' }), null)
 })
 
+function candidateResult(legacy = false) {
+  const r = { ...result(), integrationHeadCommit: null, error: '통합 브랜치에 커밋되지 않은 변경이 남아 있습니다.' }
+  if (!legacy) {
+    r.error = 'Fork 작업공간 fork2의 통합 후보에 미추적 파일이 남아 있습니다.'
+    r.integrationFailure = { reasonCode: integrationCandidateDirtyReasonCode, phase: 'candidate-worktree',
+      workspaceId: r.workspaceId, branch: r.integrationBranch, candidateCommit: candidate,
+      observedAt: new Date().toISOString(), trackedChanges: [], untrackedChanges: ['old-build/output.dll'] }
+  }
+  return r
+}
+
+test('통합 후보 변경은 단계·후보 증거 또는 정확한 구버전 오류만 명시적 재시도로 분류한다', () => {
+  for (const legacy of [false, true]) {
+    const r = candidateResult(legacy)
+    const delegation = { state: 'failed', childStatus: 'completed', workspaceLease: { leaseId: r.leaseId }, workspaceResult: r }
+    assert.deepEqual(integrationCandidateWorktreeFailure(r), { candidateCommit: legacy ? null : candidate })
+    assert.deepEqual(aiDelegationRecoveryAvailability(delegation), {
+      failurePhase: 'integration', failureCategory: integrationCandidateDirtyReasonCode, recoveryAvailable: true,
+      recommendedAction: 'retry-integration', recoveryTool: 'mindnprogress_recover_ai_delegation',
+    })
+    for (const patch of [{ childStatus: 'failed' }, { childError: '중단' }, { integratedCommit: candidate },
+      { status: 'completed' }, { conflictRound: 1 }, { unmergedFiles: ['conflict.cs'] },
+      { integrationBranch: null }, { integrationBaseCommit: 'invalid' }, { headCommit: null },
+      { integrationHeadCommit: 'invalid' }, { error: '알 수 없는 실패', integrationFailure: undefined }]) {
+      assert.equal(integrationCandidateWorktreeFailure({ ...r, ...patch }), null)
+    }
+  }
+  const r = candidateResult()
+  for (const patch of [{ reasonCode: 'unknown' }, { phase: 'child' }, { candidateCommit: null },
+    { candidateCommit: 'invalid' }, { workspaceId: 'other' }, { branch: 'other' }]) {
+    assert.equal(integrationCandidateWorktreeFailure({ ...r, integrationFailure: { ...r.integrationFailure, ...patch } }), null)
+  }
+  assert.equal(integrationCandidateWorktreeFailure({ ...r, integrationHeadCommit: '9'.repeat(40) }), null)
+})
+
 async function fixture(t, options = {}) {
   // 실제 Git 프로세스 대신 결정적인 응답으로 원 manager의 모든 복구 검증·기록을 실행한다.
   const root = await mkdtemp(path.join(tmpdir(), 'mnp-head-recovery-'))
@@ -44,7 +79,7 @@ async function fixture(t, options = {}) {
   })
   const mainRoot = path.join(root, 'main'), workerRoot = path.join(root, 'worker'), sharedRoot = path.join(root, 'shared')
   await Promise.all([mkdir(mainRoot), mkdir(workerRoot), mkdir(sharedRoot)])
-  const r = result(), calls = []
+  const r = options.kind === 'head-changed' ? result() : candidateResult(options.kind === 'candidate-legacy'), calls = []
   const lease = { ...r, projectRoot: workerRoot, integrationWorkspaceId: 'main', commits: [source],
     checkpoints: [{ commit: source, paths: ['implementation.cs'] }] }
   lease.result = r
@@ -90,9 +125,13 @@ async function fixture(t, options = {}) {
   return { manager, lease, r, options, calls, worker, main, session, root }
 }
 
-test('최신 main을 기준으로 새 후보를 예약하고 원 실패·후보·체크포인트를 보존한다', async t => {
-  const f = await fixture(t)
-  const recovered = await f.manager.recoverIntegrationHeadChangedFailure(f.lease.leaseId, scope)
+for (const kind of ['head-changed', 'candidate', 'candidate-legacy']) {
+const recover = f => kind === 'head-changed'
+  ? f.manager.recoverIntegrationHeadChangedFailure(f.lease.leaseId, scope)
+  : f.manager.recoverIntegrationCandidateWorktreeFailure(f.lease.leaseId, scope)
+test(`${kind}: 최신 main을 기준으로 새 후보를 예약하고 원 실패·후보·체크포인트를 보존한다`, async t => {
+  const f = await fixture(t, { kind })
+  const recovered = await recover(f)
   assert.equal(recovered.status, 'waiting-integration')
   assert.equal(f.lease.integrationBranch, 'mnp/integrate/job-test-retry-1')
   assert.equal(f.lease.integrationHeadCommit, null)
@@ -101,18 +140,18 @@ test('최신 main을 기준으로 새 후보를 예약하고 원 실패·후보�
   assert.deepEqual(history.previousResult, f.r)
   assert.equal(history.preservedHead, candidate)
   assert.equal(history.mainHeadAtRecovery, newMain)
-  assert.ok(f.calls.some(c => c.args[0] === 'update-ref' && c.args[1].endsWith('/head-changed-1') && c.args[2] === candidate))
+  assert.ok(f.calls.some(c => c.args[0] === 'update-ref' && c.args[1].endsWith(kind === 'head-changed' ? '/head-changed-1' : '/candidate-worktree-dirty-1') && c.args[2] === candidate))
   assert.equal(f.calls.some(c => ['switch', 'cherry-pick', 'reset', 'clean', 'commit', 'merge'].includes(c.args[0])), false)
   assert.equal(f.calls.some(c => c.cwd === f.main.root && c.args[0] === 'merge-base' && c.args[2] === candidate), false,
     'worker에만 있는 후보는 main의 ancestor 검사로 전달하면 안 된다.')
-  assert.deepEqual(await f.manager.recoverIntegrationHeadChangedFailure(f.lease.leaseId, scope), recovered)
+  assert.deepEqual(await recover(f), recovered)
   const stored = JSON.parse(await readFile(path.join(f.root, 'state.json'), 'utf8'))
   assert.equal(stored.leases[f.lease.leaseId].integrationRecoveryHistory[0].preservedHead, candidate)
 })
 
-test('원 후보가 이미 main의 조상이면 다시 적용하지 않고 같은 후보의 완료만 확인한다', async t => {
-  const f = await fixture(t, { alreadyIntegrated: true })
-  await f.manager.recoverIntegrationHeadChangedFailure(f.lease.leaseId, scope)
+test(`${kind}: 원 후보가 이미 main의 조상이면 다시 적용하지 않고 같은 후보의 완료만 확인한다`, async t => {
+  const f = await fixture(t, { kind, alreadyIntegrated: true })
+  await recover(f)
   assert.equal(f.lease.integrationBranch, f.r.integrationBranch)
   assert.equal(f.lease.integrationHeadCommit, candidate)
   assert.equal(await f.manager.applyIntegration(f.lease, f.worker, f.main), newMain)
@@ -132,10 +171,11 @@ for (const [label, mutate] of [
   ['이미 존재하는 재시도 브랜치', f => { f.options.existingRetryBranch = true }],
   ['세션 변경', async f => { await writeFile(path.join(f.worker.root, '.ai-session.json'), JSON.stringify({ ...f.session, jobId: 'other-job' })) }],
   ['진행 중 Git', async f => { await mkdir(path.join(f.worker.root, '.git')); await writeFile(path.join(f.worker.root, '.git', 'MERGE_HEAD'), candidate) }],
-]) test(`HEAD 변경 복구는 안전 조건을 우회하지 않는다: ${label}`, async t => {
-  const f = await fixture(t); await mutate(f)
-  await assert.rejects(() => f.manager.recoverIntegrationHeadChangedFailure(f.lease.leaseId, scope))
+]) test(`${kind} 복구는 안전 조건을 우회하지 않는다: ${label}`, async t => {
+  const f = await fixture(t, { kind }); await mutate(f)
+  await assert.rejects(() => recover(f))
   assert.equal(f.lease.status, 'quarantined')
   assert.equal(f.calls.some(c => c.args[0] === 'update-ref'), false)
   assert.equal(f.lease.integrationRecoveryHistory, undefined)
 })
+}

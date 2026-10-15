@@ -74,6 +74,7 @@ export function groupDelegationReportHint(item) {
   if (item?.workspaceResult?.status === 'result-correction-held') return '결과 정정 실행 또는 Git 상태를 확인할 수 없어 자료와 통합 잠금을 보존합니다. 별도 증거 검토가 필요합니다.'
   if (item?.recovery?.recommendedAction === 'correct-integration-result') return '원 담당 AI에게 통합 대기 결과 정정을 요청할 수 있습니다. 기존 후보와 이력, 통합 사용자 파일을 보존하며 새 변경 체크포인트 이후에만 다시 통합합니다.'
   if (item?.workspaceResult?.status === 'quarantined' && aiDelegationRequiresRecovery(item)) {
+    if (item.recovery?.failureCategory === 'integration-candidate-worktree-dirty') return 'main이 아니라 Fork의 통합 후보에 변경이 남아 차단된 기록입니다. 현재 파일을 확인하고 원본 보존·정리 후 통합 재시도를 요청하세요. 기존 체크포인트를 검증하며 하위 AI는 다시 실행하지 않습니다.'
     if (item.recovery?.recommendedAction === 'retry-integration') return '로컬 변경 또는 Git 잠금 등 통합 차단 원인을 해소한 뒤 통합 재시도를 요청하세요. 완료된 하위 AI 작업과 커밋을 그대로 사용합니다.'
     return item.recovery?.recoveryAvailable
       ? '작업공간이 격리되어 복구가 필요합니다. 오류와 보존된 변경을 확인하고 기존 위임을 복구하세요.'

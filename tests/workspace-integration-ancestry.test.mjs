@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { WorkspacePoolManager } from '../server/lib/workspacePool.mjs'
+import { integrationCandidateDirtyReasonCode } from '../server/lib/aiDelegations.mjs'
 
 const candidate = 'c'.repeat(40), base = 'a'.repeat(40), advanced = 'd'.repeat(40)
 const integration = { root: 'main' }
@@ -77,3 +78,37 @@ test('미반영 후보의 최초 반영은 기존 안전 검사 후 fetch·fast-
   assert.equal(calls.filter(call => call.args[0] === 'fetch').length, 1)
   assert.equal(calls.some(call => call.args[0] === 'merge-base'), false)
 })
+
+for (const type of ['integration-git-lock', 'integration-head-changed', integrationCandidateDirtyReasonCode]) {
+test(`${type}: 복구 접수 후 finalize도 main에 없는 후보를 재격리하지 않는다`, async () => {
+  const source = 'b'.repeat(40), worker = { id: 'fork2', root: 'worker' }
+  const lease = { leaseId: 'lease-test', workspaceId: worker.id, status: 'waiting-integration',
+    baseBranch: 'japan-master', baseCommit: base, headCommit: source, commits: [source],
+    integrationBranch: 'mnp/integrate/job-test', integrationBaseCommit: base, integrationHeadCommit: candidate,
+    integrationRecoveryHistory: [{ type, preservedHead: candidate }], result: { status: 'waiting-integration' } }
+  let objectChecks = 0, integrationCalls = 0
+  const manager = new WorkspacePoolManager({ gitRunner: async (cwd, args) => {
+    if (args[0] === 'status' || args[0] === 'diff') return ''
+    if (args[0] === 'branch') return cwd === worker.root ? lease.integrationBranch : lease.baseBranch
+    if (args[0] === 'rev-parse' && args[1] === 'HEAD') return cwd === worker.root ? candidate : base
+    if (cwd === integration.root && args[0] === 'rev-parse' && args.at(-1) === `${candidate}^{commit}`) {
+      objectChecks++
+      throw Object.assign(new Error('객체 없음'), { code: 1 })
+    }
+    if (cwd === worker.root && args[0] === 'merge-base' && args[2] === base && args[3] === source) return ''
+    throw new Error(`예기치 않은 명령: ${cwd}: ${args.join(' ')}`)
+  } })
+  manager.registry = { integration, workspaces: [worker] }
+  manager.state = { leases: { [lease.leaseId]: lease }, workspaces: { [worker.id]: { leaseId: lease.leaseId } } }
+  manager.persist = async () => {}
+  manager.gitPathExists = async () => false
+  manager.applyIntegration = async () => { integrationCalls++; return candidate }
+  manager.completeLease = async (_lease, _worker, result) => result
+  manager.quarantineIntegrationFailure = async (_lease, _worker, error) => error
+  const completed = await manager.finalize(lease.leaseId, { childStatus: 'completed' })
+  assert.equal(completed.status, 'completed')
+  assert.equal(completed.integratedCommit, candidate)
+  assert.equal(objectChecks, 1)
+  assert.equal(integrationCalls, 1)
+})
+}
