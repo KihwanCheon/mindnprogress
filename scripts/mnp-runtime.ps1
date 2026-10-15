@@ -1,7 +1,7 @@
 param(
     [ValidateSet('status', 'start', 'stop', 'restart')][string]$Action = 'status',
     [ValidateRange(1, 300)][int]$StopTimeoutSeconds = 60,
-    [ValidateRange(1, 300)][int]$StartTimeoutSeconds = 120,
+    [ValidateRange(1, 300)][int]$StartTimeoutSeconds = 300,
     [ValidateRange(1, 60)][int]$ForceStopTimeoutSeconds = 10,
     [switch]$OpenBrowser,
     [switch]$AllowLegacyStop,
