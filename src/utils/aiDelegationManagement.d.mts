@@ -4,6 +4,8 @@ export type AiDelegationSummary = {
   kind?: 'request-failure' | 'task-attention'
   completedExecutionCount?: number
   resolvedByDelegationId?: string | null
+  accepted?: boolean
+  requestClosure?: { reason: 'cancelled' | 'no-longer-needed'; note: string; at: string; actorId: string }
   requestedDelegationId?: string
   executionState?: 'not-started' | 'unknown'
   phase?: 'preflight' | 'dispatch'
@@ -24,7 +26,7 @@ export type AiDelegationSummary = {
   instructionPreview?: string
   requestSummary?: string
   retryVerification?: {
-    state: 'confirmed' | 'unverified' | 'not-found' | 'execution-unknown'
+    state: 'confirmed' | 'unverified' | 'not-found' | 'execution-unknown' | 'closed'
     method: string | null
     message: string
     replacement: { id: string; targetCardLabel?: string; instructionPreview?: string; createdAt: string; state: string; targetConversationId?: string } | null

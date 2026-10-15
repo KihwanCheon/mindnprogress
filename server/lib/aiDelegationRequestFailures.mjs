@@ -14,7 +14,7 @@ function sameRequestScope(failure, delegation) {
 function publicFailure(record, resolvedByDelegationId = record.resolution?.delegationId ?? null) {
   const { requestSignature: _signature, instructionHash: _instructionHash, ...publicRecord } = record
   return { ...publicRecord, resolvedByDelegationId,
-    ...(!resolvedByDelegationId && record.instructionHash && record.phase === 'preflight' && record.executionState === 'not-started'
+    ...(!resolvedByDelegationId && !record.requestClosure && record.instructionHash && record.phase === 'preflight' && record.executionState === 'not-started'
       ? { retryReference: { requestId: record.id, instruction: '동일 업무를 다시 요청할 때 retryOfRequestId에 requestId를 전달하세요. instruction은 그대로 유지하고 sourceRevision 등 요청 메타데이터만 갱신하세요. 새 업무에는 이 참조를 사용하지 마세요.' } } : {}) }
 }
 
@@ -34,6 +34,7 @@ function sameWork(failure, candidate) {
 }
 
 function verifiedReplacement(failure, delegations, records = []) {
+  if (failure.requestClosure) return null
   if (failure.resolution) return { id: failure.resolution.delegationId, method: failure.resolution.method }
   const accepted = delegations.get(failure.requestedDelegationId)
   if (sameRequestScope(failure, accepted) && failure.requestSignature && accepted.requestSignature === failure.requestSignature) {
@@ -62,11 +63,12 @@ function verificationView(failure, delegations, records) {
   const verified = verifiedReplacement(failure, delegations, records)
   const replacement = verified && delegations.get(verified.id)
   const candidates = [...delegations.values()].filter(item => sameRequestScope(failure, item))
-  const state = verified ? 'confirmed' : failure.executionState === 'unknown' ? 'execution-unknown'
+  const state = failure.requestClosure ? 'closed' : verified ? 'confirmed' : failure.executionState === 'unknown' ? 'execution-unknown'
     : candidates.length ? 'unverified' : 'not-found'
   return { ...publicFailure(failure, verified?.id ?? null), retryVerification: {
     state, method: verified?.method ?? null,
-    message: ({ confirmed: '정상 재접수가 확인되어 접수 실패 경고를 해제했습니다. 업무 완료 판정과는 별개입니다.',
+    message: ({ closed: '사용자가 미접수 요청을 종료했습니다. 재접수나 업무 완료가 아니며 원래 실패 이력을 보존합니다.',
+      confirmed: '정상 재접수가 확인되어 접수 실패 경고를 해제했습니다. 업무 완료 판정과는 별개입니다.',
       unverified: '후속 접수는 있지만 같은 업무의 재접수인지 확인할 근거가 부족합니다. 담당 상위 AI의 요청 기록 확인이 필요합니다.',
       'not-found': '이 실패 이후 같은 대상의 재접수 기록이 없습니다. 담당 상위 AI가 원인과 재접수 필요 여부를 확인해야 합니다.',
       'execution-unknown': '원 요청의 실행 여부가 불확실합니다. 중복 실행을 피하기 위해 접수 기록 확인이 필요합니다.' })[state],
@@ -126,6 +128,7 @@ export async function createAiDelegationRequestFailures({ filePath, readJson, wr
     validateRetry(context, requestId, delegations) {
       if (requestId === undefined) return null
       const failure = records.find(item => item.id === requestId)
+      if (failure?.requestClosure) throw failureError(409, 'AI_DELEGATION_REQUEST_FAILURE_CLOSED', '사용자가 종료한 요청은 재접수 참조로 사용할 수 없습니다. 새 작업은 승인 범위를 확인하고 별도로 요청하세요.')
       const candidate = { ...context, id: context.delegationId, createdAt: new Date().toISOString(),
         targetConversationId: context.requestedConversationId, instructionHash: instructionDigest(context.instruction) }
       if (!failure || failure.phase !== 'preflight' || failure.executionState !== 'not-started'
@@ -141,7 +144,7 @@ export async function createAiDelegationRequestFailures({ filePath, readJson, wr
         const record = records.find(item => item.id === failureId && item.parentMapId === mapId)
         if (!record) throw failureError(404, 'AI_DELEGATION_REQUEST_FAILURE_NOT_FOUND', '접수 실패 기록을 찾을 수 없습니다.')
         if (!actorId) throw failureError(403, 'AI_DELEGATION_EDITOR_REQUIRED', '편집자만 접수 확인을 요청할 수 있습니다.')
-        if (!record.resolution && expectedUpdatedAt !== record.updatedAt) throw failureError(409, 'AI_DELEGATION_REQUEST_FAILURE_CHANGED', '접수 실패 기록이 변경됐습니다. 최신 상태를 다시 확인하세요.')
+        if (!record.resolution && !record.requestClosure && expectedUpdatedAt !== record.updatedAt) throw failureError(409, 'AI_DELEGATION_REQUEST_FAILURE_CHANGED', '접수 실패 기록이 변경됐습니다. 최신 상태를 다시 확인하세요.')
         const verified = verifiedReplacement(record, delegations, records)
         if (verified && !record.resolution) {
           const now = new Date().toISOString()
@@ -162,10 +165,40 @@ export async function createAiDelegationRequestFailures({ filePath, readJson, wr
       const record = records.find(item => item.id === id)
       return record ? structuredClone(record) : null
     },
+    close({ mapId, failureId, expectedUpdatedAt, reason, note, confirmNotExecuted, actorId }, delegations) {
+      const action = async () => {
+        const record = records.find(item => item.id === failureId && item.parentMapId === mapId)
+        if (!record) throw failureError(404, 'AI_DELEGATION_REQUEST_FAILURE_NOT_FOUND', '접수 실패 기록을 찾을 수 없습니다.')
+        if (!actorId) throw failureError(403, 'AI_DELEGATION_EDITOR_REQUIRED', '편집자만 미접수 요청을 종료할 수 있습니다.')
+        if (confirmNotExecuted !== true || !['cancelled', 'no-longer-needed'].includes(reason)
+          || typeof note !== 'string' || note.trim().length < 3 || note.length > 1000) throw failureError(400,
+          'AI_DELEGATION_REQUEST_FAILURE_CLOSE_CONFIRMATION_REQUIRED', '미실행 요청 종료를 확인하고 사유와 3자 이상 1000자 이하의 메모를 남겨 주세요.')
+        if (record.requestClosure) {
+          if (record.requestClosure.reason !== reason || record.requestClosure.note !== note.trim()) throw failureError(409,
+            'AI_DELEGATION_REQUEST_FAILURE_CLOSED', '이미 종료한 요청입니다. 기존 종료 이력을 변경할 수 없습니다.')
+          return { requestFailure: verificationView(record, delegations, records), repeated: true }
+        }
+        if (expectedUpdatedAt !== record.updatedAt) throw failureError(409, 'AI_DELEGATION_REQUEST_FAILURE_CHANGED', '접수 실패 기록이 변경됐습니다. 최신 상태를 다시 확인하세요.')
+        if (record.phase !== 'preflight' || record.executionState !== 'not-started' || record.accepted !== false) throw failureError(409,
+          'AI_DELEGATION_REQUEST_FAILURE_EXECUTION_UNCERTAIN', '접수 전 미실행이 확인된 요청만 종료할 수 있습니다. 실행 여부가 불확실하면 먼저 접수 기록을 확인하세요.')
+        if (verifiedReplacement(record, delegations, records)) throw failureError(409,
+          'AI_DELEGATION_REQUEST_FAILURE_ALREADY_RESOLVED', '정상 재접수가 확인된 요청입니다. 재접수 확인으로 처리하고 실제 위임은 별도로 확인하세요.')
+        const now = new Date().toISOString()
+        const updated = { ...record, updatedAt: now, requestClosure: { reason, note: note.trim(), at: now, actorId } }
+        const next = records.map(item => item.id === record.id ? updated : item)
+        await writeJson(filePath, next)
+        records = next
+        return { requestFailure: verificationView(updated, delegations, records), repeated: false }
+      }
+      const result = queue.catch(() => {}).then(action)
+      queue = result.catch(() => {})
+      return result
+    },
     resolve({ mapId, failureId, replacementDelegationId, expectedUpdatedAt, confirmSameWork, note, actorId }, delegations) {
       const action = async () => {
         const record = records.find(item => item.id === failureId && item.parentMapId === mapId)
         if (!record) throw failureError(404, 'AI_DELEGATION_REQUEST_FAILURE_NOT_FOUND', '접수 실패 기록을 찾을 수 없습니다.')
+        if (record.requestClosure) throw failureError(409, 'AI_DELEGATION_REQUEST_FAILURE_CLOSED', '이미 종료한 요청을 정상 재접수로 변경할 수 없습니다.')
         if (record.resolution) {
           if (record.resolution.delegationId !== replacementDelegationId) throw failureError(409, 'AI_DELEGATION_REQUEST_FAILURE_ALREADY_RESOLVED', '다른 재접수 위임으로 이미 처리한 기록입니다.')
           return { requestFailure: publicFailure(record), repeated: true }

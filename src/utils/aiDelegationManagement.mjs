@@ -1,5 +1,5 @@
 export function requestFailureReplacementDelegations(failure, delegations) {
-  if (failure?.kind !== 'request-failure' || failure.resolvedByDelegationId
+  if (failure?.kind !== 'request-failure' || failure.resolvedByDelegationId || failure.requestClosure
     || failure.executionState !== 'not-started' || failure.phase !== 'preflight'
     || !failure.targetHomeMachineId) return []
   return (Array.isArray(delegations) ? delegations : []).filter(candidate => !candidate.kind

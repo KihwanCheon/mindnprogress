@@ -82,6 +82,7 @@ test('레거시 접수 실패를 실제 재접수에 연결하고 실패 원문�
     await writeFile(path.join(directory, '_ai-delegations.json'), JSON.stringify([accepted]), 'utf8')
     await writeFile(path.join(directory, '_ai-delegation-request-failures.json'), JSON.stringify([
       originalFailure, { ...originalFailure, id: 'request-unknown', phase: 'dispatch', executionState: 'unknown' },
+      { ...originalFailure, id: 'request-close' },
       { ...originalFailure, id: 'request-check', parentConversationId: 'parent-conversation', strategy: 'resume', instructionHash: accepted.instructionHash },
     ]), 'utf8')
     await start()
@@ -121,6 +122,23 @@ test('레거시 접수 실패를 실제 재접수에 연결하고 실패 원문�
     assert.equal(result.body.cardChanged, false)
     assert.equal(result.body.requestFailure.resolvedByDelegationId, accepted.id)
     assert.equal((await api(cookie, endpoint, 'POST', body)).body.repeated, true)
+    const closeEndpoint = `/api/maps/${mapId}/ai-delegation-request-failures/request-close/close`
+    const closeBody = { expectedUpdatedAt: originalFailure.updatedAt, reason: 'no-longer-needed', note: '사용자가 불필요한 요청 종료', confirmNotExecuted: true }
+    assert.equal((await api(null, closeEndpoint, 'POST', closeBody)).status, 401)
+    assert.equal((await api(cookie, closeEndpoint, 'POST', { ...closeBody, expectedUpdatedAt: 'stale' })).status, 409)
+    assert.equal((await api(cookie, closeEndpoint, 'POST', { ...closeBody, confirmNotExecuted: false })).status, 400)
+    assert.equal((await api(cookie, closeEndpoint.replace('request-close', 'request-unknown'), 'POST', closeBody)).body.reasonCode, 'AI_DELEGATION_REQUEST_FAILURE_EXECUTION_UNCERTAIN')
+    assert.equal((await api(cookie, closeEndpoint.replace('request-close', 'request-check'), 'POST', { ...closeBody, expectedUpdatedAt: checked.body.requestFailure.updatedAt })).body.reasonCode, 'AI_DELEGATION_REQUEST_FAILURE_ALREADY_RESOLVED')
+    const closed = await api(cookie, closeEndpoint, 'POST', closeBody)
+    assert.equal(closed.status, 200, JSON.stringify(closed.body))
+    assert.equal(closed.body.reasonCode, 'AI_DELEGATION_REQUEST_FAILURE_CLOSED')
+    assert.equal(closed.body.executionRequested, false)
+    assert.equal(closed.body.cardChanged, false)
+    assert.equal(closed.body.requestFailure.retryVerification.state, 'closed')
+    assert.equal(closed.body.requestFailure.resolvedByDelegationId, null)
+    assert.ok(closed.body.requestFailure.requestClosure.actorId)
+    assert.equal((await api(cookie, closeEndpoint, 'POST', closeBody)).body.repeated, true)
+    assert.equal((await api(cookie, closeEndpoint.replace('/close', '/resolve'), 'POST', body)).status, 409)
     assert.deepEqual((await api(cookie, `/api/maps/${mapId}`)).body.map, beforeMap)
     assert.equal(await readFile(path.join(directory, '_ai-delegations.json'), 'utf8'), delegationBefore)
     const stored = JSON.parse(await readFile(path.join(directory, '_ai-delegation-request-failures.json'), 'utf8'))
@@ -133,6 +151,8 @@ test('레거시 접수 실패를 실제 재접수에 연결하고 실패 원문�
     assert.equal(history.find(item => item.id === originalFailure.id).resolvedByDelegationId, accepted.id)
     assert.equal(history.find(item => item.id === 'request-unknown').resolvedByDelegationId, null)
     assert.equal(history.find(item => item.id === 'request-check').retryVerification.state, 'confirmed')
+    assert.equal(history.find(item => item.id === 'request-close').retryVerification.state, 'closed')
+    assert.deepEqual(history.find(item => item.id === 'request-close').requestClosure, closed.body.requestFailure.requestClosure)
   } finally {
     await stop()
     // mkdtemp가 반환한 이번 테스트의 전용 경로만 정리한다.

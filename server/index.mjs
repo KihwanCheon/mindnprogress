@@ -7625,7 +7625,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       }
       return sendJson(response, 404, { error: '지원하지 않는 재구성 작업입니다.' })
     }
-    const failureResolutionRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/ai-delegation-request-failures\/([^/]+)\/(resolve|recheck)$/)
+    const failureResolutionRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/ai-delegation-request-failures\/([^/]+)\/(resolve|recheck|close)$/)
     if (failureResolutionRoute && request.method === 'POST') {
       const user = requireUser(request, response)
       if (!user) return
@@ -7640,6 +7640,14 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         || !target.nodes.some(node => node.id === failure.targetCardId)) return sendAiDelegationResponse(response, 404, 'AI_DELEGATION_CARD_NOT_FOUND', '접수 실패의 상위 또는 대상 카드를 찾을 수 없습니다.')
       const body = await readJsonBody(request)
       try {
+        if (failureResolutionRoute[3] === 'close') {
+          const result = await aiDelegationRequestFailures.close({ mapId, failureId,
+            expectedUpdatedAt: body.expectedUpdatedAt, reason: body.reason, note: body.note,
+            confirmNotExecuted: body.confirmNotExecuted, actorId: user.id }, aiDelegations)
+          broadcastEvent({ type: 'ai-delegation-request-resolved', mapId, requestFailure: result.requestFailure })
+          return sendAiDelegationResponse(response, 200, 'AI_DELEGATION_REQUEST_FAILURE_CLOSED',
+            result.requestFailure.retryVerification.message, { ...result, executionRequested: false, cardChanged: false })
+        }
         if (failureResolutionRoute[3] === 'recheck') {
           const result = await aiDelegationRequestFailures.recheck({ mapId, failureId,
             expectedUpdatedAt: body.expectedUpdatedAt, actorId: user.id }, aiDelegations)

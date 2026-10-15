@@ -59,6 +59,69 @@ function memoryLedger(initial = []) {
   return { dependencies, disk: () => structuredClone(disk) }
 }
 
+test('미접수 요청 종료는 원 오류를 보존하고 재시작·재확인·반복 요청에도 경고를 다시 만들지 않는다', async () => {
+  const memory = memoryLedger()
+  const ledger = await createAiDelegationRequestFailures(memory.dependencies)
+  const failed = await ledger.record(context, failure)
+  const original = memory.disk()[0]
+  const command = { mapId: context.mapId, failureId: failed.id, expectedUpdatedAt: failed.updatedAt,
+    reason: 'no-longer-needed', note: '분기 대화를 삭제해 더 이상 진행하지 않습니다.', confirmNotExecuted: true, actorId: 'editor' }
+  const executions = new Map()
+  const result = await ledger.close(command, executions)
+  assert.equal(result.repeated, false)
+  assert.equal(result.requestFailure.retryVerification.state, 'closed')
+  assert.equal(result.requestFailure.resolvedByDelegationId, null)
+  assert.equal(result.requestFailure.retryReference, undefined)
+  assert.equal(result.requestFailure.state, 'request-failed')
+  assert.equal(result.requestFailure.requestClosure.actorId, 'editor')
+  assert.equal(isVisibleAiDelegation(result.requestFailure), false)
+  assert.deepEqual(aiDelegationDisplayItems([], [result.requestFailure]), [])
+  assert.deepEqual(aiDelegationStatusByCard([result.requestFailure], context.mapId), {})
+  assert.deepEqual({ ...memory.disk()[0], updatedAt: original.updatedAt, requestClosure: undefined }, { ...original, requestClosure: undefined })
+  const saved = memory.disk()
+  assert.equal((await ledger.close({ ...command, actorId: 'another-editor' }, executions)).repeated, true)
+  assert.deepEqual(memory.disk(), saved)
+  await assert.rejects(ledger.close({ ...command, note: '다른 종료 사유' }, executions), { reasonCode: 'AI_DELEGATION_REQUEST_FAILURE_CLOSED' })
+  await assert.rejects(ledger.resolve(command, executions), { reasonCode: 'AI_DELEGATION_REQUEST_FAILURE_CLOSED' })
+  assert.throws(() => ledger.validateRetry(context, failed.id, executions), { reasonCode: 'AI_DELEGATION_REQUEST_FAILURE_CLOSED' })
+  const restarted = await createAiDelegationRequestFailures(memory.dependencies)
+  // 이후 별도 요청이 접수돼도 사용자 종료를 정상 재접수로 바꾸지 않는다.
+  executions.set(context.delegationId, { ...context, id: context.delegationId, createdAt: '2999-01-01' })
+  const checked = await restarted.recheck(command, executions)
+  assert.equal(checked.requestFailure.retryVerification.state, 'closed')
+  assert.equal(checked.requestFailure.resolvedByDelegationId, null)
+  assert.deepEqual(memory.disk(), saved)
+})
+
+test('미접수 종료는 권한·확인·최신 상태·미실행을 검사하고 실제 재접수를 숨기지 않는다', async () => {
+  const ledger = await createAiDelegationRequestFailures(memoryLedger().dependencies)
+  const failed = await ledger.record(context, failure)
+  const command = { mapId: context.mapId, failureId: failed.id, expectedUpdatedAt: failed.updatedAt,
+    reason: 'cancelled', note: '사용자 요청 취소', confirmNotExecuted: true, actorId: 'editor' }
+  for (const patch of [{ actorId: '' }, { confirmNotExecuted: false }, { reason: 'arbitrary' }, { note: ' ' }, { note: 'x'.repeat(1001) }, { expectedUpdatedAt: 'stale' }, { mapId: 'other' }]) {
+    await assert.rejects(ledger.close({ ...command, ...patch }, new Map()))
+  }
+  const unknown = await ledger.record({ ...context, requestId: 'unknown', dispatchStarted: true }, failure)
+  await assert.rejects(ledger.close({ ...command, failureId: unknown.id, expectedUpdatedAt: unknown.updatedAt }, new Map()), { reasonCode: 'AI_DELEGATION_REQUEST_FAILURE_EXECUTION_UNCERTAIN' })
+  const executions = new Map([[context.delegationId, { ...context, id: context.delegationId, createdAt: '2999-01-01' }]])
+  await assert.rejects(ledger.close(command, executions), { reasonCode: 'AI_DELEGATION_REQUEST_FAILURE_ALREADY_RESOLVED' })
+  assert.equal(ledger.get(failed.id).requestClosure, undefined)
+})
+
+test('재접수 해제와 사용자 종료가 경합하면 먼저 확정된 감사 기록만 유지한다', async () => {
+  const ledger = await createAiDelegationRequestFailures(memoryLedger().dependencies)
+  const failed = await ledger.record(context, failure)
+  const common = { mapId: context.mapId, failureId: failed.id, expectedUpdatedAt: failed.updatedAt, actorId: 'editor' }
+  const executions = new Map([['later', { ...context, id: 'later', requestSignature: 'different', createdAt: '2999-01-01' }]])
+  const results = await Promise.allSettled([
+    ledger.close({ ...common, reason: 'cancelled', note: '사용자 취소 결정', confirmNotExecuted: true }, executions),
+    ledger.resolve({ ...common, replacementDelegationId: 'later', confirmSameWork: true, note: '재접수 확인' }, executions),
+  ])
+  assert.deepEqual(results.map(item => item.status), ['fulfilled', 'rejected'])
+  assert.equal(ledger.get(failed.id).resolution, undefined)
+  assert.ok(ledger.get(failed.id).requestClosure)
+})
+
 test('버전 충돌 뒤 키·서명이 바뀌어도 동일 지시·상위·머신의 정상 재접수는 표시를 해제한다', async () => {
   const memory = memoryLedger()
   const ledger = await createAiDelegationRequestFailures(memory.dependencies)

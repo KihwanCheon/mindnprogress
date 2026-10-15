@@ -10,6 +10,11 @@ type Delegation = GroupDelegation & AiDelegationSummary & {
 }
 
 type CloseReason = 'result-invalidated' | 'conversation-removed' | 'no-longer-needed'
+type RequestCloseReason = 'cancelled' | 'no-longer-needed'
+const requestCloseReasonLabels: Record<RequestCloseReason, string> = {
+  cancelled: '요청 취소',
+  'no-longer-needed': '더 이상 진행할 필요 없음',
+}
 
 const closeReasonLabels: Record<CloseReason, string> = {
   'result-invalidated': '결과가 되돌려졌거나 더 이상 유효하지 않음',
@@ -63,6 +68,7 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
   const [requestHistory, setRequestHistory] = useState<Delegation[]>([])
   const [replacementIds, setReplacementIds] = useState<Record<string, string>>({})
   const [closeDraft, setCloseDraft] = useState<{ id: string; reason: CloseReason; note: string } | null>(null)
+  const [requestCloseDraft, setRequestCloseDraft] = useState<{ id: string; reason: RequestCloseReason; note: string; expectedUpdatedAt: string } | null>(null)
   const mounted = useRef(true)
   const acting = useRef(false)
   const sectionRef = useRef<HTMLElement | null>(null)
@@ -75,7 +81,7 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
     reconcileIntegrationRecoveryRequests(relevant)
     if (mounted.current) {
       setItems(relevant)
-      setRequestHistory((data.requestFailures ?? []).filter(item => item.resolvedByDelegationId
+      setRequestHistory((data.requestFailures ?? []).filter(item => (item.resolvedByDelegationId || item.requestClosure)
         && (item.parentMapId ?? item.mapId) === mapId && item.parentCardId === cardId))
       setLoaded(true)
     }
@@ -97,7 +103,7 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
   }, [refresh])
 
   useEffect(() => () => onPreviewCards(null), [onPreviewCards])
-  useEffect(() => { setHistoryOpen(false); setRequestHistoryOpen(false) }, [mapId, cardId])
+  useEffect(() => { setHistoryOpen(false); setRequestHistoryOpen(false); setRequestCloseDraft(null) }, [mapId, cardId])
 
   async function openConversation(item: Delegation, conversationId: string) {
     // 클릭 동기 경계에서 창을 만들고 기존 권한·머신 검증 API로 주소를 확인한다.
@@ -224,6 +230,28 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
     }
   }
 
+  async function closeRequest(item: Delegation) {
+    if (acting.current || !requestCloseDraft || requestCloseDraft.id !== item.id || requestCloseDraft.note.trim().length < 3) return
+    acting.current = true; setBusy(true); setError(''); setNotice('')
+    try {
+      const result = await request<{ message: string }>(`/api/maps/${encodeURIComponent(item.parentMapId ?? item.mapId)}/ai-delegation-request-failures/${encodeURIComponent(item.id)}/close`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+          expectedUpdatedAt: requestCloseDraft.expectedUpdatedAt, reason: requestCloseDraft.reason,
+          note: requestCloseDraft.note.trim(), confirmNotExecuted: true,
+        }),
+      })
+      if (mounted.current) { setRequestCloseDraft(null); setNotice(result.message) }
+    } catch (reason) {
+      if (mounted.current) setError(reason instanceof Error ? reason.message : '미접수 요청을 종료하지 못했습니다.')
+    } finally {
+      if (mounted.current) {
+        try { await refresh() } catch { /* 원 요청과 종료 입력을 보존한다. */ }
+        setBusy(false)
+      }
+      acting.current = false
+    }
+  }
+
   async function closeDelegation(item: Delegation) {
     if (acting.current || !closeDraft || closeDraft.id !== item.id || closeDraft.note.trim().length < 3) return
     if (!window.confirm(item.closure?.workspaceReleaseRequired
@@ -276,7 +304,7 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
     requestFailureCount > 0 ? `접수 실패 ${requestFailureCount}건` : '',
     incompleteTaskCount > 0 ? `업무 확인 ${incompleteTaskCount}개 카드` : '',
   ].filter(Boolean).join(' · ') || '상태 확인'
-  const sectionSummary = !pending.length && requestHistory.length ? '현재 접수 실패 경고는 없습니다. 과거 실패와 확인된 재접수 이력을 펼쳐 볼 수 있습니다.' : requestFailureCount || incompleteTaskCount
+  const sectionSummary = !pending.length && requestHistory.length ? '현재 접수 실패 경고는 없습니다. 과거 실패·재접수 확인·사용자 종료 이력을 펼쳐 볼 수 있습니다.' : requestFailureCount || incompleteTaskCount
     ? '현재 위임·접수 실패와 카드 단위 확인 사항을 표시합니다. 단계별 실행 완료는 카드 전체 완료를 뜻하지 않으며, 완료 이력은 아래에서 펼쳐 볼 수 있습니다. 자동 재실행하지 않습니다.'
     : recoveryCount > 0
     ? activeCount > 0
@@ -345,15 +373,16 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
             <b>{item.targetCardLabel || item.targetCardId}</b>
             {!requestFailure && <small className="ai-delegation-recovery-id" title={item.id}>{cardAttention ? `완료된 실행 ${item.completedExecutionCount}건 · 카드 단위 확인` : item.id}</small>}
           </div>
-          <span>{requestFailure && history ? '재접수 확인 · 경고 해제' : history ? item.reportStatus === 'received' ? 'AI 실행 종료 · 결과 수신 완료' : 'AI 실행 종료' : groupDelegationPresentation(item).label}</span>
+          <span>{requestFailure && item.requestClosure ? '사용자 종료 · 미실행' : requestFailure && history ? '재접수 확인 · 경고 해제' : history ? item.reportStatus === 'received' ? 'AI 실행 종료 · 결과 수신 완료' : 'AI 실행 종료' : groupDelegationPresentation(item).label}</span>
         </div>
         {(history || requestFailure) && <small className="ai-delegation-history-date">{requestFailure ? '접수 실패: ' : ''}{new Date(item.createdAt).toLocaleString('ko-KR')}</small>}
         {history && item.instructionPreview && <p className="ai-delegation-history-instruction">{item.instructionPreview}</p>}
         {requestFailure ? <>
           <p className="ai-delegation-history-instruction">{item.requestSummary || '업무 요약이 없는 요청입니다. 요청 시각과 실패 사유를 확인하세요.'}</p>
           <p className="ai-delegation-recovery-guidance">{item.retryVerification?.message || '서버 기록으로 재접수 여부를 확인하세요. 확인되지 않은 요청은 자동 실행하지 않습니다.'}</p>
+          {item.requestClosure && <p className="ai-delegation-history-instruction">종료: {new Date(item.requestClosure.at).toLocaleString('ko-KR')} · {requestCloseReasonLabels[item.requestClosure.reason]}<br />{item.requestClosure.note}</p>}
           {replacement && <p className="ai-delegation-history-instruction">후속 접수: {new Date(replacement.createdAt).toLocaleString('ko-KR')} · {groupDelegationPresentation({ ...item, ...replacement, kind: undefined } as Delegation).label}<br />{replacement.instructionPreview || '후속 요청 요약 없음'}</p>}
-          <details className="ai-delegation-technical"><summary>기술 정보</summary><p>실패 기록: {item.id}<br />요청: {item.requestedDelegationId}{item.resolvedByDelegationId && <><br />재접수: {item.resolvedByDelegationId}</>}</p></details>
+          <details className="ai-delegation-technical"><summary>기술 정보</summary><p>실패 기록: {item.id}<br />요청: {item.requestedDelegationId}{item.resolvedByDelegationId && <><br />재접수: {item.resolvedByDelegationId}</>}{item.requestClosure && <><br />종료 처리 계정: {item.requestClosure.actorId}</>}</p></details>
         </> : groupDelegationReportHint(item) && <p className="ai-delegation-recovery-guidance">{groupDelegationReportHint(item)}</p>}
         {!history && item.recovery?.blockedReasonCode && <p className="ai-delegation-recovery-guidance">현재 차단 사유: {item.recovery.message}</p>}
         {errorDetail && <p className="ai-delegation-recovery-error-detail">{errorDetail}</p>}
@@ -367,9 +396,19 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
         {requestFailure && <>
           <div className="ai-delegation-recovery-actions">
             {!history && <button type="button" {...actionAccessibility('재접수 확인', actionHints.checkRequest)} disabled={busy} onClick={() => void action(item, 'check-request')}>재접수 확인</button>}
+            {!history && item.phase === 'preflight' && item.executionState === 'not-started' && item.accepted === false && <button type="button" className="danger" title="미접수 요청의 종료 사유를 입력합니다. AI 실행이나 업무 완료 처리는 하지 않습니다." disabled={busy} onClick={() => setRequestCloseDraft({ id: item.id, reason: 'no-longer-needed', note: '', expectedUpdatedAt: item.updatedAt })}>취소·진행 불필요로 종료</button>}
             <button type="button" onClick={() => onSelectCard(item.mapId, item.targetCardId)}>대상 카드 보기</button>
             {replacement?.targetConversationId && <button type="button" onClick={() => void openConversation(item, replacement.targetConversationId!)}>관련 대화 열기</button>}
           </div>
+          {!history && requestCloseDraft?.id === item.id && <div className="ai-delegation-close-form ai-delegation-request-close-form">
+            <p>실행되지 않은 접수 실패의 경고만 해제합니다. 업무 완료나 정상 재접수로 처리하지 않으며, 원래 오류와 종료 이력을 보존합니다. 종료 후에는 되돌릴 수 없습니다.</p>
+            <label><span>요청 종료 사유</span><select disabled={busy} value={requestCloseDraft.reason} onChange={event => setRequestCloseDraft({ ...requestCloseDraft, reason: event.target.value as RequestCloseReason })}>{Object.entries(requestCloseReasonLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+            <label><span>종료 메모</span><textarea disabled={busy} maxLength={1000} rows={3} value={requestCloseDraft.note} placeholder="더 이상 재접수하지 않는 이유를 남겨 주세요. 비밀값은 입력하지 마세요." onChange={event => setRequestCloseDraft({ ...requestCloseDraft, note: event.target.value })} /></label>
+            <div className="ai-delegation-recovery-actions">
+              <button type="button" disabled={busy} onClick={() => setRequestCloseDraft(null)}>입력 취소</button>
+              <button type="button" className="danger" disabled={busy || requestCloseDraft.note.trim().length < 3} onClick={() => void closeRequest(item)}>미접수 요청 종료 확정</button>
+            </div>
+          </div>}
         </>}
         {!history && !cardAttention && closing ? <div className="ai-delegation-close-form">
           {item.closure?.workspaceReleaseRequired && <p>원본 커밋·부분 통합 결과·실패 이력을 보존하고 작업공간을 반환합니다. main 반영이나 업무 완료 처리는 하지 않습니다.</p>}

@@ -35,6 +35,16 @@
 
 기존 버전에서 저장하지 않은 과거 요청은 자동으로 재구성하거나 보충하지 않는다. 실패 이력 저장 자체가 실패하면 원 오류 응답을 유지하며 `requestFailureRecorded=false`로 알린다.
 
+### 미접수 요청의 사용자 종료
+
+더 이상 진행하지 않을 요청은 정상 재접수로 꾸미지 않고 **취소·진행 불필요로 종료**한다. 편집자가 사유(`cancelled` 또는 `no-longer-needed`)와 3~1000자의 메모를 입력한 뒤 **미접수 요청 종료 확정**을 누른다. 입력 창 열기나 취소만으로 저장하지 않는다.
+
+`POST /api/maps/:parentMapId/ai-delegation-request-failures/:requestId/close`는 `expectedUpdatedAt`, `reason`, `note`, `confirmNotExecuted=true`를 받는다. 서버는 편집 권한·카드 존재·최신 상태를 확인하고 `preflight`, `not-started`, `accepted=false`인 요청만 종료한다. 실행 불확실 요청은 `409 AI_DELEGATION_REQUEST_FAILURE_EXECUTION_UNCERTAIN`, 정상 재접수가 이미 확인된 요청은 `409 AI_DELEGATION_REQUEST_FAILURE_ALREADY_RESOLVED`로 거부한다.
+
+종료는 원 상태·오류를 보존하고 별도 `requestClosure={reason,note,at,actorId}`만 기록한다. 응답은 `AI_DELEGATION_REQUEST_FAILURE_CLOSED`, `executionRequested=false`, `cardChanged=false`, `retryVerification.state=closed`이며, `resolvedByDelegationId`나 가짜 성공 위임을 만들지 않는다. 같은 사유·메모의 반복 요청은 멱등이고 기존 감사 기록을 덮어쓰지 않는다. 종료한 요청의 재접수 참조나 수동 재접수 연결은 거절하고 조회·재확인·재시작으로 종료를 되돌리지 않는다.
+
+종료한 실패는 카드 배지와 현재 확인 목록에서 제외하고 **처리된 요청 이력**에 **사용자 종료 · 미실행**, 종료 시각·사유·메모와 원 오류를 표시한다. 업무 완료·후속 실행 중지·통합·작업공간 반환·결과 수신으로 취급하지 않는다. 대화 삭제나 시간이 지났다는 이유만으로 자동 종료하지 않는다.
+
 ## 실행 종료와 카드 업무 완료
 
 통합 재시도는 HTTP 202와 `integrationRecoveryRequest.requestId/status/message/reasonCode`를 먼저 저장·반환한다. `queued`·`checking`은 검증 접수/진행이며 통합 성공이 아니다. UI는 클릭 항목에 진행·오류를 표시한다. 긴 Git 검증은 HTTP와 일반 위임 폴링 밖에서 실행하며 실패해도 원 위임 결과·체크포인트를 보존한다. 승인된 미완료 요청은 재시작 후 같은 ID·lease로 다시 대사한다. 응답 유실 시 자동 재POST하지 않고 조회하며, 접수 미확인이 계속되면 사용자가 **동일 요청 재확인**으로 같은 ID·본문만 전달할 수 있다. 확정된 실패의 원인 해소 뒤 새 승인 요청에는 새 `recoveryRequestId`를 쓴다. 실행·결과·카드·권한·기준 변경과 사용자 파일은 기존 안전 검증으로 차단한다.

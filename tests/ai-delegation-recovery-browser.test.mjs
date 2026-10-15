@@ -25,6 +25,13 @@ window.fetch = async (url, init = {}) => {
   window.audit.calls.push({url,method:init.method || 'GET',body:init.body ? JSON.parse(init.body) : null});
   if (init.method === 'POST') {
     if (window.audit.fail) return new Response(JSON.stringify({error:'서버 상태가 변경되었습니다.'}),{status:409});
+    if(String(url).includes('/ai-delegation-request-failures/') && String(url).endsWith('/close')) {
+      const failure=window.requestFailures.find(f=>String(url).includes('/'+f.id+'/'));
+      const body=JSON.parse(init.body);
+      failure.requestClosure={reason:body.reason,note:body.note,actorId:'editor',at:'2026-10-15T06:00:00Z'};
+      failure.retryVerification={state:'closed',method:null,replacement:null,message:'사용자가 미접수 요청을 종료했습니다.'};
+      return new Response(JSON.stringify({requestFailure:failure,message:failure.retryVerification.message,executionRequested:false,cardChanged:false}));
+    }
     if(String(url).includes('/ai-delegation-request-failures/') && String(url).endsWith('/recheck')) {
       const failure=window.requestFailures.find(f=>String(url).includes('/'+f.id+'/'));
       failure.resolvedByDelegationId='replacement';
@@ -340,6 +347,48 @@ test('상위 카드 복구 화면은 하위 카드를 제외하고 AI 없이 재
     assert.match(await evaluate('document.querySelector(".ai-delegation-status-badge")?.title'), /카드 업무 확인 필요 1개 카드/)
     assert.equal(await evaluate('document.querySelectorAll(".ai-delegation-recovery-actions button").length'), 1, '실제 진행 항목의 상태 확인만 제공한다')
     assert.equal(await evaluate('window.audit.calls.filter(c=>c.method==="POST").length'), afterResolutionPosts)
+    await evaluate('window.allDelegations=()=>[];window.retryableRequest();window.requestFailures[0].accepted=false;window.renderRecovery()')
+    await ready()
+    await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true })
+    await click('취소·진행 불필요로 종료')
+    await waitFor(() => evaluate('Boolean(document.querySelector(".ai-delegation-request-close-form"))'))
+    assert.equal(await evaluate('Array.from(document.querySelectorAll("button")).find(b=>b.textContent==="미접수 요청 종료 확정").disabled'), true)
+    await click('입력 취소')
+    await waitFor(() => evaluate('!document.querySelector(".ai-delegation-request-close-form")'))
+    assert.equal(await evaluate('window.audit.calls.filter(c=>c.method==="POST").length'), afterResolutionPosts)
+    await click('취소·진행 불필요로 종료')
+    await waitFor(() => evaluate('Boolean(document.querySelector(".ai-delegation-request-close-form textarea"))'))
+    await evaluate(`(() => { const textarea=document.querySelector('.ai-delegation-request-close-form textarea');Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(textarea,'분기 대화에서 요청한 촬영이 더 이상 필요하지 않습니다.');textarea.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:'종료'})); })()`)
+    await waitFor(() => evaluate('!Array.from(document.querySelectorAll("button")).find(b=>b.textContent==="미접수 요청 종료 확정").disabled'))
+    assert.equal(await evaluate('document.documentElement.scrollWidth <= document.documentElement.clientWidth'), true)
+    await evaluate('window.audit.fail=true')
+    await click('미접수 요청 종료 확정')
+    await waitFor(() => evaluate('Boolean(document.querySelector("[role=alert]"))'))
+    assert.equal(await evaluate('Boolean(window.requestFailures[0].requestClosure)'), false)
+    assert.match(await evaluate('document.querySelector(".ai-delegation-request-close-form textarea").value'), /더 이상 필요하지/)
+    await evaluate('window.audit.fail=false;window.audit.selection=null')
+    await ready()
+    await click('미접수 요청 종료 확정')
+    await waitFor(() => evaluate('Boolean(document.querySelector(".ai-delegation-request-history")) && !document.querySelector(".ai-delegation-request-close-form")'))
+    const closePost = await evaluate('window.audit.calls.filter(c=>c.method==="POST").at(-1)')
+    assert.equal(closePost.url, '/api/maps/parent-map/ai-delegation-request-failures/retryable-request/close')
+    assert.equal(closePost.body.expectedUpdatedAt, 'failure-current')
+    assert.equal(closePost.body.reason, 'no-longer-needed')
+    assert.equal(closePost.body.confirmNotExecuted, true)
+    assert.equal(closePost.body.replacementDelegationId, undefined)
+    assert.equal(await evaluate('window.audit.selection'), null)
+    assert.equal(await evaluate('window.requestFailures[0].state'), 'request-failed')
+    await evaluate('window.renderRecovery()')
+    await waitFor(() => evaluate('!document.querySelector(".ai-delegation-status-badge") && Boolean(document.querySelector(".ai-delegation-request-history"))'))
+    await evaluate('document.querySelector(".ai-delegation-request-history > summary").click()')
+    await waitFor(() => evaluate('document.body.textContent.includes("사용자 종료 · 미실행")'))
+    assert.match(await evaluate('document.body.textContent'), /분기 대화에서 요청한 촬영/)
+    assert.match(await evaluate('document.body.textContent'), /문서 버전 충돌/)
+    assert.equal(await evaluate('document.body.textContent.includes("재접수 확인 · 경고 해제")'), false)
+    await evaluate('delete window.requestFailures[0].requestClosure;window.requestFailures[0].phase="dispatch";window.requestFailures[0].executionState="unknown";window.renderRecovery()')
+    await ready()
+    assert.equal(await evaluate('Array.from(document.querySelectorAll("button")).some(b=>b.textContent==="취소·진행 불필요로 종료")'), false)
+    await send('Emulation.clearDeviceMetricsOverride')
   } finally {
     if (send && socket?.readyState === WebSocket.OPEN) await send('Browser.close').catch(() => {})
     for (const item of pending.values()) clearTimeout(item.timer)

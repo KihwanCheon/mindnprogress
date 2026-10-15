@@ -11,7 +11,7 @@ export function aiDelegationRequiresRecovery(item) {
 
 export function isVisibleAiDelegation(item) {
   if (integrationRecoveryPending(item)) return true
-  if (item?.kind === 'request-failure') return !item.resolvedByDelegationId
+  if (item?.kind === 'request-failure') return !item.resolvedByDelegationId && !item.requestClosure
   if (item?.kind === 'task-attention') return item.taskCompletion?.state === 'incomplete'
   return !terminalStates.has(item?.state)
     || aiDelegationRequiresRecovery(item)
@@ -19,7 +19,7 @@ export function isVisibleAiDelegation(item) {
 }
 
 export function aiDelegationDisplayItems(delegations = [], requestFailures = []) {
-  return [...delegations, ...requestFailures.filter(item => !item.resolvedByDelegationId)]
+  return [...delegations, ...requestFailures.filter(isVisibleAiDelegation)]
 }
 
 function targetScopeKey(item) {
