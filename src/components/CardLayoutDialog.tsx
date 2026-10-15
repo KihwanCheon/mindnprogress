@@ -115,7 +115,7 @@ export function CardLayoutDialog({ mapId, title, api, userId, members, launchInW
     active.current = { request, preview: null }; setPreview(null)
     setPreviewZoom(null)
     const result = await post<Preview>(request.id, 'preview', { variant, target })
-    if (result.layout?.version !== CARD_LAYOUT_VERSION || !result.target?.ratio || !result.metrics || !result.candidates?.length) throw new Error('비율 기반 배치를 지원하는 서버 업데이트가 필요합니다. MnP 서버를 재시작한 뒤 미리보기를 다시 열어 주세요.')
+    if (result.layout?.version !== CARD_LAYOUT_VERSION || !result.target?.ratio || !result.metrics || !result.candidates?.length) throw new Error('배치 기능이 업데이트되었습니다. MnP 서버를 재시작하고 화면을 새로고침한 뒤 미리보기를 다시 열어 주세요.')
     if (generation.current === inspectionGeneration) { setPreview(result); setTargetScreen(result.target) }
   })
   const changeTarget = (ratio: CardLayoutTarget['ratio']) => {

@@ -106,9 +106,11 @@ test('배치 HTTP·MCP·실제 브라우저는 원본을 보존하고 승인한 
     preview = (await api(`/api/card-layouts/${request.id}/preview`, 'POST', {})).body
     for (const action of ['measure', 'verify']) preview = (await api(`/api/card-layouts/${request.id}/${action}`, 'POST', { previewHash: preview.previewHash, measurements: sizes(preview.map) })).body
     const applied = await api(`/api/card-layouts/${request.id}/apply`, 'POST', { approved: true, previewHash: preview.previewHash, measurements: sizes(preview.map) }); assert.equal(applied.status, 200, JSON.stringify(applied.body))
+    assert.deepEqual(JSON.parse(await readFile(file, 'utf8')).nodes.map((n) => n.position), preview.map.nodes.map((n) => n.position), '검증한 격자 좌표 그대로 저장')
   }
   const saved = JSON.parse(await readFile(file, 'utf8')); const original = JSON.parse(before)
   assert.deepEqual(saved.nodes.map(({ position: _p, ...node }) => node), original.nodes.map(({ position: _p, ...node }) => node))
   assert.deepEqual(saved.edges, original.edges)
-  assert.deepEqual(saved.nodes[0].position, original.nodes[0].position)
+  assert.deepEqual(saved.nodes[0].position, { x: 48, y: 48 })
+  for (const n of saved.nodes) assert.ok(Number.isInteger(n.position.x / 24) && Number.isInteger(n.position.y / 24), `${n.id}: 저장 좌표도 24px 격자`)
 })

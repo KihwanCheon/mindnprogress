@@ -69,6 +69,7 @@ import { mapContentsEqual, reconcileRemoteMapContent } from './utils/mapDocument
 import { createMapContentPatch } from './utils/mapContentPatch.mjs'
 import { mapCacheKey, reclaimSynchronizedMapCaches, tryWriteMapCache } from './utils/mapLocalCache.mjs'
 import { mergeMapContent } from './utils/mergeMapContent.mjs'
+import { MINDMAP_GRID_SIZE, snapMindMapPosition } from './utils/mindMapGrid.mjs'
 import { nextOverlappingNodeId, nodeOverlapPresentation } from './utils/nodeOverlap.mjs'
 import { viewportForNodeVisibility } from './utils/nodeViewportVisibility.mjs'
 import { notificationTitle } from './utils/notificationTitles.mjs'
@@ -96,7 +97,6 @@ const DOCUMENT_COLORS = [
   { id: 'pink', label: '분홍', solid: '#cc62a0', halo: '#f6deeb' },
 ] as const
 
-const MINDMAP_GRID_SIZE = 24
 const MINDMAP_MIN_ZOOM = 0.25
 const MINDMAP_MAX_ZOOM = 1.8
 const TOUCH_CARD_LONG_PRESS_MS = 500
@@ -135,13 +135,6 @@ function aionUiConversationWebUrl(baseUrl: string, conversationId: string) {
   url.search = ''
   url.hash = `/conversation/${encodeURIComponent(conversationId)}`
   return url.toString()
-}
-
-function snapMindMapPosition(position: { x: number; y: number }) {
-  return {
-    x: Math.round(position.x / MINDMAP_GRID_SIZE) * MINDMAP_GRID_SIZE,
-    y: Math.round(position.y / MINDMAP_GRID_SIZE) * MINDMAP_GRID_SIZE,
-  }
 }
 
 function childMindMapHorizontalPosition(parentPosition: { x: number; y: number }, parentWidth = MINDMAP_DOORAY_TASK_DEFAULT_WIDTH) {
