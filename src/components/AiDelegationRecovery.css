@@ -90,9 +90,13 @@
   pointer-events: none;
 }
 
-.ai-delegation-recovery-item :is(button, a, input, select, textarea, label, [contenteditable="true"]) {
+.ai-delegation-recovery-item :is(button, a, input, select, textarea, label, summary, [contenteditable="true"]) {
   pointer-events: auto;
 }
+
+.ai-delegation-technical { margin-top: 8px; overflow-wrap: anywhere; }
+.ai-delegation-technical > summary { cursor: pointer; }
+.ai-delegation-technical > p { user-select: text; pointer-events: auto; }
 
 .ai-delegation-recovery-item-select {
   position: absolute;

@@ -7625,7 +7625,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       }
       return sendJson(response, 404, { error: '지원하지 않는 재구성 작업입니다.' })
     }
-    const failureResolutionRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/ai-delegation-request-failures\/([^/]+)\/resolve$/)
+    const failureResolutionRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/ai-delegation-request-failures\/([^/]+)\/(resolve|recheck)$/)
     if (failureResolutionRoute && request.method === 'POST') {
       const user = requireUser(request, response)
       if (!user) return
@@ -7640,6 +7640,13 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         || !target.nodes.some(node => node.id === failure.targetCardId)) return sendAiDelegationResponse(response, 404, 'AI_DELEGATION_CARD_NOT_FOUND', '접수 실패의 상위 또는 대상 카드를 찾을 수 없습니다.')
       const body = await readJsonBody(request)
       try {
+        if (failureResolutionRoute[3] === 'recheck') {
+          const result = await aiDelegationRequestFailures.recheck({ mapId, failureId,
+            expectedUpdatedAt: body.expectedUpdatedAt, actorId: user.id }, aiDelegations)
+          if (result.requestFailure.resolvedByDelegationId) broadcastEvent({ type: 'ai-delegation-request-resolved', mapId, requestFailure: result.requestFailure })
+          return sendAiDelegationResponse(response, 200, 'AI_DELEGATION_REQUEST_FAILURE_CHECKED',
+            result.requestFailure.retryVerification.message, { ...result, executionRequested: false, cardChanged: false })
+        }
         const result = await aiDelegationRequestFailures.resolve({
           mapId, failureId, replacementDelegationId: String(body.replacementDelegationId ?? '').trim(),
           expectedUpdatedAt: body.expectedUpdatedAt, confirmSameWork: body.confirmSameWork,
@@ -9981,7 +9988,11 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         .map(async id => [id, await readMap(id)])))
       const delegations = listed.map(item => withDelegationTaskCompletion(
         delegationPublicView(item, url.searchParams.get('includeResult') === 'true'), maps.get(item.mapId)))
-      const requestFailures = aiDelegationRequestFailures.list({ mapId, parentCardId, targetCardId, delegations: aiDelegations })
+      const requestFailures = aiDelegationRequestFailures.list({ mapId, parentCardId, targetCardId, delegations: aiDelegations }).map(item => {
+        const targetCardLabel = maps.get(item.mapId)?.nodes.find(node => node.id === item.targetCardId)?.data?.label ?? item.targetCardLabel
+        return { ...item, targetCardLabel, retryVerification: { ...item.retryVerification,
+          replacement: item.retryVerification.replacement ? { ...item.retryVerification.replacement, targetCardLabel } : null } }
+      })
       return sendJson(response, 200, { mapId, delegations, requestFailures })
     }
 
@@ -10030,6 +10041,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       const conversationAssessmentId = String(body.conversationAssessmentId ?? '').trim()
       const instruction = String(body.instruction ?? '').trim()
       const decisionReason = String(body.decisionReason ?? '').trim()
+      const taskSummary = body.taskSummary === undefined ? '' : body.taskSummary
       const sourceRevision = Number(body.sourceRevision)
       if (!isValidAiDelegationId(id)
         || !targetCardId || targetCardId.length > 120
@@ -10037,6 +10049,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         || (conversationAssessmentId && !/^[a-f0-9]{64}$/.test(conversationAssessmentId))
         || !instruction || instruction.length > 100_000
         || !decisionReason || decisionReason.length > 1_000
+        || typeof taskSummary !== 'string' || taskSummary.length > 240
         || !Number.isInteger(sourceRevision) || sourceRevision < 1) {
         return sendAiDelegationResponse(
           response, 400, 'AI_DELEGATION_REQUEST_INVALID', 'AI 작업 위임 값이 올바르지 않습니다.',
@@ -10046,7 +10059,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       const parentHomeMachineId = conversationHomeMachineId(source.conversationId, source)
       const requestContext = { requestId: `request-${randomUUID()}`, delegationId: id, mapId, parentMapId,
         parentCardId: source.cardId, parentConversationId: source.conversationId,
-        targetCardId, parentHomeMachineId, strategy, instruction, dispatchStarted: false }
+        targetCardId, parentHomeMachineId, strategy, instruction, taskSummary, requestedConversationId: conversationId, dispatchStarted: false }
       aiDelegationRequestContexts.set(response, requestContext)
       let targetHomeMachineId
       try {
@@ -10097,6 +10110,15 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       })
       const existingDelegation = aiDelegations.get(id)
       requestContext.requestSignature = requestSignature
+      try {
+        requestContext.retryOfRequestId = aiDelegationRequestFailures.validateRetry(requestContext, body.retryOfRequestId, aiDelegations)
+      } catch (error) {
+        if (error.reasonCode === 'AI_DELEGATION_RETRY_ALREADY_ACCEPTED' && aiDelegations.has(error.delegationId)) {
+          return sendAiDelegationResponse(response, 200, 'AI_DELEGATION_REPEATED', error.message,
+            { delegation: delegationPublicView(aiDelegations.get(error.delegationId)), repeated: true })
+        }
+        return sendAiDelegationResponse(response, error.status, error.reasonCode, error.message)
+      }
       if (existingDelegation) {
         if (existingDelegation.requestSignature !== requestSignature) {
           return sendAiDelegationResponse(response, 409, 'AI_DELEGATION_IDEMPOTENCY_CONFLICT',
@@ -10181,6 +10203,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           const delegation = {
             id,
             requestSignature,
+            ...(requestContext.retryOfRequestId ? { retryOfRequestId: requestContext.retryOfRequestId } : {}),
             mapId,
             ...groupScope,
             parentCardId: parentCard.id,
@@ -10417,6 +10440,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         const waitingDelegation = {
           id,
           requestSignature,
+          ...(requestContext.retryOfRequestId ? { retryOfRequestId: requestContext.retryOfRequestId } : {}),
           mapId,
           parentCardId: parentCard.id,
           parentCardLabel: parentCard.data?.label ?? parentCard.id,
@@ -10510,6 +10534,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
             const waitingDelegation = {
               id,
               requestSignature,
+              ...(requestContext.retryOfRequestId ? { retryOfRequestId: requestContext.retryOfRequestId } : {}),
               mapId,
               parentCardId: parentCard.id,
               parentCardLabel: parentCard.data?.label ?? parentCard.id,
@@ -10763,6 +10788,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       const delegation = {
         id,
         requestSignature,
+        ...(requestContext.retryOfRequestId ? { retryOfRequestId: requestContext.retryOfRequestId } : {}),
         mapId,
         ...groupScope,
         parentCardId: parentCard.id,

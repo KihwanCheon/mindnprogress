@@ -25,10 +25,11 @@ window.fetch = async (url, init = {}) => {
   window.audit.calls.push({url,method:init.method || 'GET',body:init.body ? JSON.parse(init.body) : null});
   if (init.method === 'POST') {
     if (window.audit.fail) return new Response(JSON.stringify({error:'서버 상태가 변경되었습니다.'}),{status:409});
-    if(String(url).includes('/ai-delegation-request-failures/') && String(url).endsWith('/resolve')) {
-      const body=JSON.parse(init.body), failure=window.requestFailures.find(f=>String(url).includes('/'+f.id+'/'));
-      failure.resolvedByDelegationId=body.replacementDelegationId;
-      return new Response(JSON.stringify({requestFailure:failure,executionRequested:false,cardChanged:false}));
+    if(String(url).includes('/ai-delegation-request-failures/') && String(url).endsWith('/recheck')) {
+      const failure=window.requestFailures.find(f=>String(url).includes('/'+f.id+'/'));
+      failure.resolvedByDelegationId='replacement';
+      failure.retryVerification={state:'confirmed',method:'same-instruction',message:'정상 재접수가 확인됐습니다.',replacement:{...replacement}};
+      return new Response(JSON.stringify({requestFailure:failure,message:failure.retryVerification.message,executionRequested:false,cardChanged:false}));
     }
     if (window.audit.integrationQueue && String(url).endsWith('/recover')) {
       item.integrationRecoveryRequest={requestId:JSON.parse(init.body).recoveryRequestId,status:'checking',reasonCode:'CHECKING',message:'보존된 완료 결과를 검증 중입니다. 같은 요청을 반복하지 마세요.'};
@@ -274,27 +275,36 @@ test('상위 카드 복구 화면은 하위 카드를 제외하고 AI 없이 재
     assert.match(await evaluate('document.body.textContent'), /위임 접수 실패 · 실행하지 않음/)
     assert.match(await evaluate('document.body.textContent'), /REMOTE_WORKSPACE_RUNNER_STALE/)
     assert.equal(await evaluate('document.querySelector(".ai-delegation-status-badge")?.textContent'), 'AI 위임 접수 실패')
-    assert.equal(await evaluate('document.querySelectorAll(".ai-delegation-recovery-actions button").length'), 0)
+    assert.equal(await evaluate('Array.from(document.querySelectorAll("button")).some(b=>b.textContent==="정상 재접수로 해제")'), false)
     assert.equal(await evaluate('window.audit.calls.filter(c=>c.method==="POST").length'), beforeRequestFailurePosts)
     await evaluate('window.retryableRequest()')
     await ready()
-    assert.match(await evaluate('document.body.textContent'), /정상 재접수로 해제/)
+    await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true })
+    assert.match(await evaluate('document.body.textContent'), /재접수 확인/)
+    assert.equal(await evaluate('document.querySelectorAll(".ai-delegation-replacement select").length'), 0)
+    assert.equal(await evaluate('document.body.innerText.includes("retryable-request")'), false, '실패 ID는 접힌 기술 정보에만 표시한다')
+    assert.equal(await evaluate('document.documentElement.scrollWidth <= document.documentElement.clientWidth'), true, '모바일 폭에서도 가로 넘침 없이 요청을 확인한다')
     await evaluate('window.audit.confirm=false')
-    await click('정상 재접수로 해제')
-    assert.equal(await evaluate('window.audit.calls.filter(c=>c.method==="POST").length'), beforeRequestFailurePosts)
-    await evaluate('window.audit.confirm=true')
-    await click('정상 재접수로 해제')
-    await waitFor(() => evaluate('window.audit.calls.some(c=>c.url.endsWith("/retryable-request/resolve"))'))
+    await click('재접수 확인')
+    await waitFor(() => evaluate('window.audit.calls.some(c=>c.url.endsWith("/retryable-request/recheck"))'))
     await ready()
     const resolutionPost = await evaluate('window.audit.calls.filter(c=>c.method==="POST").at(-1)')
-    assert.equal(resolutionPost.url, '/api/maps/parent-map/ai-delegation-request-failures/retryable-request/resolve')
-    assert.equal(resolutionPost.body.replacementDelegationId, 'replacement')
-    assert.equal(resolutionPost.body.confirmSameWork, true)
+    assert.equal(resolutionPost.url, '/api/maps/parent-map/ai-delegation-request-failures/retryable-request/recheck')
+    assert.equal(resolutionPost.body.replacementDelegationId, undefined)
+    assert.equal(resolutionPost.body.confirmSameWork, undefined)
     assert.equal(resolutionPost.body.expectedUpdatedAt, 'failure-current')
     assert.equal(await evaluate('window.requestFailures.length'), 1)
     assert.equal(await evaluate('window.requestFailures[0].resolvedByDelegationId'), 'replacement')
     assert.equal(await evaluate('window.allDelegations().find(item=>item.id==="replacement").state'), 'running')
     assert.equal(await evaluate('document.body.textContent.includes("retryable-request")'), false)
+    assert.match(await evaluate('document.querySelector(".ai-delegation-request-history > summary")?.textContent'), /처리된 요청 이력 1건/)
+    await evaluate('document.querySelector(".ai-delegation-request-history > summary").click()')
+    await waitFor(() => evaluate('document.querySelectorAll(".ai-delegation-request-history .ai-delegation-history-item").length===1'))
+    assert.match(await evaluate('document.querySelector(".ai-delegation-request-history").textContent'), /재접수 확인 · 경고 해제/)
+    assert.match(await evaluate('document.querySelector(".ai-delegation-request-history").textContent'), /같은 업무의 재접수 지시/)
+    assert.equal(await evaluate('window.audit.calls.filter(c=>c.method==="POST").length'), beforeRequestFailurePosts + 1)
+    await evaluate('document.querySelector(".ai-delegation-request-history > summary").click();window.audit.confirm=true')
+    await send('Emulation.clearDeviceMetricsOverride')
     await evaluate('window.allDelegations().find(item=>item.id==="replacement").state="completed"')
     const afterResolutionPosts = beforeRequestFailurePosts + 1
     await evaluate('window.incompleteTask()'); await ready()

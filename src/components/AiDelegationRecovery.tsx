@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { completedReplacementDelegations, requestFailureReplacementDelegations, type AiDelegationSummary } from '../utils/aiDelegationManagement.mjs'
+import { completedReplacementDelegations, type AiDelegationSummary } from '../utils/aiDelegationManagement.mjs'
 import { aiDelegationDisplayItems, aiDelegationDisplaySections, aiDelegationRequiresRecovery } from '../utils/aiDelegationStatus.mjs'
 import { groupDelegationPresentation, groupDelegationReportHint, type GroupDelegation } from '../utils/groupOverview.mjs'
 import { integrationRecoveryPending, integrationRecoveryUnconfirmed, reconcileIntegrationRecoveryRequests, submitIntegrationRecovery } from '../utils/aiIntegrationRecovery.mjs'
@@ -24,7 +24,7 @@ const actionHints = {
   correctResult: '원 담당 AI가 같은 worker에서 자기 결과를 정정하고 새 체크포인트를 만듭니다. 통합 사용자 파일은 보존하며 결과 정정은 품질 승인이나 삭제 권한이 아닙니다.',
   retryReport: '완료된 하위 작업은 다시 실행하지 않고 저장된 결과만 상위 AI에 전달합니다. 상위 AI는 결과 검토를 위해 실행됩니다.',
   supersede: '이 위임을 완료 처리하지 않고 선택한 후속 성공 위임으로 대체되었다는 이력을 남겨 닫습니다. 카드·코드·작업공간은 변경하지 않으며 UI에서 되돌릴 수 없습니다.',
-  resolveRequest: '같은 업무가 정상 재접수됐음을 확인해 접수 실패 표시만 해제합니다. 원 실패 이력·카드·진행 중 AI는 변경하지 않습니다.',
+  checkRequest: '서버 기록에서 같은 업무의 재접수가 확인되는지 검사합니다. 근거가 일치할 때만 경고를 해제하며 AI 실행이나 업무 완료 처리를 하지 않습니다.',
   openClose: '결과 전달과 완료 처리를 포기하고 위임 기록만 닫는 절차를 엽니다. 바로 종료되지 않으며 사유·감사 메모 입력과 최종 확인이 필요합니다.',
   cancelClose: '사용자 종료 입력을 취소합니다. 위임 상태와 저장된 결과는 변경되지 않습니다.',
   confirmClose: '결과를 상위 AI에 보고하지 않고 위임을 사용자 종료 상태로 닫습니다. 완료로 기록하지 않고 카드·코드·작업공간은 변경하지 않으며 UI에서 되돌릴 수 없습니다.',
@@ -59,6 +59,8 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
   const [busy, setBusy] = useState(false)
   const [feedback, setFeedback] = useState<Record<string, { error?: boolean; message: string }>>({})
   const [historyOpen, setHistoryOpen] = useState(false)
+  const [requestHistoryOpen, setRequestHistoryOpen] = useState(false)
+  const [requestHistory, setRequestHistory] = useState<Delegation[]>([])
   const [replacementIds, setReplacementIds] = useState<Record<string, string>>({})
   const [closeDraft, setCloseDraft] = useState<{ id: string; reason: CloseReason; note: string } | null>(null)
   const mounted = useRef(true)
@@ -73,6 +75,8 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
     reconcileIntegrationRecoveryRequests(relevant)
     if (mounted.current) {
       setItems(relevant)
+      setRequestHistory((data.requestFailures ?? []).filter(item => item.resolvedByDelegationId
+        && (item.parentMapId ?? item.mapId) === mapId && item.parentCardId === cardId))
       setLoaded(true)
     }
   }, [listUrl, mapId, cardId])
@@ -93,10 +97,44 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
   }, [refresh])
 
   useEffect(() => () => onPreviewCards(null), [onPreviewCards])
-  useEffect(() => { setHistoryOpen(false) }, [mapId, cardId])
+  useEffect(() => { setHistoryOpen(false); setRequestHistoryOpen(false) }, [mapId, cardId])
 
-  async function action(item: Delegation, kind: 'refresh' | 'recover' | 'retry-report' | 'supersede' | 'recheck-integration' | 'resolve-request') {
+  async function openConversation(item: Delegation, conversationId: string) {
+    // 클릭 동기 경계에서 창을 만들고 기존 권한·머신 검증 API로 주소를 확인한다.
+    const tab = window.open('about:blank', '_blank')
+    if (tab) tab.opener = null
+    try {
+      const result = await request<{ openUrl: string }>(`/api/maps/${encodeURIComponent(item.mapId)}/cards/${encodeURIComponent(item.targetCardId)}/ai-conversations/${encodeURIComponent(conversationId)}/open-url`)
+      if (tab) tab.location.href = result.openUrl
+      else setError('브라우저에서 새 창이 차단됐습니다. 팝업을 허용한 뒤 다시 열어 주세요.')
+    } catch (reason) {
+      tab?.close()
+      setError(reason instanceof Error ? reason.message : '대화를 열지 못했습니다.')
+    }
+  }
+
+  async function action(item: Delegation, kind: 'refresh' | 'recover' | 'retry-report' | 'supersede' | 'recheck-integration' | 'check-request') {
     if (acting.current) return
+    if (kind === 'check-request') {
+      acting.current = true; setBusy(true); setError(''); setNotice('')
+      setFeedback(current => ({ ...current, [item.id]: { message: '서버의 재접수 기록을 확인하고 있습니다.' } }))
+      try {
+        const result = await request<{ message: string }>(`/api/maps/${encodeURIComponent(item.parentMapId ?? item.mapId)}/ai-delegation-request-failures/${encodeURIComponent(item.id)}/recheck`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedUpdatedAt: item.updatedAt }),
+        })
+        if (mounted.current) {
+          setNotice(result.message)
+          setFeedback(current => ({ ...current, [item.id]: { message: result.message } }))
+        }
+      } catch (reason) {
+        if (mounted.current) setError(reason instanceof Error ? reason.message : '재접수 확인 실패')
+      } finally {
+        try { await refresh() } catch { /* 처리 결과를 유지한다. */ }
+        acting.current = false
+        if (mounted.current) setBusy(false)
+      }
+      return
+    }
     if (kind === 'recheck-integration') {
       if (!integrationRecoveryUnconfirmed(item)) return
       acting.current = true; setBusy(true)
@@ -117,9 +155,9 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
       return
     }
     if (kind === 'recover' && (integrationRecoveryPending(item) || integrationRecoveryUnconfirmed(item))) return
-    const candidates = kind === 'resolve-request' ? requestFailureReplacementDelegations(item, items) : completedReplacementDelegations(item, items)
+    const candidates = completedReplacementDelegations(item, items)
     const replacementId = replacementIds[item.id] ?? candidates[0]?.id
-    if ((kind === 'supersede' || kind === 'resolve-request') && !replacementId) return
+    if (kind === 'supersede' && !replacementId) return
     const retryIntegration = item.recovery?.recommendedAction === 'retry-integration'
     const correctResult = item.recovery?.recommendedAction === 'correct-integration-result'
     const confirmation = kind === 'recover'
@@ -128,8 +166,6 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
         : '중단 원인이 해소되었고 기존 승인 범위에서 작업을 이어갈까요? 현재 변경을 확인하고 남은 작업만 같은 AI 대화에서 진행합니다.'
       : kind === 'retry-report'
         ? '하위 작업을 재실행하지 않고 저장된 결과를 상위 AI에 다시 전달할까요? 상위 AI가 결과 검토를 위해 실행됩니다.'
-        : kind === 'resolve-request'
-          ? `실패했던 동일 업무가 ${replacementId}으로 정상 재접수됐나요? 원 실패 이력은 남기고 현재 실패 표시만 해제합니다. 진행 중 위임은 유지하며 AI를 실행하거나 업무를 완료 처리하지 않습니다.`
         : kind === 'supersede'
           ? `이 위임을 완료 처리하지 않고 후속 성공 위임 ${replacementId}으로 대체됐다는 이력을 남겨 종료할까요?`
           : ''
@@ -139,16 +175,6 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
     setFeedback(current => ({ ...current, [item.id]: { message: kind === 'recover' ? '복구 요청을 접수하고 있습니다. 잠시 기다려 주세요.' : '요청을 처리하고 있습니다.' } }))
     try {
       const parentMapId = item.parentMapId ?? item.mapId
-      if (kind === 'resolve-request') {
-        await request(`/api/maps/${encodeURIComponent(parentMapId)}/ai-delegation-request-failures/${encodeURIComponent(item.id)}/resolve`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
-            expectedUpdatedAt: item.updatedAt, replacementDelegationId: replacementId, confirmSameWork: true,
-            note: '사용자가 선택한 후속 위임이 동일 업무의 정상 재접수임을 확인했습니다.',
-          }),
-        })
-        if (mounted.current) setNotice('정상 재접수와 연결해 실패 표시를 해제했습니다. 실패 이력과 AI 실행은 보존했습니다.')
-        return
-      }
       const [parent, target, group] = await Promise.all([
         request<{ map: { version: number } }>(`/api/maps/${encodeURIComponent(parentMapId)}`),
         request<{ map: { version: number } }>(`/api/maps/${encodeURIComponent(item.mapId)}`),
@@ -241,7 +267,7 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
   const requestFailureCount = pending.filter(item => item.kind === 'request-failure').length
   const incompleteTaskCount = pending.filter(item => item.kind === 'task-attention').length
   const activeCount = pending.length - recoveryCount - requestFailureCount - incompleteTaskCount
-  const sectionTitle = requestFailureCount || incompleteTaskCount ? 'AI 위임 현황 및 확인 사항' : recoveryCount > 0
+  const sectionTitle = !pending.length && requestHistory.length ? 'AI 위임 처리 이력' : requestFailureCount || incompleteTaskCount ? 'AI 위임 현황 및 확인 사항' : recoveryCount > 0
     ? activeCount > 0 ? 'AI 위임 현황 및 복구' : 'AI 작업 복구'
     : 'AI 위임 진행 현황'
   const sectionCount = [
@@ -250,7 +276,7 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
     requestFailureCount > 0 ? `접수 실패 ${requestFailureCount}건` : '',
     incompleteTaskCount > 0 ? `업무 확인 ${incompleteTaskCount}개 카드` : '',
   ].filter(Boolean).join(' · ') || '상태 확인'
-  const sectionSummary = requestFailureCount || incompleteTaskCount
+  const sectionSummary = !pending.length && requestHistory.length ? '현재 접수 실패 경고는 없습니다. 과거 실패와 확인된 재접수 이력을 펼쳐 볼 수 있습니다.' : requestFailureCount || incompleteTaskCount
     ? '현재 위임·접수 실패와 카드 단위 확인 사항을 표시합니다. 단계별 실행 완료는 카드 전체 완료를 뜻하지 않으며, 완료 이력은 아래에서 펼쳐 볼 수 있습니다. 자동 재실행하지 않습니다.'
     : recoveryCount > 0
     ? activeCount > 0
@@ -260,11 +286,11 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
   useEffect(() => {
     const preview = previewedItem.current
     if (!preview) return
-    const visibleItems = preview.history ? historyOpen ? completedHistory : [] : pending
+    const visibleItems = preview.history ? [...(historyOpen ? completedHistory : []), ...(requestHistoryOpen ? requestHistory : [])] : pending
     if (visibleItems.some(item => item.id === preview.id)) return
     previewedItem.current = null
     onPreviewCards(null)
-  }, [onPreviewCards, historyOpen, pending, completedHistory])
+  }, [onPreviewCards, historyOpen, pending, completedHistory, requestHistoryOpen, requestHistory])
   useEffect(() => {
     if (!focusRequestId || (!loaded && !error && !notice)) return
     const frame = window.requestAnimationFrame(() => {
@@ -274,12 +300,12 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
     })
     return () => window.cancelAnimationFrame(frame)
   }, [error, focusRequestId, loaded, notice, onFocusHandled, pending.length])
-  if (!pending.length && !error && !notice) return null
+  if (!pending.length && !requestHistory.length && !error && !notice) return null
   const renderItem = (item: Delegation, history = false) => {
       const cardAttention = item.kind === 'task-attention'
       const requestFailure = item.kind === 'request-failure'
-      const candidates = history || cardAttention ? [] : requestFailure
-        ? requestFailureReplacementDelegations(item, items) : completedReplacementDelegations(item, items)
+      const candidates = history || cardAttention || requestFailure ? [] : completedReplacementDelegations(item, items)
+      const replacement = item.retryVerification?.replacement
       const selectedReplacementId = replacementIds[item.id] ?? candidates[0]?.id ?? ''
       const closing = closeDraft?.id === item.id
       const retryIntegration = item.recovery?.recommendedAction === 'retry-integration'
@@ -317,26 +343,32 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
         <div className="ai-delegation-recovery-item-heading">
           <div>
             <b>{item.targetCardLabel || item.targetCardId}</b>
-            <small className="ai-delegation-recovery-id" title={item.id}>{cardAttention ? `완료된 실행 ${item.completedExecutionCount}건 · 카드 단위 확인` : item.id}</small>
+            {!requestFailure && <small className="ai-delegation-recovery-id" title={item.id}>{cardAttention ? `완료된 실행 ${item.completedExecutionCount}건 · 카드 단위 확인` : item.id}</small>}
           </div>
-          <span>{history ? item.reportStatus === 'received' ? 'AI 실행 종료 · 결과 수신 완료' : 'AI 실행 종료' : groupDelegationPresentation(item).label}</span>
+          <span>{requestFailure && history ? '재접수 확인 · 경고 해제' : history ? item.reportStatus === 'received' ? 'AI 실행 종료 · 결과 수신 완료' : 'AI 실행 종료' : groupDelegationPresentation(item).label}</span>
         </div>
-        {history && <small className="ai-delegation-history-date">{new Date(item.createdAt).toLocaleString('ko-KR')}</small>}
+        {(history || requestFailure) && <small className="ai-delegation-history-date">{requestFailure ? '접수 실패: ' : ''}{new Date(item.createdAt).toLocaleString('ko-KR')}</small>}
         {history && item.instructionPreview && <p className="ai-delegation-history-instruction">{item.instructionPreview}</p>}
-        {groupDelegationReportHint(item) && <p className="ai-delegation-recovery-guidance">{groupDelegationReportHint(item)}</p>}
+        {requestFailure ? <>
+          <p className="ai-delegation-history-instruction">{item.requestSummary || '업무 요약이 없는 요청입니다. 요청 시각과 실패 사유를 확인하세요.'}</p>
+          <p className="ai-delegation-recovery-guidance">{item.retryVerification?.message || '서버 기록으로 재접수 여부를 확인하세요. 확인되지 않은 요청은 자동 실행하지 않습니다.'}</p>
+          {replacement && <p className="ai-delegation-history-instruction">후속 접수: {new Date(replacement.createdAt).toLocaleString('ko-KR')} · {groupDelegationPresentation({ ...item, ...replacement, kind: undefined } as Delegation).label}<br />{replacement.instructionPreview || '후속 요청 요약 없음'}</p>}
+          <details className="ai-delegation-technical"><summary>기술 정보</summary><p>실패 기록: {item.id}<br />요청: {item.requestedDelegationId}{item.resolvedByDelegationId && <><br />재접수: {item.resolvedByDelegationId}</>}</p></details>
+        </> : groupDelegationReportHint(item) && <p className="ai-delegation-recovery-guidance">{groupDelegationReportHint(item)}</p>}
         {!history && item.recovery?.blockedReasonCode && <p className="ai-delegation-recovery-guidance">현재 차단 사유: {item.recovery.message}</p>}
         {errorDetail && <p className="ai-delegation-recovery-error-detail">{errorDetail}</p>}
         {!history && actionFeedback && <p className="ai-delegation-action-feedback" role={actionFeedback.error ? 'alert' : 'status'}>{actionFeedback.message}</p>}
         {candidates.length > 1 && <label className="ai-delegation-replacement">
-          <span>{requestFailure ? '동일 업무의 정상 재접수' : '완료된 후속 위임'}</span>
+          <span>완료된 후속 위임</span>
           <select disabled={busy} value={selectedReplacementId} onChange={(event) => setReplacementIds((current) => ({ ...current, [item.id]: event.target.value }))}>
             {candidates.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.id}</option>)}
           </select>
         </label>}
-        {requestFailure && candidates.length > 0 && <>
-          <p className="ai-delegation-history-instruction">{candidates.find(candidate => candidate.id === selectedReplacementId)?.instructionPreview}</p>
+        {requestFailure && <>
           <div className="ai-delegation-recovery-actions">
-            <button type="button" {...actionAccessibility('정상 재접수로 해제', actionHints.resolveRequest)} disabled={busy} onClick={() => void action(item, 'resolve-request')}>정상 재접수로 해제</button>
+            {!history && <button type="button" {...actionAccessibility('재접수 확인', actionHints.checkRequest)} disabled={busy} onClick={() => void action(item, 'check-request')}>재접수 확인</button>}
+            <button type="button" onClick={() => onSelectCard(item.mapId, item.targetCardId)}>대상 카드 보기</button>
+            {replacement?.targetConversationId && <button type="button" onClick={() => void openConversation(item, replacement.targetConversationId!)}>관련 대화 열기</button>}
           </div>
         </>}
         {!history && !cardAttention && closing ? <div className="ai-delegation-close-form">
@@ -365,6 +397,10 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
     </div>
     <p className="ai-delegation-recovery-summary">{sectionSummary}</p>
     {pending.map(item => renderItem(item))}
+    {requestHistory.length > 0 && <details className="ai-delegation-request-history ai-delegation-completed-history" open={requestHistoryOpen} onToggle={event => setRequestHistoryOpen(event.currentTarget.open)}>
+      <summary>처리된 요청 이력 {requestHistory.length}건</summary>
+      {requestHistoryOpen && requestHistory.map(item => renderItem(item, true))}
+    </details>}
     {completedHistory.length > 0 && <details key={`${mapId}:${cardId}`} className="ai-delegation-completed-history" open={historyOpen} onToggle={event => setHistoryOpen(event.currentTarget.open)}>
       <summary>완료된 실행 이력 {completedHistory.length}건</summary>
       {historyOpen && <>

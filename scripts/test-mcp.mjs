@@ -1325,6 +1325,7 @@ async function main() {
       targetCardId: delegatedChild.id,
       strategy: 'new',
       instruction: '하위 카드의 요구사항을 확인하고 구현과 검증을 완료한 뒤 결과를 기록하세요.',
+      taskSummary: '하위 카드 구현 및 검증',
       decisionReason: '기존 대화가 없어 상위 대화와 같은 실행 환경으로 새 대화를 시작합니다.',
       sourceRevision: delegationSourceDocument.map.version,
       idempotencyKey: `mcp-regression:${delegatedChild.id}:${delegationSourceDocument.map.version}`,
@@ -1356,6 +1357,14 @@ async function main() {
     await originReconnectClient.connect(originReconnectTransport)
     let delegated
     try {
+      const failedRetry = await originReconnectClient.callTool({ name: 'mindnprogress_delegate_ai_work',
+        arguments: { ...delegationArguments, idempotencyKey: 'mcp-retry-failure', sourceRevision: delegationArguments.sourceRevision + 100 } })
+      assert.equal(failedRetry.isError, true)
+      const retryError = JSON.parse(failedRetry.content.find(item => item.type === 'text').text)
+      assert.equal(retryError.reasonCode, 'AI_DELEGATION_VERSION_CONFLICT')
+      assert.ok(retryError.requestFailure.retryReference.requestId)
+      assert.equal(retryError.requestFailure.requestSummary, '하위 카드 구현 및 검증')
+      delegationArguments.retryOfRequestId = retryError.requestFailure.retryReference.requestId
       delegated = parseToolResult('mindnprogress_delegate_ai_work', await originReconnectClient.callTool({
         name: 'mindnprogress_delegate_ai_work',
         arguments: delegationArguments,
@@ -1389,11 +1398,17 @@ async function main() {
     }
     assertReasonMessagePair(delegated, 'AI 위임 접수 응답')
     assert.equal(delegated.reasonCode, 'AI_DELEGATION_ACCEPTED')
+    assert.equal(delegated.delegation.retryOfRequestId, delegationArguments.retryOfRequestId)
+    const failureHistory = await invoke('mindnprogress_list_ai_delegations', { mapId, parentCardId: 'task-a' })
+    assert.equal(failureHistory.requestFailures.find(item => item.id === delegationArguments.retryOfRequestId)?.resolvedByDelegationId, delegated.delegation.id)
     assertReasonMessagePair(delegated.delegation, 'AI 위임 공개 상태')
     const delegatedRepeat = await invoke('mindnprogress_delegate_ai_work', delegationArguments)
     assert.equal(delegatedRepeat.repeated, true)
     assertReasonMessagePair(delegatedRepeat, 'AI 위임 멱등 응답')
     assert.equal(delegatedRepeat.reasonCode, 'AI_DELEGATION_REPEATED')
+    const repeatedRetry = await invoke('mindnprogress_delegate_ai_work', { ...delegationArguments, idempotencyKey: 'mcp-retry-duplicate-key' })
+    assert.equal(repeatedRetry.repeated, true)
+    assert.equal(repeatedRetry.delegation.id, delegated.delegation.id)
     assert.equal(mockAionUi.dispatchRequests.length, 1, '멱등 재호출이 하위 대화를 중복 실행했습니다.')
     assert.deepEqual(mockAionUi.conversationTitleUpdates, [{
       name: 'MCP 전체 회귀 문서: 위임 하위 카드',

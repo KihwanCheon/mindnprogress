@@ -354,6 +354,7 @@ async function apiRequest(pathname, init = {}) {
     error.code = body?.code
     error.reasonCode = body?.reasonCode ?? body?.code
     error.details = body?.details
+    error.requestFailure = body?.requestFailure
     throw error
   }
   const result = body ?? { ok: true, status: response.status }
@@ -505,6 +506,7 @@ function registerTool(server, name, description, schema, handler, options = {}) 
             reasonCode,
             message,
             ...(error?.details === undefined ? {} : { details: error.details }),
+            ...(error?.requestFailure === undefined ? {} : { requestFailure: error.requestFailure }),
           }
         : null
       const errorText = errorResult ? JSON.stringify(errorResult) : message
@@ -1820,6 +1822,8 @@ async function main() {
     decisionReason: z.string().min(1).max(1000).describe('이 기존 대화를 선택했거나 새 대화가 필요하다고 판단한 근거'),
     sourceRevision: z.number().int().positive().describe('get_context 또는 get_document에서 확인한 현재 문서 version'),
     idempotencyKey: z.string().regex(AI_DELEGATION_ID_PATTERN).describe('같은 위임의 중복 실행을 막는 안정적인 키. 영문·숫자로 시작하고 영문·숫자·밑줄·하이픈·콜론을 사용해 sourceRevision과 targetCardId를 포함하는 형식을 권장'),
+    retryOfRequestId: z.string().min(1).max(120).optional().describe('접수 실패 응답의 requestFailure.retryReference.requestId. 같은 업무를 재접수할 때 전달하고 원 instruction은 유지한 채 sourceRevision 등 메타데이터만 갱신하세요. 다른 업무에 사용하지 마세요. 성공 접수 시 기존 실패 경고가 자동 해제됩니다.'),
+    taskSummary: z.string().min(1).max(240).optional().describe('사용자에게 표시할 이번 업무의 짧은 요약. 카드 제목만으로 여러 위임을 구분하기 어려울 때 제공합니다. 비밀·인증 정보나 지시 전문을 넣지 마세요.'),
     newConversation: z.object({
       agentId: z.string().min(1).max(512),
       modelId: z.string().min(1).max(512),

@@ -22,6 +22,13 @@ export type AiDelegationSummary = {
   parentConversationId?: string
   targetConversationId?: string
   instructionPreview?: string
+  requestSummary?: string
+  retryVerification?: {
+    state: 'confirmed' | 'unverified' | 'not-found' | 'execution-unknown'
+    method: string | null
+    message: string
+    replacement: { id: string; targetCardLabel?: string; instructionPreview?: string; createdAt: string; state: string; targetConversationId?: string } | null
+  }
   createdAt: string
   updatedAt: string
   childStatus?: string | null

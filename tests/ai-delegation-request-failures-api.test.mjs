@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
@@ -73,6 +74,7 @@ test('레거시 접수 실패를 실제 재접수에 연결하고 실패 원문�
       reasonCode: 'AI_DELEGATION_VERSION_CONFLICT', message: '최신 문서 버전 재조회 필요',
       createdAt: '2026-10-13T00:00:00.000Z', updatedAt: '2026-10-13T00:00:00.000Z' }
     const accepted = { id: 'rev2-task', requestSignature: 'revision-2', mapId, parentCardId: 'root', targetCardId: 'task',
+      instructionHash: createHash('sha256').update('같은 업무').digest('hex'), strategy: 'resume', instructionPreview: '같은 업무',
       parentConversationId: 'parent-conversation', targetConversationId: 'child-conversation',
       targetHomeMachineId: machineId, state: 'completed', createdAt: '2026-10-13T00:01:00.000Z', updatedAt: '2026-10-13T00:01:00.000Z',
       childStatus: 'completed', parentDispatchState: 'completed', reportReceipt: { at: '2026-10-13T00:02:00.000Z' } }
@@ -80,6 +82,7 @@ test('레거시 접수 실패를 실제 재접수에 연결하고 실패 원문�
     await writeFile(path.join(directory, '_ai-delegations.json'), JSON.stringify([accepted]), 'utf8')
     await writeFile(path.join(directory, '_ai-delegation-request-failures.json'), JSON.stringify([
       originalFailure, { ...originalFailure, id: 'request-unknown', phase: 'dispatch', executionState: 'unknown' },
+      { ...originalFailure, id: 'request-check', parentConversationId: 'parent-conversation', strategy: 'resume', instructionHash: accepted.instructionHash },
     ]), 'utf8')
     await start()
     cookie = await login()
@@ -88,6 +91,22 @@ test('레거시 접수 실패를 실제 재접수에 연결하고 실패 원문�
     const endpoint = `/api/maps/${mapId}/ai-delegation-request-failures/request-old/resolve`
     const body = { expectedUpdatedAt: originalFailure.updatedAt, replacementDelegationId: accepted.id,
       confirmSameWork: true, note: '동일 업무의 정상 재접수 확인' }
+    const recheckEndpoint = `/api/maps/${mapId}/ai-delegation-request-failures/request-check/recheck`
+    assert.equal((await api(null, recheckEndpoint, 'POST', body)).status, 401)
+    assert.equal((await api(cookie, recheckEndpoint, 'POST', { expectedUpdatedAt: 'stale' })).status, 409)
+    const unverified = await api(cookie, endpoint.replace('/resolve', '/recheck'), 'POST', { expectedUpdatedAt: originalFailure.updatedAt })
+    assert.equal(unverified.status, 200)
+    assert.equal(unverified.body.requestFailure.retryVerification.state, 'unverified')
+    assert.equal(unverified.body.requestFailure.resolvedByDelegationId, null)
+    const checked = await api(cookie, recheckEndpoint, 'POST', { expectedUpdatedAt: originalFailure.updatedAt })
+    assert.equal(checked.status, 200, JSON.stringify(checked.body))
+    assert.equal(checked.body.executionRequested, false)
+    assert.equal(checked.body.requestFailure.retryVerification.state, 'confirmed')
+    assert.equal(checked.body.requestFailure.resolution.method, 'same-instruction')
+    assert.equal(checked.body.requestFailure.retryVerification.replacement.state, 'completed')
+    assert.equal(checked.body.requestFailure.instructionHash, undefined)
+    const unknownCheck = await api(cookie, `/api/maps/${mapId}/ai-delegation-request-failures/request-unknown/recheck`, 'POST', body)
+    assert.equal(unknownCheck.body.requestFailure.retryVerification.state, 'execution-unknown')
     assert.equal((await api(null, endpoint, 'POST', body)).status, 401)
     assert.equal((await api(cookie, endpoint, 'POST', { ...body, expectedUpdatedAt: 'stale' })).status, 409)
     assert.equal((await api(cookie, endpoint, 'POST', { ...body, confirmSameWork: false })).status, 400)
@@ -113,6 +132,7 @@ test('레거시 접수 실패를 실제 재접수에 연결하고 실패 원문�
     const history = (await api(cookie, `/api/maps/${mapId}/ai-delegations`)).body.requestFailures
     assert.equal(history.find(item => item.id === originalFailure.id).resolvedByDelegationId, accepted.id)
     assert.equal(history.find(item => item.id === 'request-unknown').resolvedByDelegationId, null)
+    assert.equal(history.find(item => item.id === 'request-check').retryVerification.state, 'confirmed')
   } finally {
     await stop()
     // mkdtemp가 반환한 이번 테스트의 전용 경로만 정리한다.

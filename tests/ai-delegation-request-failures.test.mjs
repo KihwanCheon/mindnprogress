@@ -6,7 +6,7 @@ import { aiDelegationDisplayItems, aiDelegationDisplaySections, aiDelegationStat
 import { groupDelegationPresentation } from '../src/utils/groupOverview.mjs'
 
 const context = { requestId: 'request-1', delegationId: 'delegation-1', mapId: 'map-test', parentMapId: 'map-test',
-  parentCardId: 'parent', targetCardId: 'child', targetHomeMachineId: 'mac', strategy: 'new', requestSignature: 'same-request', instruction: '비공개 지시 전문' }
+  parentCardId: 'parent', targetCardId: 'child', targetHomeMachineId: 'mac', strategy: 'new', requestSignature: 'same-request', instruction: '비공개 지시 전문', taskSummary: '검수 요청' }
 const failure = { status: 409, reasonCode: 'REMOTE_WORKSPACE_RUNNER_STALE', message: '원격 풀 보고가 만료됐습니다.' }
 
 test('요청 실패는 실행과 별개로 직렬 저장하고 재시작 후에도 이유를 조회한다', async () => {
@@ -23,6 +23,8 @@ test('요청 실패는 실행과 별개로 직렬 저장하고 재시작 후에�
   assert.equal(items[0].executionState, 'not-started')
   assert.equal(items[0].automaticRetry, false)
   assert.equal(JSON.stringify(disk).includes(context.instruction), false)
+  assert.equal(items[0].requestSummary, '검수 요청')
+  assert.equal(JSON.stringify(disk).includes('비공개 지시 전문'), false)
   assert.equal(isVisibleAiDelegation(items[0]), true)
   const badge = aiDelegationStatusByCard(items, 'map-test').parent
   assert.equal(badge.kind, 'request-failed')
@@ -164,6 +166,62 @@ test('실행 완료와 카드 업무 미완료는 분리하고 기존 완료 상
 })
 
 test('실패 메시지에서 토큰과 지시 전문을 제외한다', () => {
-  const text = safeDelegationFailureMessage('Bearer example-secret; password=private 비공개 지시 전문', context.instruction)
+  const text = safeDelegationFailureMessage(`Bearer example-secret; password=private ${context.instruction}`, context.instruction)
   assert.doesNotMatch(text, /example-secret|password=private|비공개 지시 전문/)
+})
+
+test('재접수 참조는 원 지시·귀속·실행 여부를 검증하며 중복 접수를 거부한다', async () => {
+  const ledger = await createAiDelegationRequestFailures(memoryLedger().dependencies)
+  const original = { ...context, parentConversationId: 'parent-conversation', requestedConversationId: 'child-conversation', strategy: 'resume' }
+  const failed = await ledger.record(original, failure)
+  assert.equal(failed.retryReference.requestId, failed.id)
+  const next = { ...original, delegationId: 'retry', requestSignature: 'new-revision' }
+  assert.equal(ledger.validateRetry(next, failed.id, new Map()), failed.id)
+  for (const patch of [{ instruction: '다른 업무' }, { parentConversationId: 'other' }, { requestedConversationId: 'other' },
+    { targetHomeMachineId: 'other' }, { targetCardId: 'other' }, { parentCardId: 'other' }, { parentMapId: 'other' }, { strategy: 'new' }]) {
+    assert.throws(() => ledger.validateRetry({ ...next, ...patch }, failed.id, new Map()), { reasonCode: 'AI_DELEGATION_RETRY_REFERENCE_INVALID' })
+  }
+  const accepted = { ...next, id: 'retry', createdAt: '2999-01-01', targetConversationId: 'child-conversation',
+    instructionHash: createHash('sha256').update(next.instruction).digest('hex'), retryOfRequestId: failed.id, state: 'running' }
+  const delegations = new Map([[accepted.id, accepted]])
+  assert.equal(ledger.list({mapId: context.mapId, delegations})[0].retryVerification.method, 'retry-reference')
+  assert.throws(() => ledger.validateRetry({ ...next, delegationId: 'another-retry' }, failed.id, delegations), { reasonCode: 'AI_DELEGATION_RETRY_ALREADY_ACCEPTED' })
+  assert.equal(ledger.validateRetry(next, failed.id, delegations), failed.id)
+})
+
+test('재접수 확인은 근거 없는 후보를 고르지 않고 확인된 접수만 감사 이력으로 남긴다', async () => {
+  const memory = memoryLedger()
+  const ledger = await createAiDelegationRequestFailures(memory.dependencies)
+  const original = { ...context, parentConversationId: 'parent-conversation' }
+  const failed = await ledger.record(original, { ...failure, reasonCode: 'AI_DELEGATION_ALREADY_ACTIVE' })
+  const query = { mapId: context.mapId, failureId: failed.id, expectedUpdatedAt: failed.updatedAt, actorId: 'editor' }
+  const delegations = new Map()
+  assert.equal((await ledger.recheck(query, delegations)).requestFailure.retryVerification.state, 'not-found')
+  const candidate = { ...original, id: 'later', state: 'running', createdAt: '2999-01-01', instructionHash: 'different' }
+  delegations.set(candidate.id, candidate)
+  assert.equal((await ledger.recheck(query, delegations)).requestFailure.retryVerification.state, 'unverified')
+  assert.equal(memory.disk()[0].resolution, undefined)
+  candidate.instructionHash = createHash('sha256').update(original.instruction).digest('hex')
+  const before = structuredClone(candidate)
+  const result = await ledger.recheck(query, delegations)
+  assert.equal(result.requestFailure.retryVerification.state, 'confirmed')
+  assert.equal(result.requestFailure.retryVerification.replacement.state, 'running')
+  assert.equal(result.requestFailure.resolution.method, 'same-instruction')
+  assert.deepEqual(candidate, before)
+  assert.equal((await ledger.recheck(query, delegations)).requestFailure.resolvedByDelegationId, candidate.id)
+  const restarted = await createAiDelegationRequestFailures(memory.dependencies)
+  assert.equal(restarted.list({mapId: context.mapId, delegations})[0].resolvedByDelegationId, candidate.id)
+})
+
+test('연속 접수 실패의 참조 체인은 원 요청까지 해제하고 실행 불확실 체인은 허용하지 않는다', async () => {
+  const ledger = await createAiDelegationRequestFailures(memoryLedger().dependencies)
+  const original = { ...context, parentConversationId: 'parent-conversation' }
+  const first = await ledger.record(original, failure)
+  const second = await ledger.record({ ...original, requestId: 'request-2', retryOfRequestId: first.id }, failure)
+  const accepted = { ...original, id: 'retry', requestSignature: 'new-signature', state: 'waiting-workspace', createdAt: '2999-01-01',
+    instructionHash: createHash('sha256').update(original.instruction).digest('hex'), retryOfRequestId: second.id }
+  assert.ok(ledger.list({mapId: context.mapId, delegations: new Map([[accepted.id, accepted]])}).every(item => item.resolvedByDelegationId === accepted.id))
+  const unknown = await ledger.record({ ...original, requestId: 'request-unknown', dispatchStarted: true }, failure)
+  assert.equal(unknown.retryReference, undefined)
+  assert.throws(() => ledger.validateRetry(original, unknown.id, new Map()), { reasonCode: 'AI_DELEGATION_RETRY_REFERENCE_INVALID' })
 })
