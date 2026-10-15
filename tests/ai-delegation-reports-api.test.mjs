@@ -29,6 +29,8 @@ for (const groupCoordinator of [false, true]) test(`재시작 후 ${groupCoordin
     await rm(directory, { recursive: true, force: true })
   }
   let parentBusy = true
+  let parentRuntimeFailure = false
+  let loseDispatchResponse = false
   const dispatchRequests = []
   const reportMessages = new Map()
   const operationReads = []
@@ -50,6 +52,7 @@ for (const groupCoordinator of [false, true]) test(`재시작 후 ${groupCoordin
     }
     if (request.url?.startsWith('/api/conversations/')) {
       const id = request.url.split('/')[3]
+      if (id === 'parent-report' && parentRuntimeFailure) return send({}, 503)
       return send({ id, type: 'acp', extra: {}, runtime: { state: id === 'parent-report' && parentBusy ? 'running' : 'idle', is_processing: id === 'parent-report' && parentBusy, turn_id: id === 'parent-report' && parentBusy ? 'parent-long-turn' : null } })
     }
     if (request.method === 'POST' && request.url === '/api/internal/external-conversation-dispatches') {
@@ -59,10 +62,13 @@ for (const groupCoordinator of [false, true]) test(`재시작 후 ${groupCoordin
       assert.ok([...reportMessages.values()].some((message) => message.messageId === input.historyMessageId && message.content === input.instruction), '자동 실행은 먼저 저장된 전문을 재사용한다.')
       dispatchRequests.push(input)
       parentBusy = true
+      if (loseDispatchResponse) { request.socket.destroy(); return }
       return send({ operationId: input.operationId, conversationId: 'parent-report', state: 'running', turnId: 'new-report-turn' })
     }
     if (request.url?.startsWith('/api/internal/external-conversation-dispatches/')) {
       operationReads.push(request.url)
+      const dispatched = dispatchRequests.find(item => request.url.endsWith(`/${item.operationId}`))
+      if (dispatched) return send({ operationId: dispatched.operationId, conversationId: 'parent-report', state: 'running', turnId: 'new-report-turn' })
       return send({ state: 'recovery_required', errorMessage: 'interrupted_by_restart' })
     }
     return send({}, 404)
@@ -95,7 +101,7 @@ for (const groupCoordinator of [false, true]) test(`재시작 후 ${groupCoordin
     return { status: response.status, body: await response.json() }
   }
   async function until(read, predicate) {
-    for (let i = 0; i < 100; i++) {
+    for (let i = 0; i < 300; i++) {
       const value = await read()
       if (predicate(value)) return value
       await pause(50)
@@ -190,6 +196,29 @@ for (const groupCoordinator of [false, true]) test(`재시작 후 ${groupCoordin
     assert.deepEqual((await api(mapUrl)).body.map, beforeMap, '수신 확인은 카드나 문서 버전을 변경하지 않는다.')
     assert.equal(dispatchRequests.length, 0)
     parentBusy = false
+    if (!groupCoordinator) {
+      parentRuntimeFailure = true
+      const failed = (await until(list, items => items.find(x => x.id === 'pending-auto')?.parentWakeRetry?.status === 'scheduled')).find(x => x.id === 'pending-auto')
+      assert.equal(failed.state, 'waiting-parent')
+      assert.equal(failed.reportWaitReason, null, '과거 busy와 조회 실패를 함께 표시하지 않는다.')
+      assert.equal(failed.parentWakeRetry.lastFailure.phase, 'parent-runtime')
+      assert.equal(failed.parentWakeRetry.lastFailure.status, 503)
+      assert.equal(failed.parentWakeRetry.lastFailure.pathname, '/api/conversations/parent-report')
+      assert.equal(failed.parentWakeRetry.lastFailure.origin, `http://127.0.0.1:${fakePort}`)
+      assert.equal(dispatchRequests.length, 0)
+      await stop(child); child = null
+      const persisted = JSON.parse(await readFile(path.join(directory, '_ai-delegations.json'), 'utf8')).find(x => x.id === 'pending-auto')
+      assert.deepEqual(persisted.parentWakeRetry, failed.parentWakeRetry)
+      parentRuntimeFailure = false; loseDispatchResponse = true
+      await start()
+      const lost = (await until(list, items => items.find(x => x.id === 'pending-auto')?.parentWakeRetry?.lastFailure?.phase === 'dispatch-submit')).find(x => x.id === 'pending-auto')
+      assert.equal(lost.state, 'waking-parent')
+      assert.equal(lost.parentWakeRetry.phase, 'dispatch-status')
+      assert.equal(lost.parentWakeAttempt, 1)
+      assert.equal(dispatchRequests.length, 1, '응답 유실 후 다른 주소로 POST를 반복하지 않는다.')
+      await stop(child); child = null; loseDispatchResponse = false
+      await start()
+    }
     const after = await until(list, (items) => items.every((x) => x.state === 'completed'))
     assert.equal(dispatchRequests.length, 1, '아직 미전달인 결과만 한 번 자동 전달한다.')
     assert.equal(dispatchRequests[0].targetConversationId, 'parent-report')
@@ -199,6 +228,11 @@ for (const groupCoordinator of [false, true]) test(`재시작 후 ${groupCoordin
     assert.equal(dispatchRequests[0].instruction.includes(AI_DELEGATION_FOLLOWUP_INSTRUCTION), !groupCoordinator)
     assert.equal(after.find((x) => x.id === 'pending-auto').parentDispatchState, 'running')
     assert.equal(after.find((x) => x.id === 'pending-auto').reportPending, false)
+    if (!groupCoordinator) {
+      assert.equal(after.find(x => x.id === 'pending-auto').parentWakeRetry.status, 'received')
+      assert.ok(operationReads.some(url => url.endsWith(`/${dispatchRequests[0].operationId}`)))
+      assert.equal(dispatchRequests.length, 1, '응답 유실·두 번의 재시작 후에도 새 상위 턴을 만들지 않는다.')
+    }
     await stop(child)
     child = null
     await start()

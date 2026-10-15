@@ -51,6 +51,7 @@ import { blockedAiModelLabels, filterAutomatedAiAgents } from './lib/aiModelPoli
 import { summarizeAiConversationMessages } from './lib/aiConversationMessageStatistics.mjs'
 import { AiDelegationStatusLookupError, readAiDelegationDispatchStatus } from './lib/aiDelegationStatusLookup.mjs'
 import { aiDelegationReportArchived, aiDelegationReportArchivePending, createAiDelegationReportArchiver } from './lib/aiDelegationReportArchive.mjs'
+import { createAiParentWakeProcessor, recoverableLegacyParentWake } from './lib/aiParentWake.mjs'
 import {
   acknowledgeAiDelegationReport,
   aiDelegationDeliveredReportPatch,
@@ -81,7 +82,6 @@ import {
   aiDelegationIsTerminal,
   aiDelegationWorkPending,
   aiDelegationDisplayState,
-  aiDelegationStateAfterParentWake,
   aiDelegationSucceeded,
   aiDelegationWorkspaceLeaseMatches,
   aiDelegationSelectionFromSource,
@@ -2066,12 +2066,12 @@ async function aionUiCandidateBaseUrls() {
   ].filter(Boolean))]
 }
 
-async function fetchAionUi(pathname, { timeoutMs = 8_000, method = 'GET', body } = {}) {
+async function fetchAionUi(pathname, { timeoutMs = 8_000, method = 'GET', body, strictJson = false, noMutationRetry = false, singleTarget = false } = {}) {
   runtimeLifecycle.throwIfStopping()
   let lastError = null
   let lastResponseError = null
   const candidates = await aionUiCandidateBaseUrls()
-  for (const baseUrl of candidates) {
+  for (const baseUrl of singleTarget ? candidates.slice(0, 1) : candidates) {
     runtimeLifecycle.throwIfStopping()
     try {
       const response = await fetch(`${baseUrl}${pathname}`, {
@@ -2085,6 +2085,7 @@ async function fetchAionUi(pathname, { timeoutMs = 8_000, method = 'GET', body }
       })
       const responseBody = await response.json().catch((error) => {
         throwIfRuntimeStopping(error, runtimeLifecycle.signal)
+        if (strictJson) throw Object.assign(new Error('AionUi JSON 응답을 확인하지 못했습니다.', { cause: error }), { code: 'AIONUI_INVALID_JSON', status: response.status >= 400 ? response.status : 502 })
         return {}
       })
       if (!response.ok || responseBody?.success === false) {
@@ -2097,6 +2098,9 @@ async function fetchAionUi(pathname, { timeoutMs = 8_000, method = 'GET', body }
       return responseBody?.data ?? responseBody
     } catch (error) {
       throwIfRuntimeStopping(error, runtimeLifecycle.signal)
+      // 자격 증명·query·본문은 포함하지 않고 실제 연결 대상의 origin만 진단에 남긴다.
+      try { error.requestOrigin = new URL(baseUrl).origin } catch { /* 잘못된 주소 원문은 기록하지 않는다. */ }
+      if (noMutationRetry && method !== 'GET') throw error
       lastError = error
       if (Number.isInteger(error?.status)) lastResponseError = error
     }
@@ -3435,6 +3439,7 @@ async function reconcileAiDelegationWorkspaceLeases() {
         parentResource: null,
         wakeOperationId: null,
         reportReceipt: null, reportWaitReason: null, reportArchive: null,
+        parentWakeRetry: null, parentRuntimeObservation: null,
         reportPayloadHash: null, reportResultAvailability: null, reportResultHash: null,
         reportResultTurnId: null, reportPreparedAt: null,
         attemptHistory: aiDelegationAttemptHistory(delegation, '보존된 체크포인트와 통합 브랜치 검증 후 자동 통합 대기로 복구'),
@@ -3881,6 +3886,7 @@ const integrationRecoveryQueue = createIntegrationRecoveryQueue({
     workspaceResult, workspaceError: null, integrationError: null,
     parentDispatchState: null, parentTurnId: null, parentError: null, parentResource: null,
     wakeOperationId: null, reportReceipt: null, reportWaitReason: null, reportArchive: null,
+    parentWakeRetry: null, parentRuntimeObservation: null,
     reportPayloadHash: null, reportResultAvailability: null, reportResultHash: null,
     reportResultTurnId: null, reportPreparedAt: null, completedAt: null,
     integrationRecoveryRequestedAt: delegation.integrationRecoveryRequest.requestedAt,
@@ -4070,6 +4076,7 @@ async function settlePendingAiRecovery(delegation, { allowDispatch = false } = {
     childResultSnapshot: null, childResultHash: null, childResultTurnId: null,
     childResultCapturedAt: null, childResultCaptureAttemptedAt: null,
     reportReceipt: null, reportWaitReason: null,
+    parentWakeRetry: null, parentRuntimeObservation: null,
     reportPayloadHash: null, reportResultAvailability: null, reportResultHash: null,
     reportResultTurnId: null, reportPreparedAt: null,
     workspaceResult: null, workspaceError: null,
@@ -4112,13 +4119,10 @@ async function refreshSuspendedAiDelegation(delegation) {
   const expectedConversation = reportOnly ? delegation.parentConversationId : delegation.targetConversationId
   if (status.conversationId && status.conversationId !== expectedConversation) throw aiDelegationDispatchError('실행 대화가 위임 기록과 일치하지 않습니다.', 409)
   if (reportOnly) {
-    const received = aiDelegationDeliveredReportPatch(delegation, { ...status, conversationId: status.conversationId ?? expectedConversation })
+    const received = aiDelegationDeliveredReportPatch(delegation, status)
     if (received) return updateAiDelegation(delegation.id, received)
     if (status.state !== 'completed') return delegation
-    return updateAiDelegation(delegation.id, {
-      state: 'completed', parentDispatchState: 'completed', parentError: null,
-      completedAt: new Date().toISOString(), attemptHistory: aiDelegationAttemptHistory(delegation, '기존 결과 전달 완료 확인'),
-    })
+    throw aiDelegationDispatchError('기존 결과 전달의 대화·실행 턴·해시 근거를 확인하지 못했습니다. 수신 완료로 변경하지 않았습니다.', 409, 'REPORT_DELIVERY_UNVERIFIED')
   }
   if (!['waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity', 'parent-wake-failed', 'failed'].includes(delegation.state)) return delegation
   const limitState = aiDelegationLimitState({ ...delegation, childStatus: status.state, childError: status.errorMessage ?? null })
@@ -4142,6 +4146,7 @@ async function refreshSuspendedAiDelegation(delegation) {
       reportPayloadHash: null, reportResultAvailability: null, reportResultHash: null,
       reportResultTurnId: null, reportPreparedAt: null,
       attemptHistory: aiDelegationAttemptHistory(delegation, '같은 실행의 재개 확인'),
+      parentWakeRetry: null, parentRuntimeObservation: null,
     })
   }
   if (status.state === 'completed' && !delegation.workspaceLease?.leaseId) {
@@ -4157,6 +4162,7 @@ async function refreshSuspendedAiDelegation(delegation) {
       reportPayloadHash: null, reportResultAvailability: null, reportResultHash: null,
       reportResultTurnId: null, reportPreparedAt: null,
       attemptHistory: aiDelegationAttemptHistory(delegation, '같은 실행 완료 확인 · 결과 전달은 사용자 요청 대기'),
+      parentWakeRetry: null, parentRuntimeObservation: null,
     })
     return workPending ? updated : captureAiDelegationChildResult(updated)
   }
@@ -4960,6 +4966,17 @@ const archiveAiDelegationReport = createAiDelegationReportArchiver({
   parentMachineId: delegationParentMachineId, instruction: parentWakeInstruction,
 })
 
+const processAiParentWake = createAiParentWakeProcessor({
+  get: (id) => aiDelegations.get(id), values: () => aiDelegations.values(), update: updateAiDelegation,
+  archive: archiveAiDelegationReport, coordinationPending: documentCoordinationPending,
+  capabilities: (machineId) => fetchAionUiOn(machineId, '/api/internal/external-conversation-dispatches/capabilities', { timeoutMs: 3_000, strictJson: true, singleTarget: true }),
+  parentMachineId: delegationParentMachineId,
+  runtime: (conversationId, machineId) => fetchAionUiOn(machineId, `/api/conversations/${encodeURIComponent(conversationId)}`, { timeoutMs: 2_500, strictJson: true, singleTarget: true }),
+  normalizeRuntime: normalizeAiConversationRuntime,
+  instruction: parentWakeInstruction, operationId: boundedAionOperationId, fetchOn: fetchAionUiOn,
+  signal: runtimeLifecycle.signal,
+})
+
 async function pollAiDelegations() {
   if (aiDelegationPollRunning) return
   aiDelegationPollRunning = true
@@ -4974,7 +4991,7 @@ async function pollAiDelegations() {
         'integration-running', 'integration-waiting-resume', 'integration-recovery-required',
         'waiting-parent', 'waking-parent',
       ].includes(delegation.state) || delegation.pendingRecovery || aiDelegationStoredReportDeliveryPatch(delegation)
-        || aiDelegationReportArchivePending(delegation))
+        || aiDelegationReportArchivePending(delegation) || recoverableLegacyParentWake(delegation))
     for (let delegation of active) {
       if (aiDelegationActions.has(delegation.id)) continue
       const remoteLease = remoteWorkspacePool.state?.leases[delegation.workspaceLease?.leaseId]
@@ -5226,134 +5243,7 @@ async function pollAiDelegations() {
         continue
       }
 
-      if (delegation.state === 'waiting-parent') {
-        const anotherWakeInProgress = [...aiDelegations.values()].some((candidate) =>
-          candidate.id !== delegation.id
-          && candidate.parentConversationId === delegation.parentConversationId
-          && candidate.state === 'waking-parent')
-        if (anotherWakeInProgress) {
-          await updateAiDelegation(delegation.id, { reportWaitReason: 'earlier-report' })
-          continue
-        }
-        try {
-          if (delegation.childStatus === 'completed' && await documentCoordinationPending(delegation)) {
-            await updateAiDelegation(delegation.id, {
-              state: 'waiting-document-work',
-              childResultSnapshot: null, childResultHash: null, childResultTurnId: null,
-              childResultCapturedAt: null, childResultCaptureAttemptedAt: null,
-            })
-            continue
-          }
-          if (delegation.reportApprovalRequired) {
-            await updateAiDelegation(delegation.id, { state: 'parent-wake-failed', parentDispatchState: 'not-sent', parentError: null })
-            continue
-          }
-          delegation = await archiveAiDelegationReport(delegation)
-          if (aiDelegationReportArchivePending(delegation)) {
-            await updateAiDelegation(delegation.id, { reportWaitReason: 'report-history-pending' })
-            continue
-          }
-          if (aiDelegationReportArchived(delegation)
-            && (await fetchAionCoreDispatchCapabilities(delegationParentMachineId(delegation)))?.historyOnlyReports !== true) {
-            await updateAiDelegation(delegation.id, { reportWaitReason: 'report-history-pending' })
-            continue
-          }
-          const parent = await fetchAiConversationRuntime(delegation.parentConversationId)
-          const runtime = normalizeAiConversationRuntime(delegation.parentConversationId, parent)
-          if (runtime.state !== 'idle') {
-            await updateAiDelegation(delegation.id, { reportWaitReason: runtime.state === 'running'
-              ? 'parent-busy' : runtime.state === 'waiting-confirmation' ? 'parent-confirmation' : 'parent-unavailable' })
-            continue
-          }
-          const reportResult = aiDelegationReportResult(delegation)
-          const parentWakeAttempt = Number(delegation.parentWakeAttempt ?? 0) + 1
-          const wakeOperationId = boundedAionOperationId(delegation.id, `wake-${parentWakeAttempt}`)
-          const wakeInstruction = aiDelegationReportArchived(delegation)
-            ? delegation.reportArchive.content : await parentWakeInstruction(delegation, reportResult)
-          const reportPreparedAt = new Date().toISOString()
-          // 전달 의도를 먼저 저장하여 응답 유실·재시작 뒤에도 같은 요청을 조회한다.
-          await updateAiDelegation(delegation.id, {
-            state: 'waking-parent', wakeOperationId, parentWakeAttempt, reportWaitReason: null,
-            parentTurnId: null, parentDispatchState: null, reportReceipt: null,
-            reportPayloadHash: createHash('sha256').update(wakeInstruction).digest('hex'),
-            reportResultAvailability: reportResult.availability,
-            reportResultHash: reportResult.hash,
-            reportResultTurnId: reportResult.turnId,
-            reportPreparedAt,
-          })
-          const response = await fetchAionUiOn(delegationParentMachineId(delegation), '/api/internal/external-conversation-dispatches', {
-            method: 'POST',
-            body: {
-              operationId: wakeOperationId,
-              actorConversationId: delegation.parentConversationId,
-              strategy: 'resume',
-              targetConversationId: delegation.parentConversationId,
-              instruction: wakeInstruction,
-              ...(aiDelegationReportArchived(delegation) ? { historyMessageId: delegation.reportArchive.messageId } : {}),
-            },
-          })
-          const received = aiDelegationDeliveredReportPatch(aiDelegations.get(delegation.id), response)
-          await updateAiDelegation(delegation.id, {
-            state: 'waking-parent',
-            wakeOperationId,
-            parentWakeAttempt,
-            parentTurnId: response.turnId ?? null,
-            ...received,
-          })
-        } catch (error) {
-          throwIfRuntimeStopping(error, runtimeLifecycle.signal)
-          await updateAiDelegation(delegation.id, { state: 'parent-wake-failed', parentDispatchState: 'unknown', parentError: error?.message ?? '결과 전달 상태를 확인하지 못했습니다. 상태 확인 후 재시도하세요.' })
-          continue
-        }
-        continue
-      }
-
-      try {
-        const status = await fetchAionUiOn(delegationParentMachineId(delegation), `/api/internal/external-conversation-dispatches/${encodeURIComponent(delegation.wakeOperationId)}`)
-        const received = aiDelegationDeliveredReportPatch(delegation, status)
-        if (received) {
-          await updateAiDelegation(delegation.id, received)
-          continue
-        }
-        if (status.state === 'recovery_required') {
-          await updateAiDelegation(delegation.id, {
-            state: 'parent-wake-failed',
-            parentDispatchState: 'interrupted-by-restart',
-            parentError: 'AionCore 재시작으로 결과 전달이 중단됐습니다. 기존 결과 확인 후 전달 재시도를 요청하세요.',
-          })
-          continue
-        }
-        if (['starting', 'waiting_resource', 'running', 'waiting_resume'].includes(status.state)) {
-          await updateAiDelegation(delegation.id, {
-            parentTurnId: status.turnId ?? delegation.parentTurnId ?? null,
-            parentDispatchState: status.state === 'waiting_resource'
-              ? 'waiting-resource'
-              : status.state === 'waiting_resume' ? 'waiting-resume' : status.state,
-            parentError: status.state === 'waiting_resume'
-              ? status.errorMessage ?? delegation.parentError ?? null
-              : delegation.parentError,
-            parentResource: status.resource ?? delegation.parentResource ?? null,
-          })
-          continue
-        }
-        await updateAiDelegation(delegation.id, {
-          state: aiDelegationStateAfterParentWake(delegation, status.state),
-          parentTurnId: status.turnId ?? delegation.parentTurnId ?? null,
-          parentDispatchState: status.state,
-          parentError: status.errorMessage ?? null,
-          completedAt: new Date().toISOString(),
-        })
-      } catch (error) {
-        throwIfRuntimeStopping(error, runtimeLifecycle.signal)
-        if (error?.status === 404) {
-          await updateAiDelegation(delegation.id, {
-            state: 'parent-wake-failed',
-            parentDispatchState: 'interrupted-by-restart',
-            parentError: 'AionUi가 결과 전달 상태를 더 이상 보유하지 않습니다. 중복 실행을 피하려면 기존 결과를 확인한 뒤 전달 재시도를 요청하세요.',
-          })
-        }
-        continue
-      }
+      await processAiParentWake(delegation)
     }
   } finally {
     aiDelegationPollRunning = false
@@ -7847,6 +7737,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           reportReceipt: null, reportWaitReason: null,
           reportPayloadHash: null, reportResultAvailability: null, reportResultHash: null,
           reportResultTurnId: null, reportPreparedAt: null,
+          parentWakeRetry: null, parentRuntimeObservation: null,
         })
         return sendJson(response, 202, { delegation: delegationPublicView(updated), childExecutionRequested: false })
       }

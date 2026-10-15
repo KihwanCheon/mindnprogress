@@ -88,6 +88,12 @@ export function groupDelegationReportHint(item) {
   }
   if (item?.reportArchivePending) return '결과는 보존되어 있으며 상위 대화에 완료 전문을 기록하는 중입니다. AionCore 연결·업데이트 후 AI 실행 없이 자동 재시도합니다.'
   if (item?.reportStatus === 'received') return '결과 수신이 확인됐습니다. 상위 AI의 후속 작업이나 품질 검수 완료를 뜻하지 않습니다.'
+  if (['waiting-parent', 'waking-parent'].includes(item?.state) && item.parentWakeRetry?.status === 'scheduled') {
+    const retry = item.parentWakeRetry
+    const next = retry.nextAttemptAt ? ` 다음 확인: ${new Date(retry.nextAttemptAt).toLocaleString('ko-KR')}.` : ''
+    return `${item.state === 'waking-parent' ? '상위 재개 요청의 접수 여부를 같은 요청 ID로 자동 재조회합니다. 새 실행은 만들지 않습니다.' : '상위 재개 전 조회 실패를 자동 재시도합니다. 하위 실행과 통합은 반복하지 않습니다.'}${next}${retry.lastFailure ? ` 최근 오류: ${retry.lastFailure.code} · ${retry.lastFailure.phase}.` : ''}`
+  }
+  if (item?.state === 'parent-wake-failed' && item.parentWakeRetry?.status === 'stopped') return `상위 보고 자동 복구를 중지했습니다(${item.parentWakeRetry.stopReason}). 기존 결과·요청을 확인한 뒤 결과만 재전달하거나 수신 확인하세요. 하위 실행과 통합은 반복하지 않습니다.`
   if (item?.state === 'parent-wake-failed') return '하위 실행 결과는 보존되어 있습니다. 전달 상태를 확인한 뒤 필요한 경우 결과만 재전달하세요.'
   if (item?.state === 'waking-parent') return '상위 대화로 결과 전달을 요청했습니다. 실행 요청 접수와 수신 확인은 구분됩니다.'
   if (item?.state !== 'waiting-parent') return ''

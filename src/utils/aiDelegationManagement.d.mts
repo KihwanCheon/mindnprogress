@@ -39,6 +39,7 @@ export type AiDelegationSummary = {
   integrationError?: string | null
   parentDispatchState?: string | null
   parentError?: string | null
+  parentWakeRetry?: { status: 'scheduled' | 'checking' | 'waiting' | 'stopped' | 'received'; phase: string; attempt: number; nextAttemptAt?: string | null; stopReason?: string | null; lastFailure?: { phase: string; observedAt: string; code: string; status?: number | null; causeCodes?: string[] } } | null
   recoveryDispatchError?: string | null
   integrationRecoveryRequest?: { requestId: string; status: 'queued' | 'checking' | 'accepted' | 'failed'; message: string; reasonCode: string; requestedAt: string; startedAt?: string | null; completedAt?: string | null } | null
   result?: string

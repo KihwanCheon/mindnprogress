@@ -665,6 +665,9 @@ export function aiDelegationAttemptHistory(delegation, reason, at = new Date().t
     reportPreparedAt: delegation.reportPreparedAt ?? null,
     reportReceipt: delegation.reportReceipt ?? null,
     reportArchive: delegation.reportArchive ?? null,
+    parentWakeRetry: delegation.parentWakeRetry ?? null,
+    parentWakeFailures: delegation.parentWakeFailures ?? [],
+    parentRuntimeObservation: delegation.parentRuntimeObservation ?? null,
   }]
 }
 
