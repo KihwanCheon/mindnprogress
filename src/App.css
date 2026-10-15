@@ -48,7 +48,11 @@
 .document-title span { font-size: 14px; font-weight: 650; color: #282530; }
 .document-title small { margin-top: 2px; color: #9691a2; font-size: 10px; }
 .document-title small.save-error { color: #c45555; }
-.local-backup-warning { flex: 0 0 auto; padding: 8px 20px; color: #8d4b17; border-bottom: 1px solid #f1d6ad; background: #fff5e7; font-size: 11px; line-height: 1.4; }
+.local-backup-warning { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; padding: 8px 20px; color: #8d4b17; border-bottom: 1px solid #f1d6ad; background: #fff5e7; font-size: 11px; line-height: 1.4; }
+.local-backup-warning > span { flex: 1; min-width: 0; }
+.local-backup-warning > button { display: grid; place-items: center; flex: 0 0 36px; width: 36px; height: 36px; padding: 0; color: inherit; border: 1px solid currentColor; border-radius: 6px; background: transparent; cursor: pointer; }
+.local-backup-warning > button:hover { background: #8d4b1714; }
+.local-backup-warning > button:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
 .document-title-row { display: flex; align-items: center; gap: 5px; }
 .document-title-row > span { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .document-title-row button,

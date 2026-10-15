@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type Dispatch, type FormEvent as ReactFormEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type SetStateAction, type TouchEvent as ReactTouchEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type CSSProperties, type Dispatch, type FormEvent as ReactFormEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type SetStateAction, type TouchEvent as ReactTouchEvent } from 'react'
 import {
   addEdge,
   Background,
@@ -68,6 +68,7 @@ import { revisionReasonLabel, shouldRefreshMapContentForAction } from './utils/m
 import { mapContentsEqual, reconcileRemoteMapContent } from './utils/mapDocumentSync.mjs'
 import { createMapContentPatch } from './utils/mapContentPatch.mjs'
 import { mapCacheKey, reclaimSynchronizedMapCaches, tryWriteMapCache } from './utils/mapLocalCache.mjs'
+import { createLocalBackupNotice, localBackupNoticeReducer } from './utils/localBackupNotice.mjs'
 import { mergeMapContent } from './utils/mergeMapContent.mjs'
 import { MINDMAP_GRID_SIZE, snapMindMapPosition } from './utils/mindMapGrid.mjs'
 import { nextOverlappingNodeId, nodeOverlapPresentation } from './utils/nodeOverlap.mjs'
@@ -2603,7 +2604,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [savedAt, setSavedAt] = useState('서버에서 불러오는 중…')
   const [saveError, setSaveError] = useState('')
-  const [localBackupWarningMapId, setLocalBackupWarningMapId] = useState<string | null>(null)
+  const [localBackupNotice, updateLocalBackupNotice] = useReducer(localBackupNoticeReducer, null, createLocalBackupNotice)
   const [serverBaselineRevision, setServerBaselineRevision] = useState(0)
   const dragSnapshot = useRef<DragSnapshot | null>(null)
   const rightPanGesture = useRef<RightPanGesture | null>(null)
@@ -2649,22 +2650,26 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
   nodesRef.current = nodes
   edgesRef.current = edges
 
+  useEffect(() => {
+    updateLocalBackupNotice({ type: 'open', mapId: activeMapId })
+  }, [activeMapId, mapReloadToken, selectedGroupId])
+
   const saveMapCache = useCallback((mapId: string, content: Pick<MapDocument, 'nodes' | 'edges'>) => {
     let storage: Storage
     try {
       storage = window.localStorage
     } catch {
-      if (activeMapIdRef.current === mapId) setLocalBackupWarningMapId(mapId)
+      if (activeMapIdRef.current === mapId) updateLocalBackupNotice({ type: 'backup-failed', mapId })
       return false
     }
     pendingMapCacheWrite.current = { mapId, content }
     const result = tryWriteMapCache(storage, mapId, content)
     if (result.saved) {
       pendingMapCacheWrite.current = null
-      if (activeMapIdRef.current === mapId) setLocalBackupWarningMapId(null)
+      if (activeMapIdRef.current === mapId) updateLocalBackupNotice({ type: 'backup-saved', mapId })
       return true
     }
-    if (activeMapIdRef.current === mapId) setLocalBackupWarningMapId(mapId)
+    if (activeMapIdRef.current === mapId) updateLocalBackupNotice({ type: 'backup-failed', mapId })
     if (!result.quotaExceeded) {
       pendingMapCacheWrite.current = null
       return false
@@ -2677,7 +2682,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         if (retry.saved) {
           pendingMapCacheWrite.current = null
           if (activeMapIdRef.current === pending.mapId) {
-            setLocalBackupWarningMapId(null)
+            updateLocalBackupNotice({ type: 'backup-saved', mapId: pending.mapId })
             if (!serverBaseline.current) setSavedAt('로컬 백업만 저장됨 · 서버 재연결 필요')
           }
           return true
@@ -2771,6 +2776,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       setSavedAt('병합 내용 저장 대기 중…')
       window.setTimeout(() => setMergeNotice(''), 5000)
     } else {
+      updateLocalBackupNotice({ type: 'server-saved', mapId: remoteMap.id })
       setSavedAt('서버와 동기화됨')
     }
   }, [resetHistory, saveMapCache, setEdges, setNodes])
@@ -2800,6 +2806,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     const currentContent = createPersistedMapContent(nodesRef.current, edgesRef.current)
     const reconciliation = reconcileRemoteMapContent(sentContent, currentContent, savedMap)
     serverBaseline.current = structuredClone(savedMap)
+    if (!reconciliation.needsSave) updateLocalBackupNotice({ type: 'server-saved', mapId: savedMap.id })
     if (!mapContentsEqual(currentContent, reconciliation)) {
       const currentSelectedId = selectedIdRef.current
       // 선택 카드가 사라졌으면 선택을 해제한다. 첫 카드로 넘기면 실행 취소 도중 최상위 카드가 갑자기 선택된다.
@@ -4206,6 +4213,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         }
         const loadedNodes = synchronizeNodeSelection(map.nodes, nextSelectedId)
         serverBaseline.current = structuredClone(map)
+        updateLocalBackupNotice({ type: 'server-saved', mapId: activeMapId })
         resetHistory(loadedNodes, map.edges)
         setReferenceCommentStats(loadedReferenceCommentStats ?? {})
         setUnresolvedReferenceNodeIds(new Set(unresolvedIds ?? []))
@@ -4227,6 +4235,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       })
       .catch((error) => {
         if (!active) return
+        updateLocalBackupNotice({ type: 'server-failed', mapId: activeMapId })
         const localMap = readSavedMap(activeMapId)
         if (localMap) {
           const nextSelectedId = resolveDocumentNodeSelection(
@@ -4344,11 +4353,13 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                 return
               }
               setSaveError(mergeError instanceof Error ? mergeError.message : '동시 변경을 병합하지 못했습니다.')
+              updateLocalBackupNotice({ type: 'server-failed', mapId: savingMapId })
               setSavedAt('병합 실패')
               return
             }
           }
           setSaveError(error instanceof Error ? error.message : '저장하지 못했습니다.')
+          updateLocalBackupNotice({ type: 'server-failed', mapId: savingMapId })
           setSavedAt('저장 실패')
         })
     }, 600)
@@ -7260,11 +7271,16 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
           <button onClick={() => setMergeNotice('')} aria-label="병합 알림 닫기"><Icon name="close" size={12} /></button>
         </div>
       )}
-      {localBackupWarningMapId === activeMapId && !selectedGroupId && (
+      {localBackupNotice.mapId === activeMapId && localBackupNotice.backupFailed && !localBackupNotice.dismissed && !selectedGroupId && (
         <div className="local-backup-warning" role="alert">
-          {serverBaseline.current
+          <span>{localBackupNotice.serverFailed
+            ? '서버 저장에 실패했고 이 기기의 로컬 백업도 저장하지 못했습니다. 변경 내용이 보존되지 않을 수 있습니다.'
+            : serverBaseline.current?.id === activeMapId
             ? '이 기기의 로컬 백업을 저장하지 못했습니다. 서버 저장은 계속됩니다. 오프라인에서는 변경 내용이 보존되지 않을 수 있습니다.'
-            : '서버에 연결되지 않았고 이 기기의 로컬 백업도 저장하지 못했습니다. 연결을 복구하기 전에는 변경 내용을 보존할 수 없습니다.'}
+            : '서버에 연결되지 않았고 이 기기의 로컬 백업도 저장하지 못했습니다. 연결을 복구하기 전에는 변경 내용을 보존할 수 없습니다.'}</span>
+          <button type="button" onClick={() => updateLocalBackupNotice({ type: 'dismiss', mapId: activeMapId })} aria-label="로컬 백업 경고 닫기" title="로컬 백업 경고 닫기">
+            <Icon name="close" size={14} />
+          </button>
         </div>
       )}
 
