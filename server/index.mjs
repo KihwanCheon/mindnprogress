@@ -7711,6 +7711,8 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
               : '실행 또는 복구 가능성이 남은 위임은 사용자 종료할 수 없습니다. 상태를 다시 확인하세요.' })
           }
           const releasePreserved = closure.workspaceReleaseRequired === true
+          if (!releasePreserved && body.trackedEolRecovery !== undefined) return sendJson(response, 400, {
+            error: '줄바꿈 복구는 명시적인 결과 보존 반환에만 지정할 수 있습니다.' })
           if (releasePreserved && body.confirmPreserveWorkspaceResult !== true) return sendJson(response, 400, {
             error: '미통합 결과와 부분 후보를 보존하고 작업공간만 반환할지 명시적으로 확인해야 합니다.' })
           if (releasePreserved && [...aiDelegations.values()].some(other => other.id !== id
@@ -7722,7 +7724,8 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           if (releasePreserved) {
             try {
               workspaceResult = await workspacePoolManager.releasePreservedIntegrationFailure(delegation.workspaceLease.leaseId,
-                { mapId: delegation.mapId, cardId: delegation.targetCardId, conversationId: delegation.targetConversationId, userId: user.id }, { reason: note })
+                { mapId: delegation.mapId, cardId: delegation.targetCardId, conversationId: delegation.targetConversationId, userId: user.id },
+                { reason: note, trackedEolRecovery: body.trackedEolRecovery })
             } catch (error) {
               const reasonCode = typeof error.reasonCode === 'string' ? error.reasonCode
                 : typeof error.code === 'string' ? error.code : 'INTEGRATION_RECOVERY_UNSAFE'

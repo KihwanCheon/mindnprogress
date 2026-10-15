@@ -10,6 +10,7 @@ import { assertAiDelegationSourceCompletionLease } from './aiDelegationSourceCom
 import { assertAiDelegationInterruptedLease } from './aiDelegationInterruptedRecovery.mjs'
 import { acquireWorkspaceLock, git as ownershipGit, jsonFile, saveJson } from './remoteWorkspaceProtocol.mjs'
 import { normalizeUntrackedMetaRecovery, preserveUntrackedMeta, consumePreservedMeta } from './workspaceMetaRecovery.mjs'
+import { recoverTrackedCheckoutEol } from './workspaceEolRecovery.mjs'
 
 const execFileAsync = promisify(execFile)
 const idleDriftReason = '작업공간에 소유자를 확정할 수 없는 변경이 있습니다.'
@@ -1729,14 +1730,14 @@ export class WorkspacePoolManager {
     return [...blocked].sort()
   }
 
-  async releasePreservedIntegrationFailure(leaseId, scope, { reason } = {}) {
+  async releasePreservedIntegrationFailure(leaseId, scope, { reason, trackedEolRecovery } = {}) {
     if (typeof reason !== 'string' || reason.trim().length < 3 || reason.length > 1000) {
       throw new WorkspacePoolUnavailableError('결과 보존 반환에는 명시적인 사용자 종료 사유가 필요합니다.', [], 'INTEGRATION_RECOVERY_UNSAFE')
     }
-    return this.recoverLocalChangesIntegrationFailure(leaseId, scope, { releaseReason: reason.trim() })
+    return this.recoverLocalChangesIntegrationFailure(leaseId, scope, { releaseReason: reason.trim(), trackedEolRecovery })
   }
 
-  async recoverLocalChangesIntegrationFailure(leaseId, scope, { releaseReason } = {}) {
+  async recoverLocalChangesIntegrationFailure(leaseId, scope, { releaseReason, trackedEolRecovery } = {}) {
     return this.runExclusive(async () => {
       const lease = this.state?.leases?.[leaseId]
       const workspace = this.registry?.workers.find((item) => item.id === lease?.workspaceId)
@@ -1746,6 +1747,7 @@ export class WorkspacePoolManager {
       if (!lease || !scope || lease.mapId !== scope.mapId || lease.cardId !== scope.cardId
         || lease.conversationId !== scope.conversationId) reject('복구할 위임과 작업공간 lease의 소유권이 일치하지 않습니다.')
       if (releaseReason && lease.status === 'cancelled' && lease.result?.status === 'released-preserved') return lease.result
+      if (!releaseReason && (trackedEolRecovery || lease.trackedEolRecovery)) reject('승인된 줄바꿈 정리는 결과 보존 반환에서만 수행할 수 있습니다.')
       if (lease.preservedRelease && !releaseReason) reject('결과 보존 반환을 시작한 위임은 통합 재시도 대신 반환을 마무리해야 합니다.')
       if (lease.status === 'waiting-integration' && current?.status === 'waiting-integration'
         && current.leaseId === leaseId && lease.result?.recoveredFromQuarantine
@@ -1779,7 +1781,7 @@ export class WorkspacePoolManager {
         this.git(integration.root, ['branch', '--show-current']),
         this.git(workspace.root, ['diff', '--name-only', '--diff-filter=U']),
       ])
-      if (dirty) reject('fork 작업공간에 로컬 변경이 남아 있습니다. 추적 파일 변경과 미추적 파일을 보존·정리한 뒤 통합 재시도를 요청하세요.')
+      if (dirty && !trackedEolRecovery && !lease.trackedEolRecovery) reject('fork 작업공간에 로컬 변경이 남아 있습니다. 추적 파일 변경과 미추적 파일을 보존·정리한 뒤 통합 재시도를 요청하세요.')
       if (branch !== lease.integrationBranch || workHead !== lease.headCommit
         || result.headCommit !== lease.headCommit || mainBranch !== lease.baseBranch
         || (result.integrationFailureHeadCommit && result.integrationFailureHeadCommit !== head)) reject('보존된 작업 브랜치 또는 중단된 통합 HEAD가 변경되었습니다.')
@@ -1818,6 +1820,11 @@ export class WorkspacePoolManager {
             return !match || !remaining[index].startsWith(match[1])
           })) reject('진행 중인 Git 작업이 원래 통합 요청과 일치하지 않습니다.')
       }
+      if (trackedEolRecovery || lease.trackedEolRecovery) {
+        await recoverTrackedCheckoutEol({ workerRoot: workspace.root, sharedRoot: this.registry.sharedRoot,
+          lease, request: trackedEolRecovery, actor: { userId: scope.userId ?? null, operator: scope.operator ?? null },
+          persist: () => this.persist() })
+      }
       // 재구성 전에 부분 적용 결과도 참조로 보존한다. 사용자 변경은 삭제하거나 되돌리지 않는다.
       const backupRef = `refs/mnp/integration-recovery/${lease.jobId}/${Number(lease.integrationAttempt ?? 1)}`
       await this.git(workspace.root, ['update-ref', backupRef, head])
@@ -1828,6 +1835,7 @@ export class WorkspacePoolManager {
         await this.git(workspace.root, ['update-ref', sourceRef, lease.headCommit])
         lease.preservedRelease ??= { phase: 'prepared', reason: releaseReason, preparedAt: new Date().toISOString(),
           sourceRef, sourceHead: lease.headCommit, backupRef, preservedHead: head,
+          ...(lease.trackedEolRecovery ? { trackedEolRecovery: lease.trackedEolRecovery } : {}),
           approvedByUserId: scope.userId ?? null, approvedByOperator: scope.operator ?? null }
         await this.persist()
         if (sequencer) await this.git(workspace.root, ['cherry-pick', '--quit'])
@@ -2690,8 +2698,10 @@ export class WorkspacePoolManager {
         await this.git(workspace.root, ['fetch', '--no-tags', integration.root, `refs/heads/${lease.baseBranch}`])
         const freshRecoveryCandidate = checkpointIntegrationRecoveryTypes.has(lease.integrationRecoveryHistory?.at(-1)?.type)
           && integrationBranch !== lease.integrationRecoveryHistory.at(-1).preservedBranch
-        await this.git(workspace.root, ['switch', freshRecoveryCandidate ? '-c' : '-C', integrationBranch, integrationBaseCommit])
+        await this.git(workspace.root, ['switch', freshRecoveryCandidate ? '-c' : '-C', integrationBranch, integrationBaseCommit], { lfCheckout: true })
         try {
+          // 기준 브랜치 전환부터 같은 정책을 사용한다. cherry-pick에만 적용하면
+          // 기준에 이미 존재하던 CRLF 파일은 속성 변경 뒤 dirty로 남는다.
           // 중간 커밋에서 text → -text가 바뀔 때 자동 CRLF checkout이
           // 로컬 변경으로 오인되지 않도록 이 재생 명령의 checkout 변환만 끈다.
           // input은 기존 CRLF 파일의 입력 정규화를 유지한다(false는 이를 dirty로 만든다).

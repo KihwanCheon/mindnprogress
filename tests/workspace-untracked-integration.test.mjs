@@ -27,7 +27,7 @@ async function put(root, relative, content) {
   await mkdir(path.dirname(target), { recursive: true })
   await writeFile(target, content)
 }
-async function fixture(t, files = assetPaths) {
+async function fixture(t, files = assetPaths, { baseFiles = {} } = {}) {
   const root = await mkdtemp(path.join(tmpdir(), 'mnp-untracked-integration-'))
   t.after(async () => {
     assert.ok(path.resolve(root).startsWith(`${path.resolve(tmpdir())}${path.sep}mnp-untracked-integration-`))
@@ -47,6 +47,7 @@ async function fixture(t, files = assetPaths) {
   await config(main)
   await put(main, '.gitignore', '/.ai-session.json\n/.ai-workspace.json\n')
   await put(main, 'base.txt', 'base\n')
+  for (const [relative, content] of Object.entries(baseFiles)) await put(main, relative, content)
   await git(main, ['add', '.'])
   await git(main, ['commit', '-m', 'base'])
   await git(root, ['clone', '--branch', 'japan-master', main, worker])
@@ -61,7 +62,7 @@ async function fixture(t, files = assetPaths) {
   await manager.initialize()
   const lease = await manager.acquire({ workspaceHint: main, mapId: 'map-test', cardId: 'card-test', conversationId: 'conversation-test' })
   for (const relative of files) await put(worker, relative, `worker:${relative}\n`)
-  await manager.checkpoint(lease.leaseId, { jobId: lease.jobId, mapId: 'map-test', cardId: 'card-test',
+  if (files.length) await manager.checkpoint(lease.leaseId, { jobId: lease.jobId, mapId: 'map-test', cardId: 'card-test',
     conversationId: 'conversation-test', paths: files, commitMessage })
   return { root, main, worker, sharedRoot, registryFile, stateFile, manager, lease }
 }
@@ -135,6 +136,94 @@ test('CRLF 자동 변환 뒤 -text가 추가된 체크포인트도 원본 바이
   assert.equal(await git(f.worker, ['config', '--local', 'core.autocrlf']), 'true', '사용자 설정은 변경하지 않는다.')
   assert.equal(await git(f.worker, ['rev-parse', f.lease.branch]), source)
   assert.equal(await git(f.main, ['rev-list', '--count', `${f.lease.baseCommit}..HEAD`]), String(commits.length))
+})
+
+test('기준 브랜치에 이미 있던 파일도 전환부터 LF로 준비해 -text 체크포인트를 통합한다', realGit, async (t) => {
+  const file = 'journal/receipt.json'
+  const f = await fixture(t, [], { baseFiles: { [file]: '{\n  "status": "completed"\n}\n', 'journal/.gitattributes': '*.bytes -text -diff\n' } })
+  await git(f.worker, ['config', 'core.autocrlf', 'true'])
+  const raw = Buffer.from('{\r\n  "status": "verified"\n}\r\n')
+  const checkpoint = paths => f.manager.checkpoint(f.lease.leaseId, { jobId: f.lease.jobId, ...localRecoveryScope, paths, commitMessage })
+  await put(f.worker, 'journal/.gitattributes', '* -text\n')
+  await checkpoint(['journal/.gitattributes'])
+  await put(f.worker, file, raw)
+  await checkpoint([file])
+  const source = await git(f.worker, ['rev-parse', 'HEAD'])
+  const legacy = path.join(f.root, 'legacy-base-replay')
+  await git(f.root, ['clone', '--no-checkout', f.worker, legacy])
+  for (const [key, value] of [['core.autocrlf', 'true'], ['user.name', 'MNP Test'], ['user.email', 'mnp@example.invalid'], ['core.hooksPath', path.join(f.root, 'no-hooks')]]) {
+    await git(legacy, ['config', key, value])
+  }
+  await git(legacy, ['switch', '-c', 'old-replay', f.lease.baseCommit])
+  const commits = (await git(f.worker, ['rev-list', '--reverse', `${f.lease.baseCommit}..${source}`])).split('\n')
+  await assert.rejects(git(legacy, ['-c', 'core.autocrlf=input', 'cherry-pick', ...commits]), /local changes/i,
+    '이전 보완처럼 cherry-pick만 LF 정책으로 실행하면 기준 checkout의 CRLF가 남는다.')
+  const completed = await f.manager.finalize(f.lease.leaseId, { childStatus: 'completed' })
+  assert.equal(completed.status, 'completed')
+  assert.deepEqual(await readFile(path.join(f.main, file)), raw)
+  assert.equal(await git(f.worker, ['status', '--porcelain']), '')
+  assert.equal(await git(f.worker, ['config', '--local', 'core.autocrlf']), 'true')
+  assert.equal(await git(f.worker, ['rev-parse', f.lease.branch]), source)
+})
+
+test('기준 checkout의 CRLF 격리는 승인한 원문만 보존·정리하고 중단 후 반환을 이어간다', { ...realGit, timeout: Math.max(realGit.timeout, 900_000) }, async (t) => {
+  const file = 'journal/검증.json'
+  const base = Buffer.from('{\n  "status": "completed"\n}\n')
+  const original = Buffer.from(base.toString().replaceAll('\n', '\r\n'))
+  const f = await fixture(t, [], { baseFiles: { [file]: base, 'journal/.gitattributes': '*.bytes -text -diff\n' } })
+  await git(f.worker, ['config', 'core.autocrlf', 'true'])
+  const checkpoint = paths => f.manager.checkpoint(f.lease.leaseId, { jobId: f.lease.jobId, ...localRecoveryScope, paths, commitMessage })
+  await put(f.worker, 'journal/.gitattributes', '* -text\n')
+  await checkpoint(['journal/.gitattributes'])
+  await put(f.worker, file, Buffer.from('{\r\n  "status": "verified"\n}\r\n'))
+  await checkpoint([file])
+  const source = await git(f.worker, ['rev-parse', 'HEAD'])
+  const mainHead = await git(f.main, ['rev-parse', 'HEAD'])
+  const originalGit = f.manager.git
+  f.manager.git = (cwd, args, options) => originalGit(cwd, args, args[0] === 'switch' ? {} : options)
+  await assert.rejects(f.manager.finalize(f.lease.leaseId, { childStatus: 'completed' }), /local changes/i,
+    '실제 이전 manager의 기준 전환 → 속성 커밋 → 다음 커밋 순서가 실패해야 한다.')
+  f.manager.git = originalGit
+  const head = await git(f.worker, ['rev-parse', 'HEAD'])
+  assert.deepEqual(await readFile(path.join(f.worker, file)), original)
+  const plan = { expectedHead: head, files: [{ path: file, expectedSha256: createHash('sha256').update(original).digest('hex') }] }
+  const release = trackedEolRecovery => f.manager.releasePreservedIntegrationFailure(f.lease.leaseId,
+    { ...localRecoveryScope, operator: 'MNP Test' }, { reason: '후속 결과가 진행되어 승인된 줄바꿈만 보존 정리하고 반환합니다.', trackedEolRecovery })
+  await assert.rejects(release(), /로컬 변경/)
+  await assert.rejects(release({ ...plan, expectedHead: mainHead }), /HEAD/)
+  await assert.rejects(release({ ...plan, files: [{ path: file, expectedSha256: '0'.repeat(64) }] }), /CRLF/)
+  await put(f.worker, 'unrelated.txt', '사용자 변경\n')
+  await assert.rejects(release(plan), /승인 대상 외/)
+  assert.equal(await readFile(path.join(f.worker, 'unrelated.txt'), 'utf8'), '사용자 변경\n')
+  await rm(path.join(f.worker, 'unrelated.txt'))
+  await put(f.worker, file, Buffer.from('실제 내용 변경\r\n'))
+  await assert.rejects(release(plan), /줄바꿈 외/)
+  await put(f.worker, file, original)
+  await git(f.worker, ['add', '--', file])
+  await assert.rejects(release(plan), /index 변경/)
+  await git(f.worker, ['restore', '--staged', '--', file])
+  const persist = f.manager.persist.bind(f.manager)
+  f.manager.persist = async () => {
+    if (f.manager.state.leases[f.lease.leaseId].trackedEolRecovery?.phase === 'normalized') throw new Error('injected normalization receipt failure')
+    return persist()
+  }
+  await assert.rejects(release(plan), /injected normalization/)
+  assert.deepEqual(await readFile(path.join(f.worker, file)), base)
+  const persisted = JSON.parse(await readFile(f.stateFile, 'utf8')).leases[f.lease.leaseId].trackedEolRecovery
+  assert.equal(persisted.phase, 'preserved')
+  assert.deepEqual(await readFile(path.join(f.sharedRoot, persisted.archiveRelative, 'original-0')), original)
+  assert.deepEqual(await readFile(path.join(f.sharedRoot, persisted.archiveRelative, 'removed-0')), original)
+  const restarted = new WorkspacePoolManager(f)
+  await restarted.initialize({ recoverWorkspaces: false })
+  const released = await restarted.releasePreservedIntegrationFailure(f.lease.leaseId, localRecoveryScope, { reason: '승인한 반환 재개' })
+  assert.equal(released.status, 'released-preserved')
+  assert.equal(released.preservedRelease.trackedEolRecovery.phase, 'normalized')
+  assert.equal(released.preservedRelease.trackedEolRecovery.actor.operator, 'MNP Test')
+  assert.equal(await git(f.main, ['rev-parse', 'HEAD']), mainHead)
+  assert.equal(await git(f.worker, ['rev-parse', f.lease.branch]), source)
+  assert.equal(await git(f.worker, ['rev-parse', 'HEAD']), head)
+  assert.equal(await git(f.worker, ['status', '--porcelain']), '')
+  assert.equal(restarted.state.workspaces.fork2.status, 'idle')
 })
 
 test('격리된 부분 통합은 명시적 반환 시 원본·후보를 보존하고 main을 변경하지 않는다', realGit, async (t) => {

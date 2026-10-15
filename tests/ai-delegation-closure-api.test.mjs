@@ -131,6 +131,15 @@ test('삭제된 대화의 일반 문서 위임을 후속 성공 또는 사용자
     assert.equal(superseded.status, 200, JSON.stringify(superseded.body))
     assert.equal(superseded.body.delegation.state, 'superseded')
 
+    const invalidEol = await api(cookie, `/api/maps/${mapId}/ai-delegations/discard-report/close`, 'POST', {
+      expectedUpdatedAt: discard.updatedAt, sourceRevision: beforeMap.version, targetRevision: beforeMap.version,
+      reason: 'result-invalidated', note: '일반 보고 종료에 줄바꿈 정리를 사용할 수 없습니다.',
+      confirmClosedWithoutCompletion: true, confirmResultReportDiscarded: true,
+      trackedEolRecovery: { expectedHead: 'a'.repeat(40), files: [{ path: 'test.json', expectedSha256: 'b'.repeat(64) }] },
+    })
+    assert.equal(invalidEol.status, 400)
+    assert.match(invalidEol.body.error, /결과 보존 반환/)
+
     const closed = await api(cookie, `/api/maps/${mapId}/ai-delegations/discard-report/close`, 'POST', {
       expectedUpdatedAt: discard.updatedAt, sourceRevision: beforeMap.version, targetRevision: beforeMap.version,
       reason: 'result-invalidated', note: '통합 결과가 되돌려져 상위 결과 보고를 폐기합니다.',

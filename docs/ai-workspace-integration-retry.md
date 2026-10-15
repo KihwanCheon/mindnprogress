@@ -7,15 +7,25 @@ MnP는 하위 AI 작업 완료와 `main` 반영 완료를 구분한다. 완료�
 후속 업무를 별도로 진행해 과거 결과의 통합이 불필요해진 경우 `결과 보존 후 반환`을 사용할 수 있다. 이 기능은 현재 로컬 worker의 완료된 체크포인트를 재생하다 로컬 변경 보호로 격리된 일반 위임만 지원한다. 실제 충돌·진행 중 실행·원격 풀·결과 정정은 우회하지 않는다.
 
 - 기존 `POST /api/maps/:mapId/ai-delegations/:id/close`에 최신 문서/위임 버전, 종료 사유와 메모, `confirmClosedWithoutCompletion`, `confirmResultReportDiscarded`, `confirmPreserveWorkspaceResult: true`가 필요하다. 기존 편집자/상위 카드 권한 검증을 유지한다.
-- lease·세션·브랜치·HEAD·원본 체크포인트·부분 적용·sequencer를 대조하고 추적/미추적 변경이 있으면 거부한다. 다른 lease에서 진행하는 후속 위임은 중지하거나 변경하지 않는다.
+- lease·세션·브랜치·HEAD·원본 체크포인트·부분 적용·sequencer를 대조하고 추적/미추적 변경이 있으면 거부한다. 아래의 명시적으로 승인한 CRLF checkout 정리만 예외이며, 다른 lease에서 진행하는 후속 위임은 중지하거나 변경하지 않는다.
 - 원본은 `refs/mnp/preserved-results/<jobId>/source`, 부분 후보는 `refs/mnp/integration-recovery/<jobId>/<attempt>`로 보존한다. 원 실패 결과는 반환 결과의 `previousResult`에 남는다.
-- 현재 checkout을 바꾸거나 main에 반영하지 않고 일치하는 sequencer와 세션만 해제한다. lease는 `cancelled`, 결과는 `released-preserved`, 위임은 `closed`다. 업무 성공이나 카드 완료로 기록하지 않는다. 다음 배정은 기존 준비 절차로 최신 main을 가져온다.
+- 현재 브랜치·HEAD를 바꾸거나 main에 반영하지 않고 일치하는 sequencer와 세션만 해제한다. lease는 `cancelled`, 결과는 `released-preserved`, 위임은 `closed`다. 업무 성공이나 카드 완료로 기록하지 않는다. 다음 배정은 기존 준비 절차로 최신 main을 가져온다.
 - 반환 준비를 먼저 저장한다. 응답 유실·세션 제거 후 중단은 같은 요청으로 마무리하고, 이미 다른 lease가 배정된 뒤에도 과거 반환 재조회는 새 lease를 건드리지 않는다.
 - 풀 반환 직후 위임 저장 전에 중단되면 서버 시작 시 귀속이 일치하는 `released-preserved` receipt만 대사해 과거 위임을 종료한다. 운영자가 서버 중지를 검증한 유지보수에서도 `WorkspacePoolManager.initialize({ recoverWorkspaces: false })`와 동일 반환 메서드를 사용할 수 있다. 실행 중 서버와 동시에 별도 manager를 실행하거나 JSON을 직접 편집하지 않는다. 원 실행의 종료와 다른 lease의 보존을 먼저 확인하고 `scope.operator`에 실제 운영 계정을 기록한다.
 
 복구 목록은 같은 카드·대화의 활성 위임이 있으면 `recoveryAvailable=false` 및 `blockedReasonCode=AI_DELEGATION_ALREADY_ACTIVE`를 반환한다. 이전 `integrationRecoveryRequest`의 실패 시각/사유는 과거 시도로 표시하며 현재 Git 상태라고 단정하지 않는다.
 
-체크포인트의 text → -text 속성 변경 중 자동 CRLF 변환이 로컬 변경으로 오인되는 문제를 막기 위해, 유효 설정이 `core.autocrlf=true`인 경우 통합 cherry-pick 명령에만 `core.autocrlf=input`을 적용한다. 기존 CRLF 파일의 입력 정규화는 유지하며 checkout 변환만 끈다. false/input/미설정인 저장소는 그대로 사용하고, 저장소/시스템 설정이나 소스 커밋은 변경하지 않는다.
+체크포인트의 text → -text 속성 변경 중 자동 CRLF 변환이 로컬 변경으로 오인되는 문제를 막기 위해, 유효 설정이 `core.autocrlf=true`인 경우 **통합 기준 브랜치 전환과 cherry-pick 모두** 명령 단위로 `core.autocrlf=input`을 적용한다. cherry-pick만 바꾸면 기준 브랜치에 이미 있던 파일이 CRLF로 준비되어 첫 속성 변경 뒤 다음 커밋에서 다시 실패한다. 기존 CRLF 파일의 입력 정규화는 유지하며 checkout 변환만 끈다. false/input/미설정인 저장소는 그대로 사용하고, 저장소/시스템 설정이나 소스 커밋은 변경하지 않는다.
+
+### 승인된 과거 CRLF checkout 보존·정리
+
+이미 격리된 결과의 반환에서는 `close` 요청에 선택적으로 `trackedEolRecovery: { expectedHead, files: [{ path, expectedSha256 }] }`를 지정할 수 있다. 운영자가 확인한 실패 후보 HEAD와 CRLF 원본의 SHA-256을 승인한 경우만 사용한다. 일반 UI 반환이나 통합 재시도는 이 옵션을 자동으로 넣지 않는다.
+
+- 기존 소유권·세션·원본 체크포인트·부분 적용·sequencer 검증을 모두 통과한 **결과 보존 반환**에만 적용한다. staged/미추적/추가 변경, 링크, 다른 HEAD, Git 잠금은 거부한다.
+- 승인한 1~64개 일반 파일(각 8MiB 이하)만 처리한다. 현재 `-text`, 후보와 동일한 index, UTF-8 LF 후보 blob, 후보에 CR만 추가한 정확한 CRLF 원본의 바이트·SHA-256을 대조한다. JSON 의미가 같다는 이유로 다른 바이트를 무시하지 않는다.
+- `sharedRoot/workspace-drift/<worker>/eol-recovery-<고유값>/`에 원본 바이트와 승인·귀속·파일별 해시를 보존하고 다시 읽어 검증한 뒤 풀에 내구 저장한다. 정리할 원문도 `removed-<번호>`로 이동해 보존하고, Git 후보의 정확한 LF 바이트로 일반 파일을 배타 생성한다. main이나 소스 브랜치·커밋은 변경하지 않는다.
+- 도중 중단 시 원문·정리 완료 파일·이동된 원문을 승인 기록과 대조해 같은 반환을 이어간다. 경계에서 다른 변경이 발견되면 원문을 보존하고 격리를 유지한다. 모든 파일이 clean인지 재검증한 뒤에만 기존 반환 절차를 완료한다.
+- 반환 결과의 `preservedRelease.trackedEolRecovery`에 보존 위치와 해시가 남는다. 별도 manager를 사용한 운영 회수는 서버 중지 검증 후에만 가능하며 운영 서버와 동시 쓰기는 금지한다.
 
 ## 자동 재시도 대상
 
