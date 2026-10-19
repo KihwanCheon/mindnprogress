@@ -7,6 +7,7 @@ import { retryDispatchStatus, throwIfRuntimeStopping } from './lib/runtimeStoppi
 import { createAiWorkspaceSettings } from './lib/aiWorkspaceSettings.mjs'
 import { createAiDialogPreferences } from './lib/aiDialogPreferences.mjs'
 import { replaceFileWithRetry } from './lib/replaceFileWithRetry.mjs'
+import { backfillDailyBackupHistory } from './lib/dailyBackupHistory.mjs'
 import { createDocumentMutationGate, createDocumentReconstruction, reconstructionError } from './lib/documentReconstruction.mjs'
 import { createReconstructionRequests } from './lib/documentReconstructionRequests.mjs'
 import { createCardLayoutRequests } from './lib/cardLayoutRequests.mjs'
@@ -6575,49 +6576,27 @@ async function ensureDailyBackups() {
 }
 
 async function backfillDailyBackupsFromHistory() {
+  const started = performance.now()
   const summaries = await listMaps()
   let created = 0
+  let checkedMaps = 0
+  let historyReadCount = 0
+  let reusedHistoryCount = 0
   for (const summary of summaries) {
     const map = await readMap(summary.id)
     if (!map || map.trashedAt) continue
-    const revisions = await readAllMapRevisions(map.id)
-    const latestByDate = new Map()
-    for (const revision of revisions) {
-      const snapshotAt = new Date(revision.map.updatedAt ?? revision.archivedAt)
-      if (!Number.isFinite(snapshotAt.getTime())) continue
-      const date = seoulDateString(snapshotAt)
-      const previous = latestByDate.get(date)
-      if (!previous || snapshotAt > previous.snapshotAt) latestByDate.set(date, { revision, snapshotAt })
-    }
-    const currentSnapshotAt = new Date(map.updatedAt ?? Date.now())
-    if (Number.isFinite(currentSnapshotAt.getTime())) {
-      const date = seoulDateString(currentSnapshotAt)
-      const previous = latestByDate.get(date)
-      if (!previous || currentSnapshotAt > previous.snapshotAt) latestByDate.set(date, {
-        revision: { map, archivedBy: map.updatedBy ?? systemUser },
-        snapshotAt: currentSnapshotAt,
-      })
-    }
-    for (const [date, { revision }] of latestByDate) {
-      const backup = await writeDailyBackup(revision.map, revision.archivedBy ?? systemUser, 'history-backfill', date, { overwrite: false })
-      if (backup) created += 1
-    }
+    const result = await backfillDailyBackupHistory({
+      dataDirectory, map, isValidMapId, isValidRevisionId, isValidMap, dateString: seoulDateString,
+      writeBackup: (snapshot, user, date) => writeDailyBackup(snapshot, user ?? systemUser, 'history-backfill', date, { overwrite: false }),
+      writeIndex: writeStoredArray,
+    })
+    checkedMaps += 1
+    created += result.created
+    historyReadCount += result.historyReadCount
+    reusedHistoryCount += result.reusedHistoryCount
   }
+  console.log(`[일일 백업 이력 보정] 문서 ${checkedMaps}개, 이력 본문 읽기 ${historyReadCount}회, 인덱스 재사용 ${reusedHistoryCount}개, 백업 생성 ${created}개, ${Math.round(performance.now() - started)}ms`)
   return created
-}
-
-async function readAllMapRevisions(mapId) {
-  const directory = revisionDirectoryForMap(mapId)
-  try {
-    const entries = await readdir(directory, { withFileTypes: true })
-    const revisions = await Promise.all(entries
-      .filter((entry) => entry.isFile() && entry.name.endsWith('.json') && isValidRevisionId(entry.name.slice(0, -5)))
-      .map(async (entry) => JSON.parse(await readFile(path.join(directory, entry.name), 'utf8'))))
-    return revisions.filter((revision) => revision?.mapId === mapId && isValidMap(revision.map))
-  } catch (error) {
-    if (error?.code === 'ENOENT') return []
-    throw error
-  }
 }
 
 function revisionSummary(revision) {
