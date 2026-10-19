@@ -20,7 +20,7 @@
     "perToolWrapperChars": 35,
     "note": "과거 캡처·상수이며 이번 전체 주입량 실측값이 아닙니다."
   },
-  "dynamicTotalChars": 35521,
+  "dynamicTotalChars": 38000,
   "maxDynamicChars": 4598,
   "repetitionCounts": {
     "contextBootstrap": 12,
@@ -84,28 +84,28 @@
     },
     {
       "name": "document-coordinator-new",
-      "chars": 2121,
-      "sha256": "2b1973ed00d57a29e1ca78524ee7c71091a12a26d14601cb22f9244f66e818f1"
+      "chars": 2264,
+      "sha256": "3e3967ddab02c2fd16a59b75141e0b0cb01bdc20bd0408062cb4683672010e28"
     },
     {
       "name": "document-delivery",
-      "chars": 2959,
-      "sha256": "87945dcf058297792f542998d74e82d01080c5600bb575379b80dba4e93b1f38"
+      "chars": 3102,
+      "sha256": "a6dd3c15fb257f2edfc70cf37f0ea9699fc5c3c87db46c06f5be4b7a6af44a49"
     },
     {
       "name": "worker-new-no-lease",
-      "chars": 1260,
-      "sha256": "d4ca1f02cf9964e2e4242812352bab45d0f1bdf4e8bc2bd232ef906ffc226aaf"
+      "chars": 1403,
+      "sha256": "90f1ecc7cf3d4d017bccac42e16cff868dbcdd2dfe5e45f69ec935aec3cbddd7"
     },
     {
       "name": "worker-new-lease",
-      "chars": 2920,
-      "sha256": "96d19f1ad5461eded4808440d421df9496f07c11eca5ff54e8af4557495215b7"
+      "chars": 3063,
+      "sha256": "0f4f0d14349585ca505d6924260d2772e92b4ab89de3ca487a96392f21ea77ca"
     },
     {
       "name": "worker-resume",
-      "chars": 1260,
-      "sha256": "d4ca1f02cf9964e2e4242812352bab45d0f1bdf4e8bc2bd232ef906ffc226aaf"
+      "chars": 1403,
+      "sha256": "90f1ecc7cf3d4d017bccac42e16cff868dbcdd2dfe5e45f69ec935aec3cbddd7"
     },
     {
       "name": "shared-knowledge-proposal",
@@ -114,18 +114,18 @@
     },
     {
       "name": "parent-wake",
-      "chars": 1177,
-      "sha256": "47de8e932ab6ba933b5c930888b6b0cf7e80ae1f5d0bc46384e5dfc08b788b9f"
+      "chars": 1916,
+      "sha256": "217cae42ef5cec4b7818ee0815be16027dc037c02ccaab1ce6660ec8fba8faab"
     },
     {
       "name": "group-parent-wake",
-      "chars": 3451,
-      "sha256": "9b582b52a38a96974ddec6a193c5a73dcd527d07defdd2573c40657aedeebcf9"
+      "chars": 4333,
+      "sha256": "84276581e8053fed0112c0fc782c6c499703d39e1a892dd01444127c23b9d566"
     },
     {
       "name": "user-stop-recovery",
-      "chars": 3710,
-      "sha256": "87c085fda83b97e71c779e06b34183d7f453aa0b9636b6bb4bcce8302d7ed72f"
+      "chars": 3853,
+      "sha256": "7454ada7f4e0ad53a54532c4c0f6094915b92db7e97acb3ac7b4776f078b9484"
     },
     {
       "name": "reconstruction",

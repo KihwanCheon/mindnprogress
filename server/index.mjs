@@ -34,7 +34,7 @@ import {
 } from './lib/groupDocumentInstructions.mjs'
 import { createDoorayResponseIntegration } from './lib/doorayResponseIntegration.mjs'
 import { createDoorayResponsePreferences } from './lib/doorayResponsePreferences.mjs'
-import { AI_EXECUTION_APPROVAL_INSTRUCTION, GROUP_APPROVAL_INSTRUCTION, GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION, AI_DELEGATION_FOLLOWUP_INSTRUCTION, AI_DELEGATION_REPORT_INSTRUCTION } from '../src/utils/aiApprovalInstructions.mjs'
+import { AI_EXECUTION_APPROVAL_INSTRUCTION, GROUP_APPROVAL_INSTRUCTION, GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION, AI_DELEGATION_FOLLOWUP_INSTRUCTION, AI_DELEGATION_REPORT_INSTRUCTION, AI_DELEGATION_RESULT_INSTRUCTION } from '../src/utils/aiApprovalInstructions.mjs'
 import { MNP_CONTEXT_BOOTSTRAP_INSTRUCTION } from '../src/utils/aiContextInstructions.mjs'
 import { applyMapContentPatch, MapContentPatchError } from '../src/utils/mapContentPatch.mjs'
 import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto'
@@ -2380,6 +2380,7 @@ function issueDelegatedAttribution({ mapId, cardId, conversationId, selection, s
 
 function buildDelegatedInstruction({ mapId, cardId, editorId, attributionToken, instruction, workspaceLease }) {
   const workspaceInstruction = buildWorkspaceInstruction(workspaceLease)
+  const resultInstruction = instruction.includes(AI_DELEGATION_RESULT_INSTRUCTION) ? '' : `${AI_DELEGATION_RESULT_INSTRUCTION}\n\n`
   return `# MindNProgress 하위 카드 위임 작업 요청
 
 ${MNP_CONTEXT_BOOTSTRAP_INSTRUCTION}
@@ -2397,7 +2398,7 @@ MCP 조회 결과의 \`guide\`, \`selection.taskLinks.startupInspection\`, \`sel
 
 MCP 도구를 사용할 수 없거나 문서 또는 카드를 찾지 못하면 임의로 추측하지 말고 확인 가능한 범위만 수행한 뒤 제약을 명확히 남기세요.
 
-${workspaceInstruction ? `${workspaceInstruction}\n` : ''}
+${resultInstruction}${workspaceInstruction ? `${workspaceInstruction}\n` : ''}
 
 # 상위 AI 지시
 
@@ -3714,6 +3715,7 @@ async function parentWakeInstruction(delegation, reportResult = aiDelegationRepo
 대상 문서: ${delegation.mapId}. 상위 문서: ${delegation.parentMapId ?? delegation.mapId}.
 
 - 위임 ID: ${delegation.id}
+- 상위 카드: ${delegation.parentCardLabel ?? '상위 카드'} (${delegation.parentCardId ?? '미확인'})
 - 하위 카드: ${delegation.targetCardLabel} (${delegation.targetCardId})
 - 실행 대화: ${conversationDisplay.displayLabel}
 - 하위 실행 턴: ${delegation.childTurnId ?? '미확인'}
@@ -3722,9 +3724,15 @@ async function parentWakeInstruction(delegation, reportResult = aiDelegationRepo
 - 선택 이유: ${delegation.decisionReason}
 ${workspaceResult}
 
-${approvalInstruction}${aiDelegationResultSection(reportResult)}${AI_DELEGATION_REPORT_INSTRUCTION}
+당신은 이 하위 작업을 위임한 상위 AI입니다. 위 상위 문서·카드의 원래 목표와 맡은 범위를 기준으로 아래 결과를 판단하세요.
 
-${followupInstruction}`
+${approvalInstruction}${followupInstruction}
+
+${aiDelegationResultSection(reportResult)}## 상위 AI의 결과 처리
+
+${AI_DELEGATION_REPORT_INSTRUCTION}
+
+목표 대비 달성 여부와 판정 근거, 남은 필수 작업을 먼저 보고하세요. 보완을 이어가면 미충족 조건과 종료 조건을, 보완을 마치면 완료 근거와 다음 단계를 명시하세요. 선택 개선은 별도 제안으로 구분하세요.`
 }
 
 function aiDelegationRecoveryKey(delegation) {

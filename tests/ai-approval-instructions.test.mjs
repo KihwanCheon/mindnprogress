@@ -7,6 +7,8 @@ import {
   GROUP_COORDINATOR_INSTRUCTION,
   DOCUMENT_COORDINATOR_INSTRUCTION,
   AI_DELEGATION_FOLLOWUP_INSTRUCTION,
+  AI_DELEGATION_REVIEW_INSTRUCTION,
+  AI_DELEGATION_RESULT_INSTRUCTION,
   GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION,
   buildGroupCoordinatorRequest,
   buildGroupDocumentRequest,
@@ -81,6 +83,30 @@ test('일반 결과 회수는 실제 산출물 검증 뒤 맡긴 범위의 후�
   assert.match(AI_DELEGATION_FOLLOWUP_INSTRUCTION, /다음 작업을 위임하기로 판단했다면.*실제로 호출하고 성공 결과/)
   assert.match(AI_DELEGATION_FOLLOWUP_INSTRUCTION, /분석·제안만 요청받았다면 구현으로 확대하지/)
   assert.doesNotMatch(AI_DELEGATION_FOLLOWUP_INSTRUCTION, /사용자 승인|승인 대기|두 단계 승인/)
+})
+
+test('결과 검수는 원래 목표를 기준으로 필요한 보완과 선택 개선을 구분하고 종료한다', () => {
+  for (const instruction of [AI_DELEGATION_FOLLOWUP_INSTRUCTION, GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION]) {
+    assert.ok(instruction.startsWith(AI_DELEGATION_REVIEW_INSTRUCTION))
+    assert.equal(instruction.split(AI_DELEGATION_REVIEW_INSTRUCTION).length - 1, 1)
+  }
+  assert.match(AI_DELEGATION_REVIEW_INSTRUCTION, /목적.*범위.*완료 조건.*먼저/)
+  assert.match(AI_DELEGATION_REVIEW_INSTRUCTION, /원문·출처.*체크리스트.*후속 제안.*자동 채택하지/s)
+  assert.match(AI_DELEGATION_REVIEW_INSTRUCTION, /미충족 조건.*확인된 근거.*목표 달성에 필요한 이유.*종료 조건/)
+  assert.match(AI_DELEGATION_REVIEW_INSTRUCTION, /오류·회귀·필수 검증 누락/)
+  assert.match(AI_DELEGATION_REVIEW_INSTRUCTION, /완료 조건과 필수 검증을 충족하면.*보완을 종료/)
+  assert.match(AI_DELEGATION_REVIEW_INSTRUCTION, /선택 개선.*현재 업무의 완료 조건에 추가하지/)
+  assert.match(AI_DELEGATION_REVIEW_INSTRUCTION, /같은 지적과 같은 처방.*진전 없이 반복.*재위임.*멈추/s)
+  assert.match(AI_DELEGATION_REVIEW_INSTRUCTION, /미해결 문제를 완료 처리하지/)
+  assert.doesNotMatch(AI_DELEGATION_REVIEW_INSTRUCTION, /당신은.*상위 AI/)
+})
+
+test('하위 보고는 달성 결과와 필수 미완료 및 선택 개선을 분리하고 새 실행을 지시하지 않는다', () => {
+  assert.match(AI_DELEGATION_RESULT_INSTRUCTION, /맡은 목표.*달성 결과.*검증 근거/)
+  assert.match(AI_DELEGATION_RESULT_INSTRUCTION, /필수 미완료.*선택 개선/)
+  assert.match(AI_DELEGATION_RESULT_INSTRUCTION, /없으면.*없음/)
+  assert.match(AI_DELEGATION_RESULT_INSTRUCTION, /실행 지시나 새로운 완료 조건으로.*단정하지/)
+  assert.ok(DOCUMENT_COORDINATOR_INSTRUCTION.includes(AI_DELEGATION_RESULT_INSTRUCTION))
 })
 
 test('최대 길이의 그룹·문서 식별자에서도 승인 규칙과 마지막 검수 지침이 잘리지 않는다', () => {

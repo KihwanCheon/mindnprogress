@@ -4,6 +4,8 @@ export const GROUP_COORDINATOR_APPROVAL_BOOTSTRAP_INSTRUCTION: string
 export const GROUP_COORDINATOR_INSTRUCTION: string
 export const DOCUMENT_COORDINATOR_INSTRUCTION: string
 export const AI_DELEGATION_FOLLOWUP_INSTRUCTION: string
+export const AI_DELEGATION_REVIEW_INSTRUCTION: string
+export const AI_DELEGATION_RESULT_INSTRUCTION: string
 export const GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION: string
 export const AI_DELEGATION_REPORT_INSTRUCTION: string
 export function buildGroupCoordinatorRequest(input: { groupId: string; instruction?: string }): string

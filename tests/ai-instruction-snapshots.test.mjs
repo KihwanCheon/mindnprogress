@@ -6,12 +6,14 @@ import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import {
   AI_EXECUTION_APPROVAL_INSTRUCTION,
+  AI_DELEGATION_REVIEW_INSTRUCTION,
+  AI_DELEGATION_RESULT_INSTRUCTION,
   DOCUMENT_COORDINATOR_INSTRUCTION,
   GROUP_APPROVAL_INSTRUCTION,
   GROUP_COORDINATOR_INSTRUCTION,
 } from '../src/utils/aiApprovalInstructions.mjs'
 import { MNP_CONTEXT_BOOTSTRAP_INSTRUCTION } from '../src/utils/aiContextInstructions.mjs'
-import { buildAiInstructionSnapshots, buildOrdinaryRecoverySnapshot } from './helpers/aiInstructionSnapshots.mjs'
+import { buildAiInstructionSnapshots, buildOrdinaryRecoverySnapshot, buildDocumentDelegationSnapshot, buildParentWakeSnapshot } from './helpers/aiInstructionSnapshots.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const budget = JSON.parse(await readFile(path.join(root, 'tests/fixtures/ai-instruction-budget.json'), 'utf8'))
@@ -41,6 +43,18 @@ test('17개 실제 전달 전문은 복구한 조립 경로의 전문·해시와
   assert.equal(byName['worker-new-no-lease'], byName['worker-resume'])
   assert.match(byName['worker-resume'], /사용자의 중지로 끊긴 뒤 같은 대화에서 직접 이어진 경우/)
   assert.match(byName['parent-wake'], /하위 AI의 마지막 응답.*완료 결과가 보고 대기이면/s)
+  for (const name of ['parent-wake', 'group-parent-wake']) {
+    const prompt = byName[name]
+    assert.match(prompt, /당신은 이 하위 작업을 위임한 상위 AI입니다/)
+    assert.match(prompt, /상위 카드: 상위 카드 \(parent-card-fixture\)/)
+    assert.equal(count(prompt, AI_DELEGATION_REVIEW_INSTRUCTION), 1)
+    assert.ok(prompt.indexOf(AI_DELEGATION_REVIEW_INSTRUCTION) < prompt.indexOf('## 하위 AI의 마지막 응답'))
+    assert.match(prompt, /## 상위 AI의 결과 처리.*목표 대비.*판정.*남은 필수 작업/s)
+  }
+  for (const name of ['worker-new-no-lease', 'worker-new-lease', 'worker-resume', 'user-stop-recovery', 'document-delivery']) {
+    assert.equal(count(byName[name], AI_DELEGATION_RESULT_INSTRUCTION), 1)
+    assert.doesNotMatch(byName[name], /당신은 이 하위 작업을 위임한 상위 AI입니다/)
+  }
   assert.ok(byName['group-parent-wake'].includes(AI_EXECUTION_APPROVAL_INSTRUCTION))
   assert.ok(byName['group-parent-wake'].includes(GROUP_APPROVAL_INSTRUCTION))
   assert.equal([...byName['user-stop-recovery'].matchAll(/^# 할당된 작업공간$/gm)].length, 1)
@@ -61,4 +75,23 @@ test('17개 실제 전달 전문은 복구한 조립 경로의 전문·해시와
   assert.equal(count(combined, 'workflow:'), 0)
   assert.ok(count(combined, GROUP_COORDINATOR_INSTRUCTION) >= 1)
   assert.ok(count(buildOrdinaryRecoverySnapshot(), 'mindnprogress_complete_ai_delegation') >= 1)
+})
+
+test('기존 문서 담당 위임에도 결과 보고 지침을 한 번만 전달한다', () => {
+  const prompt = buildDocumentDelegationSnapshot()
+  assert.equal(count(prompt, AI_DELEGATION_RESULT_INSTRUCTION), 1)
+  assert.doesNotMatch(prompt, /당신은 이 하위 작업을 위임한 상위 AI입니다/)
+})
+
+test('원문 미캡처·무결성 오류에서도 목표 판단과 수신 확인 제약을 보존한다', async () => {
+  for (const availability of ['unavailable', 'integrity-failed']) {
+    const prompt = await buildParentWakeSnapshot({ parentMapId: 'parent-map', parentCardId: undefined }, {
+      availability, text: '전달하면 안 되는 하위 결과',
+    })
+    assert.match(prompt, /상위 문서: parent-map/)
+    assert.match(prompt, /상위 카드: 상위 카드 \(미확인\)/)
+    assert.ok(prompt.indexOf(AI_DELEGATION_REVIEW_INSTRUCTION) < prompt.indexOf('## 하위 AI 원문'))
+    assert.doesNotMatch(prompt, /전달하면 안 되는 하위 결과/)
+    assert.match(prompt, /원문·해시가 없으면 임의 확인하지/)
+  }
 })

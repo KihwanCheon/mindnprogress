@@ -6,7 +6,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { AI_EXECUTION_APPROVAL_INSTRUCTION, AI_DELEGATION_FOLLOWUP_INSTRUCTION, GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION } from '../src/utils/aiApprovalInstructions.mjs'
+import { AI_EXECUTION_APPROVAL_INSTRUCTION, AI_DELEGATION_FOLLOWUP_INSTRUCTION, AI_DELEGATION_REVIEW_INSTRUCTION, GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION } from '../src/utils/aiApprovalInstructions.mjs'
 
 const projectDirectory = path.resolve(import.meta.dirname, '..')
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -226,6 +226,13 @@ for (const groupCoordinator of [false, true]) test(`재시작 후 ${groupCoordin
     assert.equal(dispatchRequests[0].instruction.includes(AI_EXECUTION_APPROVAL_INSTRUCTION), groupCoordinator)
     assert.equal(dispatchRequests[0].instruction.includes(GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION), groupCoordinator)
     assert.equal(dispatchRequests[0].instruction.includes(AI_DELEGATION_FOLLOWUP_INSTRUCTION), !groupCoordinator)
+    const prompt = dispatchRequests[0].instruction
+    assert.match(prompt, /상위 카드: 상위 \(parent-card\)/)
+    assert.match(prompt, /당신은 이 하위 작업을 위임한 상위 AI입니다/)
+    assert.equal(prompt.split(AI_DELEGATION_REVIEW_INSTRUCTION).length - 1, 1)
+    assert.ok(prompt.indexOf(AI_DELEGATION_REVIEW_INSTRUCTION) < prompt.indexOf('## 하위 AI의 마지막 응답'))
+    assert.ok(prompt.includes('검증된 하위 결과'))
+    assert.ok(prompt.indexOf('## 상위 AI의 결과 처리') > prompt.indexOf('검증된 하위 결과'))
     assert.equal(after.find((x) => x.id === 'pending-auto').parentDispatchState, 'running')
     assert.equal(after.find((x) => x.id === 'pending-auto').reportPending, false)
     if (!groupCoordinator) {

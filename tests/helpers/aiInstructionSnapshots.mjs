@@ -1,6 +1,7 @@
 import {
   AI_DELEGATION_FOLLOWUP_INSTRUCTION,
   AI_DELEGATION_REPORT_INSTRUCTION,
+  AI_DELEGATION_RESULT_INSTRUCTION,
   AI_EXECUTION_APPROVAL_INSTRUCTION,
   DOCUMENT_COORDINATOR_INSTRUCTION,
   GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION,
@@ -35,6 +36,7 @@ ${extract('function aiDelegationResultSection(', 'function aiDelegationRecoveryK
   MNP_CONTEXT_BOOTSTRAP_INSTRUCTION, buildWorkspaceInstruction,
   DOCUMENT_COORDINATOR_INSTRUCTION, AI_EXECUTION_APPROVAL_INSTRUCTION, GROUP_APPROVAL_INSTRUCTION,
   AI_DELEGATION_FOLLOWUP_INSTRUCTION, GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION, AI_DELEGATION_REPORT_INSTRUCTION,
+  AI_DELEGATION_RESULT_INSTRUCTION,
   groupProjects: { forDocument: async () => null },
   readMap: async () => null, documentRoot: () => null,
   aiDelegationReportResult: () => ({ availability: 'captured', text: '구현과 검증을 완료했습니다.' }),
@@ -67,6 +69,8 @@ const delegation = {
   id: 'delegation-fixture',
   mapId: identity.mapId,
   parentMapId: identity.mapId,
+  parentCardId: 'parent-card-fixture',
+  parentCardLabel: '상위 카드',
   targetCardId: identity.cardId,
   targetCardLabel: '하위 카드',
   targetConversationId: 'conversation-child',
@@ -133,4 +137,12 @@ export async function buildAiInstructionSnapshots() {
 export function buildOrdinaryRecoverySnapshot() {
   const recovery = delegationRecoveryInstruction(delegation, workerInstruction, { failureCategory: 'restart' }, '하위 대화')
   return buildDelegatedInstruction({ ...identity, instruction: recovery, workspaceLease })
+}
+
+export function buildDocumentDelegationSnapshot() {
+  return buildDelegatedInstruction({ ...identity, instruction: `${DOCUMENT_COORDINATOR_INSTRUCTION}\n\n${workerInstruction}` })
+}
+
+export function buildParentWakeSnapshot(delegationOverrides, reportResult) {
+  return parentWakeInstruction({ ...delegation, ...delegationOverrides }, reportResult)
 }
