@@ -4,9 +4,15 @@ AionUi 백엔드는 현재 대화가 MindNProgress 카드에 연결되어 있는
 
 브라우저에 MindNProgress 연동 토큰을 노출하지 않도록 두 API는 AionUi 백엔드에서 호출한다.
 
+## 서브 머신 Runner 중계
+
+서브 머신의 AionCore는 로컬 MnP를 사용할 수 없으면 AionUi Runner의 로컬 중계 정보를 읽어 같은 조회·선택 API를 호출한다. Runner는 로컬 전용 토큰을 검증하고 메인 MnP로 보낼 때만 머신 토큰을 사용한다. 브라우저와 AionCore에는 머신 토큰을 전달하지 않는다.
+
+Runner 요청에는 `X-MnP-Runner-MCP-Machine-Id`와 `X-MnP-AI-Conversation-Id`가 포함된다. 서버는 머신 토큰, 대화 원본의 실행 머신과 시작 계정, URL의 대화 ID와 헤더의 일치를 검증한다. 조회 경로는 GET, `/select` 경로는 POST만 허용한다. AionCore에서 구한 `X-MNP-Selection-Device-Address`를 중계에서도 보존하여 같은 계정·디바이스의 화면에만 선택 이벤트를 보낸다.
+
 ## 인증과 선택 식별자
 
-두 API 모두 MindNProgress 데이터 폴더의 `_integration-token` 값을 Bearer 토큰으로 사용한다.
+로컬 직접 연결에서는 두 API 모두 MindNProgress 데이터 폴더의 `_integration-token` 값을 Bearer 토큰으로 사용한다. 서브 머신은 위 Runner 중계 절차로 인증한다.
 
 ```http
 Authorization: Bearer {integration-token}

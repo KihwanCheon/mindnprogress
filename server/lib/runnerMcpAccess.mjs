@@ -25,6 +25,8 @@ const allowedDoorayIntegrationPaths = Object.freeze([
   /^\/api\/integrations\/dooray\/response-approvals\/[A-Za-z0-9_-]{1,120}$/,
 ])
 
+const conversationNavigationPath = /^\/api\/integrations\/aionui\/conversations\/([A-Za-z0-9_-]{1,120})\/mindnprogress(\/select)?$/
+
 function bearerToken(headers) {
   const authorization = String(headers?.authorization ?? '')
   return authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : ''
@@ -33,6 +35,8 @@ function bearerToken(headers) {
 export function isRunnerMcpApiPathAllowed(method, pathname) {
   if (!['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(String(method ?? '').toUpperCase())) return false
   const normalizedPath = String(pathname ?? '')
+  const navigation = normalizedPath.match(conversationNavigationPath)
+  if (navigation) return String(method).toUpperCase() === (navigation[2] ? 'POST' : 'GET')
   if (allowedPathPrefixes.some((prefix) => normalizedPath === prefix || normalizedPath.startsWith(`${prefix}/`))) return true
   return [...allowedAionUiIntegrationPaths, ...allowedDoorayIntegrationPaths]
     .some((pattern) => pattern.test(normalizedPath))
@@ -69,6 +73,7 @@ export function authorizeRunnerMcpRequest({
   }
 
   const conversationId = String(request.headers['x-mnp-ai-conversation-id'] ?? '').trim()
+  const navigation = String(pathname ?? '').match(conversationNavigationPath)
   const origin = conversationOrigins.get(conversationId)
   const machine = findMachine(machineRegistry, machineId)
   const owner = users.find((candidate) => candidate.id === machine?.ownerUserId)
@@ -79,7 +84,8 @@ export function authorizeRunnerMcpRequest({
     && Number(candidate.expiresAt) > Date.now()
   ))
   const trustedConversation = origin ?? transientAttribution
-  if (!conversationId || !trustedConversation || normalizeMachineId(trustedConversation.homeMachineId) !== machineId
+  if (!conversationId || (navigation && navigation[1] !== conversationId)
+    || !trustedConversation || normalizeMachineId(trustedConversation.homeMachineId) !== machineId
     || !owner || owner.active === false || !['editor', 'admin'].includes(owner.role)
     || trustedConversation.startedBy !== owner.id) {
     return {

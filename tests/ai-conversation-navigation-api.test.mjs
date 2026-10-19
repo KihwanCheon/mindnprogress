@@ -237,7 +237,7 @@ test('AionUi 대화 조회와 화면 선택은 연결된 카드 및 같은 계�
     instructions: '',
   }))
   await writeFile(path.join(dataDirectory, '_ai-conversation-origins.json'), JSON.stringify([
-    { conversationId, mapId, cardId, startedBy: 'user-admin', linkedAt },
+    { conversationId, mapId, cardId, startedBy: 'user-admin', homeMachineId: 'macbook', linkedAt },
     { conversationId: legacyConversationId, mapId, cardId: 'card-legacy', linkedAt },
     { conversationId: cardOwnerConversationId, mapId, cardId: 'card-owner-link', linkedAt },
     { conversationId: attributionConversationId, mapId, cardId: 'card-owner-attribution', linkedAt },
@@ -273,6 +273,8 @@ test('AionUi 대화 조회와 화면 선택은 연결된 카드 및 같은 계�
       MNP_API_PORT: String(port),
       MNP_WEB_PORT: String(port),
       MNP_EVENT_HEARTBEAT_INTERVAL_MS: '60000',
+      MNP_ADMIN_EMAIL: 'navigation-admin@mind.local',
+      MNP_ADMIN_PASSWORD: 'navigation-admin-password',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -292,6 +294,30 @@ test('AionUi 대화 조회와 화면 선택은 연결된 카드 및 같은 계�
     }
     const endpointFor = (id) => `${baseUrl}/api/integrations/aionui/conversations/${id}/mindnprogress`
     const endpoint = endpointFor(conversationId)
+
+    const login = await fetch(`${baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'navigation-admin@mind.local', password: 'navigation-admin-password' }),
+    })
+    assert.equal(login.status, 200)
+    const cookie = login.headers.get('set-cookie')?.split(';')[0]
+    assert.ok(cookie)
+    const machine = await fetch(`${baseUrl}/api/machines`, {
+      method: 'POST',
+      headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ machineId: 'macbook', label: '탐색 검증 서브 머신', platform: 'darwin' }),
+    })
+    assert.equal(machine.status, 200)
+    const issued = await fetch(`${baseUrl}/api/machines/macbook/token`, { method: 'POST', headers: { Cookie: cookie } })
+    assert.equal(issued.status, 200)
+    const runnerToken = (await issued.json()).token
+    const runnerHeaders = {
+      Authorization: `Bearer ${runnerToken}`,
+      'X-MnP-Runner-MCP-Machine-Id': 'macbook',
+      'X-MnP-AI-Conversation-Id': conversationId,
+      'X-MnP-Selection-Device-Address': '10.77.15.55',
+    }
 
     const unauthorized = await fetch(endpoint)
     assert.equal(unauthorized.status, 401)
@@ -424,6 +450,27 @@ test('AionUi 대화 조회와 화면 선택은 연결된 카드 및 같은 계�
     assert.match(remoteEvents, new RegExp(`"mapId":"${mapId}"`))
     assert.match(remoteEvents, new RegExp(`"cardId":"${cardId}"`))
 
+    const runnerLookup = await fetch(endpoint, { headers: runnerHeaders })
+    assert.equal(runnerLookup.status, 200)
+    const runnerLink = await runnerLookup.json()
+    assert.equal(runnerLink.exists, true)
+    assert.equal(runnerLink.matchingViewCount, 1)
+    assert.deepEqual(runnerLink.target, lookup.target)
+
+    const runnerSelectionResponse = await fetch(`${endpoint}/select`, { method: 'POST', headers: runnerHeaders })
+    assert.equal(runnerSelectionResponse.status, 200)
+    const runnerSelection = await runnerSelectionResponse.json()
+    assert.equal(runnerSelection.deliveredClientCount, 1)
+    assert.doesNotMatch(JSON.stringify(runnerSelection), /user-admin|10\.77\.15\.55|mnprl_|selectionDeviceKey/)
+    const runnerEvents = await readUntil(remoteReader, /"type":"ai-conversation-selection-requested"/)
+    assert.match(runnerEvents, new RegExp(`"cardId":"${cardId}"`))
+
+    const otherMachineConversation = await fetch(endpointFor(legacyConversationId), {
+      headers: { ...runnerHeaders, 'X-MnP-AI-Conversation-Id': legacyConversationId },
+    })
+    assert.equal(otherMachineConversation.status, 403)
+    assert.equal((await otherMachineConversation.json()).code, 'MNP_RUNNER_MCP_CONVERSATION_DENIED')
+
     const localSelectionResponse = await fetch(`${endpoint}/select`, { method: 'POST', headers: accountHeaders })
     assert.equal(localSelectionResponse.status, 200)
     const localSelection = await localSelectionResponse.json()
@@ -433,6 +480,7 @@ test('AionUi 대화 조회와 화면 선택은 연결된 카드 및 같은 계�
     assert.match(localEvents, new RegExp(`"mapId":"${mapId}"`))
     assert.match(localEvents, new RegExp(`"cardId":"${cardId}"`))
     assert.doesNotMatch(localEvents, new RegExp(remoteSelection.requestedAt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    assert.doesNotMatch(localEvents, new RegExp(runnerSelection.requestedAt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
 
     const mismatchingSelection = await fetch(`${endpoint}/select`, {
       method: 'POST',

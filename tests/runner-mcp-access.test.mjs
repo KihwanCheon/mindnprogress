@@ -4,11 +4,25 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { isRunnerMcpApiPathAllowed } from '../server/lib/runnerMcpAccess.mjs'
 
 const projectDirectory = path.resolve(import.meta.dirname, '..')
 const adminEmail = 'runner-mcp-admin@mind.local'
 const adminPassword = 'runner-mcp-admin-password'
 const conversationId = 'conversation-on-sub-machine'
+
+test('Runner 카드 탐색은 조회 GET과 선택 POST 경로만 허용한다', () => {
+  const pathname = `/api/integrations/aionui/conversations/${conversationId}/mindnprogress`
+  assert.equal(isRunnerMcpApiPathAllowed('GET', pathname), true)
+  assert.equal(isRunnerMcpApiPathAllowed('POST', `${pathname}/select`), true)
+  for (const method of ['POST', 'PUT', 'PATCH', 'DELETE', 'HEAD']) {
+    assert.equal(isRunnerMcpApiPathAllowed(method, pathname), false)
+  }
+  for (const method of ['GET', 'PUT', 'PATCH', 'DELETE', 'HEAD']) {
+    assert.equal(isRunnerMcpApiPathAllowed(method, `${pathname}/select`), false)
+  }
+  assert.equal(isRunnerMcpApiPathAllowed('GET', `${pathname}/extra`), false)
+})
 
 async function waitForServer(baseUrl, timeoutMs = 15_000) {
   const deadline = Date.now() + timeoutMs
@@ -108,6 +122,32 @@ test('Runner MCP만 머신 대화로 승격하고 로컬·외부 웹 인증은 �
     }
     const relayed = await jsonRequest(baseUrl, '/api/maps', { token: runnerToken, headers: runnerHeaders })
     assert.equal(relayed.response.status, 200)
+
+    const navigationPath = `/api/integrations/aionui/conversations/${conversationId}/mindnprogress`
+    const unlinked = await jsonRequest(baseUrl, navigationPath, { token: runnerToken, headers: runnerHeaders })
+    assert.equal(unlinked.response.status, 200)
+    assert.equal(unlinked.body.exists, false)
+
+    for (const suffix of ['', '/select']) {
+      const method = suffix ? 'POST' : 'GET'
+      const crossConversation = await jsonRequest(baseUrl,
+        `/api/integrations/aionui/conversations/another-conversation/mindnprogress${suffix}`,
+        { method, token: runnerToken, headers: runnerHeaders })
+      assert.equal(crossConversation.response.status, 403)
+      assert.equal(crossConversation.body.code, 'MNP_RUNNER_MCP_CONVERSATION_DENIED')
+
+      const wrongAccount = await jsonRequest(baseUrl, `${navigationPath}${suffix}`, {
+        method, token: runnerToken, headers: { ...runnerHeaders, 'X-MnP-AI-Editor-Id': 'user-other' },
+      })
+      assert.equal(wrongAccount.response.status, 403)
+      assert.equal(wrongAccount.body.code, 'MNP_RUNNER_MCP_ACCOUNT_MISMATCH')
+
+      const invalidToken = await jsonRequest(baseUrl, `${navigationPath}${suffix}`, {
+        method, token: 'invalid-machine-token', headers: runnerHeaders,
+      })
+      assert.equal(invalidToken.response.status, 401)
+      assert.equal(invalidToken.body.code, 'MNP_RUNNER_MCP_AUTH_FAILED')
+    }
 
     const approvedWithoutCardLink = await jsonRequest(baseUrl, '/api/maps', {
       token: runnerToken,
