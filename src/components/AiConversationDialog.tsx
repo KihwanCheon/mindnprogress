@@ -18,6 +18,13 @@ import {
 } from '../utils/aiConversationLaunch.mjs'
 import { loadAiConversationRole, type AiConversationRole } from '../utils/aiConversationRole.mjs'
 import { defaultAiSkillIds } from '../utils/aiSkillSelection.mjs'
+import {
+  normalizeAiDelegationRuntime,
+  readAiDelegationRuntime,
+  resolveAiDelegationRuntime,
+  saveAiDelegationRuntime,
+  type AiDelegationRuntime,
+} from '../utils/aiDelegationRuntimeSelection.mjs'
 import './AiConversationDialog.css'
 import { WorkspaceSettingsDialog } from './WorkspaceSettingsDialog'
 import { WorkspaceHistoryList } from './WorkspaceHistoryList'
@@ -152,7 +159,10 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
   const [modelId, setModelId] = useState('')
   const [mode, setMode] = useState('')
   const [thoughtLevel, setThoughtLevel] = useState('')
-  const [delegationRuntime, setDelegationRuntime] = useState({ agentId: '', modelId: '', mode: '', thoughtLevel: '' })
+  const [delegationSelection, setDelegationSelection] = useState<{ userId: string; machineId: string; value: AiDelegationRuntime; notice: string } | null>(null)
+  const savedDelegationRuntime = readAiDelegationRuntime(userId, machineId)
+  const activeDelegationSelection = delegationSelection?.userId === userId && delegationSelection.machineId === machineId ? delegationSelection : null
+  const delegationRuntime = activeDelegationSelection?.value ?? normalizeAiDelegationRuntime(null)
   const [workspace, setWorkspace] = useState('')
   const [workspaceExplicit, setWorkspaceExplicit] = useState(false)
   const [workspaceSavedScope, setWorkspaceSavedScope] = useState<'document' | 'group' | null>(null)
@@ -263,6 +273,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
     thoughtLevel: delegationThoughtLevel?.label,
   })
   const delegationSummary = [delegationAgent?.name, delegationModel?.label, delegationMode?.label, delegationThoughtLevel?.label].filter(Boolean).join(', ') || '선택사항'
+  const restorableDelegation = resolveAiDelegationRuntime(savedDelegationRuntime, options?.agents ?? [])
   const automaticRequest = combineAiEditorRequest(role?.automaticRequest, '', role?.fullInitialRequest, delegationInstruction)
   const selectedMcpServers = options?.mcpServers.filter((server) => server.required || selectedMcpIds.has(server.id)) ?? []
   const workspaceSummary = workspace.trim() || '선택 없음'
@@ -277,6 +288,20 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
     setModelId(nextAgent ? availableAiRuntimeOptionId(nextAgent.models, savedAgentSelection.modelId, nextAgent.defaultModelId) : '')
     setMode(nextAgent ? availableAiRuntimeOptionId(nextAgent.modes, savedAgentSelection.mode, nextAgent.defaultMode) : '')
     setThoughtLevel(nextAgent ? availableAiRuntimeOptionId(nextAgent.thoughtLevels, savedAgentSelection.thoughtLevel, nextAgent.defaultThoughtLevel) : '')
+  }
+
+  const changeDelegationRuntime = (value: AiDelegationRuntime) => {
+    if (loading || !options || options.machineId !== machineId) return
+    const selection = normalizeAiDelegationRuntime(value)
+    const saved = saveAiDelegationRuntime(userId, machineId, selection)
+    setDelegationSelection({ userId, machineId, value: selection,
+      notice: selection.agentId && !saved ? '마지막 선택값을 이 브라우저에 저장하지 못했습니다. 현재 선택은 유지됩니다.' : '' })
+  }
+
+  const restoreDelegationRuntime = () => {
+    if (loading || !options || options.machineId !== machineId || !restorableDelegation.selection.agentId) return
+    setDelegationSelection({ userId, machineId, value: restorableDelegation.selection,
+      notice: restorableDelegation.unavailableFields.length ? `현재 목록에 없는 ${restorableDelegation.unavailableFields.join('·')} 항목은 지정 안 함으로 두었습니다.` : '' })
   }
 
   const toggleSelection = (setter: Dispatch<SetStateAction<Set<string>>>, id: string) => {
@@ -313,7 +338,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
     setWorkspaceExplicit(false)
     setWorkspaceSavedScope(null)
     setWorkspacePrompt(false)
-    setDelegationRuntime({ agentId: '', modelId: '', mode: '', thoughtLevel: '' })
+    setDelegationSelection(null)
     setMachineId(value)
   }
 
@@ -572,21 +597,29 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
             <details className="ai-delegation-model-section">
               <summary><span className="ai-section-label">AI 위임 모델</span><span className="ai-section-selection" title={delegationSummary}>{delegationSummary}</span></summary>
               <div className="ai-delegation-model-content">
-                <p>하위 카드에 위임할 AI 설정을 자동 적용 내용에 추가합니다. AI 종류를 먼저 선택하고, 필요한 항목만 지정하세요.</p>
+                <div className="ai-delegation-model-guidance">
+                  <p>하위 카드에 위임할 AI 설정을 자동 적용 내용에 추가합니다. AI 종류를 먼저 선택하고, 필요한 항목만 지정하세요.</p>
+                  <button type="button" className="ai-delegation-restore" onClick={restoreDelegationRuntime}
+                    disabled={!restorableDelegation.selection.agentId}
+                    title={!savedDelegationRuntime ? '이 계정·실행 머신에 저장된 위임 설정이 없습니다.' : !restorableDelegation.selection.agentId ? '저장된 AI 종류를 현재 실행 머신에서 사용할 수 없습니다.' : '이 브라우저에서 마지막으로 선택한 위임 설정을 적용합니다.'}>
+                    마지막 선택값 적용
+                  </button>
+                </div>
+                {activeDelegationSelection?.notice && <p className="ai-delegation-model-notice" role="status">{activeDelegationSelection.notice}</p>}
                 <div className="ai-dialog-grid">
-                  <label><span>AI 종류 (선택사항)</span><select value={delegationAgent?.id ?? ''} onChange={(event) => setDelegationRuntime({ agentId: event.target.value, modelId: '', mode: '', thoughtLevel: '' })}>
+                  <label><span>AI 종류 (선택사항)</span><select value={delegationAgent?.id ?? ''} onChange={(event) => changeDelegationRuntime({ agentId: event.target.value, modelId: '', mode: '', thoughtLevel: '' })}>
                     <option value="">지정 안 함</option>
                     {options.agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
                   </select></label>
-                  <label><span>모델 (선택사항)</span><select value={delegationModel?.id ?? ''} disabled={!delegationAgent?.models.length} onChange={(event) => setDelegationRuntime((current) => ({ ...current, modelId: event.target.value }))}>
+                  <label><span>모델 (선택사항)</span><select value={delegationModel?.id ?? ''} disabled={!delegationAgent?.models.length} onChange={(event) => changeDelegationRuntime({ ...delegationRuntime, modelId: event.target.value })}>
                     <option value="">지정 안 함</option>
                     {delegationAgent?.models.map((item) => <option key={`${item.providerId ?? ''}-${item.id}`} value={item.id}>{item.label}</option>)}
                   </select></label>
-                  <label><span>권한 (선택사항)</span><select value={delegationMode?.id ?? ''} disabled={!delegationAgent?.modes.length} onChange={(event) => setDelegationRuntime((current) => ({ ...current, mode: event.target.value }))}>
+                  <label><span>권한 (선택사항)</span><select value={delegationMode?.id ?? ''} disabled={!delegationAgent?.modes.length} onChange={(event) => changeDelegationRuntime({ ...delegationRuntime, mode: event.target.value })}>
                     <option value="">지정 안 함</option>
                     {delegationAgent?.modes.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
                   </select></label>
-                  <label><span>사고 수준 (선택사항)</span><select value={delegationThoughtLevel?.id ?? ''} disabled={!delegationAgent?.thoughtLevels.length} onChange={(event) => setDelegationRuntime((current) => ({ ...current, thoughtLevel: event.target.value }))}>
+                  <label><span>사고 수준 (선택사항)</span><select value={delegationThoughtLevel?.id ?? ''} disabled={!delegationAgent?.thoughtLevels.length} onChange={(event) => changeDelegationRuntime({ ...delegationRuntime, thoughtLevel: event.target.value })}>
                     <option value="">지정 안 함</option>
                     {delegationAgent?.thoughtLevels.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
                   </select></label>

@@ -21,6 +21,7 @@ const workspaceContext = {mapId:'map-coordinator',groupId:'group-manager',groupN
 const options = {connected:true,machineId:'fixture',machineLabel:'테스트',machineRole:'main',machines:[{machineId:'fixture',label:'테스트',role:'main'}],protocol:'fixture:',defaultWorkspace:workspaceContext.workspace,workspaceContext,workspaceBrowseAvailable:false,skills:[],mcpServers:[],agents:[{id:'test',name:'테스트 AI',models:[{id:'test',label:'테스트'}],defaultModelId:'test',modes:[],thoughtLevels:[]}]};
 options.agents.push({id:'claude',name:'Claude Code',models:[{id:'opus',label:'Opus'},{id:'sonnet',label:'Sonnet'}],defaultModelId:'sonnet',modes:[{id:'accept-edits',label:'편집 허용'}],defaultMode:'accept-edits',thoughtLevels:[{id:'high',label:'높음'}],defaultThoughtLevel:'high'});
 options.machines.push({machineId:'sub',label:'서브 머신',role:'sub'});
+window.fixtureOptions = options;
 window.audit = { calls:[], fail:false, hold:false, closed:0, context:null };
 window.open = () => ({document:{body:{style:{}}},location:{href:''},closed:false,focus(){},close(){this.closed=true}});
 window.fetch = async (url, init = {}) => {
@@ -37,8 +38,8 @@ window.fetch = async (url, init = {}) => {
     body={...options,machineId,machineRole:machineId==='sub'?'sub':'main',workspaceContext:{...workspaceContext,machineId},agents:machineId==='sub'?[options.agents[0]]:options.agents};
   }
   else if (url.startsWith('/api/integrations/aionui/workspace-context')) body = {...workspaceContext,machineId:new URL(url,location.origin).searchParams.get('machineId')};
-  else if (url.startsWith('/api/integrations/aionui/workspaces?')) body = {userId:'fixture',machineId:new URL(url,location.origin).searchParams.get('machineId'),workspaces:[]};
-  else if (url === '/api/integrations/aionui/dialog-preferences') body = {userId:'fixture',sections:{workspace:true,mcp:true,skills:true}};
+  else if (url.startsWith('/api/integrations/aionui/workspaces?')) body = {userId:a.userId,machineId:new URL(url,location.origin).searchParams.get('machineId'),workspaces:[]};
+  else if (url === '/api/integrations/aionui/dialog-preferences') body = {userId:a.userId,sections:{workspace:true,mcp:true,skills:true}};
   else if (url === '/api/integrations/aionui/attributions') body = {editorId:'fixture',attributionToken:'fixture',completionUrl:'http://fixture.invalid/completion',statusUrl:'/api/integrations/aionui/launches/'+ 'A'.repeat(43) +'/status',approvalRequest:a.approvalRequest};
   else if (url.endsWith('/status')) {
     if (a.statusHttp) return new Response(JSON.stringify({error:'시작 상태 조회 실패'}),{status:a.statusHttp});
@@ -51,6 +52,7 @@ window.fetch = async (url, init = {}) => {
 let sequence = 0;
 window.renderDialog = (input = {}, flags = {}) => {
   Object.assign(window.audit,{calls:[],fail:false,hold:false,closed:0,launchStatus:null,statusHttp:0,confirmationError:'',approvalRequest:null,context:{map:{id:'map-coordinator',nodes:[{id:'root',data:{kind:'root'}},{id:'child',data:{kind:'task'}}],edges:[{source:'root',target:'child'}]},groupProject:{groupId:'group-manager',role:'coordinator',coordinatorMapId:'map-coordinator'}},...flags});
+  window.audit.userId = input.userId || 'fixture';
   flushSync(()=>root.render(React.createElement(AiConversationDialog,{key:++sequence,userId:'fixture',documentId:'map-coordinator',documentTitle:'총괄 문서',cardId:'root',cardTitle:'총괄 루트',purpose:'card',knowledgeSources:[],launchInWebUi:true,onClose:()=>window.audit.closed++,...input})));
 };
 window.fixtureReady = true;
@@ -134,8 +136,11 @@ test('실제 대화 팝업의 총괄 전문·선택적 위임 모델·전달 목
       await evaluate(`(() => {const el=document.querySelector(${JSON.stringify(selector)});el.value=${JSON.stringify(value)};el.dispatchEvent(new Event('change',{bubbles:true}))})()`)
     }
     const chooseDelegation = (index, value) => choose(`.ai-delegation-model-section label:nth-child(${index + 1}) select`, value)
+    const delegationValues = () => evaluate('[...document.querySelectorAll(".ai-delegation-model-section select")].map(el=>el.value)')
+    const restoreDelegation = () => evaluate('document.querySelector(".ai-delegation-model-section").open=true;document.querySelector(".ai-delegation-restore").click()')
     await open()
     assert.equal(await evaluate('document.querySelector(".ai-delegation-model-section").open'), false)
+    assert.equal(await evaluate('document.querySelector(".ai-delegation-restore").disabled'), true, '저장 이력이 없으면 적용 버튼을 비활성화한다')
     assert.equal(await preview(), expected)
     await evaluate('document.querySelector(".ai-delegation-model-section summary").click()')
     assert.deepEqual(await evaluate('[...document.querySelectorAll(".ai-delegation-model-section select")].map(el=>el.value)'), ['', '', '', ''])
@@ -155,8 +160,8 @@ test('실제 대화 팝업의 총괄 전문·선택적 위임 모델·전달 목
     for (const [width, theme] of [[1440, 'light'], [390, 'dark']]) {
       await send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false })
       await evaluate(`document.documentElement.dataset.theme=${JSON.stringify(theme)};document.querySelector('.ai-delegation-model-section').scrollIntoView({block:'center'})`)
-      const layout = await evaluate(`(() => {const section=document.querySelector('.ai-delegation-model-section'),content=document.querySelector('.ai-dialog-content');return {fits:content.scrollWidth<=content.clientWidth,selectsFit:[...section.querySelectorAll('select')].every(el=>el.getBoundingClientRect().right<=section.getBoundingClientRect().right)}})()`)
-      assert.deepEqual(layout, { fits: true, selectsFit: true })
+      const layout = await evaluate(`(() => {const section=document.querySelector('.ai-delegation-model-section'),content=document.querySelector('.ai-dialog-content'),guidance=section.querySelector('.ai-delegation-model-guidance').getBoundingClientRect(),button=section.querySelector('.ai-delegation-restore').getBoundingClientRect(),text=section.querySelector('.ai-delegation-model-guidance p').getBoundingClientRect();return {fits:content.scrollWidth<=content.clientWidth,selectsFit:[...section.querySelectorAll('select')].every(el=>el.getBoundingClientRect().right<=section.getBoundingClientRect().right),buttonRightAligned:Math.abs(button.right-guidance.right)<1,textNotOverlapped:text.right<button.left}})()`)
+      assert.deepEqual(layout, { fits: true, selectsFit: true, buttonRightAligned: true, textNotOverlapped: true })
       const shot = await send('Page.captureScreenshot', { format: 'png' })
       const shotPath = path.join(tmpdir(), `mnp-delegation-model-${width}-${theme}.png`)
       await writeFile(shotPath, Buffer.from(shot.data, 'base64'))
@@ -178,16 +183,65 @@ test('실제 대화 팝업의 총괄 전문·선택적 위임 모델·전달 목
 
     await open({ cardId: 'child' })
     assert.equal(await preview(), DEFAULT_AI_EDITOR_REQUEST, '다시 열면 위임 설정은 미지정 상태로 시작한다')
+    assert.deepEqual(await delegationValues(), ['', '', '', ''])
+    assert.equal(await evaluate('document.querySelector(".ai-delegation-restore").disabled'), false)
+    await restoreDelegation()
+    assert.deepEqual(await delegationValues(), ['claude', 'opus', 'accept-edits', 'high'])
+    assert.equal(await preview(), DEFAULT_AI_EDITOR_REQUEST + '\n\n' + instruction, '버튼을 눌러야 마지막 설정이 자동 적용 내용에 반영된다')
+    assert.equal(await evaluate('window.audit.calls.some(c=>c.method==="POST")'), false, '적용 버튼은 대화나 위임을 실행하지 않는다')
+
+    await evaluate('window.fixtureReady=false')
+    await send('Page.reload')
+    await waitFor(() => evaluate('window.fixtureReady'))
+    await open({ cardId: 'child' })
+    assert.equal(await preview(), DEFAULT_AI_EDITOR_REQUEST, '페이지 새로고침 후에도 자동 적용하지 않는다')
+    await restoreDelegation()
+    assert.deepEqual(await delegationValues(), ['claude', 'opus', 'accept-edits', 'high'], '브라우저 저장값을 다시 읽는다')
+
+    await open({ userId: 'other-account', cardId: 'child' })
+    assert.equal(await evaluate('document.querySelector(".ai-delegation-restore").disabled'), true, '다른 계정의 저장 설정을 불러오지 않는다')
+    await evaluate('window.fixtureOptions.agents[1].models=[{id:"sonnet",label:"Sonnet"}]')
+    await open({ cardId: 'child' })
+    await restoreDelegation()
+    assert.deepEqual(await delegationValues(), ['claude', '', 'accept-edits', 'high'], '없어진 모델은 기본 모델로 바꾸지 않는다')
+    assert.match(await evaluate('document.querySelector(".ai-delegation-model-notice").textContent'), /현재 목록에 없는 모델/)
+    await evaluate('window.fixtureOptions.agents[1].models=[{id:"opus",label:"Opus"},{id:"sonnet",label:"Sonnet"}]')
+    await open({ cardId: 'child' })
+    await restoreDelegation()
+    assert.deepEqual(await delegationValues(), ['claude', 'opus', 'accept-edits', 'high'], '불러오기 검증은 저장 원본을 덮어쓰지 않는다')
+    await evaluate('window.allFixtureAgents=window.fixtureOptions.agents;window.fixtureOptions.agents=window.fixtureOptions.agents.filter(a=>a.id!=="claude")')
+    await open({ cardId: 'child' })
+    assert.equal(await evaluate('document.querySelector(".ai-delegation-restore").disabled'), true)
+    assert.match(await evaluate('document.querySelector(".ai-delegation-restore").title'), /현재 실행 머신에서 사용할 수 없습니다/)
+    await evaluate('window.fixtureOptions.agents=window.allFixtureAgents')
+    await open({ cardId: 'child' })
+
     await chooseDelegation(0, 'claude')
     await chooseDelegation(1, 'opus')
     await chooseDelegation(0, 'test')
     assert.deepEqual(await evaluate('[...document.querySelectorAll(".ai-delegation-model-section select")].map(el=>el.value)'), ['test', '', '', ''], '위임 AI를 바꾸면 이전 모델·권한·사고 수준을 지운다')
     await chooseDelegation(0, '')
     assert.equal(await preview(), DEFAULT_AI_EDITOR_REQUEST, '전체 선택 해제 시 원문으로 복원한다')
+    await restoreDelegation()
+    assert.deepEqual(await delegationValues(), ['test', '', '', ''], '전체 선택 해제 후에도 마지막 지정값은 다시 적용할 수 있다')
     await chooseDelegation(0, 'claude')
+    await chooseDelegation(1, 'opus')
     await choose('.ai-machine-select select', 'sub')
     await waitFor(() => evaluate('Boolean(document.querySelector(".ai-auto-request textarea")) && document.querySelector(".ai-machine-select select").value === "sub"'))
     assert.equal(await preview(), DEFAULT_AI_EDITOR_REQUEST, '머신 변경 시 이전 머신 위임 설정을 전달하지 않는다')
+    assert.equal(await evaluate('document.querySelector(".ai-delegation-restore").disabled'), true)
+    await chooseDelegation(0, 'test')
+    await choose('.ai-machine-select select', 'fixture')
+    await waitFor(() => evaluate('Boolean(document.querySelector(".ai-auto-request textarea")) && document.querySelector(".ai-machine-select select").value === "fixture"'))
+    assert.equal(await preview(), DEFAULT_AI_EDITOR_REQUEST, '기존 머신으로 돌아와도 저장값을 자동 적용하지 않는다')
+    await restoreDelegation()
+    assert.deepEqual(await delegationValues(), ['claude', 'opus', '', ''], '머신별 마지막 지정값을 구분하고 선택하지 않은 값은 비워 둔다')
+    await evaluate('window.originalStorageSetItem=Storage.prototype.setItem;Storage.prototype.setItem=function(key,value){if(key.startsWith("mindnprogress-ai-delegation-runtime:"))throw new DOMException("용량 초과","QuotaExceededError");return window.originalStorageSetItem.call(this,key,value)}')
+    await chooseDelegation(3, 'high')
+    assert.match(await evaluate('document.querySelector(".ai-delegation-model-notice").textContent'), /저장하지 못했습니다/)
+    assert.deepEqual(await delegationValues(), ['claude', 'opus', '', 'high'], '브라우저 저장이 실패해도 현재 선택은 유지한다')
+    assert.ok((await preview()).includes('사고 수준 `높음`'))
+    await evaluate('Storage.prototype.setItem=window.originalStorageSetItem')
 
     const longApproval = '서버 승인 전문\n' + '조건'.repeat(2500) + '\n마지막 승인 조건'
     await open({ purpose: 'dooray-response', initialRequest: '화면 인계 내용', doorayApproval: { responseId: 'dooray-fixture', proposalRevision: 'a'.repeat(64) } }, { approvalRequest: longApproval })
@@ -205,6 +259,7 @@ test('실제 대화 팝업의 총괄 전문·선택적 위임 모델·전달 목
     assert.equal(await evaluate('window.audit.closed'), 0, 'ticket 발급만으로 팝업을 닫지 않는다')
     assert.equal(await evaluate('window.audit.calls.filter(c=>c.url.endsWith("/external-conversation-launches")).length'), 1)
     assert.equal(await evaluate('document.querySelector(".ai-workspace-input input").matches(":disabled")'), true)
+    assert.equal(await evaluate('document.querySelector(".ai-delegation-restore").matches(":disabled")'), true, '시작 확인 중에는 저장값 적용으로 요청을 변경할 수 없다')
     for (const [width, height] of [[1440, 900], [900, 480], [390, 640]]) {
       await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false })
       const layout = await evaluate(`(() => {
