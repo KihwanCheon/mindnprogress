@@ -15,6 +15,7 @@ import {
   normalizeAiAutomaticRequest,
   resolveAiConversationTarget,
 } from '../src/utils/aiConversationLaunch.mjs'
+import { SHARED_KNOWLEDGE_WRITE_INSTRUCTION, sharedKnowledgeAuthoringPolicy } from '../src/utils/sharedKnowledgePolicy.mjs'
 
 const selection = {
   open: true,
@@ -213,6 +214,12 @@ test('정리 제안 전문은 자동 저장을 금지하고 검토 문맥 조회
   assert.ok(request.includes('`mindnprogress_apply_shared_knowledge_review`를 호출하지 마세요.'))
   assert.ok(request.includes('공유 지식을 직접 고치지 마세요'))
   assert.ok(request.includes('지식선으로 소비하는 카드가 재사용하는 내용은 지우지 마세요'))
+  assert.match(request, /공유 지식 전체를 현재 기준의 최신본으로 재구성/)
+  assert.ok(request.includes(sharedKnowledgeAuthoringPolicy.keep.join(', ')))
+  assert.ok(request.includes(sharedKnowledgeAuthoringPolicy.exclude.join(', ')))
+  assert.ok(request.includes(sharedKnowledgeAuthoringPolicy.preserve))
+  assert.ok(request.includes(sharedKnowledgeAuthoringPolicy.history))
+  assert.ok(request.includes(sharedKnowledgeAuthoringPolicy.length))
   assert.ok(request.includes('- 공유 지식 8,432자 (15,000자 제한의 56.2%) · 검토 수준 정리 권장'))
   assert.ok(request.includes('완전히 같은 문장 반복 3건 · 이 공유 지식을 지식선으로 쓰는 카드 2개'))
   assert.ok(request.length <= AI_EDITOR_REQUEST_MAX_LENGTH)
@@ -260,7 +267,7 @@ test('기본 요구 문구는 카드 검토 진입점 문구를 유지한다', (
   assert.ok(DEFAULT_AI_EDITOR_REQUEST.startsWith('이 카드의 최신 내용을 검토하세요.'))
   assert.match(DEFAULT_AI_EDITOR_REQUEST, /개발 계획을 세우거나 카드를 정비할 때.*구현·검증 조건이 2개 이상.*결과 중심 체크리스트/)
   assert.match(DEFAULT_AI_EDITOR_REQUEST, /별도 하위 카드.*체크리스트에 중복하지 말고/)
-  assert.ok(DEFAULT_AI_EDITOR_REQUEST.includes('공유 지식에는 다른 카드가 다시 사용할 현재 유효한 결론만 남기세요.'))
+  assert.ok(DEFAULT_AI_EDITOR_REQUEST.includes(SHARED_KNOWLEDGE_WRITE_INSTRUCTION))
   assert.ok(DEFAULT_AI_EDITOR_REQUEST.includes('그다음 수행할 작업을 우선순위와 완료 조건을 포함해 제안해 주세요.'))
   assert.equal(DEFAULT_AI_EDITOR_REQUEST, DEFAULT_AI_EDITOR_REQUEST.trim())
   assert.ok(DEFAULT_AI_EDITOR_REQUEST.length <= AI_EDITOR_REQUEST_MAX_LENGTH)

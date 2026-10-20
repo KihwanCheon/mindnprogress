@@ -138,7 +138,7 @@ import {
   rememberAiWorkspace,
   removeAiWorkspace,
 } from '../src/utils/aiWorkspaceHistory.mjs'
-import { sharedKnowledgeMaxLength } from '../src/utils/sharedKnowledgePolicy.mjs'
+import { SHARED_KNOWLEDGE_WRITE_INSTRUCTION, sharedKnowledgeMaxLength } from '../src/utils/sharedKnowledgePolicy.mjs'
 import {
   isAiConversationPurpose,
 } from '../src/utils/aiConversationLaunch.mjs'
@@ -2392,7 +2392,9 @@ ${MNP_CONTEXT_BOOTSTRAP_INSTRUCTION}
 - editorId: \`${editorId}\`
 - attributionToken: \`${attributionToken}\`
 
-MCP 조회 결과의 \`guide\`, \`selection.taskLinks.startupInspection\`, \`selection.aiWorkCoordination\`과 \`nextStep\`을 확인하고 따르세요. 관련 카드를 수정하기 전에는 AI 작업 상태를 확인하고, 실행 결과를 카드 댓글과 공유 지식에 알맞게 기록하세요. 상위 AI가 맡긴 범위에서 수행하고, 분석·제안만 요청받았다면 구현으로 확대하지 마세요.
+MCP 조회 결과의 \`guide\`, \`selection.taskLinks.startupInspection\`, \`selection.aiWorkCoordination\`과 \`nextStep\`을 확인하고 따르세요. 관련 카드를 수정하기 전에는 AI 작업 상태를 확인하고, 실행 결과는 카드 댓글에 기록하세요. 상위 AI가 맡긴 범위에서 수행하고, 분석·제안만 요청받았다면 구현으로 확대하지 마세요.
+
+${SHARED_KNOWLEDGE_WRITE_INSTRUCTION}
 
 이 위임 실행이 사용자의 중지로 끊긴 뒤 같은 대화에서 직접 이어진 경우, 단순 질의 응답이나 중간 보고는 위임 완료가 아닙니다. 실제 위임 작업과 카드 기록, 필요한 작업공간 체크포인트까지 모두 끝낸 마지막 턴에서만 최종 답변 직전에 \`mindnprogress_complete_ai_delegation\`을 호출하세요. 중단 없이 진행된 최초 실행에는 이 완료 신호가 필요하지 않습니다.
 

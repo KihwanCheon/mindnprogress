@@ -13,6 +13,7 @@ import {
   GROUP_COORDINATOR_INSTRUCTION,
 } from '../src/utils/aiApprovalInstructions.mjs'
 import { MNP_CONTEXT_BOOTSTRAP_INSTRUCTION } from '../src/utils/aiContextInstructions.mjs'
+import { SHARED_KNOWLEDGE_WRITE_INSTRUCTION } from '../src/utils/sharedKnowledgePolicy.mjs'
 import { buildAiInstructionSnapshots, buildOrdinaryRecoverySnapshot, buildDocumentDelegationSnapshot, buildParentWakeSnapshot } from './helpers/aiInstructionSnapshots.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -81,6 +82,18 @@ test('기존 문서 담당 위임에도 결과 보고 지침을 한 번만 전�
   const prompt = buildDocumentDelegationSnapshot()
   assert.equal(count(prompt, AI_DELEGATION_RESULT_INSTRUCTION), 1)
   assert.doesNotMatch(prompt, /당신은 이 하위 작업을 위임한 상위 AI입니다/)
+})
+
+test('신규·재개·복구 위임은 수행 보고와 조건부 지식 갱신을 구분해 전달한다', async () => {
+  const snapshots = await buildAiInstructionSnapshots()
+  for (const name of ['worker-new-no-lease', 'worker-new-lease', 'worker-resume', 'user-stop-recovery']) {
+    const prompt = snapshots.find((item) => item.name === name).text
+    assert.equal(count(prompt, SHARED_KNOWLEDGE_WRITE_INSTRUCTION), 1, name)
+    assert.match(prompt, /실행 결과는 카드 댓글에 기록하세요/)
+    assert.doesNotMatch(prompt, /실행 결과를 카드 댓글과 공유 지식에/)
+    assert.match(prompt, /새 지식이 없으면 변경하지 마세요/)
+    assert.match(prompt, /전체 재작성은 승인된 정리 범위.*원문 보존과 버전·해시/)
+  }
 })
 
 test('원문 미캡처·무결성 오류에서도 목표 판단과 수신 확인 제약을 보존한다', async () => {

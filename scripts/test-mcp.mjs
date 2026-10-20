@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { MCP_TOOL_USAGE_DIRECTORY_NAME, readToolUsageTotals } from '../server/lib/mcpToolUsage.mjs'
-import { sharedKnowledgeMaxLength } from '../src/utils/sharedKnowledgePolicy.mjs'
+import { SHARED_KNOWLEDGE_WRITE_INSTRUCTION, sharedKnowledgeAuthoringPolicy, sharedKnowledgeMaxLength } from '../src/utils/sharedKnowledgePolicy.mjs'
 import { AI_EXECUTION_APPROVAL_INSTRUCTION, DOCUMENT_COORDINATOR_INSTRUCTION, GROUP_APPROVAL_INSTRUCTION } from '../src/utils/aiApprovalInstructions.mjs'
 import { expectedMcpToolNames } from '../tests/helpers/mcpToolNames.mjs'
 import { AI_CONVERSATION_SELECTION_INSTRUCTION, aiConversationSelectionRules } from '../mcp/aiConversationSelectionPolicy.mjs'
@@ -635,7 +635,12 @@ async function main() {
     assert.ok(guide.important.includes(AI_CONVERSATION_SELECTION_INSTRUCTION))
     assert.ok(guide.guide.operationRules.includes(AI_CONVERSATION_SELECTION_INSTRUCTION))
     assert.equal(guide.guide.product.name, 'MindNProgress')
-    assert.equal(guide.guide.version, '4.24')
+    assert.equal(guide.guide.version, '4.25')
+    const { maintenance: knowledgeMaintenance, ...knowledgeAuthoring } = guide.guide.sharedKnowledgePolicy
+    assert.deepEqual(knowledgeAuthoring, sharedKnowledgeAuthoringPolicy)
+    assert.equal(knowledgeMaintenance.automaticMutation, false)
+    assert.equal(knowledgeMaintenance.requiresExplicitApproval, true)
+    assert.ok(guide.guide.authoringRules.includes(SHARED_KNOWLEDGE_WRITE_INSTRUCTION))
     assert.equal(guide.guide.contextLifecycle.bootstrap.tool, 'mindnprogress_get_context')
     assert.equal(guide.guide.contextLifecycle.unsuccessfulAttempt.retryAllowed, true)
     assert.equal(guide.guide.contextLifecycle.refresh.repeatGetContext, false)
@@ -951,6 +956,8 @@ async function main() {
     })
     assert.equal(context.contextSchemaVersion, '3.3')
     assert.equal(context.guide.contextLifecycle.bootstrap.tool, 'mindnprogress_get_context')
+    assert.deepEqual(context.guide.sharedKnowledgePolicy, guide.guide.sharedKnowledgePolicy)
+    assert.match(context.nextStep, /sharedKnowledge.*새 지식·변경 조건.*새 지식이 없으면 변경하지/)
     assert.deepEqual(context.currentConversation, {
       displayLabel: 'MCP 전체 대화 조회 검증 (conversation-test)',
     })
@@ -1065,6 +1072,7 @@ async function main() {
       detailLevel: 'full',
     })
     assert.equal(fullContext.detailLevel, 'full')
+    assert.deepEqual(fullContext.guide.sharedKnowledgePolicy, context.guide.sharedKnowledgePolicy)
     assert.equal(fullContext.document.nodes.length, 4)
     assert.equal(fullContext.document.outline, undefined)
     assert.equal(fullContext.selection.knowledgeSources.all.length, 0)
@@ -2313,7 +2321,12 @@ async function main() {
       field: 'sharedKnowledge',
       expectedSha256: betweenPatch.after.sha256,
       operation: { type: 'append', text: '가'.repeat(sharedKnowledgeMaxLength) },
-    }, /TEXT_PATCH_LENGTH_LIMIT.*15,000자/)
+    }, /TEXT_PATCH_LENGTH_LIMIT.*15,000자.*기존 절에 통합.*정리안을 제시.*카드별 승인/)
+    await invokeExpectError('mindnprogress_update_card', {
+      mapId,
+      cardId: addedCard.id,
+      data: { sharedKnowledge: '가'.repeat(sharedKnowledgeMaxLength + 1) },
+    }, /15,000자.*기존 절에 통합.*정리안을 제시.*카드별 승인/)
     const lengthErrorCard = await invoke('mindnprogress_get_card', { mapId, cardId: addedCard.id })
     assert.equal(lengthErrorCard.document.version, versionBeforeLengthError)
     assert.equal(lengthErrorCard.card.data.sharedKnowledge, '앞[시작]교체[끝]뒤')

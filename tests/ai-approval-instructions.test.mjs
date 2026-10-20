@@ -50,6 +50,14 @@ test('총괄 역할 지침은 승인 정책 전문을 복제하지 않는다', (
   assert.ok(!GROUP_COORDINATOR_INSTRUCTION.includes(GROUP_APPROVAL_INSTRUCTION))
 })
 
+test('총괄은 하위 결과를 공유 지식에 누적하지 않고 공통 결정만 조건부 갱신한다', () => {
+  const request = buildGroupCoordinatorRequest({ groupId: 'group-test' })
+  assert.match(request, /실행 결과는 담당 추적 카드의 댓글/)
+  assert.match(request, /여러 문서의 판단·구현에 필요한 새 결정·공통 제약.*현재 결론으로 통합/)
+  assert.match(request, /하위 완료 보고를 복사하지 마세요.*새 지식이 없으면 변경하지 마세요/)
+  assert.doesNotMatch(request, /실행 결과와 현재 결정은 총괄 문서의 공유 지식/)
+})
+
 test('문서 담당은 그룹 승인 전문 없이 맡긴 범위를 수행하고 최신 원본 검토를 유지한다', () => {
   const request = buildGroupDocumentRequest({ groupId: 'group-test', groupName: '매니저' })
   assert.ok(request.includes(DOCUMENT_COORDINATOR_INSTRUCTION))
@@ -125,7 +133,8 @@ test('최대 길이의 그룹·문서 식별자에서도 승인 규칙과 마지
   }
   assert.match(DEFAULT_AI_EDITOR_REQUEST, /필요한 필드만 먼저 수정하고 저장 결과를 확인/)
   assert.match(DEFAULT_AI_EDITOR_REQUEST, /결과 중심 체크리스트를 생성하거나 갱신/)
-  assert.doesNotMatch(DEFAULT_AI_EDITOR_REQUEST, /승인|읽기 전용/)
+  assert.ok(!DEFAULT_AI_EDITOR_REQUEST.includes(AI_EXECUTION_APPROVAL_INSTRUCTION))
+  assert.doesNotMatch(DEFAULT_AI_EDITOR_REQUEST, /승인 전에는 읽기 전용/)
 })
 
 test('그룹 시작 용도는 요청을 직접 바꿔도 승인을 유지하고 일반 용도에는 주입하지 않는다', () => {

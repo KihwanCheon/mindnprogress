@@ -9,6 +9,7 @@ import {
   reconcileSharedKnowledgeReviews,
   sharedKnowledgeSha256,
 } from '../server/lib/sharedKnowledgeReview.mjs'
+import { sharedKnowledgeAuthoringPolicy } from '../src/utils/sharedKnowledgePolicy.mjs'
 
 function candidateText(character = '가', length = 8_100) {
   return character.repeat(length)
@@ -79,6 +80,14 @@ test('검토 문맥은 선택한 후보 원문과 직접 관계만 명시적으�
   assert.equal(context.relations.children[0].sharedKnowledgeLength, 12_100)
   assert.equal(context.relations.children[0].descriptionPreview, '둘째 후보 설명')
   assert.equal(Object.hasOwn(context.relations.children[0], 'sharedKnowledge'), false)
+  assert.equal(context.guidance.purpose, sharedKnowledgeAuthoringPolicy.purpose)
+  assert.equal(context.guidance.keep, sharedKnowledgeAuthoringPolicy.keep.join(' / '))
+  assert.equal(context.guidance.remove, sharedKnowledgeAuthoringPolicy.exclude.join(' / '))
+  assert.equal(context.guidance.update, sharedKnowledgeAuthoringPolicy.update)
+  assert.equal(context.guidance.preserveMeaning, sharedKnowledgeAuthoringPolicy.preserve)
+  assert.equal(context.guidance.history, sharedKnowledgeAuthoringPolicy.history)
+  assert.equal(context.guidance.capacity, sharedKnowledgeAuthoringPolicy.capacity)
+  assert.equal(context.guidance.length, sharedKnowledgeAuthoringPolicy.length)
 })
 
 test('복수 카드의 cleaned와 accepted-long 결과를 한 문서 변경으로 준비한다', () => {

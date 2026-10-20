@@ -14,6 +14,7 @@ import {
   sharedKnowledgeAuthoringPolicy,
   sharedKnowledgeMaintenancePolicy,
 } from '../server/lib/sharedKnowledgeAudit.mjs'
+import { SHARED_KNOWLEDGE_WRITE_INSTRUCTION } from '../src/utils/sharedKnowledgePolicy.mjs'
 import {
   applyCardTextPatch,
   cardTextIntegrity,
@@ -151,7 +152,7 @@ const knowledgeLinePolicy = Object.freeze({
 
 const serverInstructions = MNP_MCP_SERVER_INSTRUCTIONS
 const productGuide = {
-  version: '4.24',
+  version: '4.25',
   contextLifecycle: MNP_CONTEXT_LIFECYCLE,
   documentReconstruction: {
     contextTool: 'mindnprogress_get_reconstruction_context',
@@ -177,7 +178,7 @@ const productGuide = {
     knowledgeLine: 'data.relation=knowledge인 edge는 source 카드의 결과를 target 카드가 선행 지식으로 사용함. knowledgePolicy는 reuse-first 또는 inspect-if-insufficient',
     cardContent: {
       description: '업무의 목적, 범위, 요구사항과 완료 조건. 사용자가 작성한 원래 맥락을 보존함',
-      sharedKnowledge: '다른 카드나 후속 AI 세션에서 재사용할 안정적인 사실, 결정, 제약, 조사 결과와 사용 방법',
+      sharedKnowledge: sharedKnowledgeAuthoringPolicy.purpose,
       comments: '시간순 진행 과정, 검증 결과, 차단 사유와 완료 기록. 새 댓글은 요약과 접을 수 있는 상세 내용으로 구분',
       aiConversations: '현재 대화 제목은 currentConversation, 다른 연결 대화 제목·실행 상태는 mindnprogress_list_ai_conversations로 확인한 뒤 필요한 conversationId만 전문 조회',
     },
@@ -224,8 +225,7 @@ const productGuide = {
     '계층 깊이는 보통 2~4단계로 유지하고 중복되는 카드는 합침',
     '제목은 짧고 명확하게, description에는 목적·범위·요구사항·완료 조건을 기록',
     '실제로 실행할 카드에 독립적으로 완료 여부를 판정할 구현·검증 조건이 2개 이상이면 결과 중심 체크리스트로 작성하고 진행에 맞춰 갱신함. 별도 하위 카드로 추적할 작업은 중복하지 않으며 단일 작업, 탐색 중인 아이디어 또는 아직 완료 조건을 확정할 수 없는 카드에는 억지로 만들지 않음',
-    '다른 카드나 후속 세션이 재사용할 현재 유효한 사실·결정·제약·검증 결과와 적용 조건만 sharedKnowledge에 요약하고 진행 과정은 댓글에 기록',
-    '새 재사용 정보나 기존 결론의 변경이 없으면 sharedKnowledge를 수정하지 않으며, 같은 주제의 결론이 바뀌면 이력을 덧붙이지 않고 기존 절만 안전하게 교체',
+    SHARED_KNOWLEDGE_WRITE_INSTRUCTION,
     'sharedKnowledge를 수정할 때 기존 description의 사용자 요청과 배경을 임의로 덮어쓰지 않음',
     '존재하지 않는 담당자, 불필요한 업무 링크와 임의의 선행 관계를 만들지 않음',
     '문서 내부 선행 업무는 blockedBy, 외부 전달물·결정 대기는 waitingItems로 구분하고 제목에 “(서버 대기)” 같은 문구를 붙이지 않음',
@@ -255,7 +255,7 @@ const productGuide = {
     '조회 도구는 문서 version을 변경하지 않으며 카드·관계 편집과 AI 대화 ID 연결 같은 저장 작업만 version을 증가시킴',
     '기존 문서 변경은 최신 version을 기준으로 수행하고 버전 충돌 시 최신 상태를 다시 조회',
     '변경 후 mindnprogress_get_document로 저장 결과를 검증하고 실제 변경 내용을 요약',
-    '의미 있는 진행·차단·완료는 요약과 상세로 구분한 댓글로 기록하고, 재사용할 결론은 sharedKnowledge에도 반영',
+    '의미 있는 진행·차단·완료는 요약과 상세로 구분한 댓글에 기록함. sharedKnowledge는 guide.sharedKnowledgePolicy의 새 지식·변경 조건을 만족할 때만 갱신하며 완료 보고를 그대로 복사하지 않음',
     '댓글 summary는 [진행](수행 내용·현재 상태·다음 단계), [차단](차단 원인·재개 조건), [결과](완료 내용·검증 결과·산출물) 머리말로 시작하는 1~2문장으로 작성하고, 등록 전에 최근 댓글을 확인해 같은 내용을 반복하지 않음',
     '댓글 detail은 다른 세션이 작업을 이어가거나 결과를 검증하는 데 필요한 수행 내용, 판단, 변경 범위, 검증 방법과 실제 결과, 산출물, 제한사항, 다음 단계 또는 재개 조건 중 해당 내용을 구체적으로 기록하며 summary가 있다는 이유로 상세를 축약하지 않음',
     '코드·문서·카드 변경, 외부 시스템 처리, 검증, 중요한 결정, 실패 또는 차단이 있으면 detail을 작성하고, 새로운 사실이 없는 단순 상태 알림에만 생략. 개별 도구 호출 목록, 의미 없는 반복, 원문 로그 전체와 카드 본문의 단순 복사는 제외',
@@ -889,10 +889,11 @@ const documentLayoutSchema = z.object({
     mapIds: z.array(z.string().min(1)).max(1000),
   })).max(100),
 })
+const sharedKnowledgeLimitMessage = `sharedKnowledge는 ${sharedKnowledgeMaxLength.toLocaleString('en-US')}자 이하여야 합니다. ${sharedKnowledgeAuthoringPolicy.capacity}`
 const nodeDataSchema = z.object({
   label: z.string().min(1),
   description: z.string().default(''),
-  sharedKnowledge: z.string().max(sharedKnowledgeMaxLength).default(''),
+  sharedKnowledge: z.string().max(sharedKnowledgeMaxLength, sharedKnowledgeLimitMessage).default(''),
   progress: z.number().min(0).max(100).default(0),
   status: z.enum(['planned', 'in-progress', 'done']).default('planned'),
   kind: z.enum(['root', 'branch', 'task', 'image']).default('branch'),
@@ -933,7 +934,7 @@ const outlineCardSchema = z.object({
   parentKey: outlineKey.optional().describe('상위 카드 key. 루트 카드는 생략'),
   label: z.string().min(1).max(200),
   description: z.string().max(5000).default(''),
-  sharedKnowledge: z.string().max(sharedKnowledgeMaxLength).default(''),
+  sharedKnowledge: z.string().max(sharedKnowledgeMaxLength, sharedKnowledgeLimitMessage).default(''),
   progress: z.number().min(0).max(100).default(0),
   status: z.enum(['planned', 'in-progress', 'done']).optional(),
   kind: z.enum(['root', 'branch', 'task']).optional(),
@@ -1221,7 +1222,7 @@ async function main() {
       '새 문서는 카드 수와 관계없이 mindnprogress_create_mindmap으로 원자적으로 생성',
       '업무로 추적할 task만 isWork=true로 설정',
       'description은 업무 요청과 완료 조건, sharedKnowledge는 다른 카드가 재사용할 안정적인 결론에 사용',
-      'sharedKnowledge에는 현재 유효한 재사용 결론만 남기고 진행 기록·도구 로그·중복·폐기 결론은 댓글과 분리하며 같은 주제의 결론은 새 이력 대신 기존 절을 교체',
+      SHARED_KNOWLEDGE_WRITE_INSTRUCTION,
       '정리 후보가 있으면 주 1회와 주요 마일스톤·인수인계 시점에 점검하되 자동 변경 없이 카드별로 승인하고 accepted-long은 30일 뒤 다시 검토',
       '외부 전달물이나 결정 대기는 waitingItems에 기록하고 카드 제목에는 대기 문구를 추가하지 않음',
       '카드 일부 필드만 변경할 때는 mindnprogress_update_card에 변경할 필드만 전달하고 현재 카드 전체 데이터를 재전송하지 않음',
@@ -1612,7 +1613,7 @@ async function main() {
         ...(full ? {} : { commentsPage: focusedSelectedComments.commentsPage }),
       },
       teamMembers: full ? (usersResult.users ?? []) : (usersResult.users ?? []).map(compactTeamMember),
-      nextStep: `${groupCoordinator ? '미승인 분석·제안은 대화로 보고하고 사용자 승인을 기다리세요. 이때 댓글·공유 지식·상태를 변경하지 마세요. 승인된 작업을 실제 수행한 경우에만 ' : ''}의미 있는 진행과 결과는 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 담은 detail 댓글로 기록하고, 재사용할 결론은 sharedKnowledge에 요약한 다음 mindnprogress_get_document로 결과를 다시 확인하세요. 작업 중 선택 카드 이외의 MindNProgress 카드를 실제 근거로 사용했다면 guide.knowledgeLinePolicy에 따라 작업 종료 전에 연결 또는 제안 여부를 판단하세요. 외부 전달물이나 결정 때문에 멈추면 제목을 바꾸지 말고 waitingItems와 [차단] 댓글을 추가하며, 재개할 때 해당 항목을 제거하고 [진행] 댓글을 남기세요.`,
+      nextStep: `${groupCoordinator ? '미승인 분석·제안은 대화로 보고하고 사용자 승인을 기다리세요. 이때 댓글·공유 지식·상태를 변경하지 마세요. 승인된 작업을 실제 수행한 경우에만 ' : ''}의미 있는 진행과 결과는 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 담은 detail 댓글로 기록하세요. sharedKnowledge는 guide.sharedKnowledgePolicy의 새 지식·변경 조건을 만족할 때만 갱신하고 새 지식이 없으면 변경하지 마세요. 변경 후 mindnprogress_get_document로 결과를 다시 확인하세요. 작업 중 선택 카드 이외의 MindNProgress 카드를 실제 근거로 사용했다면 guide.knowledgeLinePolicy에 따라 작업 종료 전에 연결 또는 제안 여부를 판단하세요. 외부 전달물이나 결정 때문에 멈추면 제목을 바꾸지 말고 waitingItems와 [차단] 댓글을 추가하며, 재개할 때 해당 항목을 제거하고 [진행] 댓글을 남기세요.`,
     }
   })
 
@@ -2092,7 +2093,7 @@ async function main() {
         throw new Error('TEXT_PATCH_NO_CHANGE: 부분 수정 결과가 현재 원문과 같습니다.')
       }
       if (field === 'sharedKnowledge' && nextText.length > sharedKnowledgeMaxLength) {
-        throw new Error(`TEXT_PATCH_LENGTH_LIMIT: sharedKnowledge는 ${sharedKnowledgeMaxLength.toLocaleString('en-US')}자 이하여야 합니다. (resultLength=${nextText.length})`)
+        throw new Error(`TEXT_PATCH_LENGTH_LIMIT: ${sharedKnowledgeLimitMessage} (resultLength=${nextText.length})`)
       }
       node.data = { ...node.data, [field]: nextText }
       return { before, nextText }
@@ -2125,7 +2126,7 @@ async function main() {
       cardId: z.string().min(1).max(120),
       expectedSha256: z.string().regex(/^[a-f0-9]{64}$/).describe('검토 문맥의 card.textIntegrity.sha256'),
       reviewResult: z.enum(['cleaned', 'accepted-long']),
-      replacement: z.string().max(sharedKnowledgeMaxLength).optional().describe('cleaned일 때만 보내는 정리된 sharedKnowledge 전체. accepted-long일 때는 생략'),
+      replacement: z.string().max(sharedKnowledgeMaxLength, sharedKnowledgeLimitMessage).optional().describe('cleaned일 때만 보내는 정리된 sharedKnowledge 전체. accepted-long일 때는 생략'),
     })).min(1).max(20),
   }, async ({ mapId, baseVersion, patches }) => apiRequest(
     `/api/maps/${encodeURIComponent(mapId)}/shared-knowledge/reviews`,

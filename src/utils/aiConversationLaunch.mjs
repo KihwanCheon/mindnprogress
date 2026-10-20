@@ -1,4 +1,4 @@
-import { sharedKnowledgeMaxLength } from './sharedKnowledgePolicy.mjs'
+import { SHARED_KNOWLEDGE_WRITE_INSTRUCTION, sharedKnowledgeAuthoringPolicy, sharedKnowledgeMaxLength } from './sharedKnowledgePolicy.mjs'
 import { AI_EXECUTION_APPROVAL_INSTRUCTION, GROUP_APPROVAL_INSTRUCTION } from './aiApprovalInstructions.mjs'
 import { MNP_CONTEXT_BOOTSTRAP_INSTRUCTION } from './aiContextInstructions.mjs'
 
@@ -21,7 +21,7 @@ export const DEFAULT_AI_EDITOR_REQUEST = `이 카드의 최신 내용을 검토�
 
 개발 계획을 세우거나 카드를 정비할 때 이 카드 안에서 직접 수행하며 독립적으로 완료 여부를 판정할 구현·검증 조건이 2개 이상이면 결과 중심 체크리스트를 생성하거나 갱신하고 저장 결과를 확인하세요. 별도 하위 카드로 추적할 작업은 체크리스트에 중복하지 말고, 단일 작업이나 완료 조건을 아직 확정할 수 없는 카드에는 억지로 만들지 마세요.
 
-공유 지식에는 다른 카드가 다시 사용할 현재 유효한 결론만 남기세요. 진행 기록·도구 로그·중복·폐기 결론은 넣지 말고, 같은 주제의 결론은 새 이력으로 덧붙이지 말고 기존 내용을 안전하게 갱신하세요.
+${SHARED_KNOWLEDGE_WRITE_INSTRUCTION}
 
 카드 수정이 필요하지 않다면 그 사실을 명시하세요. 그다음 수행할 작업을 우선순위와 완료 조건을 포함해 제안해 주세요.`
 
@@ -192,11 +192,14 @@ export function buildSharedKnowledgeCleanupRequest(context) {
     '',
     '## 해야 할 일',
     '1. `mindnprogress_get_shared_knowledge_review_context`로 이 카드의 공유 지식 원문과 현재 해시, 길이 지표, 계층·지식선 관계, 최근 댓글, 정리 지침을 조회하고 그 결과만 근거로 판단하세요.',
-    '2. 다음 기준으로 정리안 전문을 작성해 답변에 그대로 제시하세요.',
-    '   - 남길 것: 현재 유효한 사실, 확정된 결정과 제약, 검증된 결과, 적용·사용 조건, 원문을 확인할 수 있는 출처 링크',
-    '   - 덜어낼 것: 시간순 진행 기록, 도구 호출과 원문 로그, 업무 설명·댓글의 단순 복사, 중복 문장, 폐기되거나 대체된 결론',
-    '   - 같은 주제의 결론이 여러 번 나오면 새 이력을 덧붙이지 말고 하나의 절로 합치세요.',
+    '2. 다음 기준으로 공유 지식 전체를 현재 기준의 최신본으로 재구성한 정리안 전문을 답변에 제시하세요. 기존 내용을 짧게 압축하는 것이 아니라 다음 담당자에게 필요한 지식을 선별하세요.',
+    `   - 남길 것: ${sharedKnowledgeAuthoringPolicy.keep.join(', ')}`,
+    `   - 덜어낼 것: ${sharedKnowledgeAuthoringPolicy.exclude.join(', ')}`,
+    '   - 같은 주제의 결론은 하나의 절로 통합하고, 대체된 결론과 현재 결론이 함께 남지 않게 하세요.',
     '   - 이 공유 지식을 지식선으로 소비하는 카드가 재사용하는 내용은 지우지 마세요.',
+    `   - ${sharedKnowledgeAuthoringPolicy.preserve}`,
+    `   - ${sharedKnowledgeAuthoringPolicy.history}`,
+    `   - ${sharedKnowledgeAuthoringPolicy.length}`,
     '3. 무엇을 왜 덜어냈는지와 몇 자에서 몇 자로 줄어드는지 함께 적고, 지울지 판단하기 어려운 내용은 임의로 지우지 말고 확인이 필요하다고 표시하세요.',
     '',
     '## 하지 말아야 할 일',

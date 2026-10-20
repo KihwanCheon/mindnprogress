@@ -12,6 +12,7 @@ import {
 } from '../../src/utils/aiApprovalInstructions.mjs'
 import { MNP_CONTEXT_BOOTSTRAP_INSTRUCTION, MNP_MCP_SERVER_INSTRUCTIONS } from '../../src/utils/aiContextInstructions.mjs'
 import { buildAiConversationPrompt, buildSharedKnowledgeCleanupRequest } from '../../src/utils/aiConversationLaunch.mjs'
+import { SHARED_KNOWLEDGE_WRITE_INSTRUCTION } from '../../src/utils/sharedKnowledgePolicy.mjs'
 import { buildWorkspaceInstruction } from '../../server/lib/workspacePool.mjs'
 import { buildGroupDocumentInstruction } from '../../server/lib/groupDocumentInstructions.mjs'
 import { buildDoorayReviewPrompt } from '../../server/lib/doorayResponses.mjs'
@@ -36,7 +37,7 @@ ${extract('function aiDelegationResultSection(', 'function aiDelegationRecoveryK
   MNP_CONTEXT_BOOTSTRAP_INSTRUCTION, buildWorkspaceInstruction,
   DOCUMENT_COORDINATOR_INSTRUCTION, AI_EXECUTION_APPROVAL_INSTRUCTION, GROUP_APPROVAL_INSTRUCTION,
   AI_DELEGATION_FOLLOWUP_INSTRUCTION, GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION, AI_DELEGATION_REPORT_INSTRUCTION,
-  AI_DELEGATION_RESULT_INSTRUCTION,
+  AI_DELEGATION_RESULT_INSTRUCTION, SHARED_KNOWLEDGE_WRITE_INSTRUCTION,
   groupProjects: { forDocument: async () => null },
   readMap: async () => null, documentRoot: () => null,
   aiDelegationReportResult: () => ({ availability: 'captured', text: '구현과 검증을 완료했습니다.' }),
