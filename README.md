@@ -398,7 +398,7 @@ node runner/index.mjs
 
 ## MindNProgress MCP 명령어
 
-카드가 선택된 작업은 먼저 `mindnprogress_get_context`로 최신 버전과 제품 규칙을 확인하고, 변경 후에는 `mindnprogress_get_document`로 실제 저장 결과를 다시 확인하는 흐름을 권장합니다. 조회 도구는 문서 버전을 변경하지 않으며 카드·관계 편집과 AI 대화 ID 연결 같은 저장 작업만 버전을 증가시킵니다. 선택 카드 이외의 형제·하위·선행 카드를 함께 수정할 때는 `mindnprogress_get_ai_work_states`로 다른 AI가 작업 중인지 먼저 확인합니다. 등록된 AI 작업공간의 최신 목록과 상태는 폴더명을 추측하지 않고 `mindnprogress_get_ai_workspace_pool`로 조회합니다.
+카드가 선택된 작업은 먼저 `mindnprogress_get_context`로 최신 버전과 제품 규칙을 확인하고, 변경 후에는 변경 도구의 응답 또는 대상별 조회 도구(카드는 `mindnprogress_get_card`, 문서 구조·버전은 `mindnprogress_get_document`의 `view=outline` 또는 `view=version`)로 실제 저장 결과를 다시 확인하는 흐름을 권장합니다. 재구성 계획·의미 보존 검토, `restore_history` 직전 백업, 요구사항 전수 감사와 지식선 전역 점검에는 `view`를 생략한 full 문서를 사용합니다. 조회 도구는 문서 버전을 변경하지 않으며 카드·관계 편집과 AI 대화 ID 연결 같은 저장 작업만 버전을 증가시킵니다. 선택 카드 이외의 형제·하위·선행 카드를 함께 수정할 때는 `mindnprogress_get_ai_work_states`로 다른 AI가 작업 중인지 먼저 확인합니다. 등록된 AI 작업공간의 최신 목록과 상태는 폴더명을 추측하지 않고 `mindnprogress_get_ai_workspace_pool`로 조회합니다.
 
 문서·카드 조회와 편집 결과는 총괄 없는 일반 그룹도 `group`으로 표시하고, 관련 문서의 소속을 `documentGroups`에 제공합니다. 현재 소속과 위임·보관 당시 기록은 구분하며 기획 지침 전문을 매번 복제하지 않습니다. 필드 의미·적용 범위·서버/MCP 재연결 절차는 [MCP 문서 소속 정보](docs/mcp-document-groups.md)를 참고하세요.
 
@@ -412,7 +412,7 @@ node runner/index.mjs
 | `mindnprogress_list_documents` | 활성 문서 목록, 버전, 완료 현황과 문서 그룹·혼합 순서를 조회합니다. |
 | `mindnprogress_search_content` | 열람 가능한 활성 문서 전체의 사용자 콘텐츠를 관련도순으로 검색하거나, 정확성 보완이 필요할 때 모든 카드를 커서 기반 카탈로그로 순회합니다. 결과는 후보이므로 최종 판단 전에 `mindnprogress_get_card`로 최신 원문을 확인합니다. |
 | `mindnprogress_get_context` | 선택 카드와 문서 구조, 관계, 댓글, 담당자, 업무 링크 및 선행 지식을 작업 문맥으로 조회합니다. `detailLevel`은 `focused` 또는 `full`을 사용합니다. |
-| `mindnprogress_get_document` | 문서의 모든 카드와 연결 관계 및 외부 접근 URL을 조회합니다. |
+| `mindnprogress_get_document` | 문서의 모든 카드와 연결 관계 및 외부 접근 URL을 조회합니다. `view`를 생략하면 기존 full 응답이며, `compact`(카드 원문 유지·AI 대화 상세와 렌더링 값 축약), `outline`(구조·상태·관계·본문 길이와 `textIntegrity`, `cardIds`로 고른 카드만 전문), `version`(version과 `documentEtag`만)을 선택할 수 있습니다. 같은 `view`·`cardIds`로 받은 응답의 `documentEtag`를 `ifNoneMatch`로 전달했고 그 뒤 문서가 바뀌지 않았으면 본문을 생략하고 `notModified=true`를 반환합니다. `knownVersion`은 version 일치 여부만 `freshness`로 알려 주며 본문을 생략하지 않습니다. |
 | `mindnprogress_get_card` | 특정 카드의 설명, 공유 지식, 업무 필드와 댓글을 페이지 단위로 조회합니다. |
 | `mindnprogress_list_shared_knowledge_candidates` | 정리가 필요한 공유 지식 후보의 우선순위·길이·SHA-256·검토 상태를 원문 없이 페이지 단위로 조회합니다. |
 | `mindnprogress_get_shared_knowledge_review_context` | 후보 한 카드의 공유 지식 원문과 관계·최근 댓글·검토 기준을 조회합니다. |

@@ -23,6 +23,7 @@ import {
 } from './cardTextPatch.mjs'
 import { imageCardLocalAccess } from './imageAccess.mjs'
 import { withDocumentGroupMetadata } from './documentGroupMetadata.mjs'
+import { DOCUMENT_VIEW_CARD_ID_LIMIT, DOCUMENT_VIEWS, buildDocumentView, cardAccessUrl, documentAccessUrl, updateCardFullEdge, updateCardFullNode } from './documentViews.mjs'
 import { WORKSPACE_POOL_STATUS_GUIDE, WORKSPACE_POOL_STATUS_REFERENCE } from './workspacePoolStatusGuide.mjs'
 import { MCP_TOOL_USAGE_DIRECTORY_NAME, createFileToolUsageRecorder } from '../server/lib/mcpToolUsage.mjs'
 import { formatAiConversationDisplay } from '../server/lib/aiConversationDisplay.mjs'
@@ -257,7 +258,7 @@ const productGuide = {
     AI_CONVERSATION_SELECTION_INSTRUCTION,
     '조회 도구는 문서 version을 변경하지 않으며 카드·관계 편집과 AI 대화 ID 연결 같은 저장 작업만 version을 증가시킴',
     '기존 문서 변경은 최신 version을 기준으로 수행하고 버전 충돌 시 최신 상태를 다시 조회',
-    '변경 후 mindnprogress_get_document로 저장 결과를 검증하고 실제 변경 내용을 요약',
+    '변경 후 변경 도구의 응답 또는 대상별 조회 도구(카드는 mindnprogress_get_card, 문서 구조·version은 mindnprogress_get_document의 view=outline 또는 version)로 저장 결과를 검증하고 실제 변경 내용을 요약. 재구성 계획·의미 보존 검토, restore_history 직전 백업, 요구사항 전수 감사와 지식선 전역 점검에는 view를 생략한 mindnprogress_get_document(full)를 사용',
     '의미 있는 진행·차단·완료는 요약과 상세로 구분한 댓글에 기록함. sharedKnowledge는 guide.sharedKnowledgePolicy의 새 지식·변경 조건을 만족할 때만 갱신하며 완료 보고를 그대로 복사하지 않음',
     '댓글 summary는 [진행](수행 내용·현재 상태·다음 단계), [차단](차단 원인·재개 조건), [결과](완료 내용·검증 결과·산출물) 머리말로 시작하는 1~2문장으로 작성하고, 등록 전에 최근 댓글을 확인해 같은 내용을 반복하지 않음',
     '댓글 detail은 다른 세션이 작업을 이어가거나 결과를 검증하는 데 필요한 수행 내용, 판단, 변경 범위, 검증 방법과 실제 결과, 산출물, 제한사항, 다음 단계 또는 재개 조건 중 해당 내용을 구체적으로 기록하며 summary가 있다는 이유로 상세를 축약하지 않음',
@@ -481,14 +482,6 @@ function toolResult(value, pretty = false) {
   return { content: [{ type: 'text', text: JSON.stringify(value, null, pretty ? 2 : 0) }] }
 }
 
-function documentAccessUrl(publicBaseUrl, mapId) {
-  return `${String(publicBaseUrl).replace(/\/+$/, '')}/mindmap/${encodeURIComponent(mapId)}`
-}
-
-function cardAccessUrl(publicBaseUrl, mapId, cardId) {
-  return `${documentAccessUrl(publicBaseUrl, mapId)}/${encodeURIComponent(cardId)}`
-}
-
 function registerTool(server, name, description, schema, handler, options = {}) {
   toolUsage?.declare(name)
   server.tool(name, description, schema, async (input) => {
@@ -656,31 +649,6 @@ function contentCard(node, mapId = '') {
     data,
     textIntegrity: cardTextIntegrity(data),
     ...(imageAccess ? { imageAccess } : {}),
-  }
-}
-
-function updateCardFullNode(node) {
-  const data = { ...(node.data ?? {}) }
-  const aiConversationCount = Array.isArray(data.aiConversations) ? data.aiConversations.length : data.aiConversationId ? 1 : 0
-  delete data.aiConversations
-  if (aiConversationCount > 0) data.aiConversationCount = aiConversationCount
-  return {
-    id: node.id,
-    position: node.position,
-    data,
-  }
-}
-
-function updateCardFullEdge(edge) {
-  const relation = isKnowledgeEdge(edge) ? 'knowledge' : 'hierarchy'
-  return {
-    id: edge.id,
-    source: edge.source,
-    target: edge.target,
-    data: {
-      relation,
-      ...(relation === 'knowledge' ? { knowledgePolicy: knowledgePolicyOf(edge) } : {}),
-    },
   }
 }
 
@@ -857,6 +825,17 @@ function compactTeamMember(user) {
 }
 
 const mapIdSchema = { mapId: z.string().min(1).describe('문서 ID') }
+const getDocumentSchema = {
+  ...mapIdSchema,
+  view: z.enum(DOCUMENT_VIEWS).optional()
+    .describe('응답 범위. 생략하면 full(기존 전체 응답). compact=카드 원문을 유지한 비손실 축약, outline=구조·상태·관계와 본문 길이·textIntegrity(원문 생략), version=version·documentEtag만'),
+  cardIds: z.array(z.string().min(1).max(120)).min(1).max(DOCUMENT_VIEW_CARD_ID_LIMIT).optional()
+    .describe("view='outline'에서 전문을 함께 받을 카드 ID 목록. 다른 view에서는 사용할 수 없음"),
+  knownVersion: z.number().int().nonnegative().optional()
+    .describe('이미 받은 같은 문서 응답의 version. 일치 여부만 freshness로 알려 주며 본문은 생략하지 않음'),
+  ifNoneMatch: z.string().min(1).max(80).optional()
+    .describe('지금 요청과 같은 view·cardIds로 받은 compact·outline·version 응답의 documentEtag. 그 응답 이후 문서가 바뀌지 않았으면 본문을 생략. 다른 view·cardIds 응답의 documentEtag는 일치하지 않음'),
+}
 
 const checkpointCommitMessageSchema = z.object({
   summary: z.string().min(1).max(80)
@@ -1214,25 +1193,25 @@ async function main() {
     recommendedWorkflows: {
       exploreWithoutSelection: [
         'mindnprogress_list_documents로 문서 목록 확인',
-        'mindnprogress_get_document로 대상 문서의 전체 구조 확인',
+        'mindnprogress_get_document로 대상 문서의 전체 구조 확인. 구조·상태·관계부터 볼 때는 view=outline을 사용하고 카드 원문 전수가 필요하면 view를 생략한 full을 사용',
         '특정 카드를 정하면 이후 mindnprogress_get_context로 제품 규칙과 선택 카드 관계를 함께 확인',
       ],
       createMindmap: [
         '사용자 자료를 분석하고 루트 1개, 핵심 branch, 실행 task로 계층 구성',
         'mindnprogress_create_mindmap을 한 번 호출해 문서와 전체 구조를 원자적으로 생성',
-        '반환된 문서 ID로 mindnprogress_get_document를 호출해 생성 결과 검증',
+        '반환된 문서 ID로 mindnprogress_get_document를 호출해 생성 결과 검증. 구조·상태·본문 길이 확인은 view=outline, 카드 원문 대조가 필요하면 view를 생략한 full을 사용',
       ],
       editExistingDocument: [
         'mindnprogress_get_context로 최신 버전과 선택 카드 관계 확인',
         '목적에 맞는 카드 또는 문서 편집 도구 호출',
-        'mindnprogress_get_document로 실제 저장 결과 검증',
+        '편집 도구의 응답 또는 대상별 조회 도구(카드는 mindnprogress_get_card, 문서 구조·version은 mindnprogress_get_document의 view=outline 또는 version)로 실제 저장 결과 검증',
       ],
     },
     important: [
       '새 문서는 카드 수와 관계없이 mindnprogress_create_mindmap으로 원자적으로 생성',
       '업무로 추적할 task만 isWork=true로 설정',
       'description은 업무 요청과 완료 조건, sharedKnowledge는 다른 카드가 재사용할 안정적인 결론에 사용',
-      SHARED_KNOWLEDGE_WRITE_INSTRUCTION,
+      // SHARED_KNOWLEDGE_WRITE_INSTRUCTION은 같은 응답의 guide.authoringRules와 guide.sharedKnowledgePolicy에 원문이 있어 여기서 반복하지 않는다.
       '정리 후보가 있으면 주 1회와 주요 마일스톤·인수인계 시점에 점검하되 자동 변경 없이 카드별로 승인하고 accepted-long은 30일 뒤 다시 검토',
       '외부 전달물이나 결정 대기는 waitingItems에 기록하고 카드 제목에는 대기 문구를 추가하지 않음',
       '카드 일부 필드만 변경할 때는 mindnprogress_update_card에 변경할 필드만 전달하고 현재 카드 전체 데이터를 재전송하지 않음',
@@ -1623,7 +1602,7 @@ async function main() {
         ...(full ? {} : { commentsPage: focusedSelectedComments.commentsPage }),
       },
       teamMembers: full ? (usersResult.users ?? []) : (usersResult.users ?? []).map(compactTeamMember),
-      nextStep: `${groupCoordinator ? '미승인 분석·제안은 대화로 보고하고 사용자 승인을 기다리세요. 이때 댓글·공유 지식·상태를 변경하지 마세요. 승인된 작업을 실제 수행한 경우에만 ' : ''}의미 있는 진행과 결과는 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 담은 detail 댓글로 기록하세요. sharedKnowledge는 guide.sharedKnowledgePolicy의 새 지식·변경 조건을 만족할 때만 갱신하고 새 지식이 없으면 변경하지 마세요. 변경 후 mindnprogress_get_document로 결과를 다시 확인하세요. 작업 중 선택 카드 이외의 MindNProgress 카드를 실제 근거로 사용했다면 guide.knowledgeLinePolicy에 따라 작업 종료 전에 연결 또는 제안 여부를 판단하세요. 외부 전달물이나 결정 때문에 멈추면 제목을 바꾸지 말고 waitingItems와 [차단] 댓글을 추가하며, 재개할 때 해당 항목을 제거하고 [진행] 댓글을 남기세요.`,
+      nextStep: `${groupCoordinator ? '미승인 분석·제안은 대화로 보고하고 사용자 승인을 기다리세요. 이때 댓글·공유 지식·상태를 변경하지 마세요. 승인된 작업을 실제 수행한 경우에만 ' : ''}의미 있는 진행과 결과는 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 담은 detail 댓글로 기록하세요. sharedKnowledge는 guide.sharedKnowledgePolicy의 새 지식·변경 조건을 만족할 때만 갱신하고 새 지식이 없으면 변경하지 마세요. 변경 후 변경 도구의 응답 또는 대상별 조회 도구(카드는 mindnprogress_get_card, 문서 구조·version은 mindnprogress_get_document의 view=outline 또는 version)로 결과를 다시 확인하세요. 작업 중 선택 카드 이외의 MindNProgress 카드를 실제 근거로 사용했다면 guide.knowledgeLinePolicy에 따라 작업 종료 전에 연결 또는 제안 여부를 판단하세요. 외부 전달물이나 결정 때문에 멈추면 제목을 바꾸지 말고 waitingItems와 [차단] 댓글을 추가하며, 재개할 때 해당 항목을 제거하고 [진행] 댓글을 남기세요.`,
     }
   })
 
@@ -1644,29 +1623,19 @@ async function main() {
     title: z.string().min(1).max(80), description: z.string().max(100000),
   }, async ({ groupId, ...body }) => apiRequest(`/api/groups/${encodeURIComponent(groupId)}/documents`, { method: 'POST', body: JSON.stringify(body) }))
 
-  registerTool(server, 'mindnprogress_get_document', '문서의 모든 카드와 연결 관계, 외부 접근 URL 및 이미지 카드의 로컬 원본 경로를 조회합니다.', mapIdSchema, async ({ mapId }) => {
+  registerTool(server, 'mindnprogress_get_document', '문서의 모든 카드와 연결 관계, 외부 접근 URL 및 이미지 카드의 로컬 원본 경로를 조회합니다. view를 생략하면 기존과 같은 full 전체 응답입니다. compact는 모든 카드 원문·관계·안전 메타데이터를 유지하고 AI 대화 상세·렌더링 전용 값·카드별 접근 URL 목록만 줄입니다. outline은 카드 원문 대신 구조·상태·관계·요구사항 필드·본문 길이와 textIntegrity를 주고 cardIds로 고른 카드만 전문을 함께 주며, 생략 범위와 회수 도구를 omitted에 표기합니다. version은 문서 version과 documentEtag만 확인합니다. 같은 view·cardIds로 받은 응답의 documentEtag를 ifNoneMatch로 전달하면 그 응답 이후 문서가 바뀌지 않았을 때만 본문을 생략하고, knownVersion은 version 일치 여부만 freshness로 알려 주며 본문을 생략하지 않습니다. 재구성 계획·의미 보존 검토, restore_history 직전 백업, 요구사항 전수 감사와 지식선 전역 점검에는 full을 사용하세요.', getDocumentSchema, async ({ mapId, view = 'full', cardIds, knownVersion, ifNoneMatch }) => {
     const [documentResult, health] = await Promise.all([
       apiRequest(`/api/maps/${encodeURIComponent(mapId)}`),
       apiRequest('/api/health'),
     ])
-    return {
-      ...documentResult,
-      access: {
-        publicBaseUrl: health.publicBaseUrl,
-        documentUrl: documentAccessUrl(health.publicBaseUrl, documentResult.map.id),
-        cards: documentResult.map.nodes.map((node) => {
-          const imageAccess = imageCardLocalAccess(dataDirectory, documentResult.map.id, node)
-          return {
-            cardId: node.id,
-            label: node.data?.label ?? node.id,
-            kind: node.data?.kind,
-            accessUrl: cardAccessUrl(health.publicBaseUrl, documentResult.map.id, node.id),
-            ...(imageAccess ? { imageAccess } : {}),
-          }
-        }),
-        rule: '웹 링크를 기록할 때 localhost나 127.0.0.1로 재작성하지 말고 accessUrl을 그대로 사용하세요. 이미지 카드의 imageAccess.localPath는 기록용 링크가 아니라 로컬 원본을 직접 열람할 때만 사용하세요.',
-      },
-    }
+    return buildDocumentView(documentResult, {
+      view,
+      cardIds,
+      knownVersion,
+      ifNoneMatch,
+      publicBaseUrl: health.publicBaseUrl,
+      imageAccessOf: (documentId, node) => imageCardLocalAccess(dataDirectory, documentId, node),
+    })
   })
 
   registerTool(server, 'mindnprogress_get_ai_work_states', '카드에 연결된 AionUi 대화의 현재 작업 상태를 조회합니다. 형제·하위·선행 카드 등 선택 카드 밖의 관련 카드를 수정하기 전에 호출해 다른 AI와의 동시 작업 충돌을 확인하세요. 이 조회는 문서 데이터, 버전과 변경 이력을 수정하지 않습니다.', {
@@ -2464,7 +2433,7 @@ async function main() {
     }
   })
 
-  registerTool(server, 'mindnprogress_update_document_info', '문서 이름이나 아이콘 색상을 변경합니다. get_document에서 확인한 최신 baseVersion을 사용하세요. force=true는 동시 변경 덮어쓰기를 사용자가 명시적으로 승인한 경우에만 사용할 수 있습니다. 저장 후 get_document로 버전과 값을 재조회해 확인하세요.', {
+  registerTool(server, 'mindnprogress_update_document_info', '문서 이름이나 아이콘 색상을 변경합니다. get_document에서 확인한 최신 baseVersion을 사용하세요. baseVersion만 필요하면 get_document의 view=version으로 확인할 수 있습니다. force=true는 동시 변경 덮어쓰기를 사용자가 명시적으로 승인한 경우에만 사용할 수 있습니다. 저장 후 get_document(view=version으로 충분)로 버전과 값을 재조회해 확인하세요.', {
     mapId: z.string().min(1),
     baseVersion: z.number().int().positive(),
     title: z.string().min(1).optional(),
@@ -2516,7 +2485,7 @@ async function main() {
     limit: z.number().int().min(1).max(100).default(50),
   }, async ({ mapId, offset, limit }) =>
     apiRequest(`/api/maps/${encodeURIComponent(mapId)}/history?offset=${offset}&limit=${limit}`))
-  registerTool(server, 'mindnprogress_restore_history', '선택한 변경 이력으로 문서 전체를 복원합니다. 복원 직전 get_document로 현재 문서를 백업하세요. 복원은 현재 문서 전체를 교체해 현재 변경을 잃을 수 있고, 복원 자체가 새 변경 이력을 만듭니다. 먼저 list_history에서 revisionId를 확인하고 복원 후 get_document와 list_history로 결과를 재조회해 검증하세요.', {
+  registerTool(server, 'mindnprogress_restore_history', '선택한 변경 이력으로 문서 전체를 복원합니다. 복원 직전 view를 생략한 get_document(full)로 현재 문서를 백업하세요. 복원은 현재 문서 전체를 교체해 현재 변경을 잃을 수 있고, 복원 자체가 새 변경 이력을 만듭니다. 먼저 list_history에서 revisionId를 확인하고 복원 후 get_document와 list_history로 결과를 재조회해 검증하세요.', {
     mapId: z.string().min(1), revisionId: z.string().min(1),
   }, async ({ mapId, revisionId }) => apiRequest(`/api/maps/${encodeURIComponent(mapId)}/history/${encodeURIComponent(revisionId)}/restore`, { method: 'POST' }))
 

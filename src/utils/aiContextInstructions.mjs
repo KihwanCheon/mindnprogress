@@ -45,12 +45,12 @@ export const MNP_CONTEXT_LIFECYCLE = Object.freeze({
     group: 'mindnprogress_get_group_context',
     aiWorkState: 'mindnprogress_get_ai_work_states',
     comments: 'mindnprogress_list_comments',
-    rule: '최신 상태가 필요하면 get_context를 반복하지 않고 변경 대상에 맞는 조회 도구를 사용합니다.',
+    rule: '최신 상태가 필요하면 get_context를 반복하지 않고 변경 대상에 맞는 조회 도구를 사용합니다. 이미 받은 문서를 다시 확인할 때는 같은 view·cardIds로 받은 응답의 documentEtag를 get_document의 ifNoneMatch로 전달해 같은 문서 본문의 재전송을 피합니다. knownVersion은 version 일치 여부만 확인하고 본문을 생략하지 않습니다.',
   }),
   staleWrite: Object.freeze({
     action: 'version 또는 SHA-256 불일치가 발생하면 저장하지 말고 충돌한 대상만 다시 조회해 판단을 갱신합니다.',
   }),
   verification: Object.freeze({
-    action: '변경 후에는 변경 응답 또는 대상별 조회 도구로 실제 저장 결과를 확인합니다.',
+    action: '변경 후에는 변경 응답 또는 대상별 조회 도구로 실제 저장 결과를 확인합니다. 카드는 mindnprogress_get_card, 문서 구조·version은 mindnprogress_get_document의 view=outline 또는 version으로 확인하고, 문서 전체 원문 대조가 필요할 때만 view를 생략한 full을 사용합니다.',
   }),
 })
