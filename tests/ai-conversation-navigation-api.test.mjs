@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
-import { tmpdir } from 'node:os'
+import { networkInterfaces, tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
@@ -169,13 +169,17 @@ async function readUntil(reader, pattern, timeoutMs = 3_000) {
 async function readFor(reader, durationMs) {
   const decoder = new TextDecoder()
   let received = ''
-  await Promise.race([
-    (async () => {
-      const result = await reader.read()
-      if (!result.done) received += decoder.decode(result.value, { stream: true })
-    })(),
-    new Promise((resolve) => setTimeout(resolve, durationMs)),
-  ])
+  const deadline = Date.now() + durationMs
+  while (Date.now() < deadline) {
+    let timer
+    const result = await Promise.race([
+      reader.read(),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(null), Math.max(1, deadline - Date.now())) }),
+    ])
+    clearTimeout(timer)
+    if (!result || result.done) break
+    received += decoder.decode(result.value, { stream: true })
+  }
   return received
 }
 
@@ -282,6 +286,7 @@ test('AionUi 대화 조회와 화면 선택은 연결된 카드 및 같은 계�
   const localController = new AbortController()
   const remoteController = new AbortController()
   const otherAccountController = new AbortController()
+  const otherLocalAccountController = new AbortController()
 
   try {
     await waitForServer(baseUrl, server, output)
@@ -482,6 +487,40 @@ test('AionUi 대화 조회와 화면 선택은 연결된 카드 및 같은 계�
     assert.doesNotMatch(localEvents, new RegExp(remoteSelection.requestedAt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
     assert.doesNotMatch(localEvents, new RegExp(runnerSelection.requestedAt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
 
+    const otherLocalAccountStream = await fetch(`${baseUrl}/api/events?clientId=other-local-account-navigation`, {
+      headers,
+      signal: otherLocalAccountController.signal,
+    })
+    assert.equal(otherLocalAccountStream.status, 200)
+    const otherLocalAccountReader = otherLocalAccountStream.body.getReader()
+    await readUntil(otherLocalAccountReader, /"type":"connected"/)
+
+    // A remote Aion host forwards the main PC's LAN address while its MnP tab
+    // uses loopback. Both must select only that account's local tab.
+    const localAddresses = new Set([
+      '::1',
+      '127.0.0.2',
+      ...Object.values(networkInterfaces()).flatMap((entries) => (entries ?? []).map((entry) => entry.address)),
+    ])
+    for (const address of localAddresses) {
+      const localRunnerHeaders = { ...runnerHeaders, 'X-MnP-Selection-Device-Address': address }
+      const localRunnerLookup = await fetch(endpoint, { headers: localRunnerHeaders })
+      assert.equal(localRunnerLookup.status, 200, `local address: ${address}`)
+      const localRunnerLink = await localRunnerLookup.json()
+      assert.equal(localRunnerLink.selectionAvailable, true, `local address: ${address}`)
+      assert.equal(localRunnerLink.matchingViewCount, 1, 'other accounts on the same device must not match')
+
+      const localRunnerSelection = await fetch(`${endpoint}/select`, { method: 'POST', headers: localRunnerHeaders })
+      assert.equal(localRunnerSelection.status, 200, `local address: ${address}`)
+      assert.equal((await localRunnerSelection.json()).deliveredClientCount, 1)
+      const localRunnerEvents = await readUntil(localReader, /"type":"ai-conversation-selection-requested"/)
+      assert.match(localRunnerEvents, new RegExp(`"cardId":"${cardId}"`))
+    }
+
+    const otherLocalAccountEvents = await readFor(otherLocalAccountReader, 250)
+    assert.doesNotMatch(otherLocalAccountEvents, /"type":"ai-conversation-selection-requested"/)
+    await otherLocalAccountReader.cancel()
+
     const mismatchingSelection = await fetch(`${endpoint}/select`, {
       method: 'POST',
       headers: { ...headers, 'X-MNP-AI-Editor-Id': 'user-public-viewer' },
@@ -505,6 +544,7 @@ test('AionUi 대화 조회와 화면 선택은 연결된 카드 및 같은 계�
     localController.abort()
     remoteController.abort()
     otherAccountController.abort()
+    otherLocalAccountController.abort()
     try {
       await stopProcess(server, output)
     } finally {

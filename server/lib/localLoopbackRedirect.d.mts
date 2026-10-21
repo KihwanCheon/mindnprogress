@@ -5,6 +5,11 @@ export function collectLocalAddresses(
   interfaces?: ReturnType<typeof networkInterfaces>,
 ): Set<string>
 
+export function normalizeSelectionDeviceAddress(
+  value: unknown,
+  addresses?: Set<string>,
+): string
+
 export function localLoopbackRedirectLocation(
   request: IncomingMessage,
   options?: {

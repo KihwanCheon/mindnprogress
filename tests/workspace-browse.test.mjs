@@ -7,6 +7,7 @@ import { listWorkspaceDirectory, listWorkspaceRoots } from '../server/lib/worksp
 import {
   isLocalLoopbackRequest,
   normalizeClientAddress,
+  normalizeSelectionDeviceAddress,
   requestClientAddress,
 } from '../server/lib/localLoopbackRedirect.mjs'
 
@@ -110,4 +111,33 @@ test('선택 디바이스 비교용 접속 주소를 정규화한다', () => {
     headers: {},
     socket: { remoteAddress: '::ffff:127.0.0.1' },
   }), '127.0.0.1')
+})
+
+test('카드 선택은 서버 PC의 루프백과 실제 인터페이스 주소를 같은 디바이스로 본다', () => {
+  const addresses = new Set(['10.77.15.110', '2001:0DB8:0:0:0:0:0:1', 'fe80::abcd%12'])
+  const localAddresses = [
+    '127.0.0.1',
+    '127.0.0.2',
+    '::1',
+    '0:0:0:0:0:0:0:1',
+    '::ffff:127.0.0.1',
+    '10.77.15.110',
+    '::ffff:10.77.15.110',
+    '2001:db8::1',
+    '[fe80::abcd%12]',
+  ]
+  for (const address of localAddresses) {
+    assert.equal(normalizeSelectionDeviceAddress(address, addresses), '127.0.0.1', address)
+  }
+})
+
+test('카드 선택은 다른 디바이스 주소를 구분하고 유효하지 않은 주소를 거부한다', () => {
+  const addresses = new Set(['10.77.15.110', '2001:db8::1'])
+  for (const address of ['10.77.15.55', '10.78.12.223', '2001:db8::2']) {
+    assert.equal(normalizeSelectionDeviceAddress(address, addresses), address)
+  }
+  assert.equal(normalizeSelectionDeviceAddress('::ffff:10.77.15.55', addresses), '10.77.15.55')
+  for (const address of ['', 'localhost', '127.not-an-ip', '10.77.15.110, 10.77.15.55', null]) {
+    assert.equal(normalizeSelectionDeviceAddress(address, addresses), '')
+  }
 })

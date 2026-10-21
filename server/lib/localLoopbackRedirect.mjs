@@ -73,6 +73,17 @@ export function collectLocalAddresses(interfaces = networkInterfaces()) {
   return addresses
 }
 
+// Use only for selection identity; local-only API authorization stays stricter.
+export function normalizeSelectionDeviceAddress(value, addresses = collectLocalAddresses()) {
+  const address = normalizeClientAddress(value)
+  if (!address) return ''
+  if (isLoopbackAddress(address)) return '127.0.0.1'
+  for (const localAddress of addresses) {
+    if (normalizeClientAddress(localAddress) === address) return '127.0.0.1'
+  }
+  return address
+}
+
 const localAddresses = collectLocalAddresses()
 
 export function localLoopbackRedirectLocation(request, {

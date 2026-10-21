@@ -165,6 +165,7 @@ import {
   isLocalLoopbackRequest,
   localLoopbackRedirectLocation,
   normalizeClientAddress,
+  normalizeSelectionDeviceAddress,
   requestClientAddress,
 } from './lib/localLoopbackRedirect.mjs'
 import { listWorkspaceDirectory, listWorkspaceRoots } from './lib/workspaceBrowse.mjs'
@@ -721,7 +722,7 @@ function localEventClientCount() {
 }
 
 function aiConversationSelectionDeviceKey(address) {
-  const normalizedAddress = normalizeClientAddress(address)
+  const normalizedAddress = normalizeSelectionDeviceAddress(address)
   return normalizedAddress
     ? createHash('sha256').update(`mindnprogress-ai-selection-device:${normalizedAddress}`).digest('base64url')
     : null
