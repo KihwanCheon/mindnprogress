@@ -6,6 +6,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { MNP_MCP_SERVER_INSTRUCTIONS } from '../src/utils/aiContextInstructions.mjs'
 import { buildAiInstructionSnapshots } from '../tests/helpers/aiInstructionSnapshots.mjs'
+import { AI_RESPONSE_SIZE_LIMITS, AI_RESPONSE_SIZE_METHOD, aiResponseSizeWarnings, measureAiResponseSizes } from '../tests/helpers/aiResponseSizes.mjs'
 
 const projectDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const fixturePath = path.join(projectDirectory, 'tests/fixtures/ai-instruction-budget.json')
@@ -77,8 +78,10 @@ try {
   const maxDynamicChars = Math.max(...snapshots.map((snapshot) => snapshot.chars))
   const snapshotText = instructionSnapshots.map((snapshot) => snapshot.text).join('\n')
   const count = (token) => snapshotText.split(token).length - 1
+  const responseItems = await measureAiResponseSizes(projectDirectory)
+  const responseWarnings = aiResponseSizeWarnings(responseItems)
   const budget = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     toolCount: tools.length,
     schemaDescriptionCount: tools.reduce((sum, tool) => sum + countSchemaDescriptions(tool.inputSchema), 0),
     sourceConstantChars: MNP_MCP_SERVER_INSTRUCTIONS.length,
@@ -101,7 +104,14 @@ try {
     },
     verificationDescriptions,
     snapshots,
+    responseSizes: {
+      method: AI_RESPONSE_SIZE_METHOD,
+      limits: AI_RESPONSE_SIZE_LIMITS,
+      items: responseItems,
+    },
   }
+  for (const warning of responseWarnings) process.stderr.write(`[응답 크기 경고] ${warning}\n`)
+  if (responseWarnings.length && process.argv.includes('--fail-on-warning')) process.exitCode = 1
   if (process.argv.includes('--write')) {
     const toolSurface = tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema }))
     await Promise.all([
