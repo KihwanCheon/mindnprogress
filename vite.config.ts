@@ -25,6 +25,10 @@ export default defineConfig({
     host: '0.0.0.0',
     port: 4175,
     strictPort: true,
+    watch: {
+      // 실행 데이터와 이력 파일은 프런트엔드 변경 감시에서 제외한다.
+      ignored: ['**/server/data/**'],
+    },
     proxy: {
       // xfwd로 실제 접속 주소를 전달해야 서버가 같은 PC 요청인지 판별할 수 있다.
       '/api': { target: 'http://127.0.0.1:4176', xfwd: true },
