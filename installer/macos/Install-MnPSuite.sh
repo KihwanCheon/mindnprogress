@@ -589,7 +589,7 @@ if os.environ['MNP_PPTX_LAUNCHER']:
 PY
 
 workspace_root="$install_root/workspace-pool"
-mkdir -p "$workspace_root/common" "$workspace_root/knowledge-inbox" "$workspace_root/knowledge-applied"
+mkdir -p "$workspace_root/common"
 if [[ ! -f "$workspace_root/workspaces.json" ]]; then
   MNP_WORKSPACE_ROOT="$workspace_root" "$python_bin" - <<'PY'
 import json
@@ -606,13 +606,35 @@ PY
 fi
 
 workspace_rules="$workspace_root/common/MULTI_WORKSPACE.md"
+# Keep the shared sections identical to installer/windows Write-WorkspacePoolScaffold and Holdem_AIShared/common/MULTI_WORKSPACE.md.
 cat > "$workspace_rules" <<'EOF'
-# Unity multi-workspace rules
+# Unity 멀티 작업공간 공통 규칙
 
-- `workspaces.json` is the only static source for workspace paths.
-- Only enabled worker entries are delegation candidates; integration is the merge target.
-- AI work must stay inside its assigned root, branch, job, and lease.
-- Workspace selection, lease, switching, and release are owned by MindNProgress.
+## 기본 모델
+
+- 서로 다른 폴더에 있는 복수의 Unity/Git clone을 작업공간 풀로 사용합니다. 작업공간은 AI 종류에 귀속되지 않으며, 비어 있는 작업공간에는 어떤 AI든 배정될 수 있습니다.
+- MindNProgress(MnP)가 비어 있는 worker 하나를 원자적으로 점유(lease)하고, AionCore가 위임 대화의 작업 폴더를 그 프로젝트 루트로 지정해 AI를 실행합니다. 하나의 작업공간에는 동시에 AI 하나만 들어갑니다.
+- `workspaces.json`이 작업공간 목록과 경로의 유일한 정적 원본입니다. 운영자 스크립트가 이 파일을 작성하고, MnP는 서버 기동 시에만 읽습니다.
+- 실제 가용 상태와 최신 목록은 MnP 작업공간 풀 조회 결과(`mindnprogress_get_ai_workspace_pool`)로 판단합니다. registry를 바꾼 뒤 MnP를 재시작하기 전에는 두 값이 다를 수 있으며, 이때도 AI는 조회 결과를 기준으로 삼습니다. `idle`이 아닌 worker를 임의로 사용하지 않습니다.
+- 폴더명, 작업공간 개수, 특정 AI와 작업공간의 대응 관계를 문서·프롬프트·대화 기억으로 추측하거나 하드코딩하지 않습니다.
+- `role=integration` 작업공간은 사용자 작업과 결과 통합의 기준입니다. `role=worker`, `enabled=true`인 항목만 AI 위임 후보입니다.
+- 위임 전문이나 `.ai-session.json`이 없는 일반 대화에서는 worker를 임의로 선택하거나 점유하지 않습니다.
+
+## AI 작업 규칙
+
+1. 작업 시작 시 배정된 프로젝트 루트의 `.ai-workspace.json`과 `.ai-session.json`을 읽습니다.
+2. 위임 전문이 지시하는 배정 값(`workspaceId`, `jobId`, `leaseId`, `projectRoot`, `branch`, `baseCommit` 등)이 `.ai-session.json`과 일치하는지 확인합니다. 확인할 필드와 불일치 시 보고 방법의 원본은 위임 전문이며, 불일치하면 작업하지 않고 위임 전문의 지시대로 보고합니다.
+3. 배정된 `projectRoot`, `branch`, `jobId`, `leaseId`만 사용합니다. 배정된 프로젝트 루트 밖의 다른 작업공간으로 이동하거나 그곳을 읽거나 수정해 작업을 우회하지 않습니다.
+4. 작업공간 선택, 점유, 전환과 해제는 MnP만 수행합니다. 브랜치를 임의로 전환하지 않으며, 전환이 필요하면 작업을 멈추고 MnP 작업으로 반환합니다.
+5. 위임 작업에서는 Git 커밋을 직접 만들지 않습니다. 변경은 위임 전문이 안내하는 MnP 체크포인트(`mindnprogress_checkpoint_ai_workspace`)로 고정합니다. 통합 충돌 해결처럼 위임 전문이 Git 명령을 명시한 경우에만 그 범위에서 사용합니다.
+6. 코드와 Unity 에셋은 Git으로만 전달합니다. 작업공간 사이에 `Assets`, `Packages`, `ProjectSettings`를 링크하거나 직접 복사하지 않습니다.
+7. `Library`, `Temp`, `Logs`, `UserSettings`, `obj`, `.vs`, 빌드 출력, AI 세션·로그·인증 정보는 작업공간별로 분리합니다.
+8. 공통 규칙·지식과 Skill은 일반 작업에서 읽기 전용입니다. 공유 루트나 프로젝트 저장소에 별도 지식 제안 파일을 만들지 않습니다.
+9. 완료 시 변경 파일, 검증 결과, 체크포인트(커밋) 여부, dirty 상태, 잔여 작업을 구조화해 보고합니다.
+
+## Unity MCP
+
+Unity MCP 대상은 등록된 `assetsPath`와 `unityInstanceHash`로 구분합니다. 프로젝트를 변경하는 호출은 배정된 작업공간과 일치하는 Unity 인스턴스만 사용하고, 다른 작업공간의 Unity 에디터를 대신 사용하지 않습니다.
 EOF
 info "Updated managed workspace rules: $workspace_rules"
 
@@ -678,14 +700,68 @@ EOF
 chmod +x "$start_mnp" "$start_aion" "$stop_mnp" "$rebuild_core" "$start_all"
 
 install_skill() {
-  local agent_home="$1" name="$2" source="$3" destination marker hash
-  destination="$agent_home/skills/$name"
-  marker="$destination/.mnp-suite-managed.json"
-  [[ ! -e "$destination" || -f "$marker" ]] || die "User-owned skill conflicts with MnP Suite skill: $destination"
-  mkdir -p "$destination"
-  cp "$source/SKILL.md" "$destination/SKILL.md"
-  hash="$(shasum -a 256 "$destination/SKILL.md" | awk '{print $1}')"
-  printf '{"schemaVersion":1,"packageId":"mnp-suite","skillName":"%s","files":[{"path":"SKILL.md","sha256":"%s"}]}\n' "$name" "$hash" > "$marker"
+  # Deploy the whole skill directory (SKILL.md plus references, scripts, assets) like the Windows installer.
+  local agent_home="$1" name="$2" source="$3"
+  MNP_SKILL_NAME="$name" MNP_SKILL_SOURCE="$source" MNP_SKILL_DEST="$agent_home/skills/$name" "$python_bin" - <<'PY' || die "Skill installation failed: $agent_home/skills/$name"
+import hashlib
+import json
+import os
+import shutil
+import sys
+from pathlib import Path
+
+name = os.environ['MNP_SKILL_NAME']
+source = Path(os.environ['MNP_SKILL_SOURCE'])
+destination = Path(os.environ['MNP_SKILL_DEST'])
+marker = destination / '.mnp-suite-managed.json'
+ignored = {'.DS_Store', '__pycache__', '.mnp-suite-managed.json'}
+
+
+def fail(message):
+    print(f'Error: {message}', file=sys.stderr)
+    raise SystemExit(1)
+
+
+def sha256(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+if not (source / 'SKILL.md').is_file():
+    fail(f'Packaged skill is missing SKILL.md: {source}')
+if destination.exists() and not marker.is_file():
+    fail(f'User-owned skill conflicts with MnP Suite skill: {destination}')
+
+source_files = sorted(
+    path.relative_to(source).as_posix()
+    for path in source.rglob('*')
+    if path.is_file() and not any(part in ignored for part in path.relative_to(source).parts)
+)
+
+# Remove files that a previous MnP Suite install wrote but the current package no longer ships.
+if marker.is_file():
+    previous = json.loads(marker.read_text(encoding='utf-8'))
+    if previous.get('packageId') != 'mnp-suite' or previous.get('skillName') != name:
+        fail(f'Unexpected MnP Suite skill marker: {marker}')
+    root = destination.resolve()
+    for entry in previous.get('files', []):
+        relative = str(entry.get('path', '')).replace(chr(92), '/')
+        target = (destination / relative).resolve()
+        if not relative or Path(relative).is_absolute() or root not in target.parents:
+            fail(f'Unsafe path in MnP Suite skill marker: {marker} ({relative})')
+        if relative in source_files or not target.is_file():
+            continue
+        if sha256(target) != str(entry.get('sha256', '')).lower():
+            fail(f'Packaged skill file was modified after install; not removing it: {target}')
+        target.unlink()
+
+files = []
+for relative in source_files:
+    target = destination / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source / relative, target)
+    files.append({'path': relative, 'sha256': sha256(target)})
+marker.write_text(json.dumps({'schemaVersion': 1, 'packageId': 'mnp-suite', 'skillName': name, 'files': files}) + '\n', encoding='utf-8')
+PY
 }
 
 merge_guidance() {
@@ -726,6 +802,11 @@ cat > "$guidance_file" <<'EOF'
 - Read and follow the `mnp-dooray` skill before using MindNProgress MCP or handling Dooray work.
 - Preserve user requirements and still-valid existing content.
 - Do not create or modify Dooray work unless the user explicitly authorized it.
+
+## MindNProgress common document workflow
+
+- Read and follow the `mnp-spec-driven-development` skill before MindNProgress group-level preparation and planning, documents or sub-tasks that consume shared outputs, and final integrated verification.
+- Perform each step only within the scope the user approved. Approval of the overall direction is not blanket approval for every document run or AI delegation.
 EOF
 "$include_unity_skill" && cat >> "$guidance_file" <<'EOF'
 
@@ -743,6 +824,7 @@ EOF
 
 for agent_home in "${CODEX_HOME:-$HOME/.codex}" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; do
   install_skill "$agent_home" mnp-dooray "$SCRIPT_DIR/../windows/skills/mnp-dooray"
+  install_skill "$agent_home" mnp-spec-driven-development "$SCRIPT_DIR/../windows/skills/mnp-spec-driven-development"
   "$include_unity_skill" && install_skill "$agent_home" unity-work "$SCRIPT_DIR/../windows/skills/unity-work"
   "$include_pptx_skill" && install_skill "$agent_home" pptx "$SCRIPT_DIR/skills/pptx"
 done

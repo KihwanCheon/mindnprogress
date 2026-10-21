@@ -2,46 +2,65 @@
 name: unity-work
 description: >
   Unity 프로젝트에서 MCP로 에디터를 조작하거나 Unity UI 코드를 작성할 때 사용한다.
-  대상 에디터 인스턴스 식별, 여러 에디터가 한 MCP 서버를 공유할 때의 오수정 방지,
-  execute_code 경로 가드와 임시 오브젝트 정리, Unity UI 레이아웃 책임 분리를 다룬다.
-  Unity MCP 변경 도구를 호출하거나 Unity UI 배치를 다루는 코드를 쓰기 전에 사용한다.
+  대상 에디터 인스턴스 지정(assetsPath → SHA1 hash 산출과 projectRoot 검증), 여러 에디터가
+  한 MCP 서버를 공유할 때의 라우팅 사고 방지, execute_code 경로 가드, 임시 오브젝트 정리,
+  다른 에디터에 남은 부산물 회수, UI 레이아웃 책임 분리(RectTransform·LayoutGroup·ScrollRect)를
+  다룬다. unityMCP 도구(execute_code, manage_gameobject, manage_components, manage_prefabs,
+  manage_asset, manage_scene, create_script, manage_editor, run_tests 등)를 호출하기 전이나
+  Unity UI 배치를 다루는 코드를 쓰기 전에 읽는다.
 ---
 
-# Unity 작업 안전 절차
+# Unity 작업 절차
 
-Unity MCP 도구의 일반 사용법은 현재 연결된 도구 설명을 따르고, 이 스킬은 이 환경에서 추가로 필요한 안전 규칙과 복구 절차를 정의한다.
+전역 지침에는 불변조건만 있다. 이 문서는 그 불변조건을 **어떻게 지키는지**와 어겼을 때의 복구 절차를 담는다.
 
-## UI 레이아웃 책임
+Unity MCP 도구의 일반 사용법은 현재 연결된 도구 설명을 따르고, 이 문서는 이 환경에서 추가로 필요한 안전 규칙과 복구 절차를 정의한다.
 
-- Unity UI의 시각적 레이아웃 값은 프리팹과 에디터에서 관리한다.
-- `RectTransform`의 부모·앵커·피벗·위치·크기·스케일을 코드나 Play 진입 시 덮어쓰지 않는다.
-- `GridLayoutGroup`, `HorizontalLayoutGroup`, `VerticalLayoutGroup`의 셀 크기·간격·패딩·정렬·제약을 코드에서 정하지 않는다.
-- `ScrollRect`의 축 활성화와 Viewport·Content 배치를 코드에서 정하지 않는다.
-- UI 코드는 데이터 표시, 아이템 생성, 이벤트 연결과 노출 조건 같은 동작만 담당한다.
-- 데이터에 따른 동적 레이아웃 계산이 불가피하면 필요성과 범위를 설명하고 사용자에게 명시적으로 확인받은 뒤 적용한다.
+## Unity UI 레이아웃 관리 규칙
 
-## 대상 Unity 인스턴스 식별
+- **아래 배치 제한과 동적 레이아웃 승인 규칙은 실서비스에 사용되는 UI에만 적용한다.**
+- 실서비스 UI의 레이아웃 값은 아트 디자이너가 프리팹과 에디터에서 결정한다. 다음 값을 코드에서 결정하거나 Play 진입 시 덮어쓰지 않는다.
+  - `RectTransform`의 부모·앵커·피벗·위치·크기·스케일
+  - `GridLayoutGroup`, `HorizontalLayoutGroup`, `VerticalLayoutGroup`의 셀 크기·간격·패딩·정렬·제약
+  - `ScrollRect`의 가로·세로 활성화와 Viewport/Content 레이아웃
+- UI 코드는 데이터 표시, 아이템 생성, 이벤트 연결, 서비스별 노출 여부 등 동작만 담당하고 시각적 배치는 직렬화된 프리팹 값을 사용한다.
+- 데이터에 따라 반드시 동적으로 계산해야 하는 레이아웃은 사용자에게 필요성과 적용 범위를 먼저 설명하고 명시적으로 확인받은 경우에만 코드로 처리한다.
+- 개발·디버그·검수·테스트 전용 UI는 코드로 배치와 동적 레이아웃을 구현할 수 있다. 승인된 구현 범위라면 아트 배치 확정이나 별도의 레이아웃 승인을 기다리지 않는다.
+- 실행 환경이 아니라 UI의 실제 용도로 구분한다. Development 빌드의 개발 전용 패널도 예외에 포함하지만, 실서비스 UI를 검수한다는 이유만으로 예외를 적용하지 않는다.
 
-여러 Unity Editor가 하나의 MCP 서버를 공유할 수 있으므로 이름만으로 대상을 선택하지 않는다.
+## unityMCP 대상 에디터 지정 규칙
 
-1. 배정되거나 사용자가 지정한 프로젝트 루트를 확정한다.
-2. 프로젝트 경로의 역슬래시를 `/`로 바꾸고 `/Assets`를 붙여 `assetsPath`를 만든다.
-3. `SHA1(assetsPath)`의 앞 16자를 인스턴스 해시로 사용한다.
-4. `mcpforunity://instances`에서 해시가 일치하는 항목을 찾는다.
-5. `set_active_instance`를 보조적으로 호출한 뒤 `mcpforunity://project/info`의 `projectRoot`가 대상과 같은지 확인한다.
+여러 유니티 에디터가 하나의 MCP 서버를 공유할 수 있다. 어느 에디터를 조작하는지 항상 확정한 뒤 작업한다.
 
-인스턴스 목록에 프로젝트 경로가 없거나 같은 이름의 복제 프로젝트가 있으면 이름을 판단 근거로 사용하지 않는다.
+- **unityMCP 도구를 처음 사용하기 전에 `set_active_instance`로 현재 작업 폴더에 해당하는 인스턴스를 지정한다.** 이 지정은 다른 세션에 영향을 주지 않는다. 다만 **세션 고정을 보장하지는 않으므로**(아래 「라우팅 사고 방지」 참조) 이것만 믿지 않고 매 변경 호출에 `unity_instance`를 함께 넘긴다.
+- **인스턴스 ID는 사용자에게 묻지 않고 스스로 산출한다.**
+  1. 현재 작업 폴더의 역슬래시를 `/`로 바꾸고 `/Assets`를 붙여 `assetsPath`를 만든다. (예: `C:\Git\Foo\client` → `C:/Git/Foo/client/Assets`)
+  2. `SHA1(assetsPath)`의 앞 16자가 인스턴스 hash다.
+  3. `mcpforunity://instances`에서 hash가 일치하는 항목의 `Name@hash`를 `set_active_instance`에 넘긴다.
+  4. **검증**: `mcpforunity://project/info`의 `projectRoot`가 현재 작업 폴더와 같은지 확인한다. 다르면 잘못 잡은 것이므로 다시 지정한다.
+- hash 산출이 맞지 않으면 후보를 하나 지정한 뒤 4번으로 확인하고, 틀리면 다른 후보로 교체하는 방식으로 판별한다.
+- `mcpforunity://instances` 응답에는 프로젝트 경로가 없다. 같은 프로젝트를 복제해 병렬 작업하면 `name`이 겹치므로 **이름만으로 대상을 판단하지 않는다.**
+- 인스턴스가 2개 이상 연결된 상태에서 지정하지 않으면 서버가 에러를 반환한다. 엉뚱한 에디터가 조작되지는 않으므로, 이 에러가 나면 지정 누락을 먼저 의심한다.
+- 단발 호출만 다른 에디터로 보낼 때는 세션 기본값을 바꾸지 않고 해당 도구 호출에 `unity_instance` 파라미터를 넘긴다 (hash prefix 허용).
+- 에디터가 하나만 연결된 상태에서도 지정해두면 이후 두 번째 에디터가 붙었을 때의 오동작을 예방할 수 있다.
 
-## 변경 호출 안전 규칙
+### 라우팅 사고 방지 (필수)
 
-- 프로젝트를 변경하는 모든 Unity MCP 호출에 `unity_instance`를 직접 지정한다. `set_active_instance`만으로 세션 고정을 가정하지 않는다.
-- `execute_code`의 첫 줄에서 `Application.dataPath`가 예상 `assetsPath`와 같은지 검사하고, 다르면 아무것도 변경하지 않고 반환한다.
-- `execute_code`의 `replay`를 사용하지 않는다. 다시 실행해야 하면 경로 가드를 포함한 코드를 새로 보낸다.
-- 에디터에서 만든 임시 오브젝트는 `try`/`finally`로 파괴한다.
-- 리소스 조회 결과는 응답의 `instance_id`와 `projectRoot`가 대상과 일치할 때만 판단 근거로 사용한다.
+`set_active_instance`는 세션 고정을 **보장하지 않는다.** 연결이 한 번 끊겼다 복구되면(`refresh_unity`가 `recovered from disconnect`를 반환하는 상황) 이후 호출이 조용히 다른 에디터로 넘어갈 수 있다. 이 때문에 다른 병렬 작업 폴더의 씬에 임시 오브젝트가 생성된 사고가 실제로 발생했다.
 
-## 오수정 또는 실패 복구
-
-- 호출이 실패하거나 대상이 잘못되었으면 연결된 다른 에디터에 임시 오브젝트나 변경 부산물이 남았는지 즉시 확인한다.
-- 잘못된 작업공간의 씬과 에셋을 저장하지 않는다.
-- 안전하게 제거할 수 있는 임시 부산물만 회수하고, 의도하지 않은 변경 범위와 복구 결과를 사용자에게 보고한다.
+- **프로젝트를 변경하는 도구는 매 호출에 `unity_instance`를 직접 지정한다.** (`execute_code`, `manage_gameobject`, `manage_components`, `manage_prefabs`, `manage_asset`, `manage_scene`, `create_script`/`apply_text_edits`/`script_apply_edits`, `manage_editor`, `run_tests` 등) `set_active_instance`는 보조 수단으로만 쓴다.
+- **클라이언트에 표시된 도구 스키마에 `unity_instance`가 없어도 인자로 넘긴다.** 서버 안내가 모든 도구 호출에 이 인자를 허용한다. 이 PC의 Claude Code 대화 기록에는 스키마에 없는 이 인자를 넘겨 성공한 호출이 있고, unity-guard 로그의 통과 호출도 대부분 이 인자를 포함했다(2026-10 확인. 로그는 클라이언트를 구분하지 않는다).
+  - 클라이언트가 인자 자체를 거부(스키마 검증 오류)하면 변경 작업을 중단하고 사용자에게 보고한다. unity-guard를 우회하거나 `set_active_instance`만으로 변경을 진행하지 않는다.
+  - 그 상태에서 조회만 계속할 때는 매 조회 직전에 `set_active_instance`를 다시 호출하고 `mcpforunity://project/info`의 `projectRoot`로 대상을 확인한다. 이렇게 얻은 결과도 보고할 때 라우팅을 인자로 고정하지 못했다고 밝힌다.
+- **검증 근거로 쓰는 조회도 같은 인스턴스로 보낸다.** `read_console`, `get_test_job`, `find_gameobjects`, `manage_scene get_hierarchy` 같은 조회는 unity-guard가 인스턴스 없이 통과시키지만, 컴파일 성공·테스트 통과·씬 상태를 판단할 근거라면 변경 호출과 같은 `unity_instance`를 넘긴다. 재연결(`recovered from disconnect`) 뒤의 조회 결과는 `projectRoot`나 `execute_code` 경로 가드 결과로 대상을 다시 확인하기 전에는 근거로 쓰지 않는다.
+- **`batch_execute`는 한 인스턴스만 대상으로 하고 상위 호출에 `unity_instance`를 넘긴다.** 내부 명령에도 같은 규칙(경로 가드, replay 금지)이 적용된다. 내부에 `set_active_instance`나 다른 `batch_execute`를 넣지 않고, 내부 `params`의 `unity_instance`로 대상을 바꾸지 않는다. 내부 인자의 라우팅 반영은 확인되지 않았다.
+- unity-guard hook(`C:/Users/NHN/.agent-rules/hooks/unity-guard.cjs`, Claude·Codex 공용)이 위 규칙을 강제한다. 조회 전용으로 등록된 도구·동작 외의 호출은 `unity_instance`가 없으면 차단되고, 목록에 없는 새 도구·동작은 쓰기로 간주된다. 차단 메시지를 받으면 인자를 보완해 다시 호출하고 hook을 끄거나 우회하지 않는다. hook 자체의 파싱 실패·내부 오류로 차단되면 사용자에게 보고하고, hook 수정·등록 해제는 사용자 승인 뒤에만 한다.
+- **`execute_code`는 첫 줄에 경로 가드를 넣는다.** 기대 경로가 아니면 아무것도 하지 않고 즉시 반환한다.
+  ```csharp
+  if (Application.dataPath != "C:/Git/Foo/client/Assets")
+      return "WRONG INSTANCE: " + Application.dataPath + " — aborted";
+  ```
+- **`execute_code`의 `replay`는 쓰지 않는다.** 히스토리는 인스턴스별이므로 엉뚱한 에디터에서 전혀 다른 코드가 실행될 수 있다. 재실행이 필요하면 코드를 다시 보낸다.
+- **리소스 조회(`mcpforunity://...`)에는 `unity_instance`를 넘길 수 없다.** 응답의 `instance_id`·`projectRoot`로 대상을 확인하고, 기대한 인스턴스가 아니면 그 결과를 판단 근거로 삼지 않는다.
+- **에디터에서 생성한 임시 오브젝트는 `try`/`finally`로 파괴한다.** 예외가 발생하면 정리 코드에 도달하지 못해 씬에 부산물이 남는다.
+- 쓰기 작업이 실패했거나 대상이 틀렸다면 **다른 에디터에 부산물이 남았는지 즉시 확인해 회수하고 사용자에게 보고한다.** 이때 다른 작업 폴더의 씬·에셋은 저장하지 않고 dirty 상태를 그대로 둔다.

@@ -1,6 +1,6 @@
 ---
 name: mnp-runtime
-description: MindNProgress(MnP) Windows 서버의 시작·종료·재시작, 실행 유지·예기치 않은 종료 진단, 작업 스케줄러 상시 실행 구성을 다룬다. 카드·Dooray 문서 정비나 서버 운영을 수반하지 않는 일반 UI·코드 수정에는 사용하지 않는다.
+description: MindNProgress(MnP) Windows 서버의 시작·종료·재시작, 실행 유지·예기치 않은 종료 진단, 작업 스케줄러 상시 실행 구성을 다룬다. 서버 운영을 수반하지 않는 카드·Dooray 문서 정비와 일반 UI·코드 수정에는 사용하지 않는다.
 ---
 
 # MindNProgress 런타임 운영
@@ -11,26 +11,44 @@ NHN 환경의 MnP를 AI 대화·Codex·Claude Code 실행 세션과 독립적으
 
 - 설명·진단·제안 요청은 읽기 전용이다. 스킬 작성·지침 정비 승인도 서버 중단이나 예약 작업 등록 승인이 아니다.
 - 사용자가 승인한 시작·종료·재시작 안에서 대상 확인과 검증은 매 단계 재승인받지 않는다. 새 작업 등록, 계정 변경, 부팅 자동 실행 등 범위 확대는 먼저 승인받는다.
+- `-UseGuiTaskHost`는 등록 작업의 실행 대상(Action)을 `Set-ScheduledTask`로 바꾸는 등록 작업 변경이다. 재시작 승인과 별도로 이 변경을 명시적으로 승인받은 경우에만 붙인다.
+- `-AllowLegacyStop`은 정상 종료 IPC가 없는 레거시 런타임을 검증된 프로세스 강제 종료로 끝내며 진행 중인 저장을 중단할 수 있다. 스크립트가 이 옵션을 요구하며 실패하면 그 위험을 사용자에게 알리고 승인받은 뒤에만 옵션을 붙여 다시 실행한다.
 - 시작·재시작에 사용할 등록 작업이 없으면 기존 서버부터 끄지 않는다. 최초 구성을 제안하고 승인받는다. 권한이나 실행 설정을 확보하지 못하면 임의의 임시 실행으로 대체하지 않고 보고한다.
 
 ## 실행 전 조회
 
-1. 현재 MnP 설치 루트와 시작·종료 스크립트를 읽고, 웹·API 주소, 로그, 환경 설정 로딩 방식을 확인한다. 이 PC의 확인 출발점은 `C:/Git/MindNProgress/MindNProgress`와 상위 폴더의 `MindNProgress_Launcher.cjs`·`MindNProgress_Stop.bat`이다. 경로와 파일 존재 여부를 매번 재확인하며, 다른 설치본에는 그대로 적용하지 않는다.
-2. `Get-ScheduledTask`로 후보를 조회한다. 등록 작업이 있으면 `TaskName`·`TaskPath`·실행 파일·인수·작업 디렉터리·실행 계정을 대조해 대상 하나를 확정한다. 이름에 MnP가 들어간다는 이유만으로 선택하거나 예시 작업명이 등록되어 있다고 가정하지 않는다. 도메인·컴퓨터 이름이 붙은 계정이나 SID도 실제 `NHN` 계정인지 확인하며, `SYSTEM`이나 다른 계정으로 바꾸지 않는다.
-3. `Get-CimInstance Win32_Process`와 `Get-NetTCPConnection`으로 실제 프로세스 명령줄·부모 관계·생성 시각·수신 포트를 확인한다. PID 파일과 과거 포트는 조회 단서일 뿐 종료 근거가 아니다. 웹·API가 한 프로세스인지 별도 프로세스인지도 확인한다.
-4. 재시작 전에는 현재 상태·PID·기동 시각과 다시 실행할 명령을 확보한다. 시작 경로가 확인되지 않거나 대상이 모호하면 기존 서버를 유지하고 보고한다.
+1. 현재 MnP 설치 루트와 시작·종료 스크립트를 읽고, 웹·API 주소, 로그, 환경 설정 로딩 방식을 확인한다. 이 PC의 확인 출발점은 `C:/Git/MindNProgress/MindNProgress`와 상위 폴더의 `MindNProgress_Launcher.cjs`·`MindNProgress_Start.bat`·`MindNProgress_Start.vbs`·`MindNProgress_Stop.bat`이다. 경로와 파일 존재 여부를 매번 재확인하며, 다른 설치본에는 그대로 적용하지 않는다.
+2. 공통 스크립트(`scripts/mnp-runtime.ps1`)가 있으면 먼저 `-Action status`로 조회한다. 인수 없이 실행해도 status이며, 잠금 파일을 만들지 않고 `TaskState`·`Healthy`(웹·API HTTP)·`GracefulShutdown`(정상 종료 IPC 가능 여부)·`Processes`(역할·PID·기동 시각)를 JSON으로 출력한다. 등록 작업이나 실행 계정이 맞지 않으면 이 단계에서 실패하므로 그 오류부터 보고한다. 아래 3~4단계의 직접 조회는 status 결과를 보완하거나 스크립트가 없을 때 쓴다.
+3. `Get-ScheduledTask`로 후보를 조회한다. 등록 작업이 있으면 `TaskName`·`TaskPath`·실행 파일·인수·작업 디렉터리·실행 계정을 대조해 대상 하나를 확정한다. 이름에 MnP가 들어간다는 이유만으로 선택하거나 예시 작업명이 등록되어 있다고 가정하지 않는다. 단, 공통 스크립트는 대상 작업을 루트 경로의 `MindNProgress`(`TaskPath`가 `\`)로 고정해 쓴다. 스크립트를 쓸 때는 이 작업이 위 조건을 충족하는지 확인하고, 다른 작업을 대상으로 확정했다면 스크립트를 그대로 실행하지 않고 보고한다. 도메인·컴퓨터 이름이 붙은 계정이나 SID도 실제 `NHN` 계정인지 확인하며, `SYSTEM`이나 다른 계정으로 바꾸지 않는다.
+4. `Get-CimInstance Win32_Process`와 `Get-NetTCPConnection`으로 실제 프로세스 명령줄·부모 관계·생성 시각·수신 포트를 확인한다. PID 파일과 과거 포트는 조회 단서일 뿐 종료 근거가 아니다. 웹·API가 한 프로세스인지 별도 프로세스인지도 확인한다.
+5. 재시작 전에는 현재 상태·PID·기동 시각과 다시 실행할 명령을 확보한다. 시작 경로가 확인되지 않거나 대상이 모호하면 기존 서버를 유지하고 보고한다.
 
 ## 공통 제어 경로 우선
 
-- 현재 설치에 `scripts/mnp-runtime.ps1`이 있으면 내용을 읽고 시작·종료·재시작은 이 스크립트의 `-Action start|stop|restart`로 수행한다. 이 PC의 명령 예시는 `& 'C:\Git\MindNProgress\MindNProgress\scripts\mnp-runtime.ps1' -Action restart`다. 실제 조회한 설치 경로를 사용한다.
-- 아래 시작·종료 순서는 공통 스크립트가 보장해야 하는 내부 절차다. 공통 스크립트가 있는 설치에서 이를 개별 `Stop-ScheduledTask`·`Start-ScheduledTask`·PID 강제 종료로 다시 작성하거나 대체하지 않는다. 스크립트가 실패하면 실패 단계·PID·포트·로그부터 진단한다.
+- 현재 설치에 `scripts/mnp-runtime.ps1`이 있으면 내용을 읽고 조회는 `-Action status`, 시작·종료·재시작은 이 스크립트의 `-Action start|stop|restart`로 수행한다. 이 PC의 명령 예시는 `& 'C:\Git\MindNProgress\MindNProgress\scripts\mnp-runtime.ps1' -Action restart`다. 실제 조회한 설치 경로를 사용한다.
+- 아래 시작·종료 순서는 공통 스크립트가 보장해야 하는 내부 절차다. 공통 스크립트가 있는 설치에서 이를 개별 `Stop-ScheduledTask`·`Start-ScheduledTask`·PID 강제 종료로 다시 작성하거나 대체하지 않는다. 스크립트가 실패하면 실패 단계·PID·포트·로그부터 진단한다. 이 PC의 로그는 설치 루트(`C:/Git/MindNProgress`)의 `.mindnprogress/runtime-operations.jsonl`과 `.mindnprogress/dev.err.log`·`dev.out.log`다. `runtime-operations.jsonl`에는 start·stop·restart마다 `action`·`succeeded`·`failedPhase`·`shutdownMode`·`forceReason`·`forcedProcesses`가 한 줄씩 남으며 status는 기록되지 않는다.
+- 진입점별 실제 동작(2026-10-21 파일 확인. 바뀔 수 있으므로 실행 전 다시 읽는다):
+
+  | 진입점 | 실제 동작 |
+  |---|---|
+  | `scripts/mnp-runtime.ps1` (인수 없음 또는 `-Action status`) | 조회만 한다. 잠금·로그 기록 없음 |
+  | `mnp-runtime.ps1 -Action start` | 기존 인스턴스가 정상이면 재시작하지 않고 끝낸다. 비정상이면 교체하지 않고 실패한다. 기존 인스턴스가 없을 때만 등록 작업을 시작한다 |
+  | `mnp-runtime.ps1 -Action stop` | 등록 작업 중지 후 정상 종료를 기다린다. 제한 시간을 넘기면 강제 종료하지 않고 실패한다 |
+  | `mnp-runtime.ps1 -Action restart` | 종료 후 시작한다. 정상 종료가 제한 시간을 넘기면 처음 확인한 MnP 프로세스만 다시 검증해 **자동으로 강제 종료**한다 |
+  | `MindNProgress_Start.bat` | 항상 `-Action restart -AllowLegacyStop -OpenBrowser`로 실행한다. 이름과 달리 정상 실행 중인 서버도 재시작하고 레거시 강제 종료까지 허용한다 |
+  | `MindNProgress_Start.vbs` | `MindNProgress_Start.bat --hidden`을 숨김 창으로 실행하는 래퍼다. 동작은 Start.bat과 같다 |
+  | `MindNProgress_Stop.bat` | 항상 `-Action stop -AllowLegacyStop`으로 실행한다 |
+  | `MindNProgress_Launcher.cjs` | 등록 작업이 실행해 감시하는 런처다. 직접 실행하지 않는다 |
+
+- 그래서 AI는 Start.bat·Start.vbs·Stop.bat으로 대신 실행하지 않고 `mnp-runtime.ps1`의 해당 `-Action`을 직접 쓴다. 시작만 요청받았으면 `-Action start`를 쓰고, `-AllowLegacyStop`·`-UseGuiTaskHost`는 「승인 범위」의 조건을 충족할 때만 붙인다. 사용자가 이 배치 파일 실행을 직접 지시했다면 위 동작을 알린 뒤 따른다.
+- restart 승인에는 위 자동 강제 종료가 포함될 수 있음을 실행 전에 알린다. 실행 후 `runtime-operations.jsonl`의 `shutdownMode`가 `forced`나 `legacy`이면 `forceReason`·`forcedProcesses`와 함께 보고한다.
 - 작업 스케줄러의 `Ready`는 실행기 중지만 뜻할 수 있다. `dev.pids`·`runtime.json`의 기록과 실제 명령줄·생성 시각·부모 관계를 대조하고, 자식 PID 종료와 포트 해제까지 확인해야 중지가 끝난 것이다. 공통 스크립트는 이미 실행기가 중지된 잔여 프로세스도 같은 검증·정상 종료 경로로 처리한다.
 - 실행 구조를 변경할 때는 기존 시작·중지 배치 원본을 먼저 비교한다. PID 기록, 자식 종료, 포트 해제, 환경 설정 로딩 중 어떤 기능을 보존하거나 변경하는지 확인한 뒤 격리 재현·회귀 검증을 한다. 기존 배치의 PID 파일 기반 강제 종료를 검증 없이 그대로 복원하지 않는다.
 
 ## 승인된 최초 등록·설정 변경
 
 - `NHN` 계정으로 실행하며 현재 MnP의 작업 디렉터리, 환경 설정과 자격 증명 로딩 방식을 보존한다. 계정 비밀번호나 토큰을 지침·로그에 기록하지 않는다.
-- 등록 작업이 직접 감시하는 대상은 서버가 살아 있는 동안 유지되는 런처여야 한다. 서버만 띄우고 곧 종료되는 VBS·배치 시작 도우미를 장기 실행 작업으로 등록하지 않는다. 기존 런처가 이 조건을 충족하는지 먼저 읽고 확인한다.
+- 등록 작업이 직접 감시하는 대상은 서버가 살아 있는 동안 유지되는 런처여야 한다. 서버만 띄우고 곧 종료되는 VBS·배치 시작 도우미를 장기 실행 작업으로 등록하지 않는다. 런처가 끝날 때까지 동기 대기하는 래퍼는 이 조건을 충족한다. 예: `-UseGuiTaskHost`가 등록하는 `wscript.exe //B scripts/runtime/task-host.vbs`는 `Shell.Run(..., 0, True)`로 런처 종료까지 기다리므로 위반이 아니다. 기존 런처가 이 조건을 충족하는지 먼저 읽고 확인한다.
 - 실행 시간 제한을 해제하고 오류 시 재시작, 중복 실행 방지, 표준 출력·오류 로그 저장을 설정한다. 재시작 간격·횟수와 전원·유휴 조건을 확인하고, 부팅·로그온 트리거와 로그오프 후 실행은 승인된 범위에서만 설정한다.
 - 저장 후 작업을 다시 조회해 계정·실행 대상·디렉터리·시간 제한·재시작 설정이 의도대로 저장되었는지 확인한다. 기존 서버가 있으면 중복으로 시작하지 않고 승인된 전환 절차를 따른다.
 - AI 도구 세션에서 `npm run dev`·`npm start`를 직접 실행하거나 PowerShell 백그라운드 작업을 만드는 방식은 상시 실행 경로로 사용하지 않는다. 창 숨김, `detached`·`unref`만으로 AI 세션 종료 후 생존을 보장하지 않는다.
@@ -45,7 +63,7 @@ NHN 환경의 MnP를 AI 대화·Codex·Claude Code 실행 세션과 독립적으
 4. 종료가 확인된 뒤 같은 작업을 `Start-ScheduledTask -TaskName $mnpTask.TaskName -TaskPath $mnpTask.TaskPath`로 시작한다. 시작만 요청한 경우도 기존 인스턴스와 포트 점유를 먼저 확인한다. `schtasks /run`을 쓸 때는 실제 전체 작업 경로를 사용한다. 실행 중인 작업에 시작 명령만 보내고 재시작했다고 보고하지 않는다.
 5. 웹과 API의 실제 HTTP 응답을 각각 확인하고, 재시작이면 기동 시각·PID도 이전 상태와 대조한다. 현재 설정이 개발 기본값일 때의 확인 예시는 `http://127.0.0.1:4175/`와 `http://127.0.0.1:4176/api/health`이며, 실행 전 확인한 실제 주소를 우선한다. 예약 작업의 실행 중 표시나 포트 열림만으로 정상 기동을 판정하지 않는다.
 
-종료가 확인되지 않거나 다른 프로그램이 포트를 점유하면 새 인스턴스를 띄우지 않는다. 기동 확인이 제한 시간을 넘으면 관련 로그와 작업 결과를 조회해 보고하며, 원인 확인 없이 반복 시작·강제 종료하지 않는다. 시작·종료 스크립트, 코드, 포트, 방화벽을 바꾸는 조치는 현재 승인 범위를 먼저 확인한다.
+종료가 확인되지 않거나 다른 프로그램이 포트를 점유하면 새 인스턴스를 띄우지 않는다. 기동 확인이 제한 시간을 넘으면 관련 로그와 작업 결과를 조회해 보고하며, 원인 확인 없이 반복 시작·강제 종료하지 않는다. 공통 스크립트 restart의 검증된 자동 강제 종료는 승인된 restart 절차의 일부로 보며, 그 뒤 기동이 실패하면 다시 실행하지 않고 보고한다. 시작·종료 스크립트, 코드, 포트, 방화벽을 바꾸는 조치는 현재 승인 범위를 먼저 확인한다.
 
 ## 예기치 않은 종료 진단·결과 보고
 

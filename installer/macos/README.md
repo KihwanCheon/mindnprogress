@@ -92,6 +92,12 @@ unset DOORAY_API_KEY
 
 API 키를 명령행 인수로 넘기지 마세요. 설치기는 환경값을 현재 사용자의 macOS Keychain 서비스 `mnp-suite-dooray-api-key`에 저장하고, descriptor·manifest·launcher에는 키나 Keychain 값이 아닌 실행 경로만 기록합니다. 같은 macOS 사용자로 재설치할 때는 기존 Keychain 항목을 재사용할 수 있습니다.
 
+## Claude Code·Codex 스킬
+
+`mnp-dooray`와 `mnp-spec-driven-development`는 항상, `unity-work`와 `pptx`는 선택 시 `${CODEX_HOME:-~/.codex}/skills`와 `${CLAUDE_CONFIG_DIR:-~/.claude}/skills`에 설치합니다. 스킬은 `SKILL.md`만이 아니라 `references` 등을 포함한 디렉터리 전체를 배포 단위로 복사하고, `.mnp-suite-managed.json`에 설치한 파일과 SHA-256을 기록합니다. 재설치할 때 패키지에서 빠진 이전 설치 파일은 설치 후 수정되지 않은 경우에만 제거하며, 수정된 파일이 있으면 설치를 중단합니다. 같은 이름의 사용자 소유 스킬 폴더(표식 없음)가 있으면 덮어쓰지 않고 중단합니다.
+
+`pptx`는 이 폴더의 `skills/pptx`(macOS 렌더러 `libreoffice+pymupdf` 플랫폼 파생본)를, 나머지는 `../windows/skills`의 사본을 설치합니다. 이 사본들은 활성본(`~/.claude/skills`)에서 동기화한 파생본이며, 원본·파생 관계는 ai-guidance-library README의 「원본과 파생본」을 따릅니다.
+
 ## 주요 옵션
 
 | 옵션 | 역할 |
