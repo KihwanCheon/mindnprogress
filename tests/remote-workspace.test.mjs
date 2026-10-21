@@ -95,6 +95,35 @@ test('실제 Git: 원격 prepare → checkpoint → staging 통합 → 반환 �
   assert.notEqual(next.leaseId, lease.leaseId)
 })
 
+test('원격 Fork 체크포인트도 로컬과 같은 knowledge-inbox 경로 거부를 적용한다', async (t) => {
+  const f = await fixture(t), lease = await f.acquire()
+  const head = await git(f.worker, ['rev-parse', 'HEAD'])
+  await mkdir(path.join(f.worker, 'knowledge-inbox'), { recursive: true })
+  await writeFile(path.join(f.worker, 'knowledge-inbox', 'job-1.md'), 'proposal\n')
+  await assert.rejects(() => f.checkpoint(lease, ['knowledge-inbox/job-1.md'], 'checkpoint-inbox'), (error) => {
+    assert.equal(error.reasonCode, 'AI_WORKSPACE_CHECKPOINT_PATH_REJECTED')
+    assert.match(error.message, /knowledge-inbox\/job-1\.md/)
+    return true
+  })
+  assert.equal(await git(f.worker, ['rev-parse', 'HEAD']), head, '거부된 경로는 커밋하지 않는다')
+  assert.match(await git(f.worker, ['status', '--porcelain=v1', '--untracked-files=all']), /knowledge-inbox\/job-1\.md/)
+
+  // Runner HTTP 응답처럼 code만 전달돼도 같은 reasonCode로 보고한다.
+  const callRunner = f.remote.callRunner
+  f.remote.callRunner = async (...args) => {
+    try { return await callRunner(...args) } catch (error) {
+      throw Object.assign(new Error(error.message), { code: error.reasonCode ?? error.code, reasonCode: 'REMOTE_REQUEST_FAILED' })
+    }
+  }
+  await assert.rejects(() => f.checkpoint(lease, ['knowledge-inbox/job-1.md'], 'checkpoint-inbox-http'), { reasonCode: 'AI_WORKSPACE_CHECKPOINT_PATH_REJECTED' })
+  f.remote.callRunner = callRunner
+
+  await rm(path.join(f.worker, 'knowledge-inbox'), { recursive: true, force: true })
+  await writeFile(path.join(f.worker, 'feature.txt'), 'remote change\n')
+  const checkpoint = await f.checkpoint(lease, ['feature.txt'], 'checkpoint-after-inbox')
+  assert.ok(checkpoint.checkpoint?.commit, '다른 경로는 새 requestId로 정상 체크포인트한다')
+})
+
 test('기준 커밋이 뒤처진 worker에는 전체 이력 대신 작은 증분 bundle만 전송한다', async (t) => {
   const f = await fixture(t)
   await writeFile(path.join(f.integration, 'feature.txt'), 'next baseline\n')

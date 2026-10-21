@@ -23,6 +23,7 @@ import {
 } from './cardTextPatch.mjs'
 import { imageCardLocalAccess } from './imageAccess.mjs'
 import { withDocumentGroupMetadata } from './documentGroupMetadata.mjs'
+import { WORKSPACE_POOL_STATUS_GUIDE, WORKSPACE_POOL_STATUS_REFERENCE } from './workspacePoolStatusGuide.mjs'
 import { MCP_TOOL_USAGE_DIRECTORY_NAME, createFileToolUsageRecorder } from '../server/lib/mcpToolUsage.mjs'
 import { formatAiConversationDisplay } from '../server/lib/aiConversationDisplay.mjs'
 import { createMapContentPatch } from '../src/utils/mapContentPatch.mjs'
@@ -859,7 +860,7 @@ const mapIdSchema = { mapId: z.string().min(1).describe('문서 ID') }
 
 const checkpointCommitMessageSchema = z.object({
   summary: z.string().min(1).max(80)
-    .describe('실제 변경을 설명하는 커밋 제목. [김용민] prefix는 서버가 추가하므로 포함하지 않음'),
+    .describe('실제 변경을 설명하는 커밋 제목. 커밋 제목 prefix(사용자 커밋 규칙의 이름 머리말 등)는 서버가 추가하므로 포함하지 않음'),
   background: z.string().min(1).max(2000)
     .describe('왜 이 변경이 필요한지 설명하는 [배경] 본문'),
   cause: z.string().min(1).max(2000)
@@ -1686,12 +1687,8 @@ async function main() {
     const result = await apiRequest('/api/ai-workspaces')
     return {
       ...result,
-      statusGuide: {
-        idle: '새 위임 후보가 될 수 있지만 실제 배정은 MindNProgress가 수행합니다.',
-        leased: '다른 AI 작업에 점유된 상태입니다.',
-        quarantined: '자동 재사용할 수 없으며 원인을 확인하고 명시적으로 복구해야 합니다.',
-        integration: '사용자 작업과 완료 결과의 통합 기준이며 AI worker로 직접 선택하지 않습니다.',
-      },
+      statusGuide: WORKSPACE_POOL_STATUS_GUIDE,
+      statusReference: WORKSPACE_POOL_STATUS_REFERENCE,
       coordinationRule: 'AI는 작업공간을 직접 선택·점유·전환·해제하지 않습니다. 실제 작업에서는 MindNProgress 위임 전문과 .ai-session.json에 배정된 projectRoot만 사용하세요.',
     }
   })
@@ -1737,7 +1734,7 @@ async function main() {
         paths: z.array(z.string().min(1).max(4096)).min(1).max(2000)
           .describe('검증 전에 고정할 의도된 변경의 projectRoot 상대 경로. git status를 확인해 실제 수정·추가한 파일만 전달'),
         commitMessage: checkpointCommitMessageSchema
-          .describe('이번 paths의 실제 변경을 설명하는 구조화 커밋 메시지. 서버가 [김용민] prefix, [MnP] 출처와 본문 섹션을 생성하므로 출처를 직접 넣지 않음'),
+          .describe('이번 paths의 실제 변경을 설명하는 구조화 커밋 메시지. 서버가 커밋 제목 prefix, [MnP] 출처와 본문 섹션을 생성하므로 prefix와 출처를 직접 넣지 않음'),
       }).strict(),
       z.object({
         action: z.literal('confirm-no-changes'),

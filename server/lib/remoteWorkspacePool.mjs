@@ -153,7 +153,8 @@ export class RemoteWorkspacePool {
     const operation = lease.operations[key] ??= { ...body, operationId: `${action}-${stableHash(body).slice(0, 48)}` }
     await this.persist()
     try { return await this.callRunner(lease.ownership.machineId, '/mnp/workspaces', { method: 'POST', body: operation, timeoutMs: 600_000 }) } catch (error) {
-      if (/^(REMOTE_|MNP_WORKSPACE_)/.test(error.code ?? '')) error.reasonCode = error.code
+      // Runner checkpoints reuse WorkspacePoolManager.checkpoint, so its path guard codes are surfaced unchanged.
+      if (/^(REMOTE_|MNP_WORKSPACE_|AI_WORKSPACE_CHECKPOINT_)/.test(error.code ?? '')) error.reasonCode = error.code
       throw error
     }
   }

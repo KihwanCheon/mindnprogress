@@ -1,6 +1,6 @@
 # 서브 머신 Unity Fork 풀
 
-현재 변경은 `feature/remote-fork-workspaces` 분리 worktree에서 구현했다. 실행 중인 서버·Runner·Unity와 실제 integration/Fork에는 적용하지 않았다.
+이 기능은 `feature/remote-fork-workspaces` 분리 worktree에서 구현한 뒤 MnP main에 병합되었다(2026-10-11 `65c7b7e`까지 main의 조상으로 확인). 작업공간 풀 조회 결과에도 `coordinatorId`와 `remotePools`가 노출된다. 다만 2026-10-21 조사 시점 `remotePools`는 빈 배열이었고, 서브 머신 원격 풀이 실제로 활성화되어 운영 중인지는 확인하지 않았다. 원격 풀을 활성화하기 전에는 아래 「검증과 적용 전 조건」을 여전히 확인해야 한다.
 
 ## 소유권과 실행 계약
 

@@ -10,6 +10,7 @@ import {
   WorkspacePoolUnavailableError,
   buildWorkspaceInstruction,
   integrationStatusRetryReasonCode,
+  knowledgeInboxCheckpointPaths,
   normalizeCheckpointCommitMessage,
 } from '../server/lib/workspacePool.mjs'
 import { replaceFileWithRetry } from '../server/lib/replaceFileWithRetry.mjs'
@@ -128,13 +129,99 @@ test('작업공간 지침은 기존 대화에도 재배정 정보를 명확하�
   assert.match(instruction, /projectRoot: `C:\\Dev\\Game_Worker02\\client`/)
   assert.match(instruction, /sharedRoot: `C:\\Dev\\Game_Workspaces`/)
   assert.match(instruction, /다른 등록 작업공간으로 이동하거나/)
-  assert.match(instruction, /knowledge-inbox\/job-12\.md/)
+  assert.match(instruction, /공통 규칙과 지식은 `sharedRoot`에서 읽기 전용으로 사용하세요/)
+  assert.doesNotMatch(instruction, /knowledge-inbox|knowledge-applied/)
   assert.match(instruction, /직접 커밋하지 마세요/)
   assert.match(instruction, /commitMessage/)
   assert.match(instruction, /mindnprogress_checkpoint_ai_workspace.*operation\.action=confirm-no-changes/)
   assert.match(instruction, /MNP_WORKSPACE_ASSIGNMENT_MISMATCH/)
   assert.match(instruction, /파일 수정, 브랜치 전환, 새 작업공간 탐색 또는 기존 변경 정리를 하지 말고/)
   assert.doesNotMatch(instruction, /ready_for_tools|mcpforunity:\/\/editor\/state|stale_status/)
+})
+
+test('체크포인트 상태에서 knowledge-inbox 추가·수정 경로만 거부 대상으로 고른다', () => {
+  assert.deepEqual(knowledgeInboxCheckpointPaths([
+    '?? knowledge-inbox/job-1.md',
+    ' M Knowledge-Inbox/job-2.md',
+    ' D knowledge-inbox/job-3.md',
+    'R  knowledge-inbox/job-4.md',
+    'Assets/moved.cs',
+    'R  Assets/renamed.cs',
+    'knowledge-inbox/job-5.md',
+    ' M Assets/knowledge-inbox/job-6.md',
+    '',
+  ].join('\0')), ['knowledge-inbox/job-1.md', 'Knowledge-Inbox/job-2.md', 'knowledge-inbox/job-4.md'])
+  assert.deepEqual(knowledgeInboxCheckpointPaths(''), [])
+})
+
+test('체크포인트는 knowledge-inbox 파일을 커밋하지 않고 거부한다', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'mnp-workspace-inbox-checkpoint-'))
+  try {
+    const integrationRoot = path.join(root, 'main')
+    const workerRoot = path.join(root, 'fork2')
+    const sharedRoot = path.join(root, 'shared')
+    await Promise.all([mkdir(integrationRoot), mkdir(workerRoot), mkdir(sharedRoot)])
+    const registryFile = path.join(sharedRoot, 'workspaces.json')
+    await writeFile(registryFile, JSON.stringify({
+      schemaVersion: 1,
+      poolId: 'holdem',
+      sharedRoot,
+      originUrl: 'https://example.invalid/holdem.git',
+      workspaces: [
+        { id: 'main', root: integrationRoot, role: 'integration', enabled: true },
+        { id: 'fork2', root: workerRoot, role: 'worker', enabled: true },
+      ],
+    }), 'utf8')
+
+    let workerBranch = 'japan-master'
+    let leased = false
+    const commands = []
+    const manager = new WorkspacePoolManager({
+      registryFile,
+      stateFile: path.join(root, 'state.json'),
+      gitRunner: async (cwd, args) => {
+        commands.push({ cwd, args })
+        const worker = cwd === workerRoot
+        if (args[0] === 'status') {
+          return worker && leased ? '?? knowledge-inbox/job-proposal.md\0 M Assets/changed.cs\0' : ''
+        }
+        if (args[0] === 'remote') return 'https://example.invalid/holdem.git'
+        if (args[0] === 'rev-parse') return 'base123'
+        if (args[0] === 'branch' && args[1] === '--show-current') return worker ? workerBranch : 'japan-master'
+        if (args[0] === 'switch') {
+          workerBranch = args[1] === '-C' ? args[2] : args[1]
+          leased = args[1] !== '-C' && args[1] !== 'japan-master'
+          return ''
+        }
+        return ''
+      },
+    })
+    await manager.initialize()
+    const lease = await manager.acquire({
+      workspaceHint: integrationRoot,
+      mapId: 'map-a',
+      cardId: 'card-a',
+      cardLabel: '지식 제안 거부',
+    })
+    await assert.rejects(
+      () => manager.checkpoint(lease.leaseId, {
+        jobId: lease.jobId,
+        mapId: 'map-a',
+        cardId: 'card-a',
+        conversationId: '',
+        paths: ['knowledge-inbox', 'Assets/changed.cs'],
+        commitMessage: checkpointCommitMessage,
+      }),
+      (error) => error instanceof WorkspacePoolUnavailableError
+        && error.reasonCode === 'AI_WORKSPACE_CHECKPOINT_PATH_REJECTED'
+        && error.details.includes('knowledge-inbox/job-proposal.md')
+        && /폐기되어/.test(error.message)
+        && !/공유 지식/.test(error.message),
+    )
+    assert.equal(commands.some(({ cwd, args }) => cwd === workerRoot && ['add', 'commit'].includes(args[0])), false)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test('체크포인트 커밋 메시지는 실제 변경 구조와 금지 항목을 검증한다', () => {

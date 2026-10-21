@@ -149,6 +149,28 @@ function isProtectedWorkspacePath(relative) {
   return protectedWorkspaceEntries.has(String(relative ?? '').replaceAll('\\', '/').split('/')[0])
 }
 
+const knowledgeInboxEntry = 'knowledge-inbox'
+
+/**
+ * Returns non-deletion paths under the retired project-root `knowledge-inbox/` folder
+ * from `git status --porcelain=v1 -z` output. Such proposal files must not be checkpointed.
+ */
+export function knowledgeInboxCheckpointPaths(porcelainStatus) {
+  const records = String(porcelainStatus ?? '').split('\0')
+  const rejected = []
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index]
+    if (record.length < 4) continue
+    const status = record.slice(0, 2)
+    // Rename and copy records are followed by their source path.
+    if (/[RC]/.test(status)) index += 1
+    const file = record.slice(3).replaceAll('\\', '/')
+    if (file.split('/')[0].toLowerCase() !== knowledgeInboxEntry || status.includes('D')) continue
+    rejected.push(file)
+  }
+  return rejected
+}
+
 function pathInside(root, relative) {
   const resolvedRoot = path.resolve(root)
   const resolved = path.resolve(resolvedRoot, relative)
@@ -365,9 +387,9 @@ ${sharedRoot ? `- sharedRoot: \`${sharedRoot}\`\n` : ''}- branch: \`${lease.bran
 
 작업 전에 \`.ai-session.json\`의 \`workspaceId\`, \`jobId\`, \`leaseId\`, \`projectRoot\`, \`branch\`, \`baseCommit\`이 이번 전문과 일치하는지 확인하세요. 하나라도 일치하지 않으면 파일 수정, 브랜치 전환, 새 작업공간 탐색 또는 기존 변경 정리를 하지 말고 \`MNP_WORKSPACE_ASSIGNMENT_MISMATCH\`와 불일치 필드만 보고하세요.
 
-이 작업에서는 위 \`projectRoot\`만 수정하세요. 다른 등록 작업공간으로 이동하거나 브랜치를 바꾸거나 lease를 직접 해제하지 마세요. \`.ai-session.json\`의 값이 위 정보와 일치하는지 먼저 확인하세요.${sharedRoot ? ` 공통 규칙과 지식은 \`sharedRoot\`에서 읽기 전용으로 사용하고, 제안은 \`knowledge-inbox/${lease.jobId}.md\`에 기록하세요.` : ''}
+이 작업에서는 위 \`projectRoot\`만 수정하세요. 다른 등록 작업공간으로 이동하거나 브랜치를 바꾸거나 lease를 직접 해제하지 마세요. \`.ai-session.json\`의 값이 위 정보와 일치하는지 먼저 확인하세요.${sharedRoot ? ' 공통 규칙과 지식은 `sharedRoot`에서 읽기 전용으로 사용하세요.' : ''}
 
-Unity Play Mode, 재임포트, 동적 폰트·Atlas 생성 등의 검증은 어떤 tracked 파일이든 자동으로 바꿀 수 있습니다. 구현 수정을 마친 뒤 각 검증을 시작하기 전에 \`mindnprogress_checkpoint_ai_workspace\`를 호출하세요. 의도한 변경이 있으면 \`operation.action=commit-changes\`에 변경 경로와 실제 변경을 설명하는 \`commitMessage\`를 함께 전달합니다. \`summary\`에는 \`[김용민]\` prefix나 \`[MnP]\` 출처를 넣지 말고, \`background\`·\`cause\`·\`changes\`에는 이번 체크포인트의 실제 변경을 작성하며 \`scope\`는 필요한 경우에만 작성하세요. MindNProgress가 현재 문서·카드 제목과 안정적인 ID를 조회해 커밋 본문의 \`[MnP]\` 섹션을 자동으로 추가합니다. 파일 변경이 전혀 없는 조사·검증 작업은 같은 도구의 \`operation.action=confirm-no-changes\`로 확인하세요. 검증 후 보완했다면 새 변경에 맞는 메시지로 다시 체크포인트를 만들고 검증하세요. Git으로 직접 커밋하지 마세요. 완료 시 MindNProgress는 명시적 체크포인트만 main에 통합하고 그 이후의 자동 변경은 복구 자료로 보존한 뒤 worker에서 제거합니다.`
+Unity Play Mode, 재임포트, 동적 폰트·Atlas 생성 등의 검증은 어떤 tracked 파일이든 자동으로 바꿀 수 있습니다. 구현 수정을 마친 뒤 각 검증을 시작하기 전에 \`mindnprogress_checkpoint_ai_workspace\`를 호출하세요. 의도한 변경이 있으면 \`operation.action=commit-changes\`에 변경 경로와 실제 변경을 설명하는 \`commitMessage\`를 함께 전달합니다. \`summary\`에는 커밋 제목 prefix(사용자 커밋 규칙의 이름 머리말 등)나 \`[MnP]\` 출처를 넣지 말고, \`background\`·\`cause\`·\`changes\`에는 이번 체크포인트의 실제 변경을 작성하며 \`scope\`는 필요한 경우에만 작성하세요. MindNProgress가 현재 문서·카드 제목과 안정적인 ID를 조회해 커밋 본문의 \`[MnP]\` 섹션을 자동으로 추가합니다. 파일 변경이 전혀 없는 조사·검증 작업은 같은 도구의 \`operation.action=confirm-no-changes\`로 확인하세요. 검증 후 보완했다면 새 변경에 맞는 메시지로 다시 체크포인트를 만들고 검증하세요. Git으로 직접 커밋하지 마세요. 완료 시 MindNProgress는 명시적 체크포인트만 main에 통합하고 그 이후의 자동 변경은 복구 자료로 보존한 뒤 worker에서 제거합니다.`
 }
 
 export class WorkspacePoolManager {
@@ -1089,6 +1111,14 @@ export class WorkspacePoolManager {
           noChanges: true,
           paths: intendedPaths,
         }
+      }
+      const inboxPaths = knowledgeInboxCheckpointPaths(scopedStatus)
+      if (inboxPaths.length > 0) {
+        throw new WorkspacePoolUnavailableError(
+          `knowledge-inbox 경로는 폐기되어 체크포인트에 포함해 커밋할 수 없습니다. 이 경로를 변경 경로에서 빼고 다시 체크포인트하세요: ${inboxPaths.join(', ')}`,
+          inboxPaths,
+          'AI_WORKSPACE_CHECKPOINT_PATH_REJECTED',
+        )
       }
       await this.git(workspace.root, ['add', '--', ...intendedPaths])
       const stagedPaths = nullSeparated(await this.git(workspace.root, ['diff', '--cached', '--name-only', '-z']))
