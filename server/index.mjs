@@ -52,6 +52,7 @@ import { blockedAiModelLabels, filterAutomatedAiAgents } from './lib/aiModelPoli
 import { summarizeAiConversationMessages } from './lib/aiConversationMessageStatistics.mjs'
 import { AiDelegationStatusLookupError, readAiDelegationDispatchStatus } from './lib/aiDelegationStatusLookup.mjs'
 import { aiDelegationReportArchived, aiDelegationReportArchivePending, createAiDelegationReportArchiver } from './lib/aiDelegationReportArchive.mjs'
+import { AI_DELEGATION_RESULT_HASH_BASIS, aiDelegationFullResult, buildAiDelegationResultCapture } from './lib/aiDelegationResultCapture.mjs'
 import { createAiParentWakeProcessor, recoverableLegacyParentWake } from './lib/aiParentWake.mjs'
 import {
   acknowledgeAiDelegationReport,
@@ -2759,7 +2760,10 @@ async function pollGroupDocumentInstructions() {
           continue
         }
         if (status.state === 'completed') {
-          const response = await latestAssistantResult(instruction.targetConversationId)
+          // 서버는 지시를 받은 첫 응답 턴만 캡처하고 총괄 대화를 재개하지 않는다. 이후 턴의
+          // 완료 보고는 문서 AI가 지시 전문의 회신 방법(session-message)으로 직접 보낸다.
+          const capture = await latestAssistantResultCapture(instruction.targetConversationId, { fullPath: 'transcript' })
+          const response = capture?.snapshot ?? ''
           await updateGroupDocumentInstruction(instruction.id, {
             state: 'replied',
             reasonCode: 'GROUP_DOCUMENT_INSTRUCTION_REPLIED',
@@ -2770,6 +2774,7 @@ async function pollGroupDocumentInstructions() {
             turnId: status.turnId ?? instruction.turnId ?? null,
             response,
             responseHash: response ? createHash('sha256').update(response).digest('hex') : null,
+            responseCapture: capture?.capture ?? null,
             repliedAt: new Date().toISOString(),
           })
           continue
@@ -2854,7 +2859,7 @@ ${inspection}${workspaceRecoveryRule}
 ${instruction.trim()}`
 }
 
-function delegationPublicView(delegation, includeResult = false) {
+function delegationPublicView(delegation, includeResult = false, { includeFullResult = false } = {}) {
   const publicDelegation = { ...delegation }
   if (publicDelegation.integrationRecoveryRequest) publicDelegation.integrationRecoveryRequest = integrationRecoveryPublicView(publicDelegation.integrationRecoveryRequest)
   delete publicDelegation.instructionHash
@@ -2864,6 +2869,7 @@ function delegationPublicView(delegation, includeResult = false) {
   delete publicDelegation.pendingSelection
   delete publicDelegation.pendingWorkspaceHint
   delete publicDelegation.childResultSnapshot
+  delete publicDelegation.childResultFull
   if (publicDelegation.pendingRecovery?.dispatchBody) {
     const { dispatchBody: _dispatchBody, ...metadata } = publicDelegation.pendingRecovery
     publicDelegation.pendingRecovery = metadata
@@ -2893,10 +2899,25 @@ function delegationPublicView(delegation, includeResult = false) {
     && aiDelegationSucceeded(delegation) && publicDelegation.reportStatus !== 'received'
   const result = aiDelegationReportResult(delegation)
   publicDelegation.resultAvailability = result.availability
+  if (result.availability === 'captured') {
+    // resultHash와 acknowledgeResultHash는 result 문자열(절단 표시 포함) 기준이다.
+    publicDelegation.resultHashBasis = AI_DELEGATION_RESULT_HASH_BASIS
+    publicDelegation.resultTruncated = result.capture?.truncated === true
+    publicDelegation.resultOriginalLength = result.capture?.originalLength ?? result.text.length
+    publicDelegation.resultMessageType = result.capture?.messageType ?? null
+    publicDelegation.resultSplitSuspected = result.capture?.splitSuspected === true
+  }
   if (includeResult === true) {
     publicDelegation.result = result.text
     publicDelegation.resultHash = result.hash
     publicDelegation.resultTurnId = result.turnId
+    const full = result.availability === 'captured' ? aiDelegationFullResult(delegation) : null
+    publicDelegation.resultFullAvailable = Boolean(full)
+    if (full && includeFullResult === true) {
+      publicDelegation.resultFull = full.text
+      publicDelegation.resultFullHash = full.hash
+      publicDelegation.resultFullTruncated = full.truncated
+    }
   }
   return publicDelegation
 }
@@ -3620,17 +3641,16 @@ async function reconcileAiDelegationWorkspaceLeaseStatus(delegation, status, sou
   return false
 }
 
-async function latestAssistantResult(conversationId) {
+// 마지막 left text/tips 메시지 하나를 결과로 캡처한다. 12,000자를 넘으면 본문 끝에 절단을
+// 명시하고, 위임 결과(fullPath=delegation)는 전체 원문을 별도 보관본으로 남긴다.
+async function latestAssistantResultCapture(conversationId, { fullPath = 'delegation' } = {}) {
   try {
     const messagePage = await fetchAionUiOn(conversationHomeMachineId(conversationId), `/api/conversations/${encodeURIComponent(conversationId)}/messages?limit=100&content_mode=full`, { timeoutMs: 30_000 })
     const messages = Array.isArray(messagePage?.items) ? messagePage.items : Array.isArray(messagePage) ? messagePage : []
-    const message = [...messages].reverse().find((candidate) => candidate?.position === 'left'
-      && (candidate.type === 'text' || candidate.type === 'tips')
-      && readAionUiMessageContent(candidate).trim())
-    return readAionUiMessageContent(message).trim().slice(0, 12_000)
+    return buildAiDelegationResultCapture(messages, { readContent: readAionUiMessageContent, fullPath })
   } catch (shutdownError) {
     throwIfRuntimeStopping(shutdownError, runtimeLifecycle.signal)
-    return ''
+    return null
   }
 }
 
@@ -3640,15 +3660,17 @@ async function captureAiDelegationChildResult(delegation) {
   if (!delegation?.childTurnId) return delegation
   const lastAttempt = Date.parse(String(delegation?.childResultCaptureAttemptedAt ?? ''))
   if (Number.isFinite(lastAttempt) && Date.now() - lastAttempt < 10_000) return delegation
-  const result = await latestAssistantResult(delegation?.targetConversationId)
+  const result = await latestAssistantResultCapture(delegation?.targetConversationId)
   const attemptedAt = new Date().toISOString()
   return updateAiDelegation(delegation.id, result
     ? {
-        childResultSnapshot: result,
-        childResultHash: createHash('sha256').update(result).digest('hex'),
+        childResultSnapshot: result.snapshot,
+        childResultHash: result.snapshotHash,
         childResultTurnId: delegation?.childTurnId ?? null,
         childResultCapturedAt: attemptedAt,
         childResultCaptureAttemptedAt: attemptedAt,
+        childResultCapture: result.capture,
+        childResultFull: result.full,
       }
     : { childResultCaptureAttemptedAt: attemptedAt })
 }
@@ -3680,7 +3702,13 @@ async function aiWorkspaceCandidates({ map, group, machineId }) {
 
 function aiDelegationResultSection(reportResult) {
   if (reportResult.availability === 'captured') {
-    return `## 하위 AI의 마지막 응답\n\n${reportResult.text}\n\n`
+    const capture = reportResult.capture ?? {}
+    const notes = [
+      capture.truncated ? `> 결과 절단: 원문 ${Number(capture.originalLength).toLocaleString('en-US')}자 중 앞 ${Number(capture.inlineLimit).toLocaleString('en-US')}자만 위에 포함했고 본문 끝에 절단 표시를 붙였습니다. ${capture.fullTextStored ? '전체 원문은 mindnprogress_list_ai_delegations(includeResult=true, includeFullResult=true)의 resultFull로 확인하세요.' : '전체 원문은 실행 대화 전문(mindnprogress_get_ai_conversation_transcript)에서 확인하세요.'} 잘린 부분을 확인하기 전에는 결과 전체를 검토한 것으로 판단하지 마세요.` : '',
+      capture.splitSuspected ? '> 결과 분할 가능성(추정): 같은 실행 턴의 앞선 텍스트 메시지가 캡처한 마지막 메시지보다 깁니다. 최종 보고가 여러 메시지로 나뉘었을 수 있으므로 실행 대화 전문(mindnprogress_get_ai_conversation_transcript)에서 앞선 응답을 확인하세요.' : '',
+      capture.messageType === 'tips' ? '> 캡처한 마지막 메시지는 일반 답변(text)이 아니라 tips 유형입니다. 실제 완료 보고인지 실행 대화에서 확인하세요.' : '',
+    ].filter(Boolean)
+    return `## 하위 AI의 마지막 응답\n\n${reportResult.text}\n\n${notes.length ? `${notes.join('\n')}\n\n` : ''}`
   }
   if (reportResult.availability === 'integrity-failed') {
     return `## 하위 AI 원문 무결성 오류\n\n저장된 결과의 해시 또는 실행 턴이 위임 기록과 일치하지 않아 원문을 전달하지 않았습니다. 대화의 최신 응답으로 대체하지 말고 위임 기록과 원본 대화를 별도로 검토하세요.\n\n`
@@ -3722,7 +3750,7 @@ async function parentWakeInstruction(delegation, reportResult = aiDelegationRepo
 - 하위 카드: ${delegation.targetCardLabel} (${delegation.targetCardId})
 - 실행 대화: ${conversationDisplay.displayLabel}
 - 하위 실행 턴: ${delegation.childTurnId ?? '미확인'}
-- 결과 원문: ${reportResult.availability === 'captured' ? '캡처됨' : reportResult.availability === 'integrity-failed' ? '무결성 오류로 제외됨' : '캡처되지 않음'}
+- 결과 원문: ${reportResult.availability === 'captured' ? `캡처됨${reportResult.capture?.truncated ? ` (${Number(reportResult.capture.inlineLimit).toLocaleString('en-US')}자 초과로 절단됨, 아래 결과 절단 안내 참조)` : ''}` : reportResult.availability === 'integrity-failed' ? '무결성 오류로 제외됨' : '캡처되지 않음'}
 - 선택 방식: ${delegation.strategy === 'resume' ? '기존 대화 이어가기' : '새 대화 시작'}
 - 선택 이유: ${delegation.decisionReason}
 ${workspaceResult}
@@ -9877,7 +9905,9 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       const maps = new Map(await Promise.all([...new Set(listed.map(item => item.mapId))]
         .map(async id => [id, await readMap(id)])))
       const delegations = listed.map(item => withDelegationTaskCompletion(
-        delegationPublicView(item, url.searchParams.get('includeResult') === 'true'), maps.get(item.mapId)))
+        delegationPublicView(item, url.searchParams.get('includeResult') === 'true', {
+          includeFullResult: url.searchParams.get('includeFullResult') === 'true',
+        }), maps.get(item.mapId)))
       const requestFailures = aiDelegationRequestFailures.list({ mapId, parentCardId, targetCardId, delegations: aiDelegations }).map(item => {
         const targetCardLabel = maps.get(item.mapId)?.nodes.find(node => node.id === item.targetCardId)?.data?.label ?? item.targetCardLabel
         return { ...item, targetCardLabel, retryVerification: { ...item.retryVerification,

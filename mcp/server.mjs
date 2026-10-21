@@ -1757,7 +1757,7 @@ async function main() {
     })
   })
 
-  registerTool(server, 'mindnprogress_send_group_document_instruction', '그룹 총괄 문서의 루트 AI가 같은 그룹에 속한 다른 문서의 원본 루트 AI에 승인된 문서별 지시 전문을 전달합니다. 이 도구는 AI 작업 위임이나 worker 배정이 아닙니다. 대상 문서 AI가 담당 분석·카드 정비를 수행하고, 승인된 실제 구현은 자기 문서의 하위 업무 카드에 별도로 위임합니다. 전달 전 mindnprogress_get_group_context에서 그룹 설정 버전과 대상 문서 버전, 두 단계 사용자 승인 범위를 확인하세요. 완료 보고는 기본적으로 현재 총괄 대화로 돌아오며, 사용자가 이번 지시에서 다른 대화를 명시한 경우에만 replyTarget을 explicit으로 지정하세요. 과거 지시·AION_SESSION_MESSAGE·reply_to를 근거로 대상을 추정하지 마세요. 대상 AI가 응답 중이면 지시를 내구 대기열에 보존하고 유휴 상태에서 자동 전달합니다. 모든 응답의 reasonCode와 message를 함께 읽고, queued·delivered·replied 상태를 업무 완료로 해석하지 마세요.', {
+  registerTool(server, 'mindnprogress_send_group_document_instruction', '그룹 총괄 문서의 루트 AI가 같은 그룹에 속한 다른 문서의 원본 루트 AI에 승인된 문서별 지시 전문을 전달합니다. 이 도구는 AI 작업 위임이나 worker 배정이 아닙니다. 대상 문서 AI가 담당 분석·카드 정비를 수행하고, 승인된 실제 구현은 자기 문서의 하위 업무 카드에 별도로 위임합니다. 전달 전 mindnprogress_get_group_context에서 그룹 설정 버전과 대상 문서 버전, 두 단계 사용자 승인 범위를 확인하세요. 서버는 대상 문서 AI가 지시를 받은 첫 응답 턴만 replied 상태와 response로 기록하며 총괄 대화를 자동 재개하거나 이후 턴의 보고를 전달하지 않습니다. 최종 완료 보고는 대상 문서 AI가 지시 전문의 회신 방법에 따라 session-message로 회신 대상 대화에 직접 보내며 기본 대상은 현재 총괄 대화입니다. 사용자가 이번 지시에서 다른 대화를 명시한 경우에만 replyTarget을 explicit으로 지정하세요. 과거 지시·AION_SESSION_MESSAGE·reply_to를 근거로 대상을 추정하지 마세요. 대상 AI가 응답 중이면 지시를 내구 대기열에 보존하고 유휴 상태에서 자동 전달합니다. 모든 응답의 reasonCode와 message를 함께 읽고, queued·delivered·replied 상태를 업무 완료로 해석하지 마세요.', {
     mapId: z.string().min(1).describe('현재 그룹 총괄 루트 카드가 속한 문서 ID'),
     targetMapId: z.string().min(1).describe('지시를 받을 같은 그룹 소속 문서 ID. 대상 카드는 서버가 원본 루트로 확정합니다.'),
     targetRevision: z.number().int().positive().describe('get_group_context에서 확인한 대상 문서의 최신 version'),
@@ -1860,12 +1860,14 @@ async function main() {
     mapId: z.string().min(1),
     parentCardId: z.string().min(1).max(120).optional().describe('상위 카드로 필터'),
     targetCardId: z.string().min(1).max(120).optional().describe('하위 대상 카드로 필터'),
-    includeResult: z.boolean().optional().describe('결과 원문과 검증된 resultHash/resultTurnId 포함. 필요한 대상만 필터해서 읽으세요. 조회만으로 보고를 수신 확인하지 않습니다. 담당 상위 AI는 읽은 결과를 refresh_ai_delegation의 acknowledgeResultHash로 명시적으로 수신 확인할 수 있습니다.'),
-  }, async ({ mapId, parentCardId, targetCardId, includeResult }) => {
+    includeResult: z.boolean().optional().describe('결과 원문과 검증된 resultHash/resultTurnId 포함. 필요한 대상만 필터해서 읽으세요. 조회만으로 보고를 수신 확인하지 않습니다. 담당 상위 AI는 읽은 결과를 refresh_ai_delegation의 acknowledgeResultHash로 명시적으로 수신 확인할 수 있습니다. resultHash는 반환된 result 문자열(절단 표시 포함) 기준이며 resultHashBasis로 표시합니다. 원문이 12,000자를 넘으면 result는 앞 12,000자와 절단 표시만 담고 resultTruncated=true, resultOriginalLength와 resultFullAvailable을 함께 반환합니다.'),
+    includeFullResult: z.boolean().optional().describe('includeResult=true와 함께 사용합니다. 절단된 결과의 보관 원문(resultFull, 최대 100,000자)과 resultFullHash를 포함합니다. 수신 확인에는 resultFullHash가 아니라 resultHash를 사용합니다.'),
+  }, async ({ mapId, parentCardId, targetCardId, includeResult, includeFullResult }) => {
     const query = new URLSearchParams()
     if (parentCardId) query.set('parentCardId', parentCardId)
     if (targetCardId) query.set('targetCardId', targetCardId)
     if (includeResult) query.set('includeResult', 'true')
+    if (includeResult && includeFullResult) query.set('includeFullResult', 'true')
     const suffix = query.size > 0 ? `?${query}` : ''
     return apiRequest(`/api/maps/${encodeURIComponent(mapId)}/ai-delegations${suffix}`, { aiMapId: mapId })
   })
@@ -2173,7 +2175,7 @@ async function main() {
   })
 
   for (const [name, action, description] of [
-    ['mindnprogress_refresh_ai_delegation', 'refresh', '기존 위임 operation의 실제 상태를 다시 확인하고 위임 메타데이터를 동기화합니다. AI 실행 요청·재위임·카드 변경은 하지 않습니다. 같은 대화의 다른 턴을 임의로 완료 근거로 삼지 않습니다. 담당 상위 AI가 list_ai_delegations(includeResult=true)로 원문을 읽은 뒤 acknowledgeResultHash에 반환된 resultHash를 명시하면 실행·통합이 끝난 해당 결과의 수신을 확인하고 사용자용 완료 전문을 상위 대화에 기록합니다. reportArchived/reportArchivePending은 전문 저장 여부이며 실패 시 AI 실행 없이 재시도합니다. 이 확인은 품질 검증 완료나 후속 작업의 사용자 승인이 아닙니다.'],
+    ['mindnprogress_refresh_ai_delegation', 'refresh', '기존 위임 operation의 실제 상태를 다시 확인하고 위임 메타데이터를 동기화합니다. AI 실행 요청·재위임·카드 변경은 하지 않습니다. 같은 대화의 다른 턴을 임의로 완료 근거로 삼지 않습니다. 담당 상위 AI가 list_ai_delegations(includeResult=true)로 원문을 읽은 뒤 acknowledgeResultHash에 반환된 resultHash를 명시하면 실행·통합이 끝난 해당 결과의 수신을 확인하고 사용자용 완료 전문을 상위 대화에 기록합니다. 결과 전문으로 시작된 상위 턴이 접수되면 서버가 수신을 자동 기록(reportReceipt.method=dispatch-delivered)하므로 reportStatus=received인 위임은 다시 확인하지 않아도 됩니다. 두 경우 모두 위임 state는 completed가 되며 이는 보고 수신 기록일 뿐입니다. reportArchived/reportArchivePending은 전문 저장 여부이며 실패 시 AI 실행 없이 재시도합니다. 이 확인은 품질 검증 완료나 후속 작업의 사용자 승인이 아닙니다.'],
     ['mindnprogress_retry_ai_delegation_report', 'retry-report', '사용자 요청과 기존 승인 범위를 확인한 뒤, 작업 완료가 확인됐으나 상위 보고만 실패한 위임의 결과를 재전달합니다. 상위 AI가 재개될 수 있지만 하위 작업은 재실행하지 않습니다. 캡처된 원문이 없거나 해시·실행 턴 무결성이 맞지 않으면 같은 대화의 최신 응답으로 대체하지 않고 원문 미포함 메타데이터만 전달합니다. 상태 조회와 실제 작업 복구를 구분하세요.'],
   ]) {
     registerTool(server, name, description, {

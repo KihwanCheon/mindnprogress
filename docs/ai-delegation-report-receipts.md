@@ -18,6 +18,20 @@
 3. 서버는 불변 시작 대화·상위 카드, 현재 연결, 하위 실행·통합 완료, 결과 해시·턴을 검증한다. 다른 대화, 오래된 상태, 미캡처·변조 결과, 미완료 통합은 거절한다.
 4. 수신 확인은 위임 메타데이터를 종결하고, 상위 대화에 사용자가 볼 완료 전문을 기록한다. 카드·문서 버전·코드·작업공간·승인을 바꾸거나 AI를 실행하지 않는다. 해당 대화의 후속 위임을 막던 활성 위임 기록은 해제되지만, 실제 실행 중인 대화를 중복 실행할 수는 없다.
 
+## 결과 원문 캡처·절단과 해시 기준
+
+- 서버는 하위 실행 턴이 끝나면 대상 대화의 최근 메시지 100개 중 마지막 `position=left`이고 `type`이 `text` 또는 `tips`인 메시지 하나를 결과 원문으로 캡처한다. 같은 턴의 앞선 텍스트 메시지는 결과에 합치지 않는다. 기존 완료 증거(`aiDelegationSourceCompletion`)가 최종 메시지와 저장 원문의 일치를 요구하기 때문이다.
+- 원문이 12,000자 이하이면 기존과 같이 trim한 원문 그대로 `childResultSnapshot`에 저장한다. 넘으면 앞 12,000자 뒤에 `[MindNProgress 결과 절단]` 표시(원문 길이와 전체 원문 조회 방법)를 붙여 저장한다. 위임 결과는 전체 원문을 최대 100,000자까지 `childResultFull`에 따로 보관한다.
+- `childResultCapture`에는 `hashBasis=stored-snapshot`, `snapshotHash`, `messageId`, `messageType`, `originalLength`, `storedLength`, `inlineLimit`, `truncated`, `fullTextStored`, `fullTextTruncated`, `turnTextMessageCount`, `earlierTextMaxLength`, `splitSuspected`를 기록한다. `splitSuspected`는 같은 턴의 앞선 텍스트가 캡처한 마지막 메시지보다 길 때 true이며 추정 신호다. 메타데이터와 보관 원문은 현재 `childResultSnapshot`의 해시와 일치할 때만 사용한다.
+- `childResultHash`, 목록의 `resultHash`, `acknowledgeResultHash`, `reportReceipt.resultHash`는 모두 저장된 결과 문자열(절단 표시 포함)의 SHA-256이다. 수신 확인에는 `resultFullHash`를 사용하지 않는다.
+- `mindnprogress_list_ai_delegations`의 기본 목록은 `resultAvailability`와 함께 `resultHashBasis`, `resultTruncated`, `resultOriginalLength`, `resultMessageType`, `resultSplitSuspected`를 반환한다. `includeResult=true`이면 `result`, `resultHash`, `resultTurnId`, `resultFullAvailable`을, `includeResult=true&includeFullResult=true`이면 `resultFull`, `resultFullHash`, `resultFullTruncated`를 추가한다. `childResultFull`은 공개 응답과 그룹 문맥에서 제외한다.
+- 상위 재개 전문은 절단·분할 가능성·`tips` 캡처를 `> 결과 절단`, `> 결과 분할 가능성(추정)` 안내로 표시한다. 같은 전문의 결과 처리 지침은 이 전문으로 시작된 턴이 접수되면 서버가 `dispatch-delivered`로 수신을 자동 기록한다는 점을 알리고, 보고 대기(`reportStatus=waiting` 또는 `failed`)일 때만 명시 수신 확인을 요구한다.
+
+## 그룹 문서 지시의 응답 캡처와 최종 회신
+
+- 그룹 문서 지시는 AI 위임이 아니어서 상위 재개 경로가 없다. 서버는 지시를 받은 첫 응답 턴이 `completed`가 되면 같은 방식으로 마지막 메시지 하나를 `response`(12,000자 초과 시 절단 표시 포함)와 `responseHash`, `responseCapture`로 기록하고 상태를 `replied`로 바꾼다. 그룹 지시 응답은 전체 원문을 따로 보관하지 않으며, 절단 표시는 대상 대화 전문 조회를 안내한다.
+- 서버는 총괄 대화를 자동 재개하지 않고 이후 턴의 보고도 전달하지 않는다. 지시 전문의 `## 완료 보고 라우팅`에 있는 "회신 방법"에 따라 문서 AI가 최종 완료 보고를 `session-message`로 유효 회신 대상 대화에 직접 보낸다. 이 전송은 사용자가 승인한 그룹 문서 지시에 포함된 회신 요청이다. 접수·대기·중간 보고는 보내지 않고, 같은 `instructionId`의 최종 보고는 한 번만 보내며 첫 줄에 `instructionId`를 적는다.
+
 ## 사용자에게 보이는 완료 전문
 
 - 수신 확인(`reportReceipt`)과 대화 기록(`reportArchive`)은 별도 근거다. AI가 MCP 응답을 읽었다는 사실만으로 사용자의 대화 화면에 전문이 남았다고 판단하지 않는다.
@@ -61,6 +75,7 @@ Core가 이미 완료 보고 API를 지원하고 내장 Runner만 수정한 경�
 - `tests/ai-approval-instructions.test.mjs`, `tests/ai-instruction-snapshots.test.mjs`: 목표·범위 판단, 보완 종료, 역할별 보고 형식, 실제 전문에서 목표 확인이 하위 원문보다 앞서는지 확인한다.
 - `tests/ai-delegation-reports.test.mjs`: 전달·수신 근거, 무결성, 중지 상태, 미완료 통합 차단.
 - `tests/ai-delegation-report-archive.test.mjs`: 내구 저장 의도, 응답 유실·재시작·배포 간 동일 전문 유지, 구형 Core 대기·업데이트 후 기록, 잘못된 응답·무결성 오류 거절.
+- `tests/ai-delegation-result-capture.test.mjs`, `tests/ai-delegation-result-capture-api.test.mjs`: 결과 절단 표시·보관 원문·해시 기준, 캡처 메시지 형태, 공개 목록 필드, 그룹 지시 응답 캡처.
 - `tests/ai-delegation-reports-api.test.mjs`: 재시작 복원, GET 무변경, 담당 대화 권한·오래된 상태 거절, 상위 실행 중 수신 확인, 유휴 자동 전달, 중복 방지.
 - `tests/ai-delegation-recovery-browser.test.mjs`: 전달 대기/전달 중/보고 실패 표시와 수신 완료 후 복구 목록 제거.
 - 기존 사용량 제한·복구·종결·MCP 회귀 테스트와 함께 실행한다.

@@ -43,7 +43,7 @@ test('17개 실제 전달 전문은 복구한 조립 경로의 전문·해시와
   assert.equal(count(byName['worker-new-lease'], '# 할당된 작업공간'), 1)
   assert.equal(byName['worker-new-no-lease'], byName['worker-resume'])
   assert.match(byName['worker-resume'], /사용자의 중지로 끊긴 뒤 같은 대화에서 직접 이어진 경우/)
-  assert.match(byName['parent-wake'], /하위 AI의 마지막 응답.*완료 결과가 보고 대기이면/s)
+  assert.match(byName['parent-wake'], /하위 AI의 마지막 응답.*자동 기록합니다\(reportReceipt\.method=dispatch-delivered.*완료 결과가 보고 대기\(reportStatus=waiting 또는 failed, reportPending=true\)이면/s)
   for (const name of ['parent-wake', 'group-parent-wake']) {
     const prompt = byName[name]
     assert.match(prompt, /당신은 이 하위 작업을 위임한 상위 AI입니다/)

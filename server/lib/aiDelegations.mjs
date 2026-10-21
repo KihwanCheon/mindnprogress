@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { integrationRecoveryPending } from './aiIntegrationRecovery.mjs'
+import { aiDelegationResultCaptureMetadata } from './aiDelegationResultCapture.mjs'
 
 export const AI_DELEGATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_:-]{0,127}$/
 export const AI_DELEGATION_WAIT_POLL_DELAYS_MS = Object.freeze([3_000, 5_000, 10_000, 30_000])
@@ -439,7 +440,8 @@ export function aiDelegationReportResult(delegation) {
   if ((storedHash && storedHash !== hash) || (capturedTurnId && childTurnId && capturedTurnId !== childTurnId)) {
     return { availability: 'integrity-failed', text: '', hash: null, turnId: null }
   }
-  return { availability: 'captured', text, hash, turnId: capturedTurnId || childTurnId || null }
+  const capture = aiDelegationResultCaptureMetadata(delegation, text)
+  return { availability: 'captured', text, hash, turnId: capturedTurnId || childTurnId || null, ...(capture ? { capture } : {}) }
 }
 
 export function retryableExternalLimitCategory(error) {
