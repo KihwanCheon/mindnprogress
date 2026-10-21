@@ -1,15 +1,15 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "toolCount": 60,
-  "schemaDescriptionCount": 150,
+  "schemaDescriptionCount": 155,
   "sourceConstantChars": 616,
   "sourceConstantSha256": "cd24be035e93b5923ec24f3148330ba5aac2c4f3a71c9851861b4e66e8c57cdd",
   "serverInstructionsChars": 922,
   "serverInstructionsSha256": "8b9f506f7079ef160331fdfecdc0cd3ab77d9a4814c087c97389c43a6da74844",
   "toolNameChars": 2022,
-  "toolDescriptionChars": 13670,
-  "inputSchemaJsonChars": 47998,
-  "rawRegisteredSurfaceChars": 64612,
+  "toolDescriptionChars": 14589,
+  "inputSchemaJsonChars": 49150,
+  "rawRegisteredSurfaceChars": 66683,
   "rawRegisteredSurfaceMeaning": "initialize instructions와 도구 이름·설명·inputSchema JSON 문자열 길이의 합계입니다. 전송 JSON이나 호스트 총주입량이 아닙니다.",
   "hostMetadata": {
     "measured": false,
@@ -20,7 +20,7 @@
     "perToolWrapperChars": 35,
     "note": "과거 캡처·상수이며 이번 전체 주입량 실측값이 아닙니다."
   },
-  "dynamicTotalChars": 39700,
+  "dynamicTotalChars": 41054,
   "maxDynamicChars": 4684,
   "repetitionCounts": {
     "contextBootstrap": 12,
@@ -84,13 +84,13 @@
     },
     {
       "name": "document-coordinator-new",
-      "chars": 2264,
-      "sha256": "3e3967ddab02c2fd16a59b75141e0b0cb01bdc20bd0408062cb4683672010e28"
+      "chars": 2315,
+      "sha256": "03ef2669d31cdbf252c575e24d5e54ce89daac4764490ac098758e07c061d13e"
     },
     {
       "name": "document-delivery",
-      "chars": 3102,
-      "sha256": "a6dd3c15fb257f2edfc70cf37f0ea9699fc5c3c87db46c06f5be4b7a6af44a49"
+      "chars": 3771,
+      "sha256": "92d687fa14c738ee7294e4cdae37e8edc48de388b00975118b409d80ccd91289"
     },
     {
       "name": "worker-new-no-lease",
@@ -99,8 +99,8 @@
     },
     {
       "name": "worker-new-lease",
-      "chars": 3348,
-      "sha256": "fe198ae7ad6a43b005db9ed84ad2884deb52a88a576d2408fe58ee3256266cec"
+      "chars": 3323,
+      "sha256": "c9f88823d6d96536edfadb886f84c6418930bcd2f7c415e4d5b06d6dbd71ac66"
     },
     {
       "name": "worker-resume",
@@ -114,18 +114,18 @@
     },
     {
       "name": "parent-wake",
-      "chars": 1916,
-      "sha256": "217cae42ef5cec4b7818ee0815be16027dc037c02ccaab1ce6660ec8fba8faab"
+      "chars": 2258,
+      "sha256": "c871c46141fadfdf9cedb89ede5be3e3857f33046883b2171423ac1bdada1a9d"
     },
     {
       "name": "group-parent-wake",
-      "chars": 4333,
-      "sha256": "84276581e8053fed0112c0fc782c6c499703d39e1a892dd01444127c23b9d566"
+      "chars": 4675,
+      "sha256": "af027ad1bad743a597bebb637b8084e1e6d7e320b0034dbbbffb4caf52a0996d"
     },
     {
       "name": "user-stop-recovery",
-      "chars": 4138,
-      "sha256": "1206acae63b3a2c22f233bfd29e3e209c708e4fbc08fc8b3b3efeda83b4d6e17"
+      "chars": 4113,
+      "sha256": "fba629d13c8dd13eed15f849613e379f7aa7e73c3f34b547bb1c644aa31b731a"
     },
     {
       "name": "reconstruction",
@@ -147,5 +147,47 @@
       "chars": 532,
       "sha256": "7c9ede483bbda64bfe3c85283b0959ce4a4032e12c20f7ab307c27111dc2e0dd"
     }
-  ]
+  ],
+  "responseSizes": {
+    "method": "scripts/capture-guidance-evidence.mjs의 captureInitialResponses로 실제 MCP 핸들러를 격리 fixture API에 연결해 호출하고 응답 text 문자 수를 잽니다. 토큰 수나 호스트 총주입량이 아닙니다.",
+    "limits": {
+      "read-me-first": 20000,
+      "leaf:get_context": 27000,
+      "document-coordinator:get_context": 27000,
+      "group-coordinator:get_context": 32500,
+      "group:get_group_context": 8000
+    },
+    "items": [
+      {
+        "name": "read-me-first",
+        "tool": "mindnprogress_read_me_first",
+        "chars": 17921,
+        "guideChars": 15928
+      },
+      {
+        "name": "leaf:get_context",
+        "tool": "mindnprogress_get_context",
+        "chars": 23755,
+        "guideChars": 15928
+      },
+      {
+        "name": "group-coordinator:get_context",
+        "tool": "mindnprogress_get_context",
+        "chars": 28811,
+        "guideChars": 19752
+      },
+      {
+        "name": "document-coordinator:get_context",
+        "tool": "mindnprogress_get_context",
+        "chars": 23730,
+        "guideChars": 15928
+      },
+      {
+        "name": "group:get_group_context",
+        "tool": "mindnprogress_get_group_context",
+        "chars": 6895,
+        "guideChars": 5686
+      }
+    ]
+  }
 }

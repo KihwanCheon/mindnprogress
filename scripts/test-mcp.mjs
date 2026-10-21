@@ -439,6 +439,14 @@ async function main() {
   let mockAionUi = await startMockAionUi()
   const aionUiDiscoveryFile = path.join(testDataDirectory, '_aionui-backend.json')
   await publishMockAionUiDiscovery(aionUiDiscoveryFile, mockAionUi)
+  // Isolated subscription usage snapshot so the read-only usage tool never reads the operator's real AionUi file.
+  const aionUiUsageFile = path.join(testDataDirectory, '_aionui-subscription-usage.json')
+  const usageSnapshotAt = new Date().toISOString()
+  await writeFile(aionUiUsageFile, `${JSON.stringify({
+    schemaVersion: 1, state: 'ready', generatedAt: usageSnapshotAt, updatedAt: usageSnapshotAt, retryAfterMs: null,
+    claude: { state: 'ready', updatedAt: usageSnapshotAt, session: { usedPercent: 12, resetsAt: null }, weekly: { usedPercent: 34, resetsAt: null } },
+    codex: { state: 'ready', updatedAt: usageSnapshotAt, weekly: { usedPercent: 56, resetsAt: null, windowDurationMins: 10080 }, limitReached: false },
+  })}\n`, 'utf8')
   const environment = {
     ...process.env,
     MNP_API_HOST: '127.0.0.1',
@@ -449,6 +457,7 @@ async function main() {
     MNP_WORKSPACE_POOL_REGISTRY: path.join(testDataDirectory, '_missing-workspaces.json'),
     MNP_AIONUI_URL: '',
     MNP_AIONUI_DISCOVERY_FILE: aionUiDiscoveryFile,
+    MNP_AIONUI_USAGE_FILE: aionUiUsageFile,
     MNP_ADMIN_EMAIL: 'mcp-test-admin@mind.local',
     MNP_ADMIN_PASSWORD: 'McpTest!2026',
     MNP_AI_ATTRIBUTION_DURATION_MS: '10000',
@@ -635,7 +644,15 @@ async function main() {
     assert.ok(guide.important.includes(AI_CONVERSATION_SELECTION_INSTRUCTION))
     assert.ok(guide.guide.operationRules.includes(AI_CONVERSATION_SELECTION_INSTRUCTION))
     assert.equal(guide.guide.product.name, 'MindNProgress')
-    assert.equal(guide.guide.version, '4.25')
+    assert.equal(guide.guide.version, '4.26')
+    const aiUsage = await invoke('mindnprogress_get_ai_usage', { provider: 'all' })
+    assert.equal(aiUsage.source.machineScope, 'mnp-server')
+    assert.equal(aiUsage.source.conversationAccountMatch, 'unverified')
+    assert.equal(aiUsage.snapshot.available, true)
+    assert.deepEqual(Object.keys(aiUsage.providers), ['claude', 'codex'])
+    assert.equal(aiUsage.providers.codex.weekly.usedPercent, 56)
+    const codexUsage = await invoke('mindnprogress_get_ai_usage', { provider: 'codex' })
+    assert.deepEqual(Object.keys(codexUsage.providers), ['codex'])
     const { maintenance: knowledgeMaintenance, ...knowledgeAuthoring } = guide.guide.sharedKnowledgePolicy
     assert.deepEqual(knowledgeAuthoring, sharedKnowledgeAuthoringPolicy)
     assert.equal(knowledgeMaintenance.automaticMutation, false)

@@ -8,6 +8,15 @@ import { AI_CONVERSATION_SELECTION_INSTRUCTION } from '../mcp/aiConversationSele
 import { AI_USAGE_GUIDE } from '../mcp/aiUsage.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+// 기준선은 2026-10-22 사용자 승인으로 작업 트리 기준 재생성했다(scripts/capture-guidance-evidence.mjs --rebaseline-working-tree).
+// 이후 지침 차이는 되돌림 목록 없이 전체 원문 비교로 그대로 실패한다. 이전 Git 기준선(11a5079) 증거는 rebaseline 기록의 HEAD에서 복구한다.
+// get_document 개선(2026-10-21 승인)의 검증 지침 문구는 재생성 기준선에도 남아 있어야 한다.
+const requiredGuidancePhrases = [
+  '변경 후 변경 도구의 응답 또는 대상별 조회 도구(카드는 mindnprogress_get_card, 문서 구조·version은 mindnprogress_get_document의 view=outline 또는 version)로 저장 결과를 검증하고 실제 변경 내용을 요약',
+  '이미 받은 문서를 다시 확인할 때는 같은 view·cardIds로 받은 응답의 documentEtag를 get_document의 ifNoneMatch로 전달해 같은 문서 본문의 재전송을 피합니다.',
+  '카드는 mindnprogress_get_card, 문서 구조·version은 mindnprogress_get_document의 view=outline 또는 version으로 확인하고, 문서 전체 원문 대조가 필요할 때만 view를 생략한 full을 사용합니다.',
+]
+
 const scenarioNames = ['read-me-first', 'leaf', 'group-coordinator', 'document-coordinator']
 const deliveryPaths = [
   ['selection', 'taskLinks', 'startupInspection'],
@@ -62,26 +71,27 @@ function mutateResponse(run, name, keys, change) {
   session.response.text = JSON.stringify(response)
 }
 
-test('실제 초기 guide는 대화 연속성과 사용량 안내만 추가하고 Git 기준선 원문을 보존한다', async (t) => {
+test('실제 초기 guide와 네 전달 필드는 2026-10-22 재생성 기준선 원문을 보존한다', async (t) => {
   const temp = await mkdtemp(path.join(root, '.initial-guide-test-'))
   t.after(() => rm(temp, { recursive: true, force: true }))
   const evidence = JSON.parse(await readFile(path.join(root, 'docs/ai-guidance-rollback-2026-10-01/initial-response-evidence.json'), 'utf8'))
+  assert.equal(evidence.schemaVersion, 2)
+  assert.equal(evidence.rebaseline?.approvedAt, '2026-10-22')
+  assert.equal(evidence.rebaseline?.previousBaselineCommit, '11a5079d62a9493e55548fe5b1ccbe0ffa3eb94c')
   const baseline = evidence.runs.find((run) => run.name === 'baseline')
-  assert.ok(baseline, 'Git 기준선 응답 존재')
+  assert.ok(baseline, '기준선 응답 존재')
   const actual = await captureInitialResponses(root, temp)
   assertInitialDeliveryFields(baseline, actual)
   for (const [index, session] of actual.sessions.entries()) {
     const guide = JSON.parse(session.guide.text)
     assert.equal(guide.version, '4.26')
+    assert.equal(guide.version, JSON.parse(baseline.sessions[index].guide.text).version, `${session.name} guide version`)
     assert.deepEqual(guide.aiUsage, AI_USAGE_GUIDE)
     assert.equal(guide.operationRules.filter((rule) => rule === AI_CONVERSATION_SELECTION_INSTRUCTION).length, 1, `${session.name} 대화 선택 안내 한 건`)
-    const preservedGuide = {
-      ...guide,
-      version: '4.25',
-      operationRules: guide.operationRules.filter((rule) => rule !== AI_CONVERSATION_SELECTION_INSTRUCTION),
+    assert.equal(session.guide.text, baseline.sessions[index].guide.text, `${session.name} 기존 guide 전체 보존`)
+    for (const phrase of requiredGuidancePhrases) {
+      assert.ok(session.guide.text.includes(phrase), `${session.name} get_document 검증 지침 문구가 실제 guide에 있음`)
     }
-    delete preservedGuide.aiUsage
-    assert.equal(JSON.stringify(preservedGuide), baseline.sessions[index].guide.text, `${session.name} 기존 guide 전체 보존`)
     assert.equal(session.groupGuide?.text, baseline.sessions[index].groupGuide?.text, `${session.name} group guide`)
     assert.equal(session.guide.sha256, digest(session.guide.text))
     assert.ok(guide.operationRules.length > 10)

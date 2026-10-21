@@ -120,7 +120,57 @@ export async function captureInitialResponses(codeRoot, stateRoot) {
   return { surface, sessions, sources, requests, fixture: { maps, group } }
 }
 
+// Approved 2026-10-22: the rollback baseline is re-captured from the current working tree.
+// The previous evidence (Git baseline 11a5079) stays recoverable from Git history at the recorded HEAD.
+const BASELINE_SOURCE_FILES = [
+  'src/utils/aiContextInstructions.mjs', 'src/utils/aiApprovalInstructions.mjs', 'src/utils/aiConversationLaunch.mjs',
+  'mcp/server.mjs', 'server/index.mjs', 'server/lib/groupDocumentInstructions.mjs', 'server/lib/groupProjects.mjs',
+  'server/lib/doorayResponses.mjs', 'server/lib/workspacePool.mjs',
+]
+
+async function rebaselineWorkingTree() {
+  const evidenceFile = path.join(output, 'initial-response-evidence.json')
+  const sourcesFile = path.join(output, 'baseline-guide-sources.json')
+  const head = git('rev-parse', 'HEAD').trim()
+  const untracked = git('ls-files', '--others', '--exclude-standard', '--', 'mcp', 'server/lib', 'src').split('\n').filter(Boolean).sort()
+  const rebaseline = {
+    approvedAt: '2026-10-22',
+    approval: '사용자 결정(2026-10-22): MnP 롤백 기준선을 현재 상태로 다시 만든다(기존 실패 3건 해소).',
+    head,
+    workingTreeDiffSha256: digest(git('diff', 'HEAD', '--', 'mcp', 'server', 'src')),
+    untracked: await Promise.all(untracked.map(async (file) => ({ file, sha256: digest(await readFile(path.join(root, file), 'utf8')) }))),
+    previousBaselineCommit: baseline,
+    previousEvidenceSha256: digest(await readFile(evidenceFile, 'utf8')),
+    previousSourcesSha256: digest(await readFile(sourcesFile, 'utf8')),
+    previousEvidenceRecovery: `git show ${head}:docs/ai-guidance-rollback-2026-10-01/initial-response-evidence.json`,
+  }
+  const temp = await mkdtemp(path.join(root, '.guidance-evidence-'))
+  try {
+    const run = { name: 'baseline', head, workingTree: true, capturedAt: new Date().toISOString(), historicalExecution: false, ...await captureInitialResponses(root, path.join(temp, 'baseline-state')) }
+    assert.ok(run.requests.every((request) => request.method === 'GET'))
+    await writeFile(evidenceFile, `${JSON.stringify({
+      schemaVersion: 2, capturedAt: new Date().toISOString(),
+      method: '승인된 재생성: 현재 작업 트리의 실제 MCP 핸들러와 SDK initialize를 격리 상태 폴더에서 실행했습니다. 그룹 API는 작업 트리의 createGroupProjects.context/forDocument를 사용합니다. 문서·계정·상태는 결정적 fixture이며 운영 응답 캡처가 아닙니다.',
+      rebaseline,
+      originalBeforeSha256: digest(await readFile(path.join(output, 'before-surface-and-prompts.json'), 'utf8')),
+      comparisons: [], runs: [run],
+    }, null, 2)}\n`)
+    const sources = {}
+    for (const file of BASELINE_SOURCE_FILES) sources[file] = await readFile(path.join(root, file), 'utf8')
+    await writeFile(sourcesFile, `${JSON.stringify({ baseline: `working-tree@${head}`, rebaseline, sources }, null, 2)}\n`)
+    process.stdout.write(`${JSON.stringify({ head, sessions: run.sessions.map(({ name, guide }) => ({ name, guideSha256: guide.sha256 })) })}\n`)
+  } finally {
+    assert.ok(path.resolve(temp).startsWith(`${root}${path.sep}.guidance-evidence-`))
+    await rm(temp, { recursive: true, force: true })
+  }
+}
+
 async function main() {
+  if (process.argv.includes('--rebaseline-working-tree')) return rebaselineWorkingTree()
+  const existing = JSON.parse(await readFile(path.join(output, 'initial-response-evidence.json'), 'utf8'))
+  if (existing.schemaVersion >= 2 && !process.argv.includes('--historical')) {
+    throw new Error('기준선은 2026-10-22에 작업 트리 기준으로 재생성되었습니다. 과거 Git 기준선 재현으로 덮어쓰려면 --historical을 지정하세요.')
+  }
   const temp = await mkdtemp(path.join(root, '.guidance-evidence-'))
   const runs = []
   try {
