@@ -8,9 +8,8 @@ function isoDate(value) {
 }
 
 function normalizedPercent(value) {
-  const percent = Number(value)
-  if (!Number.isFinite(percent)) return null
-  return Math.max(0, Math.min(100, percent))
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null
+  return Math.max(0, Math.min(100, value))
 }
 
 function normalizeWindow(value, { includeDuration = false } = {}) {

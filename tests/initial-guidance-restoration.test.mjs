@@ -5,6 +5,7 @@ import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { captureInitialResponses, digest } from '../scripts/capture-guidance-evidence.mjs'
 import { AI_CONVERSATION_SELECTION_INSTRUCTION } from '../mcp/aiConversationSelectionPolicy.mjs'
+import { AI_USAGE_GUIDE } from '../mcp/aiUsage.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const scenarioNames = ['read-me-first', 'leaf', 'group-coordinator', 'document-coordinator']
@@ -61,7 +62,7 @@ function mutateResponse(run, name, keys, change) {
   session.response.text = JSON.stringify(response)
 }
 
-test('실제 초기 guide는 대화 연속성 안내 한 건만 추가하고 Git 기준선 원문을 보존한다', async (t) => {
+test('실제 초기 guide는 대화 연속성과 사용량 안내만 추가하고 Git 기준선 원문을 보존한다', async (t) => {
   const temp = await mkdtemp(path.join(root, '.initial-guide-test-'))
   t.after(() => rm(temp, { recursive: true, force: true }))
   const evidence = JSON.parse(await readFile(path.join(root, 'docs/ai-guidance-rollback-2026-10-01/initial-response-evidence.json'), 'utf8'))
@@ -71,11 +72,15 @@ test('실제 초기 guide는 대화 연속성 안내 한 건만 추가하고 Git
   assertInitialDeliveryFields(baseline, actual)
   for (const [index, session] of actual.sessions.entries()) {
     const guide = JSON.parse(session.guide.text)
+    assert.equal(guide.version, '4.26')
+    assert.deepEqual(guide.aiUsage, AI_USAGE_GUIDE)
     assert.equal(guide.operationRules.filter((rule) => rule === AI_CONVERSATION_SELECTION_INSTRUCTION).length, 1, `${session.name} 대화 선택 안내 한 건`)
     const preservedGuide = {
       ...guide,
+      version: '4.25',
       operationRules: guide.operationRules.filter((rule) => rule !== AI_CONVERSATION_SELECTION_INSTRUCTION),
     }
+    delete preservedGuide.aiUsage
     assert.equal(JSON.stringify(preservedGuide), baseline.sessions[index].guide.text, `${session.name} 기존 guide 전체 보존`)
     assert.equal(session.groupGuide?.text, baseline.sessions[index].groupGuide?.text, `${session.name} group guide`)
     assert.equal(session.guide.sha256, digest(session.guide.text))

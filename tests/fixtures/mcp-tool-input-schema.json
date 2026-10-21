@@ -871,6 +871,18 @@
           "pattern": "^[A-Za-z0-9][A-Za-z0-9_:-]{0,127}$",
           "description": "같은 위임의 중복 실행을 막는 안정적인 키. 영문·숫자로 시작하고 영문·숫자·밑줄·하이픈·콜론을 사용해 sourceRevision과 targetCardId를 포함하는 형식을 권장"
         },
+        "retryOfRequestId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "접수 실패 응답의 requestFailure.retryReference.requestId. 같은 업무를 재접수할 때 전달하고 원 instruction은 유지한 채 sourceRevision 등 메타데이터만 갱신하세요. 다른 업무에 사용하지 마세요. 성공 접수 시 기존 실패 경고가 자동 해제됩니다."
+        },
+        "taskSummary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240,
+          "description": "사용자에게 표시할 이번 업무의 짧은 요약. 카드 제목만으로 여러 위임을 구분하기 어려울 때 제공합니다. 비밀·인증 정보나 지시 전문을 넣지 마세요."
+        },
         "newConversation": {
           "type": "object",
           "properties": {
@@ -1122,6 +1134,26 @@
         "mapId",
         "cardId"
       ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "mindnprogress_get_ai_usage",
+    "description": "MnP 서버가 읽은 AionUi의 Claude·Codex 구독 사용률·잔여율·초기화 시각을 조회합니다. 제공자별 stale·usable과 갱신 시각을 확인하세요. 현재 대화나 서브 머신의 계정과 일치함을 보장하지 않으며, 스냅샷만 읽고 강제 갱신이나 작업 중단을 하지 않습니다. 상세 해석 기준은 guide.aiUsage를 참고하세요.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": [
+            "all",
+            "claude",
+            "codex"
+          ],
+          "description": "조회할 제공자. 생략하면 Claude와 Codex 모두 조회"
+        }
+      },
       "additionalProperties": false,
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
@@ -2408,7 +2440,7 @@
   },
   {
     "name": "mindnprogress_recover_ai_delegation",
-    "description": "원래 맡긴 범위에서 현재 상태와 미완료 부분을 확인하세요. 그룹 총괄 AI가 범위를 변경하려면 사용자 승인을 먼저 확인합니다. AionCore 재시작, 연결 끊김 또는 필수 체크포인트·통합 실패로 recovery-required 또는 integration-recovery-required가 된 AI 위임을 기존 대화와 기존 작업공간에서 명시적으로 재개합니다. parent-wake-failed는 list_ai_delegations가 recoveryAvailable=true를 반환하고 사용자가 사용량·요청 한도 또는 모델 용량 부족 해소를 확인한 경우에만 같은 방식으로 재개할 수 있습니다. waiting-usage-limit, waiting-rate-limit, waiting-model-capacity도 같은 조건으로 재개하며 worker가 없는 문서 조정 위임도 지원합니다. waiting-child-resume은 사용자가 중지 후 재개를 요청한 경우에만 처리합니다. 로컬 변경으로 cherry-pick이 실패하거나 통합 작업공간의 index.lock으로 fast-forward가 실패한 완료 위임은 recovery.recommendedAction=retry-integration일 때 지원합니다. 차단 원인 해소 후 기존 체크포인트·소유권·통합 후보를 검증하여 통합 대기로 복구하며 하위 AI 작업은 다시 실행하지 않습니다. Git 잠금은 자동 삭제하지 않고, main이 진행됐다면 이전 후보를 보존한 별도 브랜치에서 최신 main 기준으로 통합합니다. 접수 여부가 불명확하면 새 실행을 만들지 말고 mindnprogress_refresh_ai_delegation으로 확인하세요. 원래 지시를 자동 재생하지 않으며, 현재 카드·Git·작업공간 상태를 확인한 뒤 미완료 부분만 수행하도록 새 복구 지시를 전달합니다. 복구 호출 후 mindnprogress_list_ai_delegations로 실제 상태를 확인하세요.",
+    "description": "원래 맡긴 범위에서 현재 상태와 미완료 부분을 확인하세요. 그룹 총괄 AI가 범위를 변경하려면 사용자 승인을 먼저 확인합니다. AionCore 재시작, 연결 끊김 또는 필수 체크포인트·통합 실패로 recovery-required 또는 integration-recovery-required가 된 AI 위임을 기존 대화와 기존 작업공간에서 명시적으로 재개합니다. recovery.recommendedAction=resume-existing인 failed 또는 parent-wake-failed는 list_ai_delegations가 recoveryAvailable=true를 반환하고 사용자가 한도·모델 용량 부족 해소를 확인했거나 연결 중단(upstream-interrupted)·실행 전 DB 접수 오류(dispatch-database-transient)의 복구를 승인한 경우 같은 방식으로 재개합니다. 원 실행이 만료됐으면 원 지시·계정·카드·lease를 서버가 대사하며 불확실한 증거로 격리를 해제하지 않습니다. waiting-usage-limit, waiting-rate-limit, waiting-model-capacity도 같은 조건으로 재개하며 worker가 없는 문서 조정 위임도 지원합니다. waiting-child-resume은 사용자가 중지 후 재개를 요청한 경우에만 처리합니다. 로컬 변경으로 cherry-pick이 실패하거나 통합 작업공간의 index.lock 또는 main HEAD 변경으로 반영이 중단된 완료 위임은 recovery.recommendedAction=retry-integration일 때 지원합니다. 차단 원인 해소 후 기존 체크포인트·소유권·통합 후보를 검증하여 통합 대기로 복구하며 하위 AI 작업은 다시 실행하지 않습니다. Git 잠금은 자동 삭제하지 않고, main이 진행됐다면 이전 후보를 보존한 별도 브랜치에서 최신 main 기준으로 통합합니다. 접수 여부가 불명확하면 새 실행을 만들지 말고 mindnprogress_refresh_ai_delegation으로 확인하세요. 원래 지시를 자동 재생하지 않으며, 현재 카드·Git·작업공간 상태를 확인한 뒤 미완료 부분만 수행하도록 새 복구 지시를 전달합니다. 통합 재시도는 요청 ID와 queued 접수 기록을 먼저 반환하고 긴 Git 검증을 비동기로 수행합니다. 접수는 통합 성공이 아닙니다. 응답 유실 시 재호출하지 말고 상태를 조회하며 같은 요청은 같은 recoveryRequestId로 확인합니다. failed receipt의 차단 원인을 해소한 뒤 사용자가 다시 승인한 재시도에는 새 recoveryRequestId를 사용하세요. 실행 턴 없이 정확한 DB 트랜잭션 중첩 오류로 failed-clean 반환된 요청은 원 dispatch·대화·lease·무변경을 검증한 경우만 수동 재개하며 만료를 추정하지 않습니다. 복구 호출 후 mindnprogress_list_ai_delegations로 실제 상태를 확인하세요.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2421,6 +2453,11 @@
           "type": "string",
           "pattern": "^[A-Za-z0-9][A-Za-z0-9_:-]{0,127}$",
           "description": "mindnprogress_list_ai_delegations에서 확인한 복구 대상 위임 ID"
+        },
+        "recoveryRequestId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,128}$",
+          "description": "통합 재시도 접수의 요청 ID. 응답 유실·같은 접수 재확인은 동일 ID를 사용합니다. failed receipt의 원인 해소 후 사용자가 승인한 새 재시도에는 새 ID를 사용합니다."
         },
         "instruction": {
           "type": "string",
@@ -3371,7 +3408,7 @@
   },
   {
     "name": "mindnprogress_supersede_ai_delegation",
-    "description": "사용자가 명시적으로 요청한 경우에만, 사용량·요청 한도 또는 모델 용량 부족으로 끝난 과거 위임을 같은 상위 카드와 대상 카드에서 나중에 성공한 위임으로 대체 종료합니다. 과거 위임의 작업공간이 failed-clean 또는 cancelled여서 보존할 변경이 없어야 하며, 카드를 수정하거나 AI를 재실행하지 않고 superseded 감사 이력만 기록합니다.",
+    "description": "사용자가 명시적으로 요청한 경우에만, 사용량·요청 한도·모델 용량 부족 또는 실행 전 DB 접수 오류(dispatch-database-transient)로 끝난 과거 위임을 같은 상위 카드와 대상 카드에서 나중에 성공한 위임으로 대체 종료합니다. DB 접수 실패는 실행 턴이 없고 정확한 트랜잭션 중첩 오류로 failed-clean 반환된 기록만 지원합니다. 과거 위임의 작업공간이 failed-clean 또는 cancelled여서 보존할 변경이 없어야 합니다. 하위 업무가 완료됐으나 결과 보고만 실패한 일반 위임도 지원합니다. 원 실패를 완료로 바꾸거나 카드를 수정하거나 AI를 재실행하지 않고 superseded 감사 이력만 기록합니다.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -3383,7 +3420,7 @@
         "delegationId": {
           "type": "string",
           "pattern": "^[A-Za-z0-9][A-Za-z0-9_:-]{0,127}$",
-          "description": "waiting-usage-limit, waiting-rate-limit 또는 waiting-model-capacity인 과거 위임 ID"
+          "description": "변경 없는 한도·모델 용량 중단, 실행 전 DB 접수 실패 또는 완료 결과의 보고 실패인 과거 위임 ID"
         },
         "replacementDelegationId": {
           "type": "string",

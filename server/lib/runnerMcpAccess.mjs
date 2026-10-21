@@ -35,6 +35,7 @@ function bearerToken(headers) {
 export function isRunnerMcpApiPathAllowed(method, pathname) {
   if (!['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(String(method ?? '').toUpperCase())) return false
   const normalizedPath = String(pathname ?? '')
+  if (normalizedPath === '/api/integrations/aionui/subscription-usage') return String(method).toUpperCase() === 'GET'
   const navigation = normalizedPath.match(conversationNavigationPath)
   if (navigation) return String(method).toUpperCase() === (navigation[2] ? 'POST' : 'GET')
   if (allowedPathPrefixes.some((prefix) => normalizedPath === prefix || normalizedPath.startsWith(`${prefix}/`))) return true

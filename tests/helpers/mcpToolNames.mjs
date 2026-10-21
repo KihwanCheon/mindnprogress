@@ -11,6 +11,7 @@ export const expectedMcpToolNames = Object.freeze([
   'mindnprogress_delete_trashed_documents',
   'mindnprogress_finalize_ai_coordination',
   'mindnprogress_get_ai_conversation_transcript',
+  'mindnprogress_get_ai_usage',
   'mindnprogress_get_ai_work_states',
   'mindnprogress_get_ai_workspace_pool',
   'mindnprogress_get_card',

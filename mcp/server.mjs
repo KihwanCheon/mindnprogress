@@ -27,6 +27,7 @@ import { MCP_TOOL_USAGE_DIRECTORY_NAME, createFileToolUsageRecorder } from '../s
 import { formatAiConversationDisplay } from '../server/lib/aiConversationDisplay.mjs'
 import { createMapContentPatch } from '../src/utils/mapContentPatch.mjs'
 import { createMnpApiConnectionResolver } from './apiConnection.mjs'
+import { AI_USAGE_GUIDE, buildAiUsageResult } from './aiUsage.mjs'
 
 const projectDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const dataDirectory = path.resolve(String(process.env.MNP_DATA_DIR ?? '').trim() || path.join(projectDirectory, 'server', 'data'))
@@ -152,8 +153,9 @@ const knowledgeLinePolicy = Object.freeze({
 
 const serverInstructions = MNP_MCP_SERVER_INSTRUCTIONS
 const productGuide = {
-  version: '4.25',
+  version: '4.26',
   contextLifecycle: MNP_CONTEXT_LIFECYCLE,
+  aiUsage: AI_USAGE_GUIDE,
   documentReconstruction: {
     contextTool: 'mindnprogress_get_reconstruction_context',
     requestTool: 'mindnprogress_get_reconstruction_request',
@@ -1067,6 +1069,13 @@ async function main() {
 
   registerTool(server, 'mindnprogress_list_documents', '활성 문서 목록과 버전, 완료 현황 및 좌측 목록의 문서 그룹·혼합 순서를 조회합니다.', {}, async () =>
     apiRequest('/api/maps'))
+
+  registerTool(server, 'mindnprogress_get_ai_usage', 'MnP 서버가 읽은 AionUi의 Claude·Codex 구독 사용률·잔여율·초기화 시각을 조회합니다. 제공자별 stale·usable과 갱신 시각을 확인하세요. 현재 대화나 서브 머신의 계정과 일치함을 보장하지 않으며, 스냅샷만 읽고 강제 갱신이나 작업 중단을 하지 않습니다. 상세 해석 기준은 guide.aiUsage를 참고하세요.', {
+    provider: z.enum(['all', 'claude', 'codex']).optional().describe('조회할 제공자. 생략하면 Claude와 Codex 모두 조회'),
+  }, async ({ provider = 'all' }) => {
+    const { usage } = await apiRequest('/api/integrations/aionui/subscription-usage')
+    return buildAiUsageResult(usage, { provider })
+  })
 
   registerTool(server, 'mindnprogress_search_content', '현재 호출 주체가 열람할 수 있는 모든 활성 문서의 사용자 콘텐츠를 검색합니다. ranked는 관련도 순 후보와 일치 근거를 반환하고, catalog는 정확성·전수성이 필요한 조사에서 모든 카드의 간결한 카탈로그를 커서로 순회합니다. 검색 결과는 후보이므로 담당 범위와 현재 상태를 확정하기 전에 mindnprogress_get_card로 최신 원문을 확인하세요. 상위 N건에서 조기 종료하지 말고 page.hasMore와 coverage를 확인하며, 의미가 다른 표현은 문자열 검색으로 보장되지 않으므로 필요하면 검색어·필터를 확장하거나 catalog로 전환하세요.', {
     query: z.string().max(240).optional().describe('ranked 검색어. catalog에서는 생략할 수 있음'),

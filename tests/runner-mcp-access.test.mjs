@@ -11,6 +11,15 @@ const adminEmail = 'runner-mcp-admin@mind.local'
 const adminPassword = 'runner-mcp-admin-password'
 const conversationId = 'conversation-on-sub-machine'
 
+test('Runner 구독 사용량 조회는 정확한 경로의 GET만 허용한다', () => {
+  const pathname = '/api/integrations/aionui/subscription-usage'
+  assert.equal(isRunnerMcpApiPathAllowed('GET', pathname), true)
+  for (const method of ['POST', 'PUT', 'PATCH', 'DELETE', 'HEAD']) {
+    assert.equal(isRunnerMcpApiPathAllowed(method, pathname), false)
+  }
+  assert.equal(isRunnerMcpApiPathAllowed('GET', `${pathname}/extra`), false)
+})
+
 test('Runner 카드 탐색은 조회 GET과 선택 POST 경로만 허용한다', () => {
   const pathname = `/api/integrations/aionui/conversations/${conversationId}/mindnprogress`
   assert.equal(isRunnerMcpApiPathAllowed('GET', pathname), true)
@@ -122,6 +131,16 @@ test('Runner MCP만 머신 대화로 승격하고 로컬·외부 웹 인증은 �
     }
     const relayed = await jsonRequest(baseUrl, '/api/maps', { token: runnerToken, headers: runnerHeaders })
     assert.equal(relayed.response.status, 200)
+
+    const usagePath = '/api/integrations/aionui/subscription-usage'
+    const usage = await jsonRequest(baseUrl, usagePath, { token: runnerToken, headers: runnerHeaders })
+    assert.equal(usage.response.status, 200)
+    assert.equal(typeof usage.body.usage.available, 'boolean')
+    const untrustedUsage = await jsonRequest(baseUrl, usagePath, {
+      token: runnerToken, headers: { 'X-MnP-Runner-MCP-Machine-Id': 'macbook' },
+    })
+    assert.equal(untrustedUsage.response.status, 403)
+    assert.equal(untrustedUsage.body.code, 'MNP_RUNNER_MCP_CONVERSATION_DENIED')
 
     const navigationPath = `/api/integrations/aionui/conversations/${conversationId}/mindnprogress`
     const unlinked = await jsonRequest(baseUrl, navigationPath, { token: runnerToken, headers: runnerHeaders })

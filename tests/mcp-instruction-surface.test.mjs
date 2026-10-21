@@ -21,7 +21,7 @@ function countSchemaDescriptions(value) {
     + Object.values(value).reduce((sum, child) => sum + countSchemaDescriptions(child), 0)
 }
 
-test('최신 59개 이름·input schema와 복구한 도구 설명 전문을 검증한다', async () => {
+test('최신 60개 이름·input schema와 복구한 도구 설명 전문을 검증한다', async () => {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [path.join(root, 'mcp/server.mjs')],
@@ -34,9 +34,9 @@ test('최신 59개 이름·input schema와 복구한 도구 설명 전문을 검
     const registeredInstructions = client.getInstructions()
     const tools = [...(await client.listTools()).tools].sort((a, b) => a.name.localeCompare(b.name))
     assert.deepEqual(tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })), fixture)
-    assert.equal(tools.length, 59)
-    assert.equal(createHash('sha256').update(JSON.stringify(tools.map(({ name, inputSchema }) => ({ name, inputSchema })))).digest('hex'), '4bf6f742820b7bdd8f109743e1f617db7bd457d0246993d6488a2024f6324df6')
-    assert.equal(tools.reduce((sum, tool) => sum + countSchemaDescriptions(tool.inputSchema), 0), 146)
+    assert.equal(tools.length, 60)
+    assert.equal(createHash('sha256').update(JSON.stringify(tools.map(({ name, inputSchema }) => ({ name, inputSchema })))).digest('hex'), 'f279e11c5aaca341a18c704401da1c50115cba89ac18c4d757a85281535e71aa')
+    assert.equal(tools.reduce((sum, tool) => sum + countSchemaDescriptions(tool.inputSchema), 0), 150)
     const metaRecovery = tools.find(tool => tool.name === 'mindnprogress_recover_ai_delegation').inputSchema.properties.untrackedMetaRecovery
     assert.deepEqual(metaRecovery.required, ['path', 'expectedSha256', 'mainCommit'])
     assert.equal(metaRecovery.additionalProperties, false)
