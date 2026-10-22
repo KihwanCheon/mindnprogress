@@ -251,9 +251,56 @@ export async function documentLifecycleBrowser(base, directory, sourceId, nextId
     assert.equal(await evaluate(`fetch('/api/document-reconstructions/browser-proposal/rollback',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(r=>r.status)`), 200, '시험 전환 되돌리기')
     await pressEscape()
     await until(() => evaluate('document.querySelector(".lifecycle-dialog") === null'), '전환 이력 탭도 ESC로 닫기')
-    assert.equal(await evaluate(`(() => { const event = new KeyboardEvent('keydown', {key:'Escape',bubbles:true,cancelable:true}); window.dispatchEvent(event); return event.defaultPrevented; })()`), false, '팝업을 닫으면 전역 ESC 처리기도 제거한다')
+    assert.equal(await evaluate(`(() => { const event = new KeyboardEvent('keydown', {key:'Escape',bubbles:true,cancelable:true}); document.body.dispatchEvent(event); return event.defaultPrevented; })()`), false, '팝업을 닫으면 전역 ESC 처리기도 제거한다')
+    // 앞선 전환의 되돌리기 근거를 바꾸지 않도록 별도 시험 문서만 왕복한다.
+    const archiveTrashId = await evaluate(`(async () => {
+      const response = await fetch('/api/maps', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:'보관함 휴지통 UI 검증',map:{nodes:[{id:'archive-root',type:'mind',position:{x:0,y:0},data:{label:'시험 보관 문서',kind:'root',isWork:false}}],edges:[]}})});
+      if (response.status !== 201) throw new Error('시험 문서 생성 실패: '+response.status+' '+await response.text());
+      const {map} = await response.json();
+      const archived = await fetch('/api/maps/'+map.id+'/archive', {method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({baseVersion:map.version,baseLifecycleVersion:0,archived:true})});
+      if (!archived.ok) throw new Error('시험 문서 보관 실패');
+      return map.id;
+    })()`)
+    await command('Page.navigate', { url: `${base}/mindmap/${archiveTrashId}` })
+    await until(() => evaluate('document.body.innerText.includes("보관 문서 (읽기 전용)")'), '시험 보관 문서 열기 실패')
+    await evaluate('[...document.querySelectorAll("button")].find(b=>b.textContent.includes("보관함 · 문서 재구성")).click()')
+    const archiveArticle = '[...document.querySelectorAll(".lifecycle-dialog article")].find(e=>e.querySelector(".lifecycle-link")?.textContent === "보관함 휴지통 UI 검증")'
+    const archiveTrashButton = `[...${archiveArticle}.querySelectorAll('button')].find(b=>b.textContent === '휴지통으로 이동')`
+    await until(() => evaluate(`Boolean(${archiveArticle})`), '시험 보관 문서 목록 없음')
+    assert.equal(await evaluate(`Boolean(${archiveTrashButton})`), true, '보관함 휴지통 버튼 표시')
+    await evaluate(`window.confirm=()=>false; ${archiveTrashButton}.click()`)
+    await until(() => evaluate(`${archiveTrashButton}.disabled === false`), '이동 취소 뒤 버튼 복원')
+    assert.equal(await evaluate(`fetch('/api/maps/${archiveTrashId}').then(r=>r.json()).then(r=>Boolean(r.map.archivedAt) && !r.map.trashedAt)`), true, '취소 시 보관 상태 유지')
+    await capture('archive-trash-mobile.png')
+    await evaluate(`(() => {
+      const original = globalThis.fetch;
+      globalThis.fetch = async (...args) => {
+        if (args[0] === '/api/maps/${archiveTrashId}/archive' && args[1]?.method === 'DELETE') {
+          globalThis.fetch = original;
+          await new Promise(resolve => { globalThis.releaseArchiveTrash = resolve; });
+        }
+        return original(...args);
+      };
+      window.confirm=()=>true;
+      ${archiveTrashButton}.click();
+    })()`)
+    await until(() => evaluate(`typeof globalThis.releaseArchiveTrash === 'function' && ${archiveTrashButton}.disabled`), '중복 이동 방지 잠금 실패')
+    await evaluate('globalThis.releaseArchiveTrash(); delete globalThis.releaseArchiveTrash;')
+    await until(() => evaluate(`!(${archiveArticle}) && document.querySelector('.lifecycle-dialog [role=status]')?.textContent.includes('휴지통으로 이동했습니다')`), '이동 성공 뒤 보관함 목록 갱신 실패')
+    await pressEscape()
+    await until(() => evaluate('document.querySelector(".lifecycle-dialog") === null && document.querySelector(".sidebar-trash span")?.textContent.includes("휴지통")'), '현재 문서를 이동한 뒤 활성 문서 전환 실패')
+    await evaluate('[...document.querySelectorAll(".sidebar-trash")].find(b=>b.querySelector("span")?.textContent.includes("휴지통")).click()')
+    const trashArticle = '[...document.querySelectorAll(".trash-item")].find(e=>e.querySelector("strong")?.textContent === "보관함 휴지통 UI 검증")'
+    await until(() => evaluate(`Boolean(${trashArticle})`), '이동 직후 휴지통 목록 갱신 실패')
+    assert.equal(await evaluate(`${trashArticle}.querySelector('button').textContent`), '보관함으로 복원')
+    await evaluate(`${trashArticle}.querySelector('button').click()`)
+    await until(() => evaluate(`!(${trashArticle})`), '휴지통 복원 뒤 목록 갱신 실패')
+    await evaluate('[...document.querySelectorAll("button")].find(b=>b.textContent.includes("보관함 · 문서 재구성")).click()')
+    await until(() => evaluate(`Boolean(${archiveArticle})`), '휴지통 복원 뒤 보관함 목록 갱신 실패')
+    assert.equal(await evaluate(`fetch('/api/maps').then(r=>r.json()).then(r=>r.maps.some(m=>m.id === '${archiveTrashId}'))`), false, '복원된 보관 문서를 활성 목록에 넣지 않는다')
+    await pressEscape()
     assert.deepEqual(errors, [], '브라우저 실행 오류 없음')
-    return { screenshotPath, proposalScreenshotPath: path.join(artifactDirectory, 'right-click-proposal.png'), typography, checked: ['기존 MnP 제목 크기 비교', '본문·입력·버튼 크기', '밝은·어두운 테마', '실제 카드 타이포그래피 격리', '보관 원본 딥링크', '읽기 전용', '그룹·문서 우클릭', '정확한 정리 대상', '새 기획 원본 필수', 'AI 옵션 연결·실행 전 취소', '제안함 자동 수신', 'JSON 없는 대응표 검토', '실제 가변 카드·Ref 렌더 배치 검증', 'ESC 닫기·포커스 이탈·입력 조합·처리 중·중첩 팝업 보호', '창 닫기·새로고침 후 제안 복원과 승인 초기화', '실제 렌더 좌표와 UI 적용 결과 일치', '별도 적용 승인', '전환 이력', '후속 카드 출처', '모바일 폭', '브라우저 실행 오류 없음'] }
+    return { screenshotPath, proposalScreenshotPath: path.join(artifactDirectory, 'right-click-proposal.png'), archiveTrashScreenshotPath: path.join(artifactDirectory, 'archive-trash-mobile.png'), typography, checked: ['보관함 휴지통 이동·취소·중복 방지·보관함 복원', '열람 중인 보관 문서 이동 후 활성 문서 전환', '기존 MnP 제목 크기 비교', '본문·입력·버튼 크기', '밝은·어두운 테마', '실제 카드 타이포그래피 격리', '보관 원본 딥링크', '읽기 전용', '그룹·문서 우클릭', '정확한 정리 대상', '새 기획 원본 필수', 'AI 옵션 연결·실행 전 취소', '제안함 자동 수신', 'JSON 없는 대응표 검토', '실제 가변 카드·Ref 렌더 배치 검증', 'ESC 닫기·포커스 이탈·입력 조합·처리 중·중첩 팝업 보호', '창 닫기·새로고침 후 제안 복원과 승인 초기화', '실제 렌더 좌표와 UI 적용 결과 일치', '별도 적용 승인', '전환 이력', '후속 카드 출처', '모바일 폭', '브라우저 실행 오류 없음'] }
   } catch (error) {
     if (command && socket?.readyState === WebSocket.OPEN) {
       const diagnostic = await command('Runtime.evaluate', { expression: '({text:document.querySelector(".lifecycle-dialog")?.innerText, measurements:globalThis.layoutRequests?.map(r=>({url:r.url,measurements:JSON.parse(r.request).measurements,layout:r.response.targets?.map(t=>t.layout),error:r.response.error})), nodes:[...document.querySelectorAll(".reconstruction-map .react-flow__node")].map(e=>({id:e.dataset.id,style:e.getAttribute("style"),body:e.querySelector(".mind-node")?.getBoundingClientRect().toJSON()}))})', returnByValue: true }).catch(() => null)

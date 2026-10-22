@@ -1411,7 +1411,7 @@ async function listMaps({ trashedOnly = false, archivedOnly = false, includeArch
   const summaries = maps
     .filter((map) => map && (includeTrashed || (trashedOnly ? Boolean(map.trashedAt) : !map.trashedAt))
       && (includePending || !map.reconstructionPending)
-      && (archivedOnly ? Boolean(map.archivedAt) : includeArchived || !map.archivedAt))
+      && (archivedOnly ? Boolean(map.archivedAt) : trashedOnly || includeArchived || !map.archivedAt))
     .map(mapSummary)
   if (trashedOnly) {
     return summaries.sort((first, second) => String(second.trashedAt ?? '').localeCompare(String(first.trashedAt ?? '')))
@@ -7205,6 +7205,11 @@ async function trashMap(mapId, user) {
 async function restoreMap(mapId, user) {
   const map = await readMap(mapId)
   if (!map?.trashedAt) return null
+  if (map.archivedAt && documentReconstruction.metadata(mapId).trashedAt) {
+    return documentReconstruction.setArchivedTrash(mapId, {
+      baseVersion: map.version, baseLifecycleVersion: map.lifecycleVersion ?? 0, trashed: false,
+    }, publicUser(user))
+  }
   const payload = {
     ...map,
     updatedAt: new Date().toISOString(),
@@ -7486,7 +7491,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
 
   try {
     if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method) && /^\/api\/(maps|groups|document-reconstructions|card-layouts)(\/|$)/.test(url.pathname)) {
-      const isTransition = /^\/api\/maps\/[^/]+\/archive$/.test(url.pathname)
+      const isTransition = /^\/api\/maps\/[^/]+\/(archive|restore)$/.test(url.pathname)
         || /^\/api\/maps\/[^/]+\/cards\/[^/]+\/move$/.test(url.pathname)
         || /^\/api\/maps\/[^/]+\/content-patch$/.test(url.pathname)
         || /^\/api\/document-reconstructions\/(apply|[^/]+\/rollback)$/.test(url.pathname)
@@ -7496,7 +7501,10 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
     const writableMapRoute = url.pathname.match(/^\/api\/maps\/([^/]+)(\/.*)?$/)
     if (writableMapRoute && !['GET', 'HEAD', 'OPTIONS'].includes(request.method) && writableMapRoute[2] !== '/archive') {
       const mapId = decodeURIComponent(writableMapRoute[1])
-      if (isValidMapId(mapId) && documentReconstruction.isUnavailable(mapId)) {
+      const metadata = documentReconstruction.metadata(mapId)
+      const restoringArchivedTrash = request.method === 'POST' && writableMapRoute[2] === '/restore'
+        && metadata.archivedAt && metadata.trashedAt && !metadata.reconstructionPending
+      if (isValidMapId(mapId) && documentReconstruction.isUnavailable(mapId) && !restoringArchivedTrash) {
         if (!requireUser(request, response)) return
         documentReconstruction.assertWritable(mapId)
       }
@@ -7514,6 +7522,18 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       broadcastMapChange(request, map.id, map.archivedAt ? 'archived' : 'archive-restored', user)
       const maps = await listMaps()
       return sendJson(response, 200, { map, maps, documentLayout: await readDocumentLayout(maps.map((m) => m.id)) })
+    }
+    if (archiveRoute && request.method === 'DELETE') {
+      const user = requireUser(request, response)
+      if (!user) return
+      if (!canEdit(user)) return sendJson(response, 403, { error: '편집자만 보관 문서를 휴지통으로 이동할 수 있습니다.' })
+      const body = await readJsonBody(request)
+      return await groupProjects.exclusive(async () => {
+        groupProjects.assertCanTrash(archiveRoute[1])
+        const map = await documentReconstruction.setArchivedTrash(archiveRoute[1], { ...body, trashed: true }, publicUser(user))
+        broadcastMapChange(request, map.id, 'trashed', user)
+        return sendJson(response, 200, { trashedId: map.id, map })
+      })
     }
     if (url.pathname === '/api/card-layouts' || url.pathname.startsWith('/api/card-layouts/')) {
       const user = requireUser(request, response)

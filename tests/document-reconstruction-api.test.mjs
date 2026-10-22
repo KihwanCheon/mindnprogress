@@ -100,9 +100,12 @@ test('보관·전환 HTTP/MCP 경로는 임시 서버에서 원본·댓글·이�
   plan.approval = { statement: '임시 시험 전환안을 적용한다.', source: '자동 회귀 시험 입력' }
   assert.equal((await api('/api/document-reconstructions/apply', 'POST', { plan, previewHash: preview.body.previewHash })).body.code, 'RECONSTRUCTION_LAYOUT_REVIEW_REQUIRED')
   preview = await verifiedPreview(plan)
-  const viewerLogin = await fetch(base + '/api/auth/viewer-access', { method: 'POST' })
-  assert.equal(viewerLogin.status, 200)
-  const viewerHeaders = { Cookie: viewerLogin.headers.get('set-cookie').split(';')[0], 'Content-Type': 'application/json' }
+  const loginViewer = async () => {
+    const viewerLogin = await fetch(base + '/api/auth/viewer-access', { method: 'POST' })
+    assert.equal(viewerLogin.status, 200)
+    return { Cookie: viewerLogin.headers.get('set-cookie').split(';')[0], 'Content-Type': 'application/json' }
+  }
+  let viewerHeaders = await loginViewer()
   assert.equal((await api('/api/document-reconstructions/requests', 'POST', requestBody, viewerHeaders)).status, 403)
   assert.equal((await api(`/api/document-reconstructions/requests/${requestId}/proposal`, 'POST', { baseRevision: 1, plan }, viewerHeaders)).status, 403)
   assert.equal((await api('/api/document-reconstructions/apply', 'POST', { plan, previewHash: preview.body.previewHash }, viewerHeaders)).status, 403)
@@ -184,4 +187,67 @@ test('보관·전환 HTTP/MCP 경로는 임시 서버에서 원본·댓글·이�
   const aiLinked = (await api(`/api/maps/${source.id}`, 'PUT', { map: activeSource, baseVersion: activeSource.version })).body.map
   const blocked = await api(`/api/maps/${source.id}/archive`, 'PATCH', { baseVersion: aiLinked.version, baseLifecycleVersion: activeSource.lifecycleVersion, archived: true })
   assert.equal(blocked.status, 409, JSON.stringify(blocked.body)); assert.equal(blocked.body.code, 'RECONSTRUCTION_AI_BUSY')
+
+  // 보관함에서 바로 이동하되 원문을 다시 저장하거나 활성 문서로 잠시 노출하지 않는다.
+  const trashFixture = (await api('/api/maps', 'POST', { title: '보관함 휴지통 왕복', map: { nodes: [node('archive-root', { kind: 'root', isWork: false })], edges: [] } })).body.map
+  const trashArchiveUrl = `/api/maps/${trashFixture.id}/archive`
+  const trashRestoreUrl = `/api/maps/${trashFixture.id}/restore`
+  const trashVersion = { baseVersion: trashFixture.version, baseLifecycleVersion: 0 }
+  viewerHeaders = await loginViewer()
+  assert.equal((await api(trashArchiveUrl, 'DELETE', trashVersion, {})).status, 401)
+  assert.equal((await api(trashArchiveUrl, 'DELETE', trashVersion, viewerHeaders)).status, 403)
+  assert.equal((await api(trashArchiveUrl, 'DELETE', trashVersion)).status, 409, '활성 문서에는 보관함 이동 경로를 사용하지 않는다')
+  await api(`/api/maps/${trashFixture.id}/comments`, 'POST', { nodeId: 'archive-root', summary: '[결과] 보존할 댓글' })
+  const trashImageUpload = await fetch(`${base}/api/maps/${trashFixture.id}/images`, { method: 'POST', headers: { ...headers, 'Content-Type': 'image/png' }, body: imageBytes })
+  assert.equal(trashImageUpload.status, 201)
+  const trashImage = (await trashImageUpload.json()).image
+  const trashFile = path.join(directory, `${trashFixture.id}.json`)
+  const trashComments = path.join(directory, '_comments', `${trashFixture.id}.json`)
+  const trashOriginalBytes = await readFile(trashFile)
+  const trashOriginalComments = await readFile(trashComments)
+  const operationHistory = (await api('/api/document-reconstructions')).body.operations
+  const archivedFixture = (await api(trashArchiveUrl, 'PATCH', { ...trashVersion, archived: true, reason: '보관함 왕복 검증' })).body.map
+  const deleteBody = { baseVersion: archivedFixture.version, baseLifecycleVersion: archivedFixture.lifecycleVersion }
+  assert.equal((await api(trashArchiveUrl, 'DELETE', { ...deleteBody, baseVersion: 99 })).status, 409)
+  assert.equal((await api(trashArchiveUrl, 'DELETE', trashVersion)).status, 409, '오래된 보관 버전 거부')
+  const trashedFixture = await api(trashArchiveUrl, 'DELETE', deleteBody)
+  assert.equal(trashedFixture.status, 200, JSON.stringify(trashedFixture.body))
+  assert.equal(trashedFixture.body.map.archivedAt, archivedFixture.archivedAt)
+  assert.ok(trashedFixture.body.map.trashedAt)
+  assert.equal((await api(trashArchiveUrl, 'DELETE', deleteBody)).status, 409, '중복 요청을 다시 적용하지 않는다')
+  assert.equal((await api('/api/maps/archive')).body.maps.some((map) => map.id === trashFixture.id), false)
+  assert.equal((await api('/api/maps')).body.maps.some((map) => map.id === trashFixture.id), false)
+  assert.equal((await api('/api/maps/trash')).body.maps.some((map) => map.id === trashFixture.id && map.archivedAt), true)
+  assert.deepEqual(await readFile(trashFile), trashOriginalBytes)
+  assert.deepEqual(await readFile(trashComments), trashOriginalComments)
+  assert.deepEqual((await api('/api/document-reconstructions')).body.operations, operationHistory)
+  await stop(); await start()
+  assert.equal((await api('/api/maps/trash')).body.maps.some((map) => map.id === trashFixture.id), true)
+  viewerHeaders = await loginViewer()
+  assert.equal((await api(trashRestoreUrl, 'POST', {}, viewerHeaders)).status, 403)
+  const restoredFixture = await api(trashRestoreUrl, 'POST', {})
+  assert.equal(restoredFixture.status, 200, JSON.stringify(restoredFixture.body))
+  assert.equal(restoredFixture.body.summary.archivedAt, archivedFixture.archivedAt)
+  assert.equal(restoredFixture.body.map.trashedAt, undefined)
+  assert.equal((await api('/api/maps/archive')).body.maps.some((map) => map.id === trashFixture.id), true)
+  assert.equal(restoredFixture.body.maps.some((map) => map.id === trashFixture.id), false)
+  assert.equal(restoredFixture.body.trash.some((map) => map.id === trashFixture.id), false)
+  assert.equal((await api(`/api/maps/${trashFixture.id}`, 'DELETE')).status, 409, '복원 뒤에도 보관 원문 변경을 차단한다')
+  assert.deepEqual(await readFile(trashFile), trashOriginalBytes)
+  assert.deepEqual(await readFile(trashComments), trashOriginalComments)
+  const restoredImage = await fetch(`${base}/api/maps/${trashFixture.id}/images/${trashImage.assetId}`, { headers })
+  assert.equal(restoredImage.status, 200)
+  assert.deepEqual(Buffer.from(await restoredImage.arrayBuffer()), imageBytes)
+  assert.equal((await api(trashArchiveUrl, 'PATCH', { baseVersion: restoredFixture.body.map.version, baseLifecycleVersion: restoredFixture.body.map.lifecycleVersion, archived: false })).status, 200)
+  assert.equal((await api(`/api/maps/${trashFixture.id}`, 'DELETE')).status, 200)
+  assert.equal((await api('/api/maps/trash')).body.maps.some((map) => map.id === trashFixture.id), true, '활성 복원 뒤 일반 휴지통 이동도 정상 동작한다')
+  const activeRestored = (await api(trashRestoreUrl, 'POST', {})).body.map
+  assert.equal(Boolean(activeRestored.archivedAt), false)
+  assert.equal((await api(trashArchiveUrl, 'PATCH', { baseVersion: activeRestored.version, baseLifecycleVersion: activeRestored.lifecycleVersion, archived: true })).status, 200)
+  const rearchived = (await api(`/api/maps/${trashFixture.id}`)).body.map
+  assert.equal((await api(trashArchiveUrl, 'DELETE', { baseVersion: rearchived.version, baseLifecycleVersion: rearchived.lifecycleVersion })).status, 200)
+  assert.equal((await api('/api/maps/trash', 'DELETE', { mapIds: [trashFixture.id] })).status, 200)
+  await assert.rejects(readFile(trashFile), { code: 'ENOENT' })
+  await assert.rejects(readFile(trashComments), { code: 'ENOENT' })
+  assert.equal((await api('/api/maps/trash')).body.maps.some((map) => map.id === trashFixture.id), false)
 })

@@ -124,6 +124,11 @@ export function DocumentLifecycle({ api, editable, documents, initialIds, scope,
     await api(`/api/maps/${encodeURIComponent(doc.id)}/archive`, { method: 'PATCH', body: JSON.stringify({ baseVersion: doc.version, baseLifecycleVersion: doc.lifecycleVersion ?? 0, archived: false, reason: '보관함에서 사용자 복원' }) })
     await refresh(); await onChanged(); setNotice('문서를 복원했습니다. 후속 문서와 함께 활성 상태입니다.')
   })
+  const trash = (doc: Document) => run(async () => {
+    if (!editable || !window.confirm(`“${doc.title}” 보관 문서를 휴지통으로 이동할까요? 원문·댓글·이미지는 유지되며, 휴지통에서 복원하면 보관함으로 돌아옵니다.\n\n기존 링크·Ref는 휴지통에서 복원하기 전까지 사용할 수 없습니다. 보관 상태가 변경되므로 기존 문서 재구성의 일괄 되돌리기도 차단됩니다.`)) return
+    await api(`/api/maps/${encodeURIComponent(doc.id)}/archive`, { method: 'DELETE', body: JSON.stringify({ baseVersion: doc.version, baseLifecycleVersion: doc.lifecycleVersion ?? 0 }) })
+    await refresh(); await onChanged(); setNotice('휴지통으로 이동했습니다. 휴지통에서 보관함으로 복원할 수 있습니다.')
+  })
   const inspect = () => run(async () => {
     setPreview(null); setApproved(false); setLayoutError(''); lastMeasurement.current = ''
     const result = await api<Preview>('/api/document-reconstructions/preview', { method: 'POST', body: JSON.stringify({ plan: JSON.parse(draft) }) })
@@ -200,6 +205,7 @@ export function DocumentLifecycle({ api, editable, documents, initialIds, scope,
           <button className="lifecycle-link" onClick={() => onNavigate(doc.id)}>{doc.title}</button><small>{doc.nodeCount}개 카드 · {doc.archivedAt && new Date(doc.archivedAt).toLocaleString('ko-KR')}</small><p>{doc.archiveReason}</p>
           {doc.successorMapIds?.map((id) => <a key={id} href={`/mindmap/${encodeURIComponent(id)}`}>후속 문서 {documents.find((doc) => doc.id === id)?.title ?? id}</a>)}
           {editable && <button onClick={() => void restore(doc)} disabled={busy}>복원</button>}
+          {editable && <button onClick={() => void trash(doc)} disabled={busy}>휴지통으로 이동</button>}
         </article>)}
       </>}
       {tab === 'reconstruction' && <>

@@ -372,6 +372,33 @@ export async function createDocumentReconstruction({ dataDirectory, writeJson, r
       } finally { lockedIds.delete(mapId) }
     })
   }
+  async function setArchivedTrash(mapId, body, user) {
+    return exclusive(async () => {
+      if (!body || typeof body !== 'object' || Array.isArray(body) || typeof body.trashed !== 'boolean') throw reconstructionError('보관 문서의 휴지통 이동 또는 복원을 지정하세요.')
+      const map = await readMap(mapId)
+      if (!map) throw reconstructionError('문서를 찾을 수 없습니다.', 404)
+      const current = metadata(mapId)
+      if (!current.archivedAt || current.reconstructionPending) throw reconstructionError('보관 상태가 변경되었습니다. 보관함을 다시 조회하세요.', 409)
+      if (body.baseVersion !== map.version || body.baseLifecycleVersion !== (current.lifecycleVersion ?? 0)) throw reconstructionError('문서 또는 보관 상태가 변경되었습니다. 목록을 다시 조회하세요.', 409)
+      if (Boolean(map.trashedAt) === body.trashed || (!body.trashed && !current.trashedAt)) throw reconstructionError('휴지통 상태가 변경되었습니다. 목록을 다시 조회하세요.', 409)
+      lockedIds.add(mapId)
+      try {
+        if (body.trashed) await checkIdle([mapId])
+        const now = new Date().toISOString()
+        const next = structuredClone(state)
+        const record = next.documents[mapId] = {
+          ...current, lifecycleVersion: (current.lifecycleVersion ?? 0) + 1,
+          trashHistory: [...(current.trashHistory ?? []), { trashed: body.trashed, at: now, by: user }],
+        }
+        if (body.trashed) { record.trashedAt = now; record.trashedBy = user }
+        else { delete record.trashedAt; delete record.trashedBy }
+        // 원본 파일은 건드리지 않고 보관·휴지통 상태만 한 번에 교체한다.
+        // 복원 시 필드를 제거해야 이후 활성 문서의 일반 휴지통 이동을 가리지 않는다.
+        await persist(next)
+        return readMap(mapId)
+      } finally { lockedIds.delete(mapId) }
+    })
+  }
   async function apply(plan, user, suppliedPreviewHash) {
     return exclusive(async () => {
       if (!nonempty(plan?.approval?.statement) || !nonempty(plan.approval.source)) throw reconstructionError('실제 사용자 승인 발언과 확인 가능한 대화 출처가 필요합니다.')
@@ -488,7 +515,7 @@ export async function createDocumentReconstruction({ dataDirectory, writeJson, r
     for (const id of record.targetMapIds) state.documents[id] = { archivedAt: new Date().toISOString(), archiveReason: record.error, reconstructionId: record.id }
     await persist(structuredClone(state))
   }
-  return { metadata, metadataSnapshot: () => state.documents, isUnavailable, assertWritable, projectLayout, context, choices, preview: inspect, inspectRenderedLayout, apply, archive, rollback,
+  return { metadata, metadataSnapshot: () => state.documents, isUnavailable, assertWritable, projectLayout, context, choices, preview: inspect, inspectRenderedLayout, apply, archive, setArchivedTrash, rollback,
     list: () => Object.values(state.operations).map(publicRecord).sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
     get: (id) => publicRecord(get(id)) }
 }

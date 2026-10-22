@@ -3956,7 +3956,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
           return
         }
         if (event.type !== 'map-changed') return
-        if (['archived', 'archive-restored', 'reconstructed'].includes(event.action)) {
+        if (['archived', 'archive-restored', 'reconstructed', 'trashed', 'trash-restored'].includes(event.action)) {
           void apiRequest<{ maps: MapSummary[] }>('/api/maps/archive').then((result) => setArchivedDocuments(result.maps)).catch(() => undefined)
           if (event.mapId === activeMapId) setMapReloadToken((current) => current + 1)
         }
@@ -5965,8 +5965,13 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
   }
 
   const refreshLifecycleLibrary = async () => {
-    const [library, archive] = await Promise.all([apiRequest<DocumentLibraryResponse>('/api/maps'), apiRequest<{ maps: MapSummary[] }>('/api/maps/archive')])
+    const [library, archive, trash] = await Promise.all([apiRequest<DocumentLibraryResponse>('/api/maps'), apiRequest<{ maps: MapSummary[] }>('/api/maps/archive'),
+      accountMode === 'editor' ? apiRequest<{ maps: MapSummary[] }>('/api/maps/trash') : Promise.resolve({ maps: [] as MapSummary[] })])
     setDocuments(library.maps); setDocumentLayout(library.documentLayout); setArchivedDocuments(archive.maps)
+    setTrashedDocuments(trash.maps)
+    if (activeMapId && ![...library.maps, ...archive.maps].some((document) => document.id === activeMapId)) {
+      setLoadedMapId(null); setActiveMapId(library.maps[0]?.id ?? '')
+    }
     setMapReloadToken((current) => current + 1)
   }
   const archiveDocument = async (mapId: string) => {
@@ -6008,7 +6013,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     if (mode !== 'editor') return
     setSaveError('')
     try {
-      const result = await apiRequest<{ maps: MapSummary[]; documentLayout: DocumentLayout; trash: MapSummary[] }>(`/api/maps/${encodeURIComponent(mapId)}/restore`, { method: 'POST' })
+      const result = await apiRequest<{ summary: MapSummary; maps: MapSummary[]; documentLayout: DocumentLayout; trash: MapSummary[] }>(`/api/maps/${encodeURIComponent(mapId)}/restore`, { method: 'POST' })
       setDocuments(result.maps)
       setDocumentLayout(result.documentLayout)
       setTrashedDocuments(result.trash)
@@ -6017,6 +6022,11 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         next.delete(mapId)
         return next
       })
+      if (result.summary.archivedAt) {
+        setArchivedDocuments((current) => [result.summary, ...current.filter((document) => document.id !== mapId)])
+        setSavedAt('보관함으로 복원됨')
+        return
+      }
       setTrashOpen(false)
       setSelectedGroupId(null)
       setActiveMapId(mapId)
@@ -7615,7 +7625,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                     />
                   )}
                   <span><strong>{document.title}</strong><small>{document.nodeCount}개 항목 · {document.trashedAt ? new Date(document.trashedAt).toLocaleDateString('ko-KR') : ''}</small></span>
-                  {mode === 'editor' && <button disabled={trashDeleting} onClick={() => { void restoreDocument(document.id) }} title="문서 복원"><Icon name="restore" size={14} />복원</button>}
+                  {mode === 'editor' && <button disabled={trashDeleting} onClick={() => { void restoreDocument(document.id) }} title={document.archivedAt ? '보관함으로 복원' : '문서 복원'}><Icon name="restore" size={14} />{document.archivedAt ? '보관함으로 복원' : '복원'}</button>}
                 </div>
               ))}
               {trashedDocuments.length === 0 && <div className="empty-map-list">휴지통이 비어 있습니다.</div>}
