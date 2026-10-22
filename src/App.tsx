@@ -2605,6 +2605,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
   const [savedAt, setSavedAt] = useState('서버에서 불러오는 중…')
   const [saveError, setSaveError] = useState('')
   const [localBackupNotice, updateLocalBackupNotice] = useReducer(localBackupNoticeReducer, null, createLocalBackupNotice)
+  const [phoneViewport, setPhoneViewport] = useState(() => isPhoneViewport())
   const [serverBaselineRevision, setServerBaselineRevision] = useState(0)
   const dragSnapshot = useRef<DragSnapshot | null>(null)
   const rightPanGesture = useRef<RightPanGesture | null>(null)
@@ -2704,13 +2705,15 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
 
   useEffect(() => {
     const mobileViewport = window.matchMedia(PHONE_VIEWPORT_QUERY)
-    const closeMobilePanelsOnDesktop = (event: MediaQueryListEvent) => {
+    setPhoneViewport(mobileViewport.matches)
+    const syncMobileViewport = (event: MediaQueryListEvent) => {
+      setPhoneViewport(event.matches)
       if (event.matches) return
       setMobileSidebarOpen(false)
       setMobileInspectorOpen(false)
     }
-    mobileViewport.addEventListener('change', closeMobilePanelsOnDesktop)
-    return () => mobileViewport.removeEventListener('change', closeMobilePanelsOnDesktop)
+    mobileViewport.addEventListener('change', syncMobileViewport)
+    return () => mobileViewport.removeEventListener('change', syncMobileViewport)
   }, [setMobileInspectorOpen, setMobileSidebarOpen])
 
   useEffect(() => {
@@ -7281,7 +7284,8 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
           <button onClick={() => setMergeNotice('')} aria-label="병합 알림 닫기"><Icon name="close" size={12} /></button>
         </div>
       )}
-      {localBackupNotice.mapId === activeMapId && localBackupNotice.backupFailed && !localBackupNotice.dismissed && !selectedGroupId && (
+      {localBackupNotice.mapId === activeMapId && localBackupNotice.backupFailed && !localBackupNotice.dismissed && !selectedGroupId
+        && (!phoneViewport || localBackupNotice.serverFailed || serverBaseline.current?.id !== activeMapId) && (
         <div className="local-backup-warning" role="alert">
           <span>{localBackupNotice.serverFailed
             ? '서버 저장에 실패했고 이 기기의 로컬 백업도 저장하지 못했습니다. 변경 내용이 보존되지 않을 수 있습니다.'

@@ -53,7 +53,7 @@ window.fetch = async (url,init={}) => {
 createRoot(document.getElementById('root')).render(React.createElement(React.StrictMode,null,React.createElement(App)));
 `
 
-test('휴대폰·데스크톱의 백업 경고는 닫힘을 유지하고 재진입·복구 후 실패·서버 실패에 다시 표시한다', {
+test('휴대폰의 로컬 백업 단독 경고는 숨기고 서버 실패 경고와 데스크톱의 기존 닫기·재표시를 유지한다', {
   skip: process.env.MNP_BROWSER_TEST !== '1', timeout: 120_000,
 }, async () => {
   const { build } = await import('vite')
@@ -154,11 +154,37 @@ test('휴대폰·데스크톱의 백업 경고는 닫힘을 유지하고 재진�
     await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true })
     await send('Emulation.setTouchEmulationEnabled', { enabled: true })
     await send('Page.navigate', { url: base + '/mindmap/map-a/root' })
+    await until(() => evaluate('window.backupAttempts>0 && Boolean(document.querySelector(".description-field textarea"))'), '휴대폰 문서와 백업 실패 준비')
+    await settle(); await visible(false)
+    const mobileWrites = await evaluate('window.backupAttempts')
+    await edit('휴대폰의 로컬 백업 실패는 숨김')
+    await visible(false)
+    assert.ok(await evaluate('window.backupAttempts') > mobileWrites, '경고만 숨기고 백업 시도와 서버 저장은 계속한다.')
+    await evaluate('window.failLocalBackup=false')
+    await edit('휴대폰 백업 복구'); await visible(false)
+    await evaluate('window.failLocalBackup=true')
+    await edit('휴대폰 백업 재실패'); await visible(false)
+    for (const mapId of ['map-b', 'map-a']) {
+      await evaluate(`document.querySelector('.map-item[data-library-menu-id="${mapId}"]').click()`)
+      await until(() => evaluate(`location.pathname.startsWith('/mindmap/${mapId}')`), '휴대폰 문서 전환 실패')
+      await settle(); await visible(false)
+    }
+    const mobileLoadId = await evaluate('window.fixtureLoadId')
+    await send('Page.reload')
+    await until(() => evaluate(`window.fixtureLoadId && window.fixtureLoadId!==${JSON.stringify(mobileLoadId)} && window.backupAttempts>0`), '휴대폰 새로고침 실패')
+    await settle(); await visible(false)
+    console.log('[백업 경고 검증] 휴대폰 반복 실패·복구·재진입·새로고침에서 단독 경고 숨김')
+    await send('Emulation.setDeviceMetricsOverride', { width: 721, height: 900, deviceScaleFactor: 1, mobile: false })
     await visible(true)
-    console.log('[백업 경고 검증] 휴대폰 경고 표시')
+    await send('Emulation.setDeviceMetricsOverride', { width: 720, height: 900, deviceScaleFactor: 1, mobile: false })
+    await visible(false)
+    await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false })
+    await visible(true)
+    console.log('[백업 경고 검증] 기존 모바일 경계와 데스크톱 경고 표시')
+    await evaluate('document.querySelector(".react-flow__node[data-id=root]").click()')
     await until(() => evaluate('Boolean(document.querySelector(".description-field textarea"))'), '편집 화면 준비 실패')
     const bounds = await evaluate('(()=>{const r=document.querySelector(".local-backup-warning button").getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height,right:r.right,bottom:r.bottom}})()')
-    assert.ok(bounds.width >= 36 && bounds.height >= 36 && bounds.x >= 0 && bounds.right <= 390 && bounds.bottom <= 844)
+    assert.ok(bounds.width >= 36 && bounds.height >= 36 && bounds.x >= 0 && bounds.right <= 1280 && bounds.bottom <= 900)
     await settle()
     const writes = await evaluate('window.backupAttempts')
     await send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 }] })
@@ -194,8 +220,14 @@ test('휴대폰·데스크톱의 백업 경고는 닫힘을 유지하고 재진�
     console.log('[백업 경고 검증] 재진입·새로고침')
     await evaluate('document.documentElement.dataset.theme="dark"')
     assert.equal(await evaluate('getComputedStyle(document.querySelector(".local-backup-warning button")).color===getComputedStyle(document.querySelector(".local-backup-warning")).color'), true)
-    await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false })
-    await close()
+    await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true })
+    await visible(false)
+    await evaluate('window.failServerSave=true')
+    await edit('휴대폰 서버 저장 실패는 숨기지 않음'); await visible(true)
+    assert.match(await evaluate('document.querySelector(".local-backup-warning").textContent'), /서버 저장에 실패/)
+    await evaluate('window.failServerSave=false')
+    await edit('휴대폰 서버만 복구되면 단독 경고는 다시 숨김'); await visible(false)
+    console.log('[백업 경고 검증] 휴대폰 서버 실패 경고 유지·복구 후 자동 숨김')
     assert.deepEqual(errors, [], '처리되지 않은 브라우저 예외 없음')
   } catch (error) {
     console.error('[백업 경고 검증 실패]', error)
