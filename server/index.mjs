@@ -231,6 +231,7 @@ import {
   integrationStatusRetryReasonCode,
   integrationWorktreeDirtyMessage,
   integrationWorktreeDirtyReasonCode,
+  resolveCommitAuthorAccount,
 } from './lib/workspacePool.mjs'
 import { RemoteWorkspacePool, remoteWorkspaceFacade } from './lib/remoteWorkspacePool.mjs'
 
@@ -342,6 +343,11 @@ const aiDelegationWaitPolls = new Map()
 const localWorkspacePoolManager = new WorkspacePoolManager({
   registryFile: workspacePoolRegistryFile,
   stateFile: workspacePoolStateFile,
+  commitAuthorNameForLease: (lease) => aiWorkspaceCommitAuthorName({
+    conversationId: lease?.conversationId,
+    mapId: lease?.mapId,
+    cardId: lease?.cardId,
+  }),
 })
 const remoteWorkspacePool = new RemoteWorkspacePool({ local: localWorkspacePoolManager,
   stateFile: path.join(dataDirectory, '_remote-workspace-pools.json'),
@@ -527,6 +533,43 @@ function accountUser(user) {
     updatedAt: user.updatedAt ?? null,
     lastLoginAt: user.lastLoginAt ?? null,
   }
+}
+
+/**
+ * Resolves the MnP account name of the human who started the AI conversation, for checkpoint commit prefixes.
+ * Order: conversation origin → persistent conversation attribution → card conversation link
+ * → delegations targeting the conversation → the requesting user. Unknown or system ids fall through.
+ */
+async function aiWorkspaceCommitAuthorName({ conversationId = '', mapId = '', cardId = '', user = null } = {}) {
+  const normalizedConversationId = String(conversationId ?? '').trim()
+  const origin = normalizedConversationId ? aiConversationOrigins.get(normalizedConversationId) : null
+  const scopeMapId = String(origin?.mapId ?? mapId ?? '').trim()
+  const scopeCardId = String(origin?.cardId ?? cardId ?? '').trim()
+  const candidates = [{ source: 'origin', id: origin?.startedBy }]
+  if (normalizedConversationId && scopeMapId && scopeCardId) {
+    const attribution = aiConversationAttributions.get(conversationAttributionKey(scopeMapId, scopeCardId))
+    if (attribution?.conversationId === normalizedConversationId) {
+      candidates.push({ source: 'attribution', id: attribution.startedBy })
+    }
+    let map = null
+    try {
+      map = isValidMapId(scopeMapId) ? await readMap(scopeMapId) : null
+    } catch (error) {
+      console.warn('[AI workspace commit author]', error)
+    }
+    const card = map?.nodes?.find((node) => node.id === scopeCardId)
+    const link = aiConversationLinksFromData(card?.data).find((item) => item.conversationId === normalizedConversationId)
+    candidates.push({ source: 'conversation-link', id: link?.startedBy?.id })
+  }
+  if (normalizedConversationId) {
+    const delegations = [...aiDelegations.values()]
+      .filter((delegation) => delegation.targetConversationId === normalizedConversationId)
+      .sort((first, second) => String(second.updatedAt ?? second.createdAt ?? '')
+        .localeCompare(String(first.updatedAt ?? first.createdAt ?? '')))
+    for (const delegation of delegations) candidates.push({ source: 'delegation', id: delegation.startedBy })
+  }
+  candidates.push({ source: 'request-user', id: user?.id })
+  return resolveCommitAuthorAccount({ candidates, users })?.name ?? null
 }
 
 function canEdit(user) {
@@ -8915,6 +8958,12 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           paths,
           confirmNoChanges,
           commitMessage: body.commitMessage,
+          commitAuthorName: await aiWorkspaceCommitAuthorName({
+            conversationId: source?.conversationId ?? scope.conversationId,
+            mapId: scope.mapId,
+            cardId: checkpointCardId,
+            user,
+          }),
           mnpContext: {
             mapId: scope.mapId,
             cardId: checkpointCardId,

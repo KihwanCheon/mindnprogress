@@ -76,6 +76,65 @@ export const checkpointCommitMessageExample = {
   scope: 'JAPAN_SERVICE 로그인 흐름에만 적용됩니다.',
 }
 
+const checkpointCommitPrefixMaxLength = 40
+
+function inlineCommitPrefixText(value) {
+  return [...String(value)]
+    .map((character) => {
+      const code = character.codePointAt(0)
+      return code === 127 || code < 32 ? ' ' : character
+    })
+    .join('')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/**
+ * Normalizes the explicit `commitPrefix` of a workspace pool registry.
+ * Returns null when the registry does not configure it; an empty string means "no prefix".
+ */
+export function normalizeConfiguredCommitPrefix(value) {
+  if (typeof value !== 'string') return null
+  return inlineCommitPrefixText(value).slice(0, checkpointCommitPrefixMaxLength).trim()
+}
+
+/**
+ * Resolves the checkpoint commit title prefix.
+ * Priority: explicit registry `commitPrefix` → `[account name]` of the MnP editor who owns the work → no prefix.
+ */
+export function resolveCheckpointCommitPrefix(options = {}) {
+  return resolveCheckpointCommitPrefixDetails(options).prefix
+}
+
+/**
+ * Same as `resolveCheckpointCommitPrefix`, but also reports where the prefix came from:
+ * `configured` (registry), `account` (MnP account name) or `none`.
+ */
+export function resolveCheckpointCommitPrefixDetails({ configuredPrefix, authorName } = {}) {
+  const configured = normalizeConfiguredCommitPrefix(configuredPrefix)
+  if (configured !== null) return { prefix: configured, source: 'configured' }
+  const name = typeof authorName === 'string'
+    ? inlineCommitPrefixText(authorName).replace(/[[\]]/g, '').trim().slice(0, checkpointCommitPrefixMaxLength).trim()
+    : ''
+  return name ? { prefix: `[${name}]`, source: 'account' } : { prefix: '', source: 'none' }
+}
+
+/**
+ * Picks the first candidate user id that maps to a human MnP account with a name.
+ * Candidates are ordered by priority; system-managed accounts and unknown ids (e.g. integration users) are skipped.
+ */
+export function resolveCommitAuthorAccount({ candidates = [], users = [] } = {}) {
+  for (const candidate of Array.isArray(candidates) ? candidates : []) {
+    const id = String(candidate?.id ?? '').trim()
+    if (!id) continue
+    const account = (Array.isArray(users) ? users : [])
+      .find((user) => user?.id === id && user.systemManaged !== true)
+    const name = String(account?.name ?? '').trim()
+    if (name) return { name, userId: id, source: String(candidate.source ?? '') || null }
+  }
+  return null
+}
+
 function checkpointCommitMessageError(message) {
   return new WorkspacePoolUnavailableError(
     message,
@@ -103,7 +162,7 @@ function normalizedCheckpointMessageField(value, name, maxLength, { inline = fal
   return normalized
 }
 
-export function normalizeCheckpointCommitMessage(value) {
+export function normalizeCheckpointCommitMessage(value, { commitPrefix = '' } = {}) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw checkpointCommitMessageError('변경 체크포인트에는 실제 변경을 설명하는 commitMessage가 필요합니다.')
   }
@@ -113,8 +172,8 @@ export function normalizeCheckpointCommitMessage(value) {
     throw checkpointCommitMessageError(`commitMessage에 지원하지 않는 필드가 있습니다: ${unknownFields.join(', ')}`)
   }
   const summary = normalizedCheckpointMessageField(value.summary, 'summary', 80, { inline: true })
-  if (summary.startsWith('[김용민]')) {
-    throw checkpointCommitMessageError('commitMessage.summary에는 [김용민] prefix를 넣지 마세요. 서버가 자동으로 추가합니다.')
+  if (commitPrefix && summary.startsWith(commitPrefix)) {
+    throw checkpointCommitMessageError(`commitMessage.summary에는 ${commitPrefix} prefix를 넣지 마세요. 서버가 자동으로 추가합니다.`)
   }
   const scope = value.scope === undefined || value.scope === null || value.scope === ''
     ? null
@@ -300,6 +359,7 @@ function normalizeRegistry(raw, registryFile) {
     poolId: String(raw?.poolId ?? path.basename(String(raw?.sharedRoot ?? 'workspace-pool'))).trim() || 'workspace-pool',
     sharedRoot: path.resolve(String(raw?.sharedRoot ?? path.dirname(registryFile))),
     originUrl: String(raw?.originUrl ?? '').trim(),
+    commitPrefix: normalizeConfiguredCommitPrefix(raw?.commitPrefix),
     integration,
     workers: workspaces.filter((workspace) => workspace.role === 'worker' && workspace.id !== integration?.id),
     workspaces,
@@ -333,21 +393,25 @@ function checkpointMnpSection(mnpContext) {
   return `[MnP]\n문서: ${document}\n카드: ${card}\n경로: ${relativePath}`
 }
 
-function checkpointMessage(commitMessage, mnpContext) {
-  const normalized = normalizeCheckpointCommitMessage(commitMessage)
+function checkpointMessage(commitMessage, mnpContext, commitPrefix = '') {
+  const normalized = normalizeCheckpointCommitMessage(commitMessage, { commitPrefix })
   const normalizedMnpContext = normalizeCheckpointMnpContext(mnpContext)
   return {
-    title: `[김용민] ${normalized.summary}`,
+    title: commitPrefix ? `${commitPrefix} ${normalized.summary}` : normalized.summary,
     body: `${checkpointMnpSection(normalizedMnpContext)}\n\n[배경]\n${normalized.background}\n\n[원인]\n${normalized.cause}\n\n[수정]\n${normalized.changes}${normalized.scope ? `\n\n[적용 범위]\n${normalized.scope}` : ''}`,
     normalized,
     mnpContext: normalizedMnpContext,
   }
 }
 
-function integrationConflictCheckpointMessage(lease) {
-  const checkpoint = [...(Array.isArray(lease?.checkpoints) ? lease.checkpoints : [])]
+function latestMessageCheckpoint(lease) {
+  return [...(Array.isArray(lease?.checkpoints) ? lease.checkpoints : [])]
     .reverse()
     .find((candidate) => candidate?.commitMessage)
+}
+
+function integrationConflictCheckpointMessage(lease, legacyCommitPrefix = '') {
+  const checkpoint = latestMessageCheckpoint(lease)
   const source = checkpoint?.commitMessage
   if (!source) {
     throw new WorkspacePoolIntegrationError(
@@ -365,7 +429,7 @@ function integrationConflictCheckpointMessage(lease) {
     mapId: lease?.mapId,
     cardId: lease?.cardId,
     cardTitle: lease?.cardLabel,
-  })
+  }, typeof checkpoint.commitPrefix === 'string' ? checkpoint.commitPrefix : legacyCommitPrefix)
 }
 
 export function buildWorkspaceInstruction(lease) {
@@ -393,11 +457,16 @@ Unity Play Mode, 재임포트, 동적 폰트·Atlas 생성 등의 검증은 어�
 }
 
 export class WorkspacePoolManager {
-  constructor({ registryFile, stateFile, gitRunner = defaultGitRunner, replaceStateFile = replaceFileWithRetry } = {}) {
+  constructor({
+    registryFile, stateFile, gitRunner = defaultGitRunner, replaceStateFile = replaceFileWithRetry,
+    commitAuthorNameForLease = () => null,
+  } = {}) {
     this.registryFile = path.resolve(String(registryFile ?? '').trim())
     this.stateFile = path.resolve(String(stateFile ?? '').trim())
     this.git = gitRunner
     this.replaceStateFile = replaceStateFile
+    // Resolves (sync or async) the MnP account name for leases whose checkpoints predate the stored commit prefix.
+    this.commitAuthorNameForLease = commitAuthorNameForLease
     this.registry = null
     this.state = null
     this.queue = Promise.resolve()
@@ -1044,6 +1113,7 @@ export class WorkspacePoolManager {
     confirmNoChanges = false,
     commitMessage,
     mnpContext,
+    commitAuthorName = null,
   } = {}) {
     return this.runExclusive(async () => {
       const lease = this.state?.leases?.[String(leaseId ?? '').trim()]
@@ -1100,7 +1170,11 @@ export class WorkspacePoolManager {
           'AI_WORKSPACE_CHECKPOINT_INPUT_INVALID',
         )
       }
-      const normalizedCommitMessage = normalizeCheckpointCommitMessage(commitMessage)
+      const { prefix: commitPrefix, source: commitPrefixSource } = resolveCheckpointCommitPrefixDetails({
+        configuredPrefix: this.registry.commitPrefix,
+        authorName: commitAuthorName,
+      })
+      const normalizedCommitMessage = normalizeCheckpointCommitMessage(commitMessage, { commitPrefix })
       const scopedStatus = await this.git(workspace.root, [
         'status', '--porcelain=v1', '-z', '--untracked-files=all', '--', ...intendedPaths,
       ])
@@ -1131,13 +1205,21 @@ export class WorkspacePoolManager {
         mapId: lease.mapId,
         cardId: lease.cardId,
         cardTitle: lease.cardLabel,
-      }))
+      }), commitPrefix)
+      if (commitPrefixSource === 'none') {
+        console.warn('[AI workspace checkpoint] commit prefix unresolved; committing without prefix', JSON.stringify({
+          leaseId: lease.leaseId,
+          conversationId: lease.conversationId ?? null,
+        }))
+      }
       await this.git(workspace.root, ['commit', '-m', message.title, '-m', message.body])
       const commit = await this.git(workspace.root, ['rev-parse', 'HEAD'])
       const checkpoint = {
         commit,
         paths: intendedPaths,
         commitMessage: message.normalized,
+        commitPrefix,
+        commitPrefixSource,
         mnpContext: message.mnpContext,
         createdAt: new Date().toISOString(),
       }
@@ -2867,7 +2949,15 @@ export class WorkspacePoolManager {
 
         const remainingChanges = await this.git(workspace.root, ['status', '--porcelain', '--untracked-files=all'])
         if (remainingChanges) {
-          const message = integrationConflictCheckpointMessage(lease)
+          // Checkpoints created before commitPrefix was stored resolve the prefix the same way a new checkpoint would.
+          const latestCheckpoint = latestMessageCheckpoint(lease)
+          const legacyCommitPrefix = latestCheckpoint && typeof latestCheckpoint.commitPrefix !== 'string'
+            ? resolveCheckpointCommitPrefix({
+              configuredPrefix: this.registry.commitPrefix,
+              authorName: await this.commitAuthorNameForLease(lease),
+            })
+            : ''
+          const message = integrationConflictCheckpointMessage(lease, legacyCommitPrefix)
           await this.git(workspace.root, ['add', '-A'])
           await this.git(workspace.root, ['commit', '-m', message.title, '-m', message.body])
         }

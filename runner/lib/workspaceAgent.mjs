@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { mkdir, rm } from 'node:fs/promises'
 import path from 'node:path'
-import { WorkspacePoolManager } from '../../server/lib/workspacePool.mjs'
+import { WorkspacePoolManager, normalizeConfiguredCommitPrefix } from '../../server/lib/workspacePool.mjs'
 import { RemoteWorkspaceArtifacts } from '../../server/lib/remoteWorkspaceArtifacts.mjs'
 import {
   REMOTE_WORKSPACE_VERSION, REMOTE_WORKSPACE_ACTIONS, identifier, commitId, git,
@@ -53,7 +53,8 @@ export async function createWorkspaceAgent({ registryFile, machineId, request, r
   state.identity = identity
   const artifacts = new RemoteWorkspaceArtifacts(path.join(sharedRoot, 'remote-runner', 'artifacts'))
   const manager = new WorkspacePoolManager({ registryFile, stateFile })
-  manager.registry = { poolId: raw.poolId, sharedRoot, originUrl: raw.originUrl, workspaces: workers, workers }
+  manager.registry = { poolId: raw.poolId, sharedRoot, originUrl: raw.originUrl,
+    commitPrefix: normalizeConfiguredCommitPrefix(raw.commitPrefix), workspaces: workers, workers }
   manager.state = state
   let queue = Promise.resolve()
   const exclusive = (action) => {

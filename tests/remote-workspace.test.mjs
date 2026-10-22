@@ -10,7 +10,7 @@ import { git, jsonFile, saveJson, workspaceLock } from '../server/lib/remoteWork
 import { RemoteWorkspaceArtifacts } from '../server/lib/remoteWorkspaceArtifacts.mjs'
 
 const message = { summary: '원격 Fork 기능 검증', background: '원격 작업 결과를 안전하게 전달해야 합니다.', cause: '머신 간 작업공간이 분리되어 있습니다.', changes: '의도한 기능 파일만 체크포인트로 전달했습니다.' }
-async function fixture(t) {
+async function fixture(t, { remoteCommitPrefix } = {}) {
   const root = await realpath(await mkdtemp(path.join(tmpdir(), 'mnp-remote-test-')))
   t.after(() => rm(root, { recursive: true, force: true }))
   const integration = path.join(root, 'integration'), localRoot = path.join(root, 'local-worker'), worker = path.join(root, 'remote-worker')
@@ -45,7 +45,8 @@ async function fixture(t) {
   await remote.initialize()
   const remoteRegistry = path.join(root, 'remote.json')
   await saveJson(remoteRegistry, { schemaVersion: 1, coordinatorId: remote.state.coordinatorId, poolId: 'mac-pool', originUrl,
-    sharedRoot: path.join(root, 'remote-shared'), workspaces: [{ id: 'fork1', root: worker, role: 'worker' }] })
+    sharedRoot: path.join(root, 'remote-shared'), workspaces: [{ id: 'fork1', root: worker, role: 'worker' }],
+    ...(remoteCommitPrefix === undefined ? {} : { commitPrefix: remoteCommitPrefix }) })
   const buildAgent = () => createWorkspaceAgent({ registryFile: remoteRegistry, machineId: 'macbook', runtimeIdle: async () => !active,
     request: (pathname, body, method) => {
       const match = /^\/api\/machines\/([^/]+)\/runner\/workspace-artifacts\/([^/]+)\/([^/]+)\/(.*)$/.exec(pathname)
@@ -93,6 +94,17 @@ test('실제 Git: 원격 prepare → checkpoint → staging 통합 → 반환 �
   const next = await f.acquire('delegation-2')
   assert.equal(next.ownership.generation, 2)
   assert.notEqual(next.leaseId, lease.leaseId)
+})
+
+test('원격 Fork 체크포인트 제목은 Runner registry의 commitPrefix를 우선하고 없으면 전달된 계정 이름을 쓴다', async (t) => {
+  for (const [remoteCommitPrefix, expectedTitle] of [['[원격팀]', `[원격팀] ${message.summary}`], [undefined, `[김용민] ${message.summary}`]]) {
+    const f = await fixture(t, { remoteCommitPrefix }), lease = await f.acquire()
+    await writeFile(path.join(f.worker, 'feature.txt'), 'remote prefix change\n')
+    const result = await f.remote.checkpoint(lease.leaseId, { requestId: 'checkpoint-prefix', jobId: lease.jobId, mapId: 'map', cardId: 'card',
+      conversationId: 'conversation-1', paths: ['feature.txt'], commitMessage: message, commitAuthorName: '김용민' })
+    assert.equal(await git(f.worker, ['log', '-1', '--format=%s']), expectedTitle)
+    assert.equal(result.checkpoint.commitPrefix, expectedTitle.slice(0, expectedTitle.indexOf(']') + 1))
+  }
 })
 
 test('원격 Fork 체크포인트도 로컬과 같은 knowledge-inbox 경로 거부를 적용한다', async (t) => {

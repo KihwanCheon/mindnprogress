@@ -12,6 +12,9 @@ import {
   integrationStatusRetryReasonCode,
   knowledgeInboxCheckpointPaths,
   normalizeCheckpointCommitMessage,
+  resolveCheckpointCommitPrefix,
+  resolveCheckpointCommitPrefixDetails,
+  resolveCommitAuthorAccount,
 } from '../server/lib/workspacePool.mjs'
 import { replaceFileWithRetry } from '../server/lib/replaceFileWithRetry.mjs'
 
@@ -227,8 +230,15 @@ test('체크포인트는 knowledge-inbox 파일을 커밋하지 않고 거부한
 test('체크포인트 커밋 메시지는 실제 변경 구조와 금지 항목을 검증한다', () => {
   assert.deepEqual(normalizeCheckpointCommitMessage(checkpointCommitMessage), checkpointCommitMessage)
   assert.throws(
-    () => normalizeCheckpointCommitMessage({ ...checkpointCommitMessage, summary: '[김용민] 중복 prefix' }),
-    /prefix/,
+    () => normalizeCheckpointCommitMessage(
+      { ...checkpointCommitMessage, summary: '[김용민] 중복 prefix' },
+      { commitPrefix: '[김용민]' },
+    ),
+    /commitMessage\.summary에는 \[김용민\] prefix를 넣지 마세요/,
+  )
+  assert.equal(
+    normalizeCheckpointCommitMessage({ ...checkpointCommitMessage, summary: '[MnP] 해석된 prefix 없음' }).summary,
+    '[MnP] 해석된 prefix 없음',
   )
   assert.throws(
     () => normalizeCheckpointCommitMessage({ ...checkpointCommitMessage, changes: '변경\n\nCo-Authored-By: AI' }),
@@ -242,6 +252,147 @@ test('체크포인트 커밋 메시지는 실제 변경 구조와 금지 항목�
     () => normalizeCheckpointCommitMessage({ ...checkpointCommitMessage, legacyText: '호환 필드' }),
     /지원하지 않는 필드/,
   )
+})
+
+test('체크포인트 커밋 prefix는 작업공간 설정, 계정 이름, 없음 순서로 해석한다', () => {
+  assert.equal(resolveCheckpointCommitPrefix({ configuredPrefix: '[NE팀]', authorName: '김용민' }), '[NE팀]')
+  assert.equal(resolveCheckpointCommitPrefix({ configuredPrefix: '', authorName: '김용민' }), '')
+  assert.equal(resolveCheckpointCommitPrefix({ configuredPrefix: '  [줄\n바꿈]  ' }), '[줄 바꿈]')
+  assert.equal(resolveCheckpointCommitPrefix({ configuredPrefix: 7, authorName: '김용민' }), '[김용민]')
+  assert.equal(resolveCheckpointCommitPrefix({ authorName: ' 김용민 ' }), '[김용민]')
+  assert.equal(resolveCheckpointCommitPrefix({ authorName: '[김용민]' }), '[김용민]')
+  assert.equal(resolveCheckpointCommitPrefix({ authorName: '  ' }), '')
+  assert.equal(resolveCheckpointCommitPrefix({}), '')
+  assert.deepEqual(resolveCheckpointCommitPrefixDetails({ configuredPrefix: '[NE팀]', authorName: '김용민' }), { prefix: '[NE팀]', source: 'configured' })
+  assert.deepEqual(resolveCheckpointCommitPrefixDetails({ configuredPrefix: '', authorName: '김용민' }), { prefix: '', source: 'configured' })
+  assert.deepEqual(resolveCheckpointCommitPrefixDetails({ authorName: '김용민' }), { prefix: '[김용민]', source: 'account' })
+  assert.deepEqual(resolveCheckpointCommitPrefixDetails({}), { prefix: '', source: 'none' })
+})
+
+test('체크포인트 커밋 작성자 계정은 후보 순서대로 사람 계정 이름을 고른다', () => {
+  const users = [
+    { id: 'user-editor', name: '김용민', role: 'editor' },
+    { id: 'user-admin', name: '시스템 관리자', role: 'admin' },
+    { id: 'user-public-viewer', name: '공개 뷰어', role: 'viewer', systemManaged: true },
+    { id: 'user-nameless', name: '  ', role: 'editor' },
+  ]
+  // startedBy of the conversation origin wins over later candidates such as the requesting user.
+  assert.deepEqual(resolveCommitAuthorAccount({
+    users,
+    candidates: [{ source: 'origin', id: 'user-editor' }, { source: 'request-user', id: 'user-admin' }],
+  }), { name: '김용민', userId: 'user-editor', source: 'origin' })
+  // Null origin and integration/system ids fall through to the attribution or delegation candidates.
+  assert.deepEqual(resolveCommitAuthorAccount({
+    users,
+    candidates: [
+      { source: 'origin', id: null },
+      { source: 'attribution', id: 'system-aionui-ai' },
+      { source: 'delegation', id: 'user-editor' },
+      { source: 'request-user', id: 'user-admin' },
+    ],
+  }), { name: '김용민', userId: 'user-editor', source: 'delegation' })
+  // System-managed accounts and accounts without a name are skipped.
+  assert.deepEqual(resolveCommitAuthorAccount({
+    users,
+    candidates: [
+      { source: 'origin', id: 'user-public-viewer' },
+      { source: 'conversation-link', id: 'user-nameless' },
+      { source: 'request-user', id: 'user-admin' },
+    ],
+  }), { name: '시스템 관리자', userId: 'user-admin', source: 'request-user' })
+  assert.equal(resolveCommitAuthorAccount({
+    users,
+    candidates: [{ source: 'origin', id: '' }, { source: 'request-user', id: 'system-aionui-ai' }],
+  }), null)
+  assert.equal(resolveCommitAuthorAccount({ users }), null)
+})
+
+async function checkpointCommitTitleFixture(t, { commitPrefix, commitAuthorName, summary = checkpointCommitMessage.summary }) {
+  const root = await mkdtemp(path.join(tmpdir(), 'mnp-workspace-commit-prefix-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const integrationRoot = path.join(root, 'main')
+  const workerRoot = path.join(root, 'fork2')
+  const sharedRoot = path.join(root, 'shared')
+  await Promise.all([mkdir(integrationRoot), mkdir(workerRoot), mkdir(sharedRoot)])
+  const registryFile = path.join(sharedRoot, 'workspaces.json')
+  await writeFile(registryFile, JSON.stringify({
+    schemaVersion: 1,
+    poolId: 'holdem',
+    sharedRoot,
+    originUrl: 'https://example.invalid/holdem.git',
+    ...(commitPrefix === undefined ? {} : { commitPrefix }),
+    workspaces: [
+      { id: 'main', root: integrationRoot, role: 'integration', enabled: true },
+      { id: 'fork2', root: workerRoot, role: 'worker', enabled: true },
+    ],
+  }), 'utf8')
+  let workerBranch = 'japan-master'
+  let leased = false
+  const commands = []
+  const manager = new WorkspacePoolManager({
+    registryFile,
+    stateFile: path.join(root, 'state.json'),
+    gitRunner: async (cwd, args) => {
+      commands.push({ cwd, args })
+      const worker = cwd === workerRoot
+      if (args[0] === 'status') return worker && leased ? ' M Assets/changed.cs\0' : ''
+      if (args[0] === 'diff' && args[1] === '--cached') return 'Assets/changed.cs\0'
+      if (args[0] === 'remote') return 'https://example.invalid/holdem.git'
+      if (args[0] === 'rev-parse') return 'base123'
+      if (args[0] === 'branch' && args[1] === '--show-current') return worker ? workerBranch : 'japan-master'
+      if (args[0] === 'switch') {
+        workerBranch = args[1] === '-C' ? args[2] : args[1]
+        leased = args[1] !== '-C' && args[1] !== 'japan-master'
+        return ''
+      }
+      return ''
+    },
+  })
+  await manager.initialize()
+  const lease = await manager.acquire({ workspaceHint: integrationRoot, mapId: 'map-a', cardId: 'card-a', cardLabel: 'prefix 확인' })
+  const checkpoint = () => manager.checkpoint(lease.leaseId, {
+    jobId: lease.jobId,
+    mapId: 'map-a',
+    cardId: 'card-a',
+    conversationId: '',
+    paths: ['Assets/changed.cs'],
+    commitMessage: { ...checkpointCommitMessage, summary },
+    commitAuthorName,
+  })
+  const commitTitle = () => commands.find(({ args }) => args[0] === 'commit')?.args[2] ?? null
+  return { checkpoint, commitTitle }
+}
+
+test('체크포인트 커밋 제목은 해석된 prefix를 붙이고 같은 prefix로 시작하는 summary를 거부한다', async (t) => {
+  const configured = await checkpointCommitTitleFixture(t, { commitPrefix: '[NE팀]', commitAuthorName: '김용민' })
+  const configuredResult = await configured.checkpoint()
+  assert.equal(configured.commitTitle(), `[NE팀] ${checkpointCommitMessage.summary}`)
+  assert.equal(configuredResult.checkpoint.commitPrefix, '[NE팀]')
+  assert.equal(configuredResult.checkpoint.commitPrefixSource, 'configured')
+
+  const account = await checkpointCommitTitleFixture(t, { commitAuthorName: '김용민' })
+  const accountResult = await account.checkpoint()
+  assert.equal(account.commitTitle(), `[김용민] ${checkpointCommitMessage.summary}`)
+  assert.equal(accountResult.checkpoint.commitPrefix, '[김용민]')
+  assert.equal(accountResult.checkpoint.commitPrefixSource, 'account')
+
+  const none = await checkpointCommitTitleFixture(t, {})
+  const noneResult = await none.checkpoint()
+  assert.equal(none.commitTitle(), checkpointCommitMessage.summary)
+  assert.equal(noneResult.checkpoint.commitPrefix, '')
+  assert.equal(noneResult.checkpoint.commitPrefixSource, 'none')
+
+  const duplicated = await checkpointCommitTitleFixture(t, { commitAuthorName: '김용민', summary: '[김용민] 중복 prefix' })
+  await assert.rejects(
+    () => duplicated.checkpoint(),
+    (error) => error instanceof WorkspacePoolUnavailableError
+      && error.reasonCode === 'AI_WORKSPACE_CHECKPOINT_MESSAGE_INVALID'
+      && error.message.includes('[김용민] prefix를 넣지 마세요'),
+  )
+  assert.equal(duplicated.commitTitle(), null)
+
+  const duplicatedConfigured = await checkpointCommitTitleFixture(t, { commitPrefix: '[NE팀]', commitAuthorName: '김용민', summary: '[NE팀] 중복 prefix' })
+  await assert.rejects(() => duplicatedConfigured.checkpoint(), /\[NE팀\] prefix를 넣지 마세요/)
 })
 
 test('회수 기준 커밋 객체가 없으면 두 번 fetch한 뒤 worker 전환 없이 중단한다', async () => {
@@ -1425,6 +1576,7 @@ test('완료된 worker 변경을 체크포인트로 고정하고 main에 직렬 
       conversationId: '',
       paths: ['Assets/changed.cs'],
       commitMessage: checkpointCommitMessage,
+      commitAuthorName: '김용민',
       mnpContext: {
         mapId: 'map-jp-login',
         cardId: 'node-idp-link',
@@ -1766,7 +1918,7 @@ test('체크포인트 이후 인프라 파일로 격리된 완료 작업은 깨�
   }
 })
 
-test('통합 충돌은 main을 건드리지 않고 같은 worker의 AI 해결 후 반영한다', async () => {
+async function integrationConflictScenario({ legacyAuthorName = null } = {}) {
   const root = await mkdtemp(path.join(tmpdir(), 'mnp-workspace-conflict-'))
   try {
     const integrationRoot = path.join(root, 'main')
@@ -1799,6 +1951,7 @@ test('통합 충돌은 main을 건드리지 않고 같은 worker의 AI 해결 �
     const manager = new WorkspacePoolManager({
       registryFile,
       stateFile,
+      commitAuthorNameForLease: async (lease) => (lease?.cardId === 'node-conflict' ? legacyAuthorName : null),
       gitRunner: async (cwd, args) => {
         commands.push({ cwd, args })
         const worker = cwd === workerRoot
@@ -1858,6 +2011,7 @@ test('통합 충돌은 main을 건드리지 않고 같은 worker의 AI 해결 �
       conversationId: '',
       paths: ['Assets/conflict.cs'],
       commitMessage: checkpointCommitMessage,
+      commitAuthorName: '김용민',
       mnpContext: {
         mapId: 'map-conflict',
         cardId: 'node-conflict',
@@ -1865,6 +2019,12 @@ test('통합 충돌은 main을 건드리지 않고 같은 worker의 AI 해결 �
         cardTitle: '충돌 작업',
       },
     })
+    if (legacyAuthorName) {
+      // Simulate a checkpoint recorded before commitPrefix was stored.
+      const storedCheckpoint = manager.state.leases[lease.leaseId].checkpoints.at(-1)
+      delete storedCheckpoint.commitPrefix
+      delete storedCheckpoint.commitPrefixSource
+    }
 
     const conflict = await manager.finalize(lease.leaseId, { childStatus: 'completed' })
     assert.equal(conflict.status, 'awaiting-conflict-resolution')
@@ -1880,7 +2040,8 @@ test('통합 충돌은 main을 건드리지 않고 같은 worker의 AI 해결 �
     const conflictCommit = commands
       .filter(({ cwd, args }) => cwd === workerRoot && args[0] === 'commit')
       .at(-1)?.args ?? []
-    assert.ok(conflictCommit.includes('[김용민] 일본 로그인 IDP 뷰 이중 등록 해소 통합 충돌 해소'))
+    const expectedPrefix = legacyAuthorName ? `[${legacyAuthorName}]` : '[김용민]'
+    assert.ok(conflictCommit.includes(`${expectedPrefix} 일본 로그인 IDP 뷰 이중 등록 해소 통합 충돌 해소`))
     assert.match(
       conflictCommit.at(-1) ?? '',
       /\[MnP\]\n문서: 충돌 검증 문서 \(map-conflict\)\n카드: 충돌 작업 \(node-conflict\)\n경로: \/mindmap\/map-conflict\/node-conflict/,
@@ -1891,7 +2052,13 @@ test('통합 충돌은 main을 건드리지 않고 같은 worker의 AI 해결 �
   } finally {
     await rm(root, { recursive: true, force: true })
   }
-})
+}
+
+test('통합 충돌은 main을 건드리지 않고 같은 worker의 AI 해결 후 반영한다', () => integrationConflictScenario())
+
+test('통합 충돌 재커밋은 prefix가 저장되지 않은 과거 체크포인트면 계정 이름을 비동기로 다시 해석한다', () => (
+  integrationConflictScenario({ legacyAuthorName: '이전작성자' })
+))
 
 test('유휴 worker drift는 파일 종류와 관계없이 보존한 뒤 새 lease 전에 복원한다', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'mnp-workspace-drift-unit-'))

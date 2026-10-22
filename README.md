@@ -261,7 +261,7 @@ npm run dev
 | `MNP_AIONUI_URL` | 자동 탐색 | AionUi 백엔드 주소 강제 지정 |
 | `MNP_AIONUI_WEB_URL` | `MNP_PUBLIC_URL` 호스트의 7777 포트 | 원격 브라우저에서 AI 대화를 열 AionUi WebUI 주소 |
 | `MNP_AIONUI_DISCOVERY_FILE` | OS 임시 폴더의 `aionui-backend.json` | AionUi 가변 포트 탐색 파일 |
-| `MNP_WORKSPACE_POOL_REGISTRY` | 저장소의 `workspaces.json` | Unity integration·worker 작업공간 풀 구성 파일 |
+| `MNP_WORKSPACE_POOL_REGISTRY` | 저장소의 `workspaces.json` | Unity integration·worker 작업공간 풀 구성 파일. 선택 필드 `commitPrefix`로 체크포인트 커밋 제목 prefix를 지정 |
 | `MNP_AI_DELEGATION_POLL_INTERVAL_MS` | `3000` | 하위 AI 턴과 상위 대화 재개 상태 확인 간격. 최소 100ms |
 | `MNP_AI_ATTRIBUTION_DURATION_MS` | 8시간 | AI 종류·모델 작성자 귀속 정보의 유지 시간(ms) |
 | `MNP_DOORAY_API_KEY` | Suite 설치본은 DPAPI 키를 시작 시 전달, 그 외 환경은 Claude 설정에서 조회 | Dooray API 키 환경변수 우선 지정 |
@@ -430,7 +430,7 @@ node runner/index.mjs
 | `mindnprogress_get_ai_conversation_transcript` | 카드에 연결된 최근 AionUi 대화 또는 `conversationId`로 지정한 이전 대화 전문을 페이지 단위 텍스트로 조회합니다. `coverage.complete=false`이면 `page.nextBefore`로 오래된 메시지를 이어서 조회합니다. |
 | `mindnprogress_list_users` | 담당자로 지정할 수 있는 편집자 계정 목록을 조회합니다. |
 
-변경 체크포인트의 `commitMessage.summary`에는 `[김용민]`이나 `[MnP]` 출처를 넣지 않습니다. 서버가 제목 prefix와 `[MnP]`·`[배경]`·`[원인]`·`[수정]`·선택적 `[적용 범위]` 섹션을 생성하며 `Co-Authored-By`는 거부합니다. `[MnP]`에는 체크포인트 시점의 문서·카드 제목, 안정적인 `mapId`·`cardId`와 호스트에 의존하지 않는 상대 경로가 기록됩니다. 파일 변경이 없으면 빈 `paths`를 보내지 않고 `operation.action=confirm-no-changes`를 사용합니다.
+변경 체크포인트의 `commitMessage.summary`에는 커밋 제목 prefix나 `[MnP]` 출처를 넣지 않습니다. 제목 prefix는 작업공간 풀 registry(`workspaces.json`)의 `commitPrefix`가 문자열로 지정되어 있으면 그 값(빈 문자열은 prefix 없음)을, 없으면 AI 대화를 시작한 MnP 편집자 계정 이름으로 만든 `[이름]`을 사용하고, 둘 다 확인할 수 없으면 붙이지 않습니다. 시작자는 대화 origin, 카드 대화 귀속, 카드의 대화 연결, 그 대화를 대상으로 한 위임 기록, 체크포인트 요청 사용자 순서로 찾으며 시스템 계정과 등록되지 않은 ID는 건너뜁니다. 체크포인트 기록의 `commitPrefixSource`(`configured`·`account`·`none`)로 출처를 확인할 수 있고, `none`이면 서버 로그에 경고를 남깁니다. 원격 Fork 작업공간은 runner 쪽 registry의 `commitPrefix`를 따릅니다. summary가 해석된 prefix로 시작하면 체크포인트를 거부합니다. 서버가 제목 prefix와 `[MnP]`·`[배경]`·`[원인]`·`[수정]`·선택적 `[적용 범위]` 섹션을 생성하며 `Co-Authored-By`는 거부합니다. `[MnP]`에는 체크포인트 시점의 문서·카드 제목, 안정적인 `mapId`·`cardId`와 호스트에 의존하지 않는 상대 경로가 기록됩니다. 파일 변경이 없으면 빈 `paths`를 보내지 않고 `operation.action=confirm-no-changes`를 사용합니다.
 
 ### 문서와 카드 편집
 

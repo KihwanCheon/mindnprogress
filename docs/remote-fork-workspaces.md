@@ -46,6 +46,8 @@ registry 예시의 경로는 실제 설정에 사용할 값이 아니라 계약 
 }
 ```
 
+선택 필드 `commitPrefix`(문자열)를 두면 이 풀의 체크포인트 커밋 제목 prefix로 사용한다. 빈 문자열은 prefix 없음이다. 지정하지 않으면 메인 서버가 전달한 MnP 편집자 계정 이름으로 `[이름]`을 만들고, 이름도 없으면 붙이지 않는다. registry를 바꾸면 digest가 달라지므로 풀을 다시 승인해야 한다.
+
 ## API
 
 - `POST /api/machines/:machineId/runner/heartbeat`: 인증된 Runner의 `workspacePool` 보고. 메인이 받은 시각 기준 180초 뒤 만료한다. 보고 중단도 기존 풀을 일반 작업공간으로 바꾸지 않는다.
