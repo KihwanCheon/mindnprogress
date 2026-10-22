@@ -120,32 +120,102 @@ export async function captureInitialResponses(codeRoot, stateRoot) {
   return { surface, sessions, sources, requests, fixture: { maps, group } }
 }
 
-// Approved 2026-10-22: the rollback baseline is re-captured from the current working tree.
-// The previous evidence (Git baseline 11a5079) stays recoverable from Git history at the recorded HEAD.
+// The rollback baseline can be re-captured from the working tree only after a user approval.
+// Each re-capture must name its own approval with --approval-ref and --approved-at; a failing guidance test
+// is never a reason to re-capture. An existing approved rebaseline is refused unless --replace-rebaseline-head
+// names its exact recorded head. Earlier evidence stays recoverable from Git history at the recorded HEAD.
 const BASELINE_SOURCE_FILES = [
   'src/utils/aiContextInstructions.mjs', 'src/utils/aiApprovalInstructions.mjs', 'src/utils/aiConversationLaunch.mjs',
   'mcp/server.mjs', 'server/index.mjs', 'server/lib/groupDocumentInstructions.mjs', 'server/lib/groupProjects.mjs',
   'server/lib/doorayResponses.mjs', 'server/lib/workspacePool.mjs',
 ]
+const CAPTURED_TREE_PATHS = ['mcp', 'server', 'src']
+const EVIDENCE_PATH = 'docs/ai-guidance-rollback-2026-10-01/initial-response-evidence.json'
+const SOURCES_PATH = 'docs/ai-guidance-rollback-2026-10-01/baseline-guide-sources.json'
+const REBASELINE_USAGE = '기준선 재생성은 사용자가 승인한 경우에만 실행합니다. 테스트 실패를 해소하려고 재생성하지 마세요. 사용법: node scripts/capture-guidance-evidence.mjs --rebaseline-working-tree --approval-ref "<사용자 승인 위치와 내용>" --approved-at YYYY-MM-DD. 이미 승인된 재생성 기준선이 있으면 사용자가 기준선 교체를 승인한 경우에만 --replace-rebaseline-head <기록된 rebaseline.head 전체 SHA>를 함께 지정합니다.'
+const REBASELINE_SHA_PATTERN = /^[0-9a-f]{40}$/
+
+function optionValue(argv, name) {
+  const index = argv.indexOf(name)
+  if (index < 0) return undefined
+  const value = argv[index + 1]
+  return typeof value === 'string' && !value.startsWith('--') ? value.trim() : ''
+}
+
+/**
+ * Validate the approval arguments of a working-tree re-capture.
+ * A new approval reference is required every time, so an earlier approval cannot be reused.
+ * When an approved rebaseline already exists, --replace-rebaseline-head must equal its recorded head.
+ */
+export function rebaselineApprovalFromArgs(argv, existingRebaseline) {
+  const approvalRef = optionValue(argv, '--approval-ref')
+  if (!approvalRef || approvalRef.length < 10) throw new Error(`--approval-ref에 사용자 승인 근거(위치와 내용, 10자 이상)를 지정하세요. ${REBASELINE_USAGE}`)
+  const approvedAt = optionValue(argv, '--approved-at')
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(approvedAt ?? '') || Number.isNaN(Date.parse(`${approvedAt}T00:00:00Z`))) {
+    throw new Error(`--approved-at에 사용자 승인 날짜(YYYY-MM-DD)를 지정하세요. ${REBASELINE_USAGE}`)
+  }
+  const usedApprovals = []
+  for (let record = existingRebaseline; record; record = record.previousRebaseline) usedApprovals.push(record.approvalRef, record.approval)
+  if (usedApprovals.includes(approvalRef)) throw new Error(`이미 기준선 재생성에 사용한 승인 근거입니다. 새 재생성에는 새 사용자 승인이 필요합니다. ${REBASELINE_USAGE}`)
+  if (existingRebaseline) {
+    // An approved rebaseline is replaced only when the caller names the exact recorded head it replaces.
+    const replaceHead = optionValue(argv, '--replace-rebaseline-head')
+    if (replaceHead === undefined) {
+      throw new Error(`이미 승인된 재생성 기준선(head ${existingRebaseline.head})이 있어 기본으로 거부합니다. 사용자가 기준선 교체를 승인한 경우에만 --replace-rebaseline-head에 기록된 head 전체 SHA를 지정하세요. ${REBASELINE_USAGE}`)
+    }
+    if (!REBASELINE_SHA_PATTERN.test(replaceHead) || replaceHead !== existingRebaseline.head) {
+      throw new Error(`--replace-rebaseline-head가 기록된 재생성 기준선 head(${existingRebaseline.head}) 전체 SHA와 정확히 일치하지 않습니다. 사용자가 기준선 교체를 승인한 경우에만 지정하세요. ${REBASELINE_USAGE}`)
+    }
+  }
+  return { approvalRef, approvedAt }
+}
+
+/** Tree hashes of the captured working tree, comparable with `git rev-parse <commit>:<path>` after committing it. */
+async function capturedWorkingTree(temp) {
+  const env = { ...process.env, GIT_INDEX_FILE: path.join(temp, 'capture-index') }
+  const run = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', env }).trim()
+  run('read-tree', 'HEAD')
+  run('add', '-A', '--', ...CAPTURED_TREE_PATHS)
+  const tree = run('write-tree')
+  return { tree, paths: Object.fromEntries(CAPTURED_TREE_PATHS.map((item) => [item, run('rev-parse', `${tree}:${item}`)])) }
+}
+
+function previousRebaselineSummary(record) {
+  if (!record) return null
+  const { approvedAt, approval, approvalRef, head, workingTreeDiffSha256, capturedTree, previousRebaseline } = record
+  return {
+    approvedAt, approval, ...(approvalRef ? { approvalRef } : {}), head, workingTreeDiffSha256,
+    ...(capturedTree ? { capturedTree } : {}), previousRebaseline: previousRebaselineSummary(previousRebaseline),
+  }
+}
 
 async function rebaselineWorkingTree() {
-  const evidenceFile = path.join(output, 'initial-response-evidence.json')
-  const sourcesFile = path.join(output, 'baseline-guide-sources.json')
+  const evidenceFile = path.join(root, EVIDENCE_PATH)
+  const sourcesFile = path.join(root, SOURCES_PATH)
+  const existing = JSON.parse(await readFile(evidenceFile, 'utf8'))
+  const { approvalRef, approvedAt } = rebaselineApprovalFromArgs(process.argv, existing.rebaseline)
+  if (git('status', '--porcelain', '--', EVIDENCE_PATH, SOURCES_PATH).trim()) {
+    throw new Error('기준선 파일에 커밋되지 않은 변경이 있습니다. 직전 기준선을 Git에서 복구할 수 있도록 먼저 원인을 확인하세요.')
+  }
   const head = git('rev-parse', 'HEAD').trim()
   const untracked = git('ls-files', '--others', '--exclude-standard', '--', 'mcp', 'server/lib', 'src').split('\n').filter(Boolean).sort()
-  const rebaseline = {
-    approvedAt: '2026-10-22',
-    approval: '사용자 결정(2026-10-22): MnP 롤백 기준선을 현재 상태로 다시 만든다(기존 실패 3건 해소).',
-    head,
-    workingTreeDiffSha256: digest(git('diff', 'HEAD', '--', 'mcp', 'server', 'src')),
-    untracked: await Promise.all(untracked.map(async (file) => ({ file, sha256: digest(await readFile(path.join(root, file), 'utf8')) }))),
-    previousBaselineCommit: baseline,
-    previousEvidenceSha256: digest(await readFile(evidenceFile, 'utf8')),
-    previousSourcesSha256: digest(await readFile(sourcesFile, 'utf8')),
-    previousEvidenceRecovery: `git show ${head}:docs/ai-guidance-rollback-2026-10-01/initial-response-evidence.json`,
-  }
   const temp = await mkdtemp(path.join(root, '.guidance-evidence-'))
   try {
+    const rebaseline = {
+      approvedAt,
+      approval: approvalRef,
+      approvalRef,
+      head,
+      headTree: git('rev-parse', 'HEAD^{tree}').trim(),
+      workingTreeDiffSha256: digest(git('diff', 'HEAD', '--', 'mcp', 'server', 'src')),
+      capturedTree: await capturedWorkingTree(temp),
+      untracked: await Promise.all(untracked.map(async (file) => ({ file, sha256: digest(await readFile(path.join(root, file), 'utf8')) }))),
+      previousBaselineCommit: existing.rebaseline?.head ?? baseline,
+      previousRebaseline: previousRebaselineSummary(existing.rebaseline),
+      previousEvidenceSha256: digest(await readFile(evidenceFile, 'utf8')),
+      previousSourcesSha256: digest(await readFile(sourcesFile, 'utf8')),
+      previousEvidenceRecovery: `git show ${head}:${EVIDENCE_PATH}`,
+    }
     const run = { name: 'baseline', head, workingTree: true, capturedAt: new Date().toISOString(), historicalExecution: false, ...await captureInitialResponses(root, path.join(temp, 'baseline-state')) }
     assert.ok(run.requests.every((request) => request.method === 'GET'))
     await writeFile(evidenceFile, `${JSON.stringify({

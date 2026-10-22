@@ -22,7 +22,7 @@ MCP 도구는 전후 모두 **59개**이고 이름·`inputSchema` 조합 SHA-256
 
 ## 초기 응답과 정상 조립 경로 원문
 
-`node scripts/capture-guidance-evidence.mjs`는 기준선 11a5079, 초기 시작 eaa7eed와 후보 HEAD의 Git archive를 후보 작업공간 안에 격리 추출한다. 실제 `mcp/server.mjs`·SDK Client를 실행하며 API는 결정적 fixture를 GET으로만 제공한다. 그룹 API는 각 Git 코드의 실제 `createGroupProjects.context`·`forDocument`를 실행한다. 운영 MCP·운영 카드·운영 API를 변경하거나 캡처에 사용하지 않는다. 원문·시각·Git 객체·소스 전체 문자열과 해시·요청 목록은 `initial-response-evidence.json`의 `runs`에 있다. 과거 코드를 현재 재현한 시점과 원래 Git 시점을 구분하므로 당시 운영 실측이라고 주장하지 않는다.
+`node scripts/capture-guidance-evidence.mjs`는 기준선 11a5079, 초기 시작 eaa7eed와 후보 HEAD의 Git archive를 후보 작업공간 안에 격리 추출한다. 실제 `mcp/server.mjs`·SDK Client를 실행하며 API는 결정적 fixture를 GET으로만 제공한다. 그룹 API는 각 Git 코드의 실제 `createGroupProjects.context`·`forDocument`를 실행한다. 운영 MCP·운영 카드·운영 API를 변경하거나 캡처에 사용하지 않는다. 원문·시각·Git 객체·소스 전체 문자열과 해시·요청 목록은 `initial-response-evidence.json`의 `runs`에 있다. 과거 코드를 현재 재현한 시점과 원래 Git 시점을 구분하므로 당시 운영 실측이라고 주장하지 않는다. 2026-10-22 이후 `initial-response-evidence.json`은 승인된 작업 트리 기준 재생성본이다. 이 문서가 가리키는 당시 `runs`는 `git show 7b04f8f:docs/ai-guidance-rollback-2026-10-01/initial-response-evidence.json`으로 읽는다.
 
 | 실제 guide | 초기 eaa7eed 후속 재현 | 기준선과 후보 | 기준선 전체 일치 해시 |
 |---|---:|---:|---|

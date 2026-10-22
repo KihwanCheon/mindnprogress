@@ -71,3 +71,17 @@
 
 - `mcp/server.mjs`의 `read_me_first.important`에서 `SHARED_KNOWLEDGE_WRITE_INSTRUCTION` 한 줄만 뺐다. 같은 응답의 `guide.authoringRules`와 `guide.sharedKnowledgePolicy`(purpose·writeWhen·update)에 같은 문장이 그대로 있다. 표현이 다른 유사 규칙과 `AI_CONVERSATION_SELECTION_INSTRUCTION`의 반복은 남겼다. 후자는 `tests/initial-guidance-restoration.test.mjs`가 의도된 노출로 고정하고 있다.
 - 대표 조회 도구 응답 크기 측정과 상한 경고, 행동 평가 시나리오 세트를 추가했다. 측정·경고는 축약의 근거가 아니라 중복 삽입을 찾기 위한 신호다.
+
+## 롤백 기준선 재생성 기록
+
+`baseline-guide-sources.json`과 `initial-response-evidence.json`은 처음에는 11a5079 Git 기준선 재현이었지만, 아래 승인에 따라 작업 트리 기준으로 다시 만들었다. 이 폴더의 다른 문서가 말하는 "기준선 원문"은 11a5079 원문이며, 지금 파일과 다르다.
+
+- 재생성 절차: `node scripts/capture-guidance-evidence.mjs --rebaseline-working-tree --approval-ref "<사용자 승인 위치와 내용>" --approved-at YYYY-MM-DD`. 사용자가 승인한 경우에만 실행한다. `tests/initial-guidance-restoration.test.mjs` 등 지침 테스트의 실패를 해소하려고 재생성하지 않는다. 스크립트는 승인 근거가 없거나 이미 사용한 승인 근거이면 거부하고, 기준선 파일에 커밋되지 않은 변경이 있어도 거부한다. 이미 승인된 재생성 기록(`rebaseline`)이 있으면 새 승인 근거를 주어도 기본으로 거부한다. 사용자가 기준선 교체를 승인한 경우에만 `--replace-rebaseline-head <기록된 rebaseline.head 전체 SHA>`를 함께 지정하며, 기록된 head와 정확히 일치하지 않으면 거부한다. 이 교체 인자 검사는 2차 재생성을 실행한 뒤 같은 R1 검수 보완에서 추가했다. 재생성하면 테스트의 `APPROVED_REBASELINE` 상수도 함께 바꿔야 하므로 기준선 교체가 diff에 드러난다.
+- 응답 크기 상한은 경고선으로만 쓴다. 상한을 넘으면 테스트는 진단 경고만 남긴다. 금지·예외 문장을 삭제·축약해 상한에 맞추지 않는다.
+- 1차 재생성(2026-10-22, 커밋 `ae54629`): 승인 근거는 사용자 결정 "MnP 롤백 기준선을 현재 상태로 다시 만든다(기존 실패 3건 해소)"이다. 이때 스크립트는 승인 기록을 고정 문자열로 남겼고, 같은 명령을 다시 실행해도 거부하지 않았다. 2차 재생성 때 이 두 가지를 고쳤다.
+  - 캡처 출처는 `7b04f8f` 위의 미커밋 작업 트리다. 2026-10-22 복구 작업에서 대조한 결과, 기록된 소스 9개 원문은 `ae54629` 커밋의 같은 파일과 EOL 외에 같다. untracked 3개 해시도 `ae54629` 파일과 일치한다(`mcp/documentViews.mjs`·`mcp/workspacePoolStatusGuide.mjs`는 LF, `server/lib/aiDelegationResultCapture.mjs`는 CRLF 기준). 따라서 1차 재생성 기준선은 `ae54629` 커밋 트리에 대응한다.
+  - `ae54629` 트리 해시: 루트 `b9bbc612b1663fb39bf6b06aeccf1656dd560b1a`, `mcp` `bcd6fe25b690474904c05c1144bd88fff2926c22`, `server` `6bac88b880bef7eb48eba3846ba5fd761728245c`, `src` `af9c67fe419c746b5565f9ec8db9c23c3ecc812a`.
+  - 1차 재생성 직전(11a5079 기준선) 원문: `git show 7b04f8f:docs/ai-guidance-rollback-2026-10-01/initial-response-evidence.json`, `git show 7b04f8f:docs/ai-guidance-rollback-2026-10-01/baseline-guide-sources.json`.
+  - 이 재생성은 행동 평가([behavior-evaluation-checklist.md](behavior-evaluation-checklist.md)) 없이 이루어졌다.
+- 2차 재생성(2026-10-22, 지침 감사 위험 복구 R1·R2): 승인 근거는 증거 파일의 `rebaseline.approvalRef`에 기록했다. 기준선 보호 강화(R1)와 get_document 검증 문구 보강(R2)의 지침 문구 변경을 반영한다. 기록에는 캡처 시점 HEAD와 `headTree`, 작업 트리 diff 해시, 작업 트리를 Git 트리로 쓴 `capturedTree`(루트와 `mcp`·`server`·`src` 트리 해시)가 있다. 그대로 커밋했다면 `git rev-parse <커밋>:mcp` 등과 비교해 어느 커밋이 이 기준선과 같은지 확인할 수 있다. 직전(1차) 기준선 원문은 `rebaseline.previousEvidenceRecovery`의 `git show`로 읽고, 1차 기록 요약은 `rebaseline.previousRebaseline`에 있다.
+  - 2차 재생성 뒤 R2 검수 보완에서 `mcp/documentViews.mjs`에 응답 형식 식별자(`DOCUMENT_VIEW_FORMAT`)를 documentEtag 해시 입력으로 추가했다. 이 변경은 기준선 소스 9개와 guide·전달 필드 원문에 영향이 없어 기준선을 다시 만들지 않았다. 그 대신 커밋 트리의 `mcp` 해시는 `capturedTree.paths.mcp`와 다르며, 차이는 `mcp/documentViews.mjs` 한 파일이다. `server`·`src` 해시는 그대로 대조할 수 있다.

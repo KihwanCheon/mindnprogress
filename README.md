@@ -412,7 +412,7 @@ node runner/index.mjs
 | `mindnprogress_list_documents` | 활성 문서 목록, 버전, 완료 현황과 문서 그룹·혼합 순서를 조회합니다. |
 | `mindnprogress_search_content` | 열람 가능한 활성 문서 전체의 사용자 콘텐츠를 관련도순으로 검색하거나, 정확성 보완이 필요할 때 모든 카드를 커서 기반 카탈로그로 순회합니다. 결과는 후보이므로 최종 판단 전에 `mindnprogress_get_card`로 최신 원문을 확인합니다. |
 | `mindnprogress_get_context` | 선택 카드와 문서 구조, 관계, 댓글, 담당자, 업무 링크 및 선행 지식을 작업 문맥으로 조회합니다. `detailLevel`은 `focused` 또는 `full`을 사용합니다. |
-| `mindnprogress_get_document` | 문서의 모든 카드와 연결 관계 및 외부 접근 URL을 조회합니다. `view`를 생략하면 기존 full 응답이며, `compact`(카드 원문 유지·AI 대화 상세와 렌더링 값 축약), `outline`(구조·상태·관계·본문 길이와 `textIntegrity`, `cardIds`로 고른 카드만 전문), `version`(version과 `documentEtag`만)을 선택할 수 있습니다. 같은 `view`·`cardIds`로 받은 응답의 `documentEtag`를 `ifNoneMatch`로 전달했고 그 뒤 문서가 바뀌지 않았으면 본문을 생략하고 `notModified=true`를 반환합니다. `knownVersion`은 version 일치 여부만 `freshness`로 알려 주며 본문을 생략하지 않습니다. |
+| `mindnprogress_get_document` | 문서의 모든 카드와 연결 관계 및 외부 접근 URL을 조회합니다. `view`를 생략하면 기존 full 응답이며, `compact`(카드 원문 유지·AI 대화 상세와 렌더링 값 축약), `outline`(구조·상태·관계·본문 길이와 `textIntegrity`, `cardIds`로 고른 카드만 전문), `version`(version과 `documentEtag`만)을 선택할 수 있습니다. 같은 `view`·`cardIds`로 받은 응답의 `documentEtag`를 `ifNoneMatch`로 전달했고 그 뒤 문서가 바뀌지 않았으면 본문을 생략하고 `notModified=true`를 반환합니다. `knownVersion`은 version 일치 여부만 `freshness`로 알려 주며 본문을 생략하지 않습니다(`view`를 생략한 full 응답에는 `freshness`가 없습니다). |
 | `mindnprogress_get_card` | 특정 카드의 설명, 공유 지식, 업무 필드와 댓글을 페이지 단위로 조회합니다. |
 | `mindnprogress_list_shared_knowledge_candidates` | 정리가 필요한 공유 지식 후보의 우선순위·길이·SHA-256·검토 상태를 원문 없이 페이지 단위로 조회합니다. |
 | `mindnprogress_get_shared_knowledge_review_context` | 후보 한 카드의 공유 지식 원문과 관계·최근 댓글·검토 기준을 조회합니다. |

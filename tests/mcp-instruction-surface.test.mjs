@@ -15,9 +15,8 @@ const baseline = JSON.parse(await readFile(path.join(root, 'docs/ai-guidance-rol
 const baselineDescriptions = new Map([...baseline.matchAll(/^\s*registerTool\(server, '([^']+)', ('(?:\\.|[^'])*'|`[^`]*`), /gm)]
   .map((match) => [match[1], match[2]]))
 const safetyTools = new Set(['mindnprogress_restore_history', 'mindnprogress_update_document_info', 'mindnprogress_recover_ai_delegation'])
-// 실제 서버 동작(첫 응답 턴만 replied 기록, 최종 보고는 session-message 직접 전송)에 맞춰 정정한 설명은 아래 의미 검사로 검증한다.
-// get_document는 2026-10-21 사용자 승인(opt-in view 인자, full 기본 유지)으로 설명을 확장했으며 아래 의미 검사로 검증한다.
-const correctedTools = new Set(['mindnprogress_send_group_document_instruction', 'mindnprogress_get_document'])
+// send_group_document_instruction(실제 서버 동작에 맞춘 정정)과 get_document(2026-10-21 승인 view 인자)는 재생성 기준선과
+// 설명이 같아졌으므로 다른 도구와 같이 기준선 전문 비교 대상이다. 아래 의미 검사는 재생성 이후를 대비한 보조 안전망이다.
 function countSchemaDescriptions(value) {
   if (!value || typeof value !== 'object') return 0
   return (typeof value.description === 'string' ? 1 : 0)
@@ -38,7 +37,8 @@ test('최신 60개 이름·input schema와 복구한 도구 설명 전문을 검
     const tools = [...(await client.listTools()).tools].sort((a, b) => a.name.localeCompare(b.name))
     assert.deepEqual(tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })), fixture)
     assert.equal(tools.length, 60)
-    assert.equal(createHash('sha256').update(JSON.stringify(tools.map(({ name, inputSchema }) => ({ name, inputSchema })))).digest('hex'), '371ea373fdf5df29bc3e53ff9d708a166637ea728e48314e5f243e410e3964a8')
+    // 2026-10-22 승인된 복구(R2 L27): get_document knownVersion 설명에 full 응답의 freshness 부재를 추가해 해시를 갱신했다.
+    assert.equal(createHash('sha256').update(JSON.stringify(tools.map(({ name, inputSchema }) => ({ name, inputSchema })))).digest('hex'), 'e891b28d0dd4eca19ac7bb0c0469c1c3341255f310474f9401d334641cc30df2')
     assert.equal(tools.reduce((sum, tool) => sum + countSchemaDescriptions(tool.inputSchema), 0), 155)
     const metaRecovery = tools.find(tool => tool.name === 'mindnprogress_recover_ai_delegation').inputSchema.properties.untrackedMetaRecovery
     assert.deepEqual(metaRecovery.required, ['path', 'expectedSha256', 'mainCommit'])
@@ -47,7 +47,7 @@ test('최신 60개 이름·input schema와 복구한 도구 설명 전문을 검
     // 2026-10-22 작업 트리 기준 재생성 기준선(capture-guidance-evidence.mjs --rebaseline-working-tree)의 registerTool 직접 등록 수
     assert.equal(baselineDescriptions.size, 58)
     for (const tool of tools) {
-      if (safetyTools.has(tool.name) || correctedTools.has(tool.name) || tool.name === 'mindnprogress_search_content' || tool.name === 'mindnprogress_patch_card_text') continue
+      if (safetyTools.has(tool.name) || tool.name ==='mindnprogress_search_content' || tool.name === 'mindnprogress_patch_card_text') continue
       const original = baselineDescriptions.get(tool.name)
       if (!original) continue // 배열로 등록되는 복구 도구는 아래 의미 검사에서 검증한다.
       assert.equal(tool.description, original.slice(1, -1), `${tool.name}의 기준선 상세 설명이 달라졌습니다.`)
@@ -61,7 +61,9 @@ test('최신 60개 이름·input schema와 복구한 도구 설명 전문을 검
     assert.ok(getDocument.startsWith(baselineDescriptions.get('mindnprogress_get_document').slice(1, -1)), 'get_document 기준선 설명 문장을 그대로 유지한다.')
     assert.match(getDocument, /view를 생략하면 기존과 같은 full.*compact.*outline.*cardIds.*omitted.*version.*같은 view·cardIds로 받은 응답의 documentEtag를 ifNoneMatch.*knownVersion은 version 일치 여부만.*본문을 생략하지 않습니다.*재구성.*restore_history.*전수 감사.*지식선 전역 점검에는 full/s)
     assert.match(getDocumentSchema.properties.ifNoneMatch.description, /같은 view·cardIds로 받은.*다른 view·cardIds 응답의 documentEtag는 일치하지 않음/s)
-    assert.match(getDocumentSchema.properties.knownVersion.description, /본문은 생략하지 않음/)
+    assert.match(getDocumentSchema.properties.knownVersion.description, /본문은 생략하지 않음.*full 응답에는 freshness가 없으므로/s)
+    assert.equal(getDocument, baselineDescriptions.get('mindnprogress_get_document').slice(1, -1), 'get_document 기준선 설명 전문')
+    assert.equal(descriptions.get('mindnprogress_send_group_document_instruction'), baselineDescriptions.get('mindnprogress_send_group_document_instruction').slice(1, -1), 'send_group_document_instruction 기준선 설명 전문')
     assert.deepEqual(getDocumentSchema.required, ['mapId'])
     assert.deepEqual(getDocumentSchema.properties.view.enum, ['full', 'compact', 'outline', 'version'])
     assert.equal(Object.hasOwn(getDocumentSchema.properties.view, 'default'), false, 'view 기본값은 서버에서 full로 처리한다')

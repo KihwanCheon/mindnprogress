@@ -45,12 +45,12 @@ export const MNP_CONTEXT_LIFECYCLE = Object.freeze({
     group: 'mindnprogress_get_group_context',
     aiWorkState: 'mindnprogress_get_ai_work_states',
     comments: 'mindnprogress_list_comments',
-    rule: '최신 상태가 필요하면 get_context를 반복하지 않고 변경 대상에 맞는 조회 도구를 사용합니다. 이미 받은 문서를 다시 확인할 때는 같은 view·cardIds로 받은 응답의 documentEtag를 get_document의 ifNoneMatch로 전달해 같은 문서 본문의 재전송을 피합니다. knownVersion은 version 일치 여부만 확인하고 본문을 생략하지 않습니다.',
+    rule: '최신 상태가 필요하면 get_context를 반복하지 않고 변경 대상에 맞는 조회 도구를 사용합니다. 이미 받은 문서를 다시 확인할 때는 같은 view·cardIds로 받은 응답의 documentEtag를 get_document의 ifNoneMatch로 전달해 같은 문서 본문의 재전송을 피할 수 있습니다. 이 방법은 그 응답 원문을 끝까지 읽었고 대화 문맥에 원문 그대로 남아 있을 때만 사용하고, 응답이 잘렸거나 일부만 읽었거나 문맥 요약·압축으로 원문 대신 요약만 남았거나 원문이 남아 있는지 확신할 수 없으면 ifNoneMatch 없이 다시 조회합니다. knownVersion은 version 일치 여부만 확인하고 본문을 생략하지 않습니다.',
   }),
   staleWrite: Object.freeze({
     action: 'version 또는 SHA-256 불일치가 발생하면 저장하지 말고 충돌한 대상만 다시 조회해 판단을 갱신합니다.',
   }),
   verification: Object.freeze({
-    action: '변경 후에는 변경 응답 또는 대상별 조회 도구로 실제 저장 결과를 확인합니다. 카드는 mindnprogress_get_card, 문서 구조·version은 mindnprogress_get_document의 view=outline 또는 version으로 확인하고, 문서 전체 원문 대조가 필요할 때만 view를 생략한 full을 사용합니다.',
+    action: '변경 후에는 변경 응답 또는 대상별 조회 도구로 실제 저장 결과를 확인합니다. 카드는 mindnprogress_get_card, 문서 구조·version은 mindnprogress_get_document의 view=outline 또는 version으로 확인하고, 문서 전체 원문 대조가 필요할 때만 view를 생략한 full을 사용합니다. 카드 텍스트를 작성·변경했다면 outline의 길이·textIntegrity와 version은 변경 탐지용이며 원문 검증을 대신하지 않으므로, mindnprogress_get_card 또는 outline의 cardIds로 저장된 원문을 읽어 의도와 대조합니다.',
   }),
 })

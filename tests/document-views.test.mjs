@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import test from 'node:test'
-import { DOCUMENT_VIEWS, buildDocumentView, documentEtag } from '../mcp/documentViews.mjs'
+import { DOCUMENT_VIEWS, DOCUMENT_VIEW_FORMAT, buildDocumentView, documentEtag } from '../mcp/documentViews.mjs'
 
 const publicBaseUrl = 'https://mindnprogress.test/'
 const user = { id: 'user-editor', name: '편집자', email: 'editor@example.invalid', role: 'editor', publicAccess: false }
@@ -190,6 +190,7 @@ test('compact는 카드 원문과 관계를 유지하고 정해진 렌더링·�
   assert.deepEqual(compact.access.imageCards, [{ cardId: 'image-1', imageAccess }])
   assert.equal(JSON.stringify(compact).includes(user.email), false)
   assert.ok(Object.keys(compact.omitted.fields).some((key) => key.includes('aiConversations')))
+  assert.match(compact.omitted.notOmitted, /aiConversations 이외의 모든 data 필드.*aiConversationCount만 제공/s)
   assert.equal(compact.omitted.retrieval.aiConversations.tool, 'mindnprogress_list_ai_conversations')
 })
 
@@ -201,7 +202,11 @@ test('outline은 생략 사실·범위·회수 경로를 표기하고 cardIds �
   assert.equal(task.textIntegrity.description.length, documentResult.map.nodes[1].data.description.length)
   assert.equal(task.textIntegrity.sharedKnowledge.sha256, sha256('업무 A의 재사용 결론'))
   assert.deepEqual(task.data.checklistSummary, { total: 2, done: 1 })
-  assert.deepEqual(task.data.waitingItems, [{ id: 'w1', label: '서버 API', resumeCondition: 'API 배포', since: '2026-10-20', noteLength: '긴 메모 원문'.length }])
+  // 대기 메모에는 재개를 제한하는 금지·예외 조건이 있을 수 있어 outline에서도 원문을 유지한다.
+  assert.deepEqual(task.data.waitingItems, documentResult.map.nodes[1].data.waitingItems)
+  assert.equal(Object.keys(outline.omitted.fields).some((key) => key.includes('waitingItems')), false)
+  assert.match(outline.omitted.notOmitted, /waitingItems 항목 전체\(note 원문 포함\)/)
+  assert.match(outline.omitted.fields['cards[].data.checklist'], /미완료 항목.*승인·검증 조건.*완료·검수·위임 판단 전.*항목 원문을 확인/s)
   assert.deepEqual(task.data.requirementIds, ['REQ-1', 'REQ-2'])
   assert.deepEqual(task.data.blockedBy, ['task-b'])
   assert.equal(task.parentId, 'root')
@@ -235,6 +240,7 @@ test('같은 view·cardIds로 받은 documentEtag만 같은 문서 재전송을 
   assert.equal(version.documentEtag, documentEtag(documentResult, { view: 'version' }))
   assert.match(version.documentEtag, /^v7-version-[0-9a-f]{32}$/)
   assert.match(version.versionScope, /list_comments/)
+  assert.match(version.omitted.rule, /stats\.referenceCardCount가 0보다 크면.*Ref 카드 원본은 바뀌었을 수.*documentEtag가 없는 full이면.*mindnprogress_get_card/s)
 
   // 같은 view(와 outline의 같은 cardIds)로 받은 etag일 때만 생략한다.
   const compact = view(documentResult, { view: 'compact' })
@@ -255,6 +261,7 @@ test('같은 view·cardIds로 받은 documentEtag만 같은 문서 재전송을 
     assert.equal(unchanged.group.id, 'group-1')
     assert.deepEqual(unchanged.omitted.retrieval, { tool: 'mindnprogress_get_document', arguments: { mapId: 'map-views', view: name, ...(cardIds ? { cardIds } : {}) } })
     assert.match(unchanged.omitted.rule, /같은 view·cardIds/)
+    assert.match(unchanged.omitted.rule, /끝까지 읽었고 원문 그대로 남아 있을 때만.*잘렸거나 일부만 읽었거나.*요약·압축.*확신할 수 없으면 ifNoneMatch 없이 다시 조회/s)
   }
   // cardIds 순서·중복은 표현을 바꾸지 않는다.
   assert.equal(view(documentResult, { view: 'outline', cardIds: ['task-b', 'task-a', 'task-a'] }).documentEtag, view(documentResult, { view: 'outline', cardIds: ['task-a', 'task-b'] }).documentEtag)
@@ -279,6 +286,34 @@ test('같은 view·cardIds로 받은 documentEtag만 같은 문서 재전송을 
   assert.equal(stale.notModified, undefined)
   assert.equal(stale.freshness.notModified, false)
   assert.ok(stale.cards.length > 0)
+})
+
+test('documentEtag는 응답 형식을 반영해 형식 변경 전에 받은 etag로 본문을 생략하지 않는다', () => {
+  const documentResult = fixture()
+  const etagFor = (viewName, cardIds, format) => {
+    const payload = {
+      ...(format === undefined ? {} : { format }),
+      view: viewName,
+      cardIds: cardIds ?? [],
+      map: documentResult.map,
+      referenceCommentStats: documentResult.referenceCommentStats ?? {},
+      unresolvedReferenceNodeIds: documentResult.unresolvedReferenceNodeIds ?? [],
+    }
+    return `v${documentResult.map.version}-${viewName}-${sha256(JSON.stringify(payload)).slice(0, 32)}`
+  }
+  assert.equal(DOCUMENT_VIEW_FORMAT, 2, 'outline waitingItems.note 원문 포함(M7) 형식')
+  for (const [viewName, cardIds] of [['compact'], ['outline'], ['outline', ['task-a']], ['version']]) {
+    const current = view(documentResult, { view: viewName, ...(cardIds ? { cardIds } : {}) })
+    assert.equal(current.documentEtag, etagFor(viewName, cardIds, DOCUMENT_VIEW_FORMAT), '현재 형식 식별자가 etag 해시에 들어간다')
+    assert.match(current.documentEtag, new RegExp(`^v7-${viewName}-[0-9a-f]{32}$`))
+    // 형식 식별자가 없던 이전 etag와 다른 형식 값의 etag는 현재 응답과 일치하지 않는다.
+    for (const staleEtag of [etagFor(viewName, cardIds, undefined), etagFor(viewName, cardIds, DOCUMENT_VIEW_FORMAT + 1)]) {
+      assert.notEqual(staleEtag, current.documentEtag)
+      const refetched = view(documentResult, { view: viewName, ...(cardIds ? { cardIds } : {}), ifNoneMatch: staleEtag })
+      assert.equal(refetched.notModified, undefined)
+      assert.equal(refetched.freshness.notModified, false)
+    }
+  }
 })
 
 test('knownVersion은 version 일치 여부만 알려 주고 본문을 생략하지 않는다', () => {

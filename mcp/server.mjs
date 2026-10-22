@@ -24,6 +24,7 @@ import {
 import { imageCardLocalAccess } from './imageAccess.mjs'
 import { withDocumentGroupMetadata } from './documentGroupMetadata.mjs'
 import { DOCUMENT_VIEW_CARD_ID_LIMIT, DOCUMENT_VIEWS, buildDocumentView, cardAccessUrl, documentAccessUrl, updateCardFullEdge, updateCardFullNode } from './documentViews.mjs'
+import { preserveOmittedWaitingItemNotes } from './waitingItemNotes.mjs'
 import { WORKSPACE_POOL_STATUS_GUIDE, WORKSPACE_POOL_STATUS_REFERENCE } from './workspacePoolStatusGuide.mjs'
 import { MCP_TOOL_USAGE_DIRECTORY_NAME, createFileToolUsageRecorder } from '../server/lib/mcpToolUsage.mjs'
 import { formatAiConversationDisplay } from '../server/lib/aiConversationDisplay.mjs'
@@ -832,7 +833,7 @@ const getDocumentSchema = {
   cardIds: z.array(z.string().min(1).max(120)).min(1).max(DOCUMENT_VIEW_CARD_ID_LIMIT).optional()
     .describe("view='outline'에서 전문을 함께 받을 카드 ID 목록. 다른 view에서는 사용할 수 없음"),
   knownVersion: z.number().int().nonnegative().optional()
-    .describe('이미 받은 같은 문서 응답의 version. 일치 여부만 freshness로 알려 주며 본문은 생략하지 않음'),
+    .describe('이미 받은 같은 문서 응답의 version. 일치 여부만 freshness로 알려 주며 본문은 생략하지 않음. view를 생략한 full 응답에는 freshness가 없으므로 compact·outline·version과 함께 사용'),
   ifNoneMatch: z.string().min(1).max(80).optional()
     .describe('지금 요청과 같은 view·cardIds로 받은 compact·outline·version 응답의 documentEtag. 그 응답 이후 문서가 바뀌지 않았으면 본문을 생략. 다른 view·cardIds 응답의 documentEtag는 일치하지 않음'),
 }
@@ -1199,7 +1200,7 @@ async function main() {
       createMindmap: [
         '사용자 자료를 분석하고 루트 1개, 핵심 branch, 실행 task로 계층 구성',
         'mindnprogress_create_mindmap을 한 번 호출해 문서와 전체 구조를 원자적으로 생성',
-        '반환된 문서 ID로 mindnprogress_get_document를 호출해 생성 결과 검증. 구조·상태·본문 길이 확인은 view=outline, 카드 원문 대조가 필요하면 view를 생략한 full을 사용',
+        '반환된 문서 ID로 mindnprogress_get_document를 호출해 생성 결과 검증. 구조·상태는 view=outline으로 확인하고, 작성한 카드 원문은 cardIds를 지정한 view=outline(최대 50장) 또는 view를 생략한 full로 읽어 의도와 대조. 길이·textIntegrity·version은 변경 탐지용이며 내용 검증이 아님',
       ],
       editExistingDocument: [
         'mindnprogress_get_context로 최신 버전과 선택 카드 관계 확인',
@@ -1623,7 +1624,7 @@ async function main() {
     title: z.string().min(1).max(80), description: z.string().max(100000),
   }, async ({ groupId, ...body }) => apiRequest(`/api/groups/${encodeURIComponent(groupId)}/documents`, { method: 'POST', body: JSON.stringify(body) }))
 
-  registerTool(server, 'mindnprogress_get_document', '문서의 모든 카드와 연결 관계, 외부 접근 URL 및 이미지 카드의 로컬 원본 경로를 조회합니다. view를 생략하면 기존과 같은 full 전체 응답입니다. compact는 모든 카드 원문·관계·안전 메타데이터를 유지하고 AI 대화 상세·렌더링 전용 값·카드별 접근 URL 목록만 줄입니다. outline은 카드 원문 대신 구조·상태·관계·요구사항 필드·본문 길이와 textIntegrity를 주고 cardIds로 고른 카드만 전문을 함께 주며, 생략 범위와 회수 도구를 omitted에 표기합니다. version은 문서 version과 documentEtag만 확인합니다. 같은 view·cardIds로 받은 응답의 documentEtag를 ifNoneMatch로 전달하면 그 응답 이후 문서가 바뀌지 않았을 때만 본문을 생략하고, knownVersion은 version 일치 여부만 freshness로 알려 주며 본문을 생략하지 않습니다. 재구성 계획·의미 보존 검토, restore_history 직전 백업, 요구사항 전수 감사와 지식선 전역 점검에는 full을 사용하세요.', getDocumentSchema, async ({ mapId, view = 'full', cardIds, knownVersion, ifNoneMatch }) => {
+  registerTool(server, 'mindnprogress_get_document', '문서의 모든 카드와 연결 관계, 외부 접근 URL 및 이미지 카드의 로컬 원본 경로를 조회합니다. view를 생략하면 기존과 같은 full 전체 응답입니다. compact는 모든 카드 원문·관계·안전 메타데이터를 유지하고 AI 대화 상세·렌더링 전용 값·카드별 접근 URL 목록만 줄입니다. outline은 카드 원문 대신 구조·상태·관계·요구사항 필드·본문 길이와 textIntegrity를 주고 cardIds로 고른 카드만 전문을 함께 주며, 생략 범위와 회수 도구를 omitted에 표기합니다. version은 문서 version과 documentEtag만 확인합니다. 같은 view·cardIds로 받은 응답의 documentEtag를 ifNoneMatch로 전달하면 그 응답 이후 문서가 바뀌지 않았을 때만 본문을 생략하고, knownVersion은 version 일치 여부만 freshness로 알려 주며 본문을 생략하지 않습니다(view를 생략한 full 응답에는 freshness가 없습니다). 재구성 계획·의미 보존 검토, restore_history 직전 백업, 요구사항 전수 감사와 지식선 전역 점검에는 full을 사용하세요.', getDocumentSchema, async ({ mapId, view = 'full', cardIds, knownVersion, ifNoneMatch }) => {
     const [documentResult, health] = await Promise.all([
       apiRequest(`/api/maps/${encodeURIComponent(mapId)}`),
       apiRequest('/api/health'),
@@ -2011,7 +2012,7 @@ async function main() {
       ...node.data,
       ...data,
       ...checklistState,
-      ...(data.waitingItems === undefined ? {} : { waitingItems: normalizeWaitingItems(data.waitingItems) }),
+      ...(data.waitingItems === undefined ? {} : { waitingItems: normalizeWaitingItems(preserveOmittedWaitingItemNotes(node.data?.waitingItems, data.waitingItems)) }),
     }
     node.data = nextData.status === 'done' || nextData.progress >= 100
       ? { ...nextData, waitingItems: [] }

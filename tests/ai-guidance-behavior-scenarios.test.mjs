@@ -37,11 +37,15 @@ test('각 시나리오의 규칙이 현재 전달 전문에 실제로 노출된�
   }
 })
 
-test('대표 조회 도구 응답 크기는 기록된 측정값과 같고 상한을 넘지 않는다', async () => {
+// 응답 크기 상한은 경고선이다(rollback-cause-record.md: 문자 수 절감을 성공 기준으로 쓰지 않는다).
+// 상한을 넘어도 테스트를 실패시키지 않고 진단 경고만 남긴다. 금지·예외 문장을 삭제·축약해 상한에 맞추지 않는다.
+test('대표 조회 도구 응답 크기는 기록된 측정값과 같고 상한 초과는 경고로만 알린다', async (t) => {
   const items = await measureAiResponseSizes(root)
   assert.deepEqual(budget.responseSizes.limits, AI_RESPONSE_SIZE_LIMITS)
-  assert.deepEqual(items, budget.responseSizes.items, 'node scripts/measure-ai-instructions.mjs --write로 측정값을 갱신하세요.')
-  assert.deepEqual(aiResponseSizeWarnings(items), [])
+  assert.deepEqual(items, budget.responseSizes.items, '측정값을 갱신하기 전에 바뀐 지침 문장이 사용자가 승인한 변경인지 확인하세요. 승인된 변경일 때만 node scripts/measure-ai-instructions.mjs --write로 측정값을 갱신하세요.')
+  for (const warning of aiResponseSizeWarnings(items)) {
+    t.diagnostic(`응답 크기 경고: ${warning} 금지·예외 문장을 삭제·축약해 맞추지 말고 중복 삽입 여부를 먼저 확인하세요.`)
+  }
   assert.deepEqual(aiResponseSizeWarnings([{ name: 'read-me-first', chars: AI_RESPONSE_SIZE_LIMITS['read-me-first'] + 1 }]).length, 1)
   assert.deepEqual(aiResponseSizeWarnings([{ name: 'unknown-tool', chars: 1 }]).length, 1)
 })

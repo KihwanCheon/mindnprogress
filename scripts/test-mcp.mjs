@@ -1133,7 +1133,9 @@ async function main() {
     assert.equal(fullContext.document.outline, undefined)
     assert.equal(fullContext.selection.knowledgeSources.all.length, 0)
     assert.ok(JSON.stringify(context).length < JSON.stringify(fullContext).length)
-    assert.ok(JSON.stringify(context).length < 25_500, `focused 컨텍스트가 크기 회귀 기준을 초과했습니다: ${JSON.stringify(context).length} / 25500`)
+    // 중복 삽입을 찾기 위한 회귀 기준이다. 넘으면 금지·예외 문장을 삭제·축약해 맞추지 말고 중복 삽입 여부를 먼저 확인한다.
+    // 2026-10-22 승인된 복구(R2)의 get_document 검증·재조회 조건 문구 보강으로 25,500자에서 26,500자로 올렸다.
+    assert.ok(JSON.stringify(context).length < 26_500, `focused 컨텍스트가 크기 회귀 기준을 초과했습니다: ${JSON.stringify(context).length} / 26500. 금지·예외 문장을 삭제·축약해 맞추지 말고 중복 삽입 여부를 먼저 확인하세요.`)
     documentResult = await invoke('mindnprogress_get_document', { mapId })
     assert.equal(documentResult.map.version, versionBeforeReadOnlyTools, '조회 도구가 문서 버전을 변경했습니다.')
 

@@ -117,24 +117,17 @@ function checklistSummary(checklist) {
   }
 }
 
-// Same waiting item shape as get_context focusedDocument; the free-form note is replaced by its length.
-function outlineWaitingItem(item) {
-  if (!item || typeof item !== 'object') return item
-  const { note, ...rest } = item
-  return typeof note === 'string' && note.length > 0 ? { ...rest, noteLength: note.length } : rest
-}
-
 function outlineCard(node, parentId, childCount) {
   const { description: _description, sharedKnowledge: _sharedKnowledge, aiConversations: _aiConversations, checklist, ...rest } = node.data ?? {}
   const aiConversationCount = aiConversationCountOf(node.data ?? {})
   const summary = checklistSummary(checklist)
+  // waitingItems keep the note text: notes often hold the restrictions that limit resuming a wait.
   return {
     id: node.id,
     parentId,
     childCount,
     data: {
       ...shortCardData(rest),
-      ...(Array.isArray(rest.waitingItems) ? { waitingItems: rest.waitingItems.map(outlineWaitingItem) } : {}),
       ...(aiConversationCount > 0 ? { aiConversationCount } : {}),
       ...(summary ? { checklistSummary: summary } : {}),
     },
@@ -196,13 +189,21 @@ function representationCardIds(view, cardIds) {
 }
 
 /**
+ * Response representation format of the projected views. Bump it whenever a view's response shape or
+ * wording changes, so an etag issued for an older response body never yields notModified.
+ * 2: outline waitingItems carry the note text (M7).
+ */
+export const DOCUMENT_VIEW_FORMAT = 2
+
+/**
  * Content token for re-fetch avoidance. It covers the resolved map (including Ref projections),
- * Ref comment state and the requested representation (view and outline cardIds),
+ * Ref comment state, the response format and the requested representation (view and outline cardIds),
  * so a matching token means the caller already holds this exact response body.
  */
 export function documentEtag(documentResult, { view = 'full', cardIds } = {}) {
   const selectedCardIds = representationCardIds(view, cardIds)
   const digest = createHash('sha256').update(JSON.stringify({
+    format: DOCUMENT_VIEW_FORMAT,
     view,
     cardIds: selectedCardIds,
     map: documentResult.map,
@@ -284,7 +285,7 @@ function notModifiedResponse(documentResult, view, cardIds, freshness) {
         ? `요청한 view(${view})와 cardIds(${selectedCardIds.join(', ')})의 문서 본문 전체`
         : `요청한 view(${view})의 문서 본문 전체`,
       reason: freshness.reason,
-      rule: '같은 view·cardIds로 이전에 받은 이 문서의 응답(documentEtag가 같은 응답)을 그대로 사용하세요. 그 응답이 대화 문맥에 남아 있지 않으면 ifNoneMatch 없이 다시 조회하세요.',
+      rule: '같은 view·cardIds로 이전에 받은 이 문서의 응답(documentEtag가 같은 응답)을 그대로 사용하세요. 그 응답이 대화 문맥에 남아 있지 않으면 ifNoneMatch 없이 다시 조회하세요. 그 응답 원문을 끝까지 읽었고 원문 그대로 남아 있을 때만 사용할 수 있습니다. 응답이 잘렸거나 일부만 읽었거나, 문맥 요약·압축으로 원문 대신 요약만 남았거나, 원문이 남아 있는지 확신할 수 없으면 ifNoneMatch 없이 다시 조회하세요. 파일로 저장된 응답은 그 파일을 끝까지 읽은 경우에만 보유한 원문으로 봅니다.',
       retrieval: { tool: 'mindnprogress_get_document', arguments: { mapId: map.id, ...scopeArguments } },
     },
     versionScope: VERSION_SCOPE_RULE,
@@ -303,7 +304,7 @@ function versionResponse(documentResult, freshness) {
     ...(freshness ? { freshness } : {}),
     omitted: {
       scope: '카드·관계·접근 URL 전체와 archiveHistory',
-      rule: '쓰기 전 baseVersion 확인과 같은 버전 재조회 회피에만 사용하세요. 카드 내용 판단에는 다른 view나 mindnprogress_get_card를 사용하세요.',
+      rule: '쓰기 전 baseVersion 확인과 같은 버전 재조회 회피에만 사용하세요. 문서 version 일치는 카드·관계 편집이 없었다는 뜻일 뿐입니다. stats.referenceCardCount가 0보다 크면 version이 같아도 Ref 카드 원본은 바뀌었을 수 있으므로, 이전 응답의 Ref 카드 본문을 다시 쓰기 전에 같은 view·cardIds로 받은 documentEtag를 ifNoneMatch로 확인하거나 mindnprogress_get_card로 다시 확인하세요. 이전 응답이 documentEtag가 없는 full이면 ifNoneMatch로 확인할 수 없으므로 mindnprogress_get_card로 확인하세요. 카드 내용 판단에는 다른 view나 mindnprogress_get_card를 사용하세요.',
       retrieval: retrievalFor(map.id),
     },
     versionScope: VERSION_SCOPE_RULE,
@@ -331,7 +332,7 @@ function compactResponse(documentResult, publicBaseUrl, imageAccessOf, freshness
         'access.cards': 'label·kind는 nodes[].data에 있고 accessUrl은 access.cardAccessUrlTemplate으로 만듭니다. 이미지 카드의 imageAccess는 access.imageCards에 있습니다.',
         'createdBy·updatedBy·sharedKnowledgeUpdatedBy 등 사용자 객체': 'id와 name만 제공합니다. 다른 계정 정보는 retrieval.users로 조회하세요.',
       },
-      notOmitted: '카드 원문(description·sharedKnowledge·checklist·waitingItems·requirement 계열 등 모든 data 필드), version, 관계 edge, knowledgePolicy, group·membership, access.rule은 그대로 제공합니다.',
+      notOmitted: '카드 원문(description·sharedKnowledge·checklist·waitingItems·requirement 계열 등 aiConversations 이외의 모든 data 필드. aiConversations는 위 fields대로 aiConversationCount만 제공), version, 관계 edge, knowledgePolicy, group·membership, access.rule은 그대로 제공합니다.',
       rule: '렌더링 전용 값이나 계정 상세가 필요할 때만 retrieval의 도구를 사용하세요.',
       retrieval: retrievalFor(map.id),
     },
@@ -371,13 +372,12 @@ function outlineResponse(documentResult, publicBaseUrl, imageAccessOf, cardIds, 
       fields: {
         'cards[].data.description': '원문을 생략했습니다. 길이와 SHA-256은 cards[].textIntegrity.description에 있습니다.',
         'cards[].data.sharedKnowledge': '원문을 생략했습니다. 길이와 SHA-256은 cards[].textIntegrity.sharedKnowledge에 있습니다.',
-        'cards[].data.checklist': '항목 원문을 생략했습니다. 개수와 완료 수는 cards[].data.checklistSummary에 있습니다.',
-        'cards[].data.waitingItems[].note': '자유 메모 원문을 생략했습니다. 길이는 noteLength에 있고 id·label·resumeCondition·since는 그대로 있습니다.',
+        'cards[].data.checklist': '항목 원문을 생략했습니다. 개수와 완료 수는 cards[].data.checklistSummary에 있습니다. 미완료 항목에는 승인·검증 조건이 있을 수 있으므로 완료·검수·위임 판단 전에는 retrieval.selectedCards 또는 retrieval.singleCard로 항목 원문을 확인하세요.',
         'cards[].data.aiConversations': 'aiConversationCount만 제공합니다.',
         'cards[].position·type, edges[]의 id와 렌더링 키': '배치·렌더링 전용 값이라 제외했습니다. 계층은 cards[].parentId, 지식선은 knowledgeLinks의 sourceId·targetId·policy에 있습니다.',
         '사용자 객체': 'id와 name만 제공합니다.',
       },
-      notOmitted: 'version, 상태·진행률, waitingItems 항목, blockedBy, requirement 계열 등 원문 이외의 카드 data 필드, 계층·지식선, knowledgePolicy, group·membership, access.rule은 그대로 제공합니다. selectedCards에는 cardIds로 고른 카드의 전문이 있습니다.',
+      notOmitted: 'version, 상태·진행률, waitingItems 항목 전체(note 원문 포함), blockedBy, requirement 계열 등 원문 이외의 카드 data 필드, 계층·지식선, knowledgePolicy, group·membership, access.rule은 그대로 제공합니다. selectedCards에는 cardIds로 고른 카드의 전문이 있습니다.',
       rule: OMITTED_TEXT_RULE,
       retrieval: retrievalFor(map.id),
     },

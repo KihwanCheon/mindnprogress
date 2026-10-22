@@ -28,6 +28,8 @@
 
 세부 원문은 `baseline-guide-sources.json`, 변경 전 실제 `before-surface-and-prompts.json`에 저장했다. 이후 실제 복구 전문·최신 MCP 표면과 대조해 문구뿐 아니라 전달 위치·동작을 검증한다. 기준선에도 있던 지식선·대기·pagination은 신규 보존 성과로 계수하지 않는다.
 
+> 2026-10-22 이후 `baseline-guide-sources.json`과 `initial-response-evidence.json`은 사용자 승인으로 작업 트리 기준 재생성되어, 이 문서가 말하는 11a5079 원문이 아니다. 11a5079 기준선 원문은 `git show 7b04f8f:docs/ai-guidance-rollback-2026-10-01/baseline-guide-sources.json`과 `git show 7b04f8f:docs/ai-guidance-rollback-2026-10-01/initial-response-evidence.json`으로 읽는다. 재생성 이력과 각 재생성 직전 원문의 복구 경로는 [rollback-cause-record.md](rollback-cause-record.md)의 「롤백 기준선 재생성 기록」과 증거 파일의 `rebaseline` 기록에 있다.
+
 ## 혼합 커밋의 파일·변경 단위 판정
 
 위 표에서 P인 17개 커밋의 모든 변경 파일은 `commit-file-inventory.json`의 목록대로 제품 기능·계약 보존 대상이다. 다음 네 커밋은 파일 안의 서로 다른 변경 단위를 구분했다. 여기서 `R`은 상세 지침 원문과 조립 방식을 기준선으로 복구, `P`는 지정 독립 개선 또는 이후 제품 기능 유지, `M`은 같은 파일에 둘 다 있는 뜻이다.
