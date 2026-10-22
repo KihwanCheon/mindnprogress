@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { aiDelegationReportResult, aiDelegationSucceeded } from './aiDelegations.mjs'
 import { aiDelegationReportArchived, aiDelegationReportArchivePending } from './aiDelegationReportArchive.mjs'
 import { aiDelegationDeliveredReportPatch } from './aiDelegationReports.mjs'
+import { integrationRecoveryPending } from './aiIntegrationRecovery.mjs'
 import { throwIfRuntimeStopping } from './runtimeStopping.mjs'
 
 const reportStates = new Set(['waiting-parent', 'waking-parent'])
@@ -55,6 +56,7 @@ export function createAiParentWakeProcessor({ get, values, update, archive, coor
     let machineId = null
     const stamp = () => new Date(now()).toISOString()
     const current = () => get(delegation.id) === delegation && !delegation.reportReceipt && !delegation.pendingRecovery
+      && !integrationRecoveryPending(delegation)
       && (reportStates.has(delegation.state) || recoverableLegacyParentWake(delegation))
     const save = async (patch) => {
       if (!current()) return false

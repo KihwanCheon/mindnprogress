@@ -67,6 +67,8 @@ main 정리 대기와 **Fork 안의 통합 후보 변경**은 다르다. 최신 
 
 완료된 하위 위임의 `git merge --ff-only [--no-overwrite-ignore] <후보>`가 통합 작업공간의 `index.lock` 존재로 실패한 경우, 목록은 `failurePhase=integration`, `failureCategory=integration-git-lock`, `recommendedAction=retry-integration`을 제공한다. UI의 **통합 재시도**와 기존 `recover` API/MCP를 사용한다. 목록은 기록 기준 복구 후보이며 현재 잠금 해소나 안전 검증 완료를 뜻하지 않는다.
 
+상위 보고가 대기·전달 중이거나 전달에 실패한 상태(`waiting-parent`, `waking-parent`, `parent-wake-failed`)에서도 하위 실행 완료와 기존 통합 실패 증거가 확인되면 **AI 작업 복구 → 통합 복구 필요 → 통합 재시도**를 사용할 수 있다. 상위 보고 대화를 먼저 재개하거나 종료할 필요가 없다. 같은 기준은 기존 로컬 변경·통합 HEAD 변경·Fork 통합 후보 변경의 명시적 재시도에도 적용한다. 복구 접수·검증 중에는 상위 보고 처리를 보류하며, 이전 보고의 늦은 응답으로 복구 상태를 덮어쓰지 않는다. 기존 보고 이력과 하위 결과는 보존하고 통합 후 새 결과를 보고한다.
+
 - API는 기존 승인·문서 버전·상위 소유권과 대상 대화의 유휴 상태를 확인한다. 풀은 오류의 잠금 경로를 실제 통합 저장소의 `git rev-parse --git-path index.lock`과 대조한다. worker의 잠금 오류, 권한 오류, 일반 Git 실패, 충돌·미완료 실행은 이 경로로 복구하지 않는다.
 - worker와 통합 저장소의 잠금·병합·cherry-pick·리베이스·sequencer, 다른 lease의 통합 점유가 남아 있으면 거부한다. 잠금 삭제, 프로세스 종료, 사용자 변경 되돌리기를 수행하지 않는다.
 - map/card/conversation/job/lease, registry·메타데이터·세션, source 브랜치·HEAD·명시적 체크포인트, 실패 후보 브랜치·HEAD를 검증한다. 각 source 커밋을 `git merge-tree --write-tree --merge-base`로 재현하여 후보 tree와 정확히 대조한다. 실제 index·worktree는 변경하지 않는다. 해당 명령을 지원하는 Git이 필요하며 검증 불능은 격리를 유지한다.

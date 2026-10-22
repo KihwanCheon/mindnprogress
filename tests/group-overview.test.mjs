@@ -88,6 +88,16 @@ test('Git 잠금 통합 실패는 하위 재실행이 아닌 통합 재시도로
   assert.match(groupDelegationReportHint(item), /완료된 하위 AI 작업과 커밋을 그대로 사용/)
 })
 
+test('상위 보고 대기·전달 중·실패여도 통합 재시도가 허용되면 화면에서 복구하도록 안내한다', () => {
+  const item = { childStatus: 'completed', parentDispatchState: 'waiting-resume', workspaceResult: { status: 'quarantined' },
+    recovery: { recoveryAvailable: true, recommendedAction: 'retry-integration', failureCategory: 'integration-git-lock' } }
+  for (const state of ['waiting-parent', 'waking-parent', 'parent-wake-failed']) {
+    assert.equal(groupDelegationPresentation({ ...item, state }).label, '통합 복구 필요')
+    assert.match(groupDelegationReportHint({ ...item, state }), /상위 보고 완료를 기다리지 않고 이 화면에서 통합 재시도/)
+  }
+  assert.doesNotMatch(groupDelegationReportHint({ ...item, state: 'waking-parent', recovery: { ...item.recovery, recoveryAvailable: false } }), /이 화면에서 통합 재시도를 요청할 수 있습니다/)
+})
+
 test('Fork 통합 후보의 변경은 main 정리 자동 대기와 구분해 명시적 재시도로 안내한다', () => {
   const item = { state: 'failed', childStatus: 'completed', workspaceResult: { status: 'quarantined' },
     recovery: { recoveryAvailable: true, failureCategory: 'integration-candidate-worktree-dirty', recommendedAction: 'retry-integration' } }

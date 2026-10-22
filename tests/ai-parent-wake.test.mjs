@@ -225,3 +225,36 @@ test('진단은 안전한 원인 코드·대상 origin만 남기고 토큰·본�
   assert.deepEqual(d.causeCodes, ['ECONNRESET', 'ENOTFOUND', 'EAI_AGAIN'])
   assert.doesNotMatch(JSON.stringify(d), /password|secret|sensitive|완료 전문/)
 })
+
+test('통합 재시도 접수·검증 중에는 실패 보고를 보내거나 완료 상태를 대사하지 않는다', async () => {
+  for (const state of ['waiting-parent', 'waking-parent']) {
+    for (const status of ['queued', 'checking']) {
+      const h = harness({ ...fixture(), state, workspaceResult: { status: 'quarantined', childStatus: 'completed' },
+        wakeOperationId: 'old-wake', parentDispatchState: 'waiting-resume', integrationRecoveryRequest: { status } })
+      const before = structuredClone(h.stored)
+      const processor = createAiParentWakeProcessor({ ...h.options,
+        runtime: async () => assert.fail('복구 검증 중 상위 대화를 재개하지 않는다.'),
+        fetchOn: async () => assert.fail('복구 검증 중 이전 보고 완료를 조회하지 않는다.') })
+      await processor(h.stored)
+      assert.deepEqual(h.stored, before)
+    }
+  }
+})
+
+test('통합 재시도 접수와 경합한 이전 상위 보고의 완료 응답은 복구 상태를 덮어쓰지 않는다', async () => {
+  const h = harness({ ...fixture(), state: 'waking-parent', wakeOperationId: 'old-wake',
+    parentDispatchState: 'waiting-resume', workspaceResult: { status: 'quarantined', childStatus: 'completed' } })
+  let release, entered
+  const started = new Promise(resolve => { entered = resolve })
+  const gate = new Promise(resolve => { release = resolve })
+  const processor = createAiParentWakeProcessor({ ...h.options, fetchOn: async () => {
+    entered(); await gate
+    return { operationId: 'old-wake', conversationId: 'parent', state: 'completed', turnId: 'old-report-turn' }
+  } })
+  const pending = processor(h.stored)
+  await started
+  h.replace({ ...h.stored, integrationRecoveryRequest: { requestId: 'new-recovery', status: 'queued' } })
+  const accepted = structuredClone(h.stored)
+  release(); await pending
+  assert.deepEqual(h.stored, accepted, '늦은 보고 완료로 failed 전환·복구 snapshot 변경을 하지 않는다.')
+})

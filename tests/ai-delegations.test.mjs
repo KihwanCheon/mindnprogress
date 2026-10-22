@@ -76,6 +76,42 @@ test('통합 Git 잠금 분류는 완료된 fast-forward 실패만 통합 재시
   assert.equal(aiDelegationRecoveryAvailability({ ...delegation, state: 'completed' }), null)
 })
 
+test('완료 결과의 통합 복구는 중단된 상위 보고를 먼저 끝내지 않아도 요청할 수 있다', () => {
+  const commit = 'a'.repeat(40)
+  const base = { childStatus: 'completed', workspaceLease: { leaseId: 'lease-test' },
+    parentDispatchState: 'waiting-resume', childOperationId: 'child-operation', childTurnId: 'child-turn' }
+  const result = { status: 'quarantined', childStatus: 'completed', headCommit: commit,
+    workspaceId: 'fork-test', integrationBranch: 'mnp/integrate/job-test',
+    integrationBaseCommit: 'b'.repeat(40), integrationHeadCommit: commit }
+  const failures = [
+    ['integration-git-lock', `Command failed: git merge --ff-only --no-overwrite-ignore ${commit}\nerror: Unable to create 'C:/main/.git/index.lock': File exists.\n`],
+    ['workspace-local-changes', `Command failed: git cherry-pick ${commit}\nerror: your local changes would be overwritten by cherry-pick.\n`],
+    ['integration-head-changed', '통합 직전에 통합 작업공간의 HEAD가 변경되었습니다.'],
+    ['integration-candidate-worktree-dirty', '통합 브랜치에 커밋되지 않은 변경이 남아 있습니다.'],
+  ]
+  for (const [category, error] of failures) {
+    const delegation = { ...base, workspaceResult: { ...result, error } }
+    for (const state of ['waiting-parent', 'waking-parent', 'parent-wake-failed']) {
+      const current = { ...delegation, state }
+      const recovery = aiDelegationRecoveryAvailability(current)
+      assert.equal(recovery.failureCategory, category)
+      assert.equal(recovery.recoveryAvailable, true)
+      assert.equal(recovery.recommendedAction, 'retry-integration')
+      for (const patch of [{ childStatus: 'running' }, { workspaceLease: null },
+        { workspaceResult: { ...current.workspaceResult, childStatus: 'failed' } },
+        { workspaceResult: { ...current.workspaceResult, integratedCommit: commit } },
+        { workspaceResult: { ...current.workspaceResult, unmergedFiles: ['conflict.cs'] } },
+        { workspaceResult: { ...current.workspaceResult, error: '확인되지 않은 실패' } },
+        { integrationRecoveryRequest: { status: 'queued' } }, { pendingRecovery: {} }, { resultCorrection: { phase: 'dispatched' } }]) {
+        assert.notEqual(aiDelegationRecoveryAvailability({ ...current, ...patch })?.recommendedAction, 'retry-integration')
+      }
+    }
+    for (const state of ['running', 'integration-running', 'completed', 'closed', 'superseded']) {
+      assert.notEqual(aiDelegationRecoveryAvailability({ ...delegation, state })?.recommendedAction, 'retry-integration')
+    }
+  }
+})
+
 test('하위 작업 완료 알림은 실제 완료 판정에 도달한 위임에 한 번만 만들고 차단 알림과 타입을 구분한다', () => {
   const completed = {
     id: 'delegation-done', state: 'waiting-parent', childStatus: 'completed',

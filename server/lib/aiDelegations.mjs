@@ -609,26 +609,31 @@ export function aiDelegationRecoveryAvailability(delegation) {
     }
     return null
   }
-  if (!['parent-wake-failed', 'failed', 'waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity', 'recovery-required', 'integration-recovery-required', 'waiting-child-resume'].includes(delegation?.state)) return null
-  if (delegation.state === 'failed' && delegation.workspaceLease?.leaseId
+  // 완료 결과의 통합 실패는 상위 보고가 끝나기 전에도 명시적으로 재시도할 수 있다.
+  // 보고 상태만으로 허용하지 않고 아래의 기존 실패 증거·lease 검증을 그대로 사용한다.
+  const retryCompletedIntegration = delegation?.state === 'failed'
+    || (!delegation?.resultCorrection && ['waiting-parent', 'waking-parent', 'parent-wake-failed'].includes(delegation?.state)
+      && delegation.childStatus === 'completed')
+  if (retryCompletedIntegration && delegation.workspaceLease?.leaseId
     && localChangesIntegrationCommits(delegation.workspaceResult)) {
     return { failurePhase: 'integration', failureCategory: 'workspace-local-changes', recoveryAvailable: true, recommendedAction: 'retry-integration', recoveryTool: 'mindnprogress_recover_ai_delegation' }
   }
-  if (delegation.state === 'failed' && delegation.workspaceLease?.leaseId
+  if (retryCompletedIntegration && delegation.workspaceLease?.leaseId
     && integrationGitLockFailure(delegation.workspaceResult)) {
     return { failurePhase: 'integration', failureCategory: 'integration-git-lock', recoveryAvailable: true,
       recommendedAction: 'retry-integration', recoveryTool: 'mindnprogress_recover_ai_delegation' }
   }
-  if (delegation.state === 'failed' && delegation.workspaceLease?.leaseId
+  if (retryCompletedIntegration && delegation.workspaceLease?.leaseId
     && integrationHeadChangedFailure(delegation.workspaceResult)) {
     return { failurePhase: 'integration', failureCategory: 'integration-head-changed', recoveryAvailable: true,
       recommendedAction: 'retry-integration', recoveryTool: 'mindnprogress_recover_ai_delegation' }
   }
-  if (delegation.state === 'failed' && delegation.workspaceLease?.leaseId
+  if (retryCompletedIntegration && delegation.workspaceLease?.leaseId
     && integrationCandidateWorktreeFailure(delegation.workspaceResult)) {
     return { failurePhase: 'integration', failureCategory: integrationCandidateDirtyReasonCode, recoveryAvailable: true,
       recommendedAction: 'retry-integration', recoveryTool: 'mindnprogress_recover_ai_delegation' }
   }
+  if (!['parent-wake-failed', 'failed', 'waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity', 'recovery-required', 'integration-recovery-required', 'waiting-child-resume'].includes(delegation?.state)) return null
   if (['recovery-required', 'integration-recovery-required', 'waiting-child-resume'].includes(delegation.state)) {
     return { failurePhase: 'child', failureCategory: delegation.state === 'waiting-child-resume' ? 'user-stop' : 'restart', recoveryAvailable: true, recommendedAction: 'resume-existing', recoveryTool: 'mindnprogress_recover_ai_delegation' }
   }

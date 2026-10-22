@@ -16,7 +16,7 @@ const originalFetch = window.fetch.bind(window);
 window.audit = { calls: [], confirm: true, fail: false, focus: null, selection: null, preview: null };
 window.requestFailures = [];
 window.extraDelegations = [];
-window.confirm = () => window.audit.confirm;
+window.confirm = message => {window.audit.lastConfirmation=message;return window.audit.confirm};
 const item = { id:'limited',mapId:'child-map',parentMapId:'parent-map',parentCardId:'parent',targetCardId:'child',targetCardLabel:'하위 작업',state:'waiting-usage-limit',createdAt:'2026-09-11',updatedAt:'current',recovery:{recoveryAvailable:true},childError:'사용량 초과' };
 const replacement = {...item,id:'replacement',state:'completed',createdAt:'2026-09-12',updatedAt:'replacement-current',workCompleted:true,recovery:null,childError:null};
 window.allDelegations = () => [item,replacement,...window.extraDelegations,{...item,id:'unrelated',targetCardId:'someone-else',parentCardId:'someone-else',targetCardLabel:'다른 카드 작업'}];
@@ -61,6 +61,7 @@ window.quarantinedIntegration = () => {item.state='failed';item.childStatus='com
 window.resolvedQuarantine = state => {delete item.integrationRecoveryRequest;item.state=state;item.recovery=null;window.renderRecovery()};
 window.retryIntegration = () => {item.recovery={recoveryAvailable:true,failureCategory:'workspace-local-changes',recommendedAction:'retry-integration'};window.renderRecovery()};
 window.newIntegrationRequest = () => {delete item.integrationRecoveryRequest;item.recovery={recoveryAvailable:true,failureCategory:'workspace-local-changes',recommendedAction:'retry-integration'};window.renderRecovery()};
+window.reportingIntegration = state => {delete item.integrationRecoveryRequest;Object.assign(item,{state,parentDispatchState:'waiting-resume',reportPending:true,reportStatus:state==='waking-parent'?'delivering':'waiting',recovery:{recoveryAvailable:true,failureCategory:'integration-git-lock',recommendedAction:'retry-integration'}});window.renderRecovery()};
 window.blockIntegrationRequest = () => {item.integrationRecoveryRequest.status='failed';item.integrationRecoveryRequest.message='통합 재시도를 시작하지 못했습니다: 사용자 변경 원본을 보존해야 합니다.';item.recovery={recoveryAvailable:true,recommendedAction:'retry-integration'};window.renderRecovery()};
 window.competingIntegration = () => {item.recovery={recoveryAvailable:false,recommendedAction:'retry-integration',blockedReasonCode:'AI_DELEGATION_ALREADY_ACTIVE',message:'같은 카드·대화의 다른 위임이 진행 중입니다.'};item.closure={closeAvailable:true,workspaceReleaseRequired:true,reason:'preserve-integration-result'};window.renderRecovery()};
 window.reportOnly = () => {item.state='parent-wake-failed';item.childError=null;item.parentError='보고 사용량 초과';item.workCompleted=true;item.reportPending=true;item.recovery={recoveryAvailable:false,reportRetryAvailable:true};item.closure={closeAvailable:true,reason:'completed-child-report-abandonment'};window.renderRecovery()};
@@ -236,9 +237,19 @@ test('상위 카드 복구 화면은 하위 카드를 제외하고 AI 없이 재
     assert.match(integrationPost.body.instruction, /완료 커밋 통합 재시도/)
     assert.equal(integrationPost.body.confirmApprovedScope, true)
     assert.equal(typeof integrationPost.body.recoveryRequestId, 'string')
-    await evaluate('window.audit.integrationQueue=true;window.newIntegrationRequest()'); await ready()
-    await click('통합 재시도'); await ready()
+    const beforeReportingRecoveryPosts = await evaluate('window.audit.calls.filter(c=>c.method==="POST").length')
+    for (const state of ['waiting-parent', 'parent-wake-failed', 'waking-parent']) {
+      await evaluate(`window.reportingIntegration(${JSON.stringify(state)})`); await ready()
+      assert.match(await evaluate('document.querySelector(".ai-delegation-recovery-item-heading > span")?.textContent'), /통합 복구 필요/)
+      assert.match(await evaluate('document.body.textContent'), /상위 보고 완료를 기다리지 않고 이 화면에서 통합 재시도/)
+      assert.equal(await evaluate('Array.from(document.querySelectorAll("button")).find(b=>b.textContent==="통합 재시도").disabled'), false)
+      assert.equal(await evaluate('Array.from(document.querySelectorAll("button")).some(b=>b.textContent==="기존 작업 재개" || b.textContent==="결과 전달 재시도")'), false)
+    }
+    await evaluate('window.audit.integrationQueue=true')
+    await evaluate('(() => { const button=Array.from(document.querySelectorAll("button")).find(b=>b.textContent==="통합 재시도");button.click();button.click() })()'); await ready()
     await waitFor(() => evaluate('document.querySelector(".ai-delegation-action-feedback")?.textContent.includes("검증 중")'))
+    assert.match(await evaluate('window.audit.lastConfirmation'), /상위 보고 완료를 기다리지 않으며/)
+    assert.equal(await evaluate('window.audit.calls.filter(c=>c.method==="POST").length'), beforeReportingRecoveryPosts + 1, '연속 클릭은 같은 통합 복구 요청을 중복 접수하지 않는다')
     assert.match(await evaluate('document.querySelector(".ai-delegation-recovery-item-heading > span")?.textContent'), /통합 재시도 검증 중/)
     assert.equal(await evaluate('Array.from(document.querySelectorAll("button")).some(b=>b.textContent==="통합 재시도")'), false)
     const queuedPosts = await evaluate('window.audit.calls.filter(c=>c.method==="POST").length')

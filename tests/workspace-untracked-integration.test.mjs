@@ -594,9 +594,10 @@ test('통합 재시도는 소유권·세션·체크포인트·수동 커밋 불�
   assert.equal(f.manager.state.leases[f.lease.leaseId].integrationRecoveryHistory, undefined)
 })
 
-for (const failureType of ['local-changes', 'integration-git-lock', 'integration-git-lock-meta', 'integration-head-changed', 'candidate-worktree', 'candidate-worktree-legacy', 'preserved-release', 'released-startup']) {
+for (const failureType of ['local-changes', 'integration-git-lock', 'integration-git-lock-reporting', 'integration-git-lock-meta', 'integration-head-changed', 'candidate-worktree', 'candidate-worktree-legacy', 'preserved-release', 'released-startup']) {
 test(`통합 복구 API(${failureType})는 최신 승인·유휴 대화를 확인하고 결과 해시를 보존하며 하위 AI 실행 없이 복구한다`, realGit, async (t) => {
   const releasePreserved = ['preserved-release', 'released-startup'].includes(failureType)
+  const reporting = failureType === 'integration-git-lock-reporting'
   const candidateWorktree = failureType.startsWith('candidate-worktree')
   const gitLock = failureType !== 'local-changes' && !releasePreserved && !candidateWorktree
   const f = candidateWorktree ? await candidateWorktreeQuarantine(t, failureType === 'candidate-worktree-legacy')
@@ -637,6 +638,8 @@ test(`통합 복구 API(${failureType})는 최신 승인·유휴 대화를 확�
     childResultTurnId: 'original-turn', workspaceLease: f.lease,
     workspaceResult: f.manager.state.leases[f.lease.leaseId].result.previousResult ?? f.manager.state.leases[f.lease.leaseId].result,
     startedBy: 'user-admin', createdAt: now, updatedAt: now, completedAt: now }
+  if (reporting) Object.assign(delegation, { state: 'waking-parent', completedAt: null,
+    wakeOperationId: 'interrupted-report', parentDispatchState: 'waiting-resume', parentTurnId: 'old-report-turn' })
   const successor = { ...delegation, id: 'successor', state: 'running', childStatus: null, childOperationId: 'successor-operation',
     childTurnId: 'successor-turn', workspaceLease: { leaseId: 'different-lease', workspaceId: 'fork-other' }, workspaceResult: null }
   await writeFile(path.join(dataDirectory, '_ai-delegations.json'), JSON.stringify(releasePreserved ? [delegation, successor] : [delegation]))
@@ -654,6 +657,8 @@ test(`통합 복구 API(${failureType})는 최신 승인·유휴 대화를 확�
     if (request.url.endsWith('/capabilities')) return send({ schemaVersion: 3, workspaceLeaseVersion: 0, explicitCompletionAfterInterruption: false })
     if (request.url === '/api/conversations/conversation-test') return send({ id: 'conversation-test', runtime: { state: runtimeState, isProcessing: runtimeState !== 'idle', pendingConfirmations: 0 }, extra: { workspace: f.worker } })
     if (request.url === '/api/internal/conversation-runtimes/active') return send({ items: [] })
+    if (reporting && request.url.endsWith('/interrupted-report')) return send({ state: 'waiting_resume',
+      operationId: 'interrupted-report', conversationId: 'parent-conversation', turnId: 'old-report-turn' })
     if (releasePreserved && request.url.endsWith('/original-operation')) return send({ state: originalDispatchState, operationId: 'original-operation', conversationId: 'conversation-test', turnId: 'original-turn' })
     return send({}, 404)
   })
@@ -786,6 +791,12 @@ test(`통합 복구 API(${failureType})는 최신 승인·유휴 대화를 확�
     assert.equal(saved.childTurnId, delegation.childTurnId)
     assert.equal(saved.workspaceLease.leaseId, f.lease.leaseId)
     assert.equal(saved.attemptHistory.length, 1)
+    if (reporting) {
+      assert.equal(saved.attemptHistory[0].state, 'waking-parent')
+      assert.equal(saved.attemptHistory[0].wakeOperationId, 'interrupted-report')
+      assert.equal(saved.attemptHistory[0].parentDispatchState, 'waiting-resume')
+      assert.equal(saved.wakeOperationId, null, '이전 실패 보고와 새 통합 결과의 보고를 분리한다.')
+    }
     const duplicate = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(lastInput) })
     assert.equal(duplicate.status, 202, '같은 요청은 새 하위 실행 없이 기존 receipt로 확인한다.')
     assert.equal((await duplicate.json()).repeated, true)

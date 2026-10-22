@@ -25,7 +25,7 @@ const closeReasonLabels: Record<CloseReason, string> = {
 const actionHints = {
   refresh: '기존 실행 기록의 상태만 조회해 화면과 저장 상태를 동기화합니다. 새 AI 실행은 요청하지 않습니다.',
   recover: '중단된 작업을 같은 AI 대화와 작업공간에서 이어갑니다. 확인창에서 승인하면 해당 AI가 다시 실행됩니다.',
-  retryIntegration: '로컬 변경 또는 Git 잠금 등 통합 차단 원인을 해소한 뒤 완료된 커밋의 통합을 다시 요청합니다. 하위 AI 작업은 다시 실행하지 않습니다.',
+  retryIntegration: '보존된 완료 커밋의 통합을 다시 요청합니다. 현재 Git 잠금과 변경 상태를 먼저 확인하며 상위 보고 완료를 기다리지 않습니다. 하위 AI 작업은 다시 실행하지 않습니다.',
   correctResult: '원 담당 AI가 같은 worker에서 자기 결과를 정정하고 새 체크포인트를 만듭니다. 통합 사용자 파일은 보존하며 결과 정정은 품질 승인이나 삭제 권한이 아닙니다.',
   retryReport: '완료된 하위 작업은 다시 실행하지 않고 저장된 결과만 상위 AI에 전달합니다. 상위 AI는 결과 검토를 위해 실행됩니다.',
   supersede: '이 위임을 완료 처리하지 않고 선택한 후속 성공 위임으로 대체되었다는 이력을 남겨 닫습니다. 카드·코드·작업공간은 변경하지 않으며 UI에서 되돌릴 수 없습니다.',
@@ -168,7 +168,7 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
     const correctResult = item.recovery?.recommendedAction === 'correct-integration-result'
     const confirmation = kind === 'recover'
       ? correctResult ? '통합 대기 결과 정정을 승인할까요? 원 담당 AI가 같은 worker에서 요구사항과 증거를 대사하고 자기 우발 변경을 새 체크포인트로 정정합니다. 통합 사용자 파일은 보존합니다. 이 요청은 업무 완료·품질 승인이나 사용자 파일 삭제 권한을 부여하지 않습니다.' : retryIntegration
-        ? '로컬 변경 또는 Git 잠금 등 통합 차단 원인이 해소됐나요? 완료된 커밋을 검증한 뒤 통합을 다시 시도합니다. 사용자 파일과 기존 후보를 보존하며 하위 AI 작업은 다시 실행하지 않습니다.'
+        ? '보존된 완료 커밋의 통합을 다시 시도할까요? 현재 Git 잠금과 변경 상태를 먼저 확인합니다. 상위 보고 완료를 기다리지 않으며 사용자 파일과 기존 후보를 보존합니다. 하위 AI 작업은 다시 실행하지 않습니다.'
         : '중단 원인이 해소되었고 기존 승인 범위에서 작업을 이어갈까요? 현재 변경을 확인하고 남은 작업만 같은 AI 대화에서 진행합니다.'
       : kind === 'retry-report'
         ? '하위 작업을 재실행하지 않고 저장된 결과를 상위 AI에 다시 전달할까요? 상위 AI가 결과 검토를 위해 실행됩니다.'
@@ -193,7 +193,7 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
           ...(kind === 'recover' && correctResult ? { recoveryMode: 'correct-integration-result' } : {}),
           ...(kind === 'recover' ? { instruction: correctResult
             ? '사용자가 통합 대기 결과 정정을 승인했습니다. 원 요구사항과 source 체크포인트 증거를 대사하고 본인의 우발 변경만 같은 worker에서 정정하세요. integration 사용자 파일은 보존하세요. 정상 변경 체크포인트 후 정정 검증 결과를 보고하세요.' : retryIntegration
-            ? '사용자가 통합 차단 원인 해소 후 기존 승인 범위의 완료 커밋 통합 재시도를 요청했습니다.'
+            ? '사용자가 기존 승인 범위의 완료 커밋 통합 재시도를 요청했습니다. 현재 Git 잠금과 변경 상태를 확인하고 보존된 결과만 통합하세요.'
             : '사용자가 카드에서 기존 승인 범위의 작업 재개를 요청했습니다. 현재 카드, 최근 대화, 할당된 작업공간과 변경을 확인하세요. 완료된 작업이나 외부 처리는 반복하지 말고 미완료 부분만 이어가세요. 기준이나 범위가 바뀌었다면 변경안을 제안하세요.' } : {}),
           ...(kind === 'supersede' ? { replacementDelegationId: replacementId, confirmSupersededByCompletedDelegation: true } : {}),
         }
@@ -309,7 +309,7 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
     : recoveryCount > 0
     ? activeCount > 0
       ? '진행 중인 AI 위임과 복구가 필요한 작업을 확인하고, 가능한 후속 조치를 할 수 있습니다.'
-      : '복구가 필요한 위임의 오류를 확인하고, 가능한 작업 재개나 결과 전달을 진행할 수 있습니다.'
+      : '복구가 필요한 위임의 오류를 확인하고, 가능한 작업 재개·통합 재시도·결과 전달을 진행할 수 있습니다.'
     : '진행 중인 AI 위임의 현재 상태를 확인할 수 있습니다.'
   useEffect(() => {
     const preview = previewedItem.current
