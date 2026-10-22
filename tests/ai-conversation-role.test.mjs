@@ -26,7 +26,7 @@ test('총괄 뷰·루트 선택·우클릭·대화 목록의 신규 시작은 �
   assert.equal(expected.automaticRequest, request)
   for (const target of [rootSelection, picker]) assert.deepEqual(resolveAiConversationRole(target, context), expected)
   const combined = combineAiEditorRequest(expected.automaticRequest, '추가 확인 사항', expected.fullInitialRequest)
-  assert.equal(combined, `${request}\n\n추가 확인 사항`)
+  assert.equal(combined, `${request}\n\n# 사용자 요청\n추가 확인 사항`)
   const prompt = buildAiConversationPrompt({ ...input, purpose: expected.purpose, editorId: 'fixture-editor', attributionToken: 'fixture-token', request: combined })
   assert.ok(prompt.includes(request))
   assert.match(prompt, /# 그룹의 두 단계 사용자 승인/)

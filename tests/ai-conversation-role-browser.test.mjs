@@ -117,6 +117,11 @@ test('실제 대화 팝업의 총괄 전문·선택적 위임 모델·전달 목
       await waitFor(() => evaluate('Boolean(document.querySelector(".ai-auto-request textarea")) && !document.querySelector(".ai-dialog footer .primary").disabled'))
       return evaluate('document.querySelector(".ai-auto-request textarea").value')
     }
+    const enterUserRequest = (value) => evaluate(`(() => {
+      const input = document.querySelector('.ai-user-request textarea');
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, ${JSON.stringify(value)});
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`)
     const expected = buildGroupCoordinatorRequest({ groupId: 'group-manager' })
     assert.equal(await open(), expected)
     assert.equal(await open({ purpose: 'group-coordination', groupId: 'group-manager', initialRequest: expected, fullInitialRequest: true }), expected)
@@ -130,6 +135,16 @@ test('실제 대화 팝업의 총괄 전문·선택적 위임 모델·전달 목
     assert.equal(posts.find(c => c.url.endsWith('/attributions')).body.purpose, 'group-coordination')
     const payload = posts.find(c => c.url.endsWith('/external-conversation-launches')).body
     assert.ok(payload.prompt.includes(expected)); assert.match(payload.title, /^\[그룹 총괄\]/)
+    assert.ok(!payload.prompt.includes('# 사용자 요청'), '사용자 입력이 없으면 빈 요청 절을 추가하지 않는다')
+
+    await open({ cardId: 'child' })
+    const userRequest = '첫 번째 요청\n\n- 두 번째 요청'
+    await enterUserRequest(userRequest)
+    assert.equal(await evaluate('document.querySelector(".ai-auto-request textarea").value'), DEFAULT_AI_EDITOR_REQUEST)
+    await evaluate('document.querySelector(".ai-dialog footer .primary").click()')
+    await waitFor(() => evaluate('window.audit.closed === 1'))
+    const userPrompt = await evaluate('window.audit.calls.find(c=>c.url.endsWith("/external-conversation-launches")).body.prompt')
+    assert.ok(userPrompt.endsWith(`${DEFAULT_AI_EDITOR_REQUEST}\n\n# 사용자 요청\n${userRequest}`), '입력한 본문은 최종 전송 전문의 사용자 요청 절에 들어간다')
 
     const preview = () => evaluate('document.querySelector(".ai-auto-request textarea").value')
     const choose = async (selector, value) => {
@@ -247,11 +262,12 @@ test('실제 대화 팝업의 총괄 전문·선택적 위임 모델·전달 목
     await open({ purpose: 'dooray-response', initialRequest: '화면 인계 내용', doorayApproval: { responseId: 'dooray-fixture', proposalRevision: 'a'.repeat(64) } }, { approvalRequest: longApproval })
     await chooseDelegation(0, 'claude')
     await chooseDelegation(1, 'opus')
+    await enterUserRequest('승인 범위 내에서 추가 조건을 확인하세요.')
     await evaluate('document.querySelector(".ai-dialog footer .primary").click()')
     await waitFor(() => evaluate('window.audit.closed === 1'))
     const approvalPrompt = await evaluate('window.audit.calls.find(c=>c.url.endsWith("/external-conversation-launches")).body.prompt')
     assert.ok(approvalPrompt.includes(longApproval), 'Dooray 서버 승인 원문을 보존한다')
-    assert.ok(approvalPrompt.endsWith('하위 카드에 업무를 위임할 때 다음 AI 설정을 사용하세요: AI 종류 `Claude Code`, 모델 `Opus`.'))
+    assert.ok(approvalPrompt.endsWith('하위 카드에 업무를 위임할 때 다음 AI 설정을 사용하세요: AI 종류 `Claude Code`, 모델 `Opus`.\n\n# 사용자 요청\n승인 범위 내에서 추가 조건을 확인하세요.'))
 
     await open({}, { launchStatus: 'pending' })
     await evaluate('document.querySelector(".ai-dialog footer .primary").click(); document.querySelector(".ai-dialog footer .primary").click()')

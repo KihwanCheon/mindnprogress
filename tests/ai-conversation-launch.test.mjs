@@ -49,7 +49,7 @@ test('담당 카드 전달 전문은 4,000자 뒤의 제안·URL·재제안 지�
   assert.equal(target.fullInitialRequest, true)
   assert.equal(normalizeAiAutomaticRequest(proposal, true), proposal)
   const request = combineAiEditorRequest(target.initialRequest, '추가 요청', target.fullInitialRequest)
-  assert.equal(request, `${proposal}\n\n추가 요청`)
+  assert.equal(request, `${proposal}\n\n# 사용자 요청\n추가 요청`)
   assert.ok(buildAiConversationPrompt({ mapId: 'map1', cardId: 'card1', editorId: 'user1', attributionToken: 'token', request }).includes(proposal))
   assert.equal(normalizeAiAutomaticRequest(proposal).length, AI_EDITOR_REQUEST_MAX_LENGTH)
   assert.throws(() => normalizeAiAutomaticRequest('가'.repeat(100001), true), /임의로 자르지/)
@@ -180,13 +180,37 @@ test('전문은 대상 식별자와 편집자 요청을 그대로 담는다', ()
   assert.ok(prompt.endsWith('# 편집자 요청\n\n정리안을 제안해 주세요.'))
 })
 
-test('자동 적용 내용 뒤에 사용자 입력을 붙여 기존 편집자 요청 형식을 유지한다', () => {
+test('자동 적용 내용 뒤에 사용자 입력을 별도 사용자 요청 절로 붙인다', () => {
   assert.equal(
     combineAiEditorRequest('  자동 적용 내용  ', '  추가 정보 또는 요청  '),
-    '자동 적용 내용\n\n추가 정보 또는 요청',
+    '자동 적용 내용\n\n# 사용자 요청\n추가 정보 또는 요청',
   )
-  assert.equal(combineAiEditorRequest('자동 적용 내용', '   '), '자동 적용 내용')
-  assert.equal(combineAiEditorRequest('', '사용자 요청'), '사용자 요청')
+  assert.equal(combineAiEditorRequest('', '사용자 요청'), '# 사용자 요청\n사용자 요청')
+  for (const emptyInput of ['', ' \n\t ', undefined, null]) {
+    assert.equal(combineAiEditorRequest('자동 적용 내용', emptyInput), '자동 적용 내용')
+    assert.equal(combineAiEditorRequest('', emptyInput), '')
+  }
+})
+
+test('사용자 요청 본문의 줄바꿈과 4,000자 입력 한도를 제목과 별개로 보존한다', () => {
+  const multiline = '첫 번째 요청\n\n## 확인 항목\n- 두 번째 요청'
+  assert.equal(combineAiEditorRequest('자동 적용 내용', multiline), `자동 적용 내용\n\n# 사용자 요청\n${multiline}`)
+  const maximumInput = '가'.repeat(AI_EDITOR_REQUEST_MAX_LENGTH)
+  assert.equal(combineAiEditorRequest('', maximumInput), `# 사용자 요청\n${maximumInput}`)
+  assert.equal(combineAiEditorRequest('', `${maximumInput}초과`), `# 사용자 요청\n${maximumInput}`)
+})
+
+test('일반·총괄·Dooray 최종 전달 전문 모두 사용자 요청 제목과 본문을 보존한다', () => {
+  const userInput = '첫 번째 요청\n\n두 번째 요청'
+  for (const purpose of ['card', 'group-coordination', 'dooray-response']) {
+    const prompt = buildAiConversationPrompt({
+      purpose, mapId: 'map-test', cardId: 'card-test', editorId: 'editor-test', attributionToken: 'token-test',
+      doorayApproval: { responseId: 'dooray-test', proposalRevision: 'a'.repeat(64) },
+      request: combineAiEditorRequest('자동 적용 내용', userInput),
+    })
+    assert.ok(prompt.endsWith(`자동 적용 내용\n\n# 사용자 요청\n${userInput}`))
+    assert.equal(prompt.match(/^# 사용자 요청$/gm)?.length, 1)
+  }
 })
 
 test('위임 모델은 선택한 항목만 전문에 추가하고 모두 비우면 기존 요청을 유지한다', () => {
@@ -201,8 +225,8 @@ test('위임 모델은 선택한 항목만 전문에 추가하고 모두 비우�
     assert.ok(instruction.includes(`${label} \`${value}\``))
     assert.ok(!instruction.includes('모델 `'), '권한·사고 수준을 고르더라도 모델은 자동 지정하지 않는다')
   }
-  assert.equal(combineAiEditorRequest('기본 요청', '추가 요청', false, ''), '기본 요청\n\n추가 요청')
-  assert.equal(combineAiEditorRequest('기본 요청', '추가 요청', false, withModel), `기본 요청\n\n${withModel}\n\n추가 요청`)
+  assert.equal(combineAiEditorRequest('기본 요청', '추가 요청', false, ''), '기본 요청\n\n# 사용자 요청\n추가 요청')
+  assert.equal(combineAiEditorRequest('기본 요청', '추가 요청', false, withModel), `기본 요청\n\n${withModel}\n\n# 사용자 요청\n추가 요청`)
 })
 
 test('기본 전문이 길어도 위임 설정을 자르지 않고 긴 승인 전문도 보존한다', () => {
@@ -211,9 +235,9 @@ test('기본 전문이 길어도 위임 설정을 자르지 않고 긴 승인 �
   const preview = combineAiEditorRequest(ordinary, '', false, instruction)
   const request = combineAiEditorRequest(ordinary, '사용자 추가 요청', false, instruction)
   assert.equal(preview, `${ordinary}\n\n${instruction}`)
-  assert.equal(request, `${preview}\n\n사용자 추가 요청`)
+  assert.equal(request, `${preview}\n\n# 사용자 요청\n사용자 추가 요청`)
   const approval = `${ordinary}승인 전문 마지막 조건`
-  assert.equal(combineAiEditorRequest(approval, '추가 요청', true, instruction), `${approval}\n\n${instruction}\n\n추가 요청`)
+  assert.equal(combineAiEditorRequest(approval, '추가 요청', true, instruction), `${approval}\n\n${instruction}\n\n# 사용자 요청\n추가 요청`)
 })
 
 test('전문 조립에 필요한 값이 없으면 실패로 알린다', () => {

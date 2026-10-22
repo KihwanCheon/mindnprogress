@@ -95,8 +95,9 @@ export function buildAiDelegationModelInstruction({ agentName, model, mode, thou
 }
 
 export function combineAiEditorRequest(automaticRequest, userInput, preserveFull = false, delegationInstruction = '') {
+  const userRequest = normalizeAiEditorRequest(userInput)
   // 기본 전문의 길이 제한을 먼저 적용해 뒤에 붙는 사용자 선택 설정이 잘리지 않게 한다.
-  return [normalizeAiAutomaticRequest(automaticRequest, preserveFull), text(delegationInstruction), normalizeAiEditorRequest(userInput)]
+  return [normalizeAiAutomaticRequest(automaticRequest, preserveFull), text(delegationInstruction), userRequest ? `# 사용자 요청\n${userRequest}` : '']
     .filter(Boolean)
     .join('\n\n')
 }
