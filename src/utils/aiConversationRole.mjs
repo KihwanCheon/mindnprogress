@@ -6,7 +6,7 @@ export function resolveAiConversationRole(input, context) {
   const purpose = normalizeAiConversationPurpose(input.purpose)
   const fullInitialRequest = input.fullInitialRequest === true
   const automaticRequest = normalizeAiAutomaticRequest(input.initialRequest, fullInitialRequest) || DEFAULT_AI_EDITOR_REQUEST
-  const ordinary = { purpose, automaticRequest, fullInitialRequest, groupId: null }
+  const ordinary = { purpose, automaticRequest, fullInitialRequest, groupId: null, isDocumentRoot: false }
   if (!['card', 'group-coordination'].includes(purpose)) return ordinary
 
   const map = context?.map
@@ -20,18 +20,19 @@ export function resolveAiConversationRole(input, context) {
   const targets = new Set(map.edges.filter((edge) => edge.data?.relation !== 'knowledge').map((edge) => edge.target))
   const root = map.nodes.find((node) => node.data?.kind === 'root' && !targets.has(node.id))
     ?? map.nodes.find((node) => !targets.has(node.id))
+  const isDocumentRoot = root?.id === input.cardId && !root.data?.reference
   const project = context.groupProject
   const coordinator = project?.role === 'coordinator' && project.coordinatorMapId === map.id
-    && root?.id === input.cardId && !root.data?.reference
+    && isDocumentRoot
   if (purpose === 'group-coordination' && !coordinator) {
     throw new Error('총괄 문서 또는 최상위 루트가 변경되었습니다. 팝업을 닫고 현재 대상에서 다시 시작해 주세요.')
   }
-  if (!coordinator) return ordinary
+  if (!coordinator) return { ...ordinary, isDocumentRoot }
   if (!project.groupId || (input.groupId && input.groupId !== project.groupId)) {
     throw new Error('총괄 문서의 소속 그룹이 변경되었습니다. 팝업을 닫고 다시 시작해 주세요.')
   }
   return {
-    purpose: 'group-coordination', groupId: project.groupId, fullInitialRequest: true,
+    purpose: 'group-coordination', groupId: project.groupId, fullInitialRequest: true, isDocumentRoot,
     automaticRequest: purpose === 'group-coordination' && input.initialRequest?.trim()
       ? normalizeAiAutomaticRequest(input.initialRequest, true)
       : normalizeAiAutomaticRequest(buildGroupCoordinatorRequest({

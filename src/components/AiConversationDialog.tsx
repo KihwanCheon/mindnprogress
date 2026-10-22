@@ -423,7 +423,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
       }
       const launchWorkspace = workspace.trim()
       const latestRole = await loadAiConversationRole(roleInput, { signal: AbortSignal.timeout(10_000) })
-      if (latestRole.purpose !== role.purpose || latestRole.groupId !== role.groupId || latestRole.automaticRequest !== role.automaticRequest) {
+      if (latestRole.purpose !== role.purpose || latestRole.groupId !== role.groupId || latestRole.isDocumentRoot !== role.isDocumentRoot || latestRole.automaticRequest !== role.automaticRequest) {
         setRoleResult({ input: roleInput, role: latestRole })
         throw new Error('문서의 그룹 역할이 변경되었습니다. 갱신된 자동 적용 내용을 확인한 뒤 다시 시작해 주세요. AI 대화는 시작하지 않았습니다.')
       }
@@ -473,7 +473,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
       const launchPayload = {
         agentId: selectedAgent.id,
         completionUrl: attribution.completionUrl,
-        title: aiConversationTitle({ purpose: role.purpose, documentTitle, cardTitle }),
+        title: aiConversationTitle({ purpose: latestRole.purpose, isDocumentRoot: latestRole.isDocumentRoot, documentTitle, cardTitle }),
         prompt,
         modelId,
         providerId: selectedModel?.providerId,

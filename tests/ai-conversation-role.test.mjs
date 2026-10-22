@@ -46,6 +46,22 @@ test('총괄 문서의 하위 카드·다른 문서 루트·미지정 그룹은 
   }
 })
 
+test('일반 문서의 실제 최상위 원본만 상위 제목 역할로 구분한다', () => {
+  for (const groupProject of [null, { ...context.groupProject, role: 'document', coordinatorMapId: 'map-other' }]) {
+    const document = { ...context, groupProject }
+    const root = resolveAiConversationRole(input, document)
+    assert.equal(root.isDocumentRoot, true)
+    assert.equal(aiConversationTitle({ ...root, documentTitle: '문서', cardTitle: '루트' }), '[상위] 문서: 루트')
+    assert.equal(resolveAiConversationRole({ ...input, cardId: 'task' }, document).isDocumentRoot, false)
+  }
+  const reference = structuredClone(context)
+  reference.map.nodes[1].data.reference = { mapId: 'source', nodeId: 'root' }
+  assert.equal(resolveAiConversationRole(input, reference).isDocumentRoot, false)
+  const moved = structuredClone(context)
+  moved.map.edges = [{ source: 'task', target: 'root' }]
+  assert.equal(resolveAiConversationRole(input, moved).isDocumentRoot, false)
+})
+
 test('루트 kind만으로 총괄을 판정하지 않고 실제 계층과 원본 여부를 확인한다', () => {
   const nestedRoot = structuredClone(context)
   nestedRoot.map.nodes[0].data.kind = 'root'

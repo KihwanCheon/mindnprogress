@@ -141,6 +141,7 @@ import {
 } from '../src/utils/aiWorkspaceHistory.mjs'
 import { SHARED_KNOWLEDGE_WRITE_INSTRUCTION, sharedKnowledgeMaxLength } from '../src/utils/sharedKnowledgePolicy.mjs'
 import {
+  aiConversationTitlePrefix,
   isAiConversationPurpose,
 } from '../src/utils/aiConversationLaunch.mjs'
 import {
@@ -726,6 +727,15 @@ function rememberAiConversationOrigin(value) {
   return origin
 }
 
+async function formatAiCardConversationTitle(map, card) {
+  const isDocumentRoot = documentRoot(map)?.id === card.id && !card.data?.reference
+  const project = isDocumentRoot ? await groupProjects.forDocument(map.id) : null
+  return formatAiConversationTitle(map.title, card.data?.label ?? card.id, {
+    isDocumentRoot,
+    purpose: project?.role === 'coordinator' ? 'group-coordination' : 'card',
+  })
+}
+
 async function resolveAiConversationNavigation(conversationId) {
   const normalizedConversationId = String(conversationId ?? '').trim()
   const origin = aiConversationOrigins.get(normalizedConversationId)
@@ -735,7 +745,8 @@ async function resolveAiConversationNavigation(conversationId) {
   const card = map.nodes.find((node) => node.id === origin.cardId)
   if (!card || !isAiConversationLinked(card.data, normalizedConversationId)) return null
   const groupProject = await groupProjects.forDocument(map.id)
-  const coordinatorGroup = groupProject?.role === 'coordinator' && documentRoot(map)?.id === card.id
+  const isDocumentRoot = documentRoot(map)?.id === card.id && !card.data?.reference
+  const coordinatorGroup = groupProject?.role === 'coordinator' && isDocumentRoot
     ? { id: groupProject.groupId, title: groupProject.name, role: 'coordinator' }
     : null
   const conversationLink = aiConversationLinksFromData(card.data)
@@ -755,6 +766,7 @@ async function resolveAiConversationNavigation(conversationId) {
       cardId: card.id,
       cardTitle: String(card.data?.label ?? '').trim() || '제목 없는 카드',
       archived: Boolean(map.archivedAt),
+      titlePrefix: aiConversationTitlePrefix({ isDocumentRoot, purpose: coordinatorGroup ? 'group-coordination' : 'card' }),
       ...(coordinatorGroup ? { group: coordinatorGroup } : {}),
     },
     recordedStartedBy,
@@ -2702,7 +2714,7 @@ async function runGroupDocumentInstructionDispatch(instruction, user) {
             ? { targetConversationId: instruction.requestedConversationId }
             : { create: {
                 agentId: selection.agent.id,
-                title: formatAiConversationTitle(targetMap.title, targetCard.data?.label ?? targetCard.id),
+                title: await formatAiCardConversationTitle(targetMap, targetCard),
                 modelId: selection.model.id,
                 mode: selection.mode?.id ?? null,
                 thoughtLevel: selection.thoughtLevel?.id ?? null,
@@ -2748,7 +2760,7 @@ async function runGroupDocumentInstructionDispatch(instruction, user) {
     attribution.conversationId = targetConversationId
     if (instruction.strategy === 'new') {
       try {
-        await protectAionUiConversationTitle(targetConversationId, formatAiConversationTitle(targetMap.title, targetCard.data?.label ?? targetCard.id), instruction.targetHomeMachineId)
+        await protectAionUiConversationTitle(targetConversationId, await formatAiCardConversationTitle(targetMap, targetCard), instruction.targetHomeMachineId)
       } catch (error) {
         console.warn('[Group document instruction conversation title protection]', error)
       }
@@ -3182,7 +3194,7 @@ async function dispatchPreparedAiDelegation({
     workspaceLease,
   })
   const delegatedConversationTitle = strategy === 'new'
-    ? formatAiConversationTitle(map.title, targetCard.data?.label ?? targetCard.id)
+    ? await formatAiCardConversationTitle(map, targetCard)
     : null
 
   let dispatch
@@ -10581,7 +10593,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       })
 
       const delegatedConversationTitle = strategy === 'new'
-        ? formatAiConversationTitle(map.title, targetCard.data?.label ?? targetCard.id)
+        ? await formatAiCardConversationTitle(map, targetCard)
         : null
       let dispatch
       try {

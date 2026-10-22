@@ -62,8 +62,12 @@ export function normalizeAiConversationPurpose(value) {
   return isAiConversationPurpose(value) ? value : 'card'
 }
 
-export function aiConversationTitle({ purpose, documentTitle, cardTitle } = {}) {
-  const prefix = purpose === 'card-layout' ? '[배치 제안] ' : purpose === 'dooray-response' ? '[Dooray 승인] ' : purpose === 'document-reconstruction' ? '[문서 정리] ' : purpose === 'group-coordination' ? '[그룹 총괄] ' : normalizeAiConversationPurpose(purpose) === 'shared-knowledge-review' ? '[지식정리] ' : ''
+export function aiConversationTitlePrefix({ purpose, isDocumentRoot = false } = {}) {
+  return purpose === 'card-layout' ? '[배치 제안] ' : purpose === 'dooray-response' ? '[Dooray 승인] ' : purpose === 'document-reconstruction' ? '[문서 정리] ' : purpose === 'group-coordination' ? '[그룹 총괄] ' : normalizeAiConversationPurpose(purpose) === 'shared-knowledge-review' ? '[지식정리] ' : isDocumentRoot ? '[상위] ' : ''
+}
+
+export function aiConversationTitle({ purpose, documentTitle, cardTitle, isDocumentRoot = false } = {}) {
+  const prefix = aiConversationTitlePrefix({ purpose, isDocumentRoot })
   return `${prefix}${text(documentTitle)}: ${text(cardTitle)}`.replace(/\s+/g, ' ').trim().slice(0, 120)
 }
 

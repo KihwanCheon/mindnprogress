@@ -145,6 +145,19 @@ test('대화 용도에 따라 제목을 만들고 접두사를 보존한 채 120
   assert.equal(isAiConversationPurpose('unknown'), false)
 })
 
+test('문서 최상위 대화는 상위 접두어를 붙이고 별도 용도의 접두어를 우선한다', () => {
+  const target = { documentTitle: '문서', cardTitle: '루트', isDocumentRoot: true }
+  assert.equal(aiConversationTitle(target), '[상위] 문서: 루트')
+  assert.equal(aiConversationTitle({ ...target, isDocumentRoot: false }), '문서: 루트')
+  for (const [purpose, prefix] of [
+    ['group-coordination', '[그룹 총괄]'], ['shared-knowledge-review', '[지식정리]'],
+    ['document-reconstruction', '[문서 정리]'], ['card-layout', '[배치 제안]'], ['dooray-response', '[Dooray 승인]'],
+  ]) assert.equal(aiConversationTitle({ ...target, purpose }), `${prefix} 문서: 루트`)
+  const longTitle = aiConversationTitle({ ...target, cardTitle: '긴 제목'.repeat(100) })
+  assert.equal(longTitle.length, 120)
+  assert.ok(longTitle.startsWith('[상위] '))
+})
+
 test('전문은 대상 식별자와 편집자 요청을 그대로 담는다', () => {
   const prompt = buildAiConversationPrompt({
     mapId: 'map-other',

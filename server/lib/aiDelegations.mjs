@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { aiConversationTitle } from '../../src/utils/aiConversationLaunch.mjs'
 import { integrationRecoveryPending } from './aiIntegrationRecovery.mjs'
 import { aiDelegationResultCaptureMetadata } from './aiDelegationResultCapture.mjs'
 
@@ -829,8 +830,8 @@ export function explicitCompletionAiDelegationsForConversation(delegations, {
       .localeCompare(String(first.updatedAt ?? first.createdAt ?? '')))
 }
 
-export function formatAiConversationTitle(documentTitle, cardTitle) {
-  return `${documentTitle}: ${cardTitle}`.replace(/\s+/g, ' ').trim().slice(0, 120)
+export function formatAiConversationTitle(documentTitle, cardTitle, options = {}) {
+  return aiConversationTitle({ ...options, documentTitle, cardTitle })
 }
 
 export function initialAiDelegationRuntime(dispatch, completedAt = new Date().toISOString()) {

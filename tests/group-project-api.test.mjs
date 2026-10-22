@@ -574,6 +574,7 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
     assert.equal(instructed.body.instruction.coordinationOnly, undefined)
     const instructionCall = calls.find((call) => call.operationId === 'gdi:group-instruction-first')
     assert.ok(instructionCall)
+    assert.equal(instructionCall.create.title, `[상위] ${instructionDocument.title}: ${instructionDocument.nodes[0].data.label}`)
     assert.match(instructionCall.instruction, /^# MindNProgress 그룹 문서 지시/m)
     assert.match(instructionCall.instruction, /AI 작업 위임이나 worker 작업공간 배정이 아닙니다/)
     assert.match(instructionCall.instruction, /문서 내부의 실제 하위 업무 카드에 AI 위임/)

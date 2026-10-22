@@ -234,6 +234,14 @@ test('AionUi 대화 조회와 화면 선택은 연결된 카드 및 같은 계�
     groups: [{ id: groupId, name: '변경된 그룹 이름', mapIds: [mapId] }],
   }))
   await mkdir(path.join(dataDirectory, '_group-projects'))
+  const rootMapId = 'map-document-root-title'
+  const rootConversationId = 'conversation-document-root-title'
+  await writeFile(path.join(dataDirectory, `${rootMapId}.json`), JSON.stringify({
+    id: rootMapId,
+    title: '일반 문서',
+    nodes: [linkedCard('document-root', '문서 루트', rootConversationId, 'user-admin')],
+    edges: [], version: 1, updatedAt: linkedAt,
+  }))
   await writeFile(path.join(dataDirectory, '_group-projects', `${groupId}.json`), JSON.stringify({
     version: 1,
     coordinatorMapId: mapId,
@@ -241,6 +249,7 @@ test('AionUi 대화 조회와 화면 선택은 연결된 카드 및 같은 계�
     instructions: '',
   }))
   await writeFile(path.join(dataDirectory, '_ai-conversation-origins.json'), JSON.stringify([
+    { conversationId: rootConversationId, mapId: rootMapId, cardId: 'document-root', startedBy: 'user-admin', linkedAt },
     { conversationId, mapId, cardId, startedBy: 'user-admin', homeMachineId: 'macbook', linkedAt },
     { conversationId: legacyConversationId, mapId, cardId: 'card-legacy', linkedAt },
     { conversationId: cardOwnerConversationId, mapId, cardId: 'card-owner-link', linkedAt },
@@ -350,6 +359,7 @@ test('AionUi 대화 조회와 화면 선택은 연결된 카드 및 같은 계�
         cardId,
         cardTitle: '대화 탐색 카드',
         archived: false,
+        titlePrefix: '[그룹 총괄] ',
         group: {
           id: groupId,
           title: '변경된 그룹 이름',
@@ -365,6 +375,11 @@ test('AionUi 대화 조회와 화면 선택은 연결된 카드 및 같은 계�
 
     const matchingHeaderLookup = await fetch(endpoint, { headers: accountHeaders })
     assert.equal(matchingHeaderLookup.status, 200)
+    const rootLookupResponse = await fetch(`${baseUrl}/api/integrations/aionui/conversations/${rootConversationId}/mindnprogress`, { headers })
+    assert.equal(rootLookupResponse.status, 200)
+    const rootLookup = await rootLookupResponse.json()
+    assert.equal(rootLookup.target.titlePrefix, '[상위] ')
+    assert.equal(rootLookup.target.group, undefined)
 
     const mismatchingHeaderLookup = await fetch(endpoint, {
       headers: { ...headers, 'X-MNP-AI-Editor-Id': 'user-public-viewer' },
@@ -433,6 +448,7 @@ test('AionUi 대화 조회와 화면 선택은 연결된 카드 및 같은 계�
       assert.equal(fallbackLookup.selectionAvailable, true)
       assert.equal(fallbackLookup.matchingViewCount, 1)
       assert.equal(fallbackLookup.target.group, undefined)
+      assert.equal(fallbackLookup.target.titlePrefix, '')
     }
 
     const remoteLookup = await (await fetch(endpoint, { headers: remoteHeaders })).json()

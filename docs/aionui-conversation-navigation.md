@@ -68,6 +68,8 @@ GET /api/integrations/aionui/conversations/{conversationId}/mindnprogress
 }
 ```
 
+`target.titlePrefix`는 최신 문서 계층으로 판정한 대화 역할의 접두어다. 그룹 총괄 루트는 `[그룹 총괄] `, 일반 문서의 최상위 원본 카드는 `[상위] `, 하위 카드와 참조 카드는 빈 문자열을 반환한다. 신규 대화 제목과 자동 위임으로 생성한 제목에 같은 규칙을 적용한다. 기존 대화는 AionUi의 제목 동기화 버튼으로 반영하며, `[지식정리]` 등 별도 작업 용도의 접두어는 유지한다. 구버전 MnP가 이 필드를 생략하면 AionUi는 기존 역할 접두어를 보존한다.
+
 ## 같은 계정·디바이스 화면 선택
 
 ```http

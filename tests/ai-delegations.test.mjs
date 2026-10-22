@@ -447,6 +447,8 @@ test('명시적인 빈 스킬과 MCP 목록은 상위 설정으로 다시 채우
 
 test('AI 위임으로 만든 새 대화 제목에 문서와 카드 제목을 함께 사용한다', () => {
   assert.equal(formatAiConversationTitle('JP-로그인', '더미 UI 준비'), 'JP-로그인: 더미 UI 준비')
+  assert.equal(formatAiConversationTitle('문서', '루트', { isDocumentRoot: true }), '[상위] 문서: 루트')
+  assert.equal(formatAiConversationTitle('총괄', '루트', { isDocumentRoot: true, purpose: 'group-coordination' }), '[그룹 총괄] 총괄: 루트')
   assert.equal(formatAiConversationTitle('문서\n제목', '카드   제목'), '문서 제목: 카드 제목')
   assert.equal(formatAiConversationTitle('문서', '카드'.repeat(60)).length, 120)
 })

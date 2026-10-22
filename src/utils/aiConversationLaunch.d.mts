@@ -66,8 +66,10 @@ export function buildAiDelegationModelInstruction(input?: { agentName?: string; 
 export function combineAiEditorRequest(automaticRequest: unknown, userInput: unknown, preserveFull?: boolean, delegationInstruction?: string): string
 export function isAiConversationPurpose(value: unknown): value is AiConversationPurpose
 export function normalizeAiConversationPurpose(value: unknown): AiConversationPurpose
+export function aiConversationTitlePrefix(input?: { purpose?: AiConversationPurpose; isDocumentRoot?: boolean }): string
 export function aiConversationTitle(input?: {
   purpose?: AiConversationPurpose
+  isDocumentRoot?: boolean
   documentTitle?: unknown
   cardTitle?: unknown
 }): string
