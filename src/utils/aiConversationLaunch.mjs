@@ -86,7 +86,8 @@ export function normalizeAiAutomaticRequest(value, preserveFull = false) {
   return request
 }
 
-export function buildAiDelegationModelInstruction({ agentName, model, mode, thoughtLevel } = {}) {
+export function buildAiDelegationModelInstruction({ agentName, model, mode, thoughtLevel, narrativeMode = false, narrativeText } = {}) {
+  if (narrativeMode) return text(narrativeText) ? `하위 카드에 업무를 위임할 때 다음 AI 설정을 사용하세요:\n${text(narrativeText)}` : ''
   if (!text(agentName)) return ''
   const settings = [
     ['AI 종류', agentName], ['모델', model], ['권한', mode], ['사고 수준', thoughtLevel],

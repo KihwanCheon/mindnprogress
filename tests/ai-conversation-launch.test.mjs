@@ -62,6 +62,15 @@ const reviewContext = {
   relations: { totals: { knowledgeConsumers: 2 } },
 }
 
+test('서술형 위임 설정은 선택형과 섞지 않고 원문 줄바꿈과 사용자 요청 경계를 보존한다', () => {
+  const narrativeText = '구현은 Claude Code의 Opus를 사용하세요.\n검수는 Codex로 위임하세요.'
+  const instruction = buildAiDelegationModelInstruction({ narrativeMode: true, narrativeText, agentName: '선택형 AI', model: '선택형 모델' })
+  assert.equal(instruction, `하위 카드에 업무를 위임할 때 다음 AI 설정을 사용하세요:\n${narrativeText}`)
+  assert.equal(combineAiEditorRequest('자동 요청', '추가 요청', false, instruction), `자동 요청\n\n${instruction}\n\n# 사용자 요청\n추가 요청`)
+  for (const narrativeText of ['', ' \n ']) assert.equal(buildAiDelegationModelInstruction({ narrativeMode: true, narrativeText, agentName: '선택형 AI' }), '')
+  assert.equal(buildAiDelegationModelInstruction({ narrativeMode: false, narrativeText, agentName: '선택형 AI' }), '하위 카드에 업무를 위임할 때 다음 AI 설정을 사용하세요: AI 종류 `선택형 AI`.')
+})
+
 test('선택 카드가 없어도 바로 지정한 카드로 대화 대상을 만든다', () => {
   const target = resolveAiConversationTarget({
     explicitTarget: { mapId: 'map-other', cardId: 'node-candidate', cardTitle: '정리 후보 카드', documentTitle: '다른 문서', initialRequest: '정리안을 제안해 주세요.' },

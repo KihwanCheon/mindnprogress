@@ -1,5 +1,6 @@
 const storagePrefix = 'mindnprogress-ai-delegation-runtime:'
 const optionalFields = ['modelId', 'mode', 'thoughtLevel']
+export const AI_DELEGATION_NARRATIVE_MAX_LENGTH = 4_000
 
 export function normalizeAiDelegationRuntime(value) {
   const clean = field => typeof value?.[field] === 'string' && value[field].trim().length <= 512 ? value[field].trim() : ''
@@ -11,26 +12,33 @@ function storageKey(userId, machineId) {
   return userId && machineId ? `${storagePrefix}${encodeURIComponent(userId)}:${encodeURIComponent(machineId)}` : null
 }
 
-export function readAiDelegationRuntime(userId, machineId, storage) {
+export function normalizeAiDelegationPreferences(value) {
+  return {
+    selection: normalizeAiDelegationRuntime(value?.selection),
+    narrativeMode: value?.narrativeMode === true,
+    narrativeText: typeof value?.narrativeText === 'string' && value.narrativeText.length <= AI_DELEGATION_NARRATIVE_MAX_LENGTH ? value.narrativeText : '',
+  }
+}
+
+export function readAiDelegationPreferences(userId, machineId, storage) {
   const key = storageKey(userId, machineId)
   if (!key) return null
   try {
     const saved = JSON.parse((storage ?? globalThis.localStorage).getItem(key) ?? 'null')
-    if (saved?.version !== 1) return null
-    const selection = normalizeAiDelegationRuntime(saved.selection)
-    return selection.agentId ? selection : null
+    if (saved?.version !== 1 && saved?.version !== 2) return null
+    // 이전 선택형 설정도 자동 복원하되 읽기만으로 저장 원본을 덮어쓰지 않는다.
+    return normalizeAiDelegationPreferences(saved.version === 1 ? { selection: saved.selection } : saved)
   } catch {
     return null
   }
 }
 
-export function saveAiDelegationRuntime(userId, machineId, value, storage) {
+export function saveAiDelegationPreferences(userId, machineId, value, storage) {
   const key = storageKey(userId, machineId)
-  const selection = normalizeAiDelegationRuntime(value)
-  // 미지정 초기값이나 선택 해제로 마지막에 지정한 설정을 지우지 않는다.
-  if (!key || !selection.agentId) return false
+  if (!key) return false
   try {
-    (storage ?? globalThis.localStorage).setItem(key, JSON.stringify({ version: 1, selection }))
+    // 사용자 조작에서만 저장한다. 명시적으로 비운 값도 다음 진입에서 그대로 복원한다.
+    (storage ?? globalThis.localStorage).setItem(key, JSON.stringify({ version: 2, ...normalizeAiDelegationPreferences(value) }))
     return true
   } catch {
     // 저장이 불가능해도 현재 팝업의 선택과 대화 시작은 유지한다.
