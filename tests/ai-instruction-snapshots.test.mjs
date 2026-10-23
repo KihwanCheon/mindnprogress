@@ -86,7 +86,7 @@ test('기존 문서 담당 위임에도 결과 보고 지침을 한 번만 전�
 
 test('신규·재개·복구 위임에는 상위 대화, 결과 보고에는 하위 대화의 이동 정보를 붙인다', async () => {
   const snapshots = await buildAiInstructionSnapshots()
-  for (const name of ['worker-new-no-lease', 'worker-new-lease', 'worker-resume', 'user-stop-recovery', 'parent-wake', 'group-parent-wake']) {
+  for (const name of ['document-delivery', 'worker-new-no-lease', 'worker-new-lease', 'worker-resume', 'user-stop-recovery', 'parent-wake', 'group-parent-wake']) {
     const content = snapshots.find((item) => item.name === name).text
     const report = name.endsWith('parent-wake')
     assert.equal(content.split('\n')[0], '[[MNP_CONVERSATION_SOURCE]]', name)

@@ -20,7 +20,7 @@
     "perToolWrapperChars": 35,
     "note": "과거 캡처·상수이며 이번 전체 주입량 실측값이 아닙니다."
   },
-  "dynamicTotalChars": 41848,
+  "dynamicTotalChars": 41982,
   "maxDynamicChars": 4804,
   "repetitionCounts": {
     "contextBootstrap": 12,
@@ -89,8 +89,8 @@
     },
     {
       "name": "document-delivery",
-      "chars": 3771,
-      "sha256": "92d687fa14c738ee7294e4cdae37e8edc48de388b00975118b409d80ccd91289"
+      "chars": 3905,
+      "sha256": "7cc4b962ab7202dd6a837c7fd3b3bbe2cdf609f20451768c9df15e5a2823031d"
     },
     {
       "name": "worker-new-no-lease",

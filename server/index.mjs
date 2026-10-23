@@ -2699,6 +2699,9 @@ async function runGroupDocumentInstructionDispatch(instruction, user) {
       parentConversationId: instruction.parentConversationId,
       replyTarget: instruction.replyTarget,
       documentCoordinatorInstruction: DOCUMENT_COORDINATOR_INSTRUCTION,
+      sourceConversation: await resolveAiConversationSource(
+        instruction.parentConversationId, instruction.parentHomeMachineId, instruction.targetHomeMachineId,
+      ),
     })
     const operationId = groupDocumentInstructionOperationId(instruction.id)
     let dispatch
@@ -4386,9 +4389,10 @@ async function processAiDelegationIntegrationCleanWaitNotice(originalDelegation)
   const parent = await fetchAiConversationRuntime(delegation.parentConversationId)
   const runtime = normalizeAiConversationRuntime(delegation.parentConversationId, parent)
   if (runtime.state !== 'idle') return
-  const targetConversationDisplay = await resolveAiConversationDisplay(
+  const targetConversationDisplay = await resolveAiConversationSource(
     delegation.targetConversationId,
     delegationTargetMachineId(delegation),
+    delegationParentMachineId(delegation),
   )
 
   const attempt = Number(delegation.integrationCleanWakeAttempt ?? 0) + 1
@@ -4400,7 +4404,9 @@ async function processAiDelegationIntegrationCleanWaitNotice(originalDelegation)
       actorConversationId: delegation.parentConversationId,
       strategy: 'resume',
       targetConversationId: delegation.parentConversationId,
-      instruction: parentIntegrationCleanWaitInstruction(delegation, targetConversationDisplay.displayLabel),
+      instruction: prependAiConversationSource(
+        parentIntegrationCleanWaitInstruction(delegation, targetConversationDisplay.displayLabel), 'report', targetConversationDisplay,
+      ),
     },
   })
   await updateAiDelegation(delegation.id, {
@@ -4471,9 +4477,10 @@ async function processAiDelegationRecoveryNotice(originalDelegation) {
   const parent = await fetchAiConversationRuntime(delegation.parentConversationId)
   const runtime = normalizeAiConversationRuntime(delegation.parentConversationId, parent)
   if (runtime.state !== 'idle') return
-  const targetConversationDisplay = await resolveAiConversationDisplay(
+  const targetConversationDisplay = await resolveAiConversationSource(
     delegation.targetConversationId,
     delegationTargetMachineId(delegation),
+    delegationParentMachineId(delegation),
   )
 
   const recoveryWakeAttempt = Number(delegation.recoveryWakeAttempt ?? 0) + 1
@@ -4485,7 +4492,9 @@ async function processAiDelegationRecoveryNotice(originalDelegation) {
       actorConversationId: delegation.parentConversationId,
       strategy: 'resume',
       targetConversationId: delegation.parentConversationId,
-      instruction: parentRecoveryInstruction(delegation, targetConversationDisplay.displayLabel),
+      instruction: prependAiConversationSource(
+        parentRecoveryInstruction(delegation, targetConversationDisplay.displayLabel), 'report', targetConversationDisplay,
+      ),
     },
   })
   await updateAiDelegation(delegation.id, {
@@ -4611,7 +4620,8 @@ async function startWorkspaceCheckpointResolution(delegation, workspaceResult) {
         strategy: 'resume',
         targetConversationId: delegation.targetConversationId,
         workspaceLease: delegation.workspaceLease,
-        instruction: workspaceCheckpointInstruction(delegation, workspaceResult),
+        instruction: prependAiConversationSource(workspaceCheckpointInstruction(delegation, workspaceResult), 'delegation',
+          await resolveAiConversationSource(delegation.parentConversationId, delegationParentMachineId(delegation), delegationTargetMachineId(delegation))),
       },
     })
   } catch (error) {
@@ -4654,7 +4664,8 @@ async function startWorkspaceConflictResolution(delegation, workspaceResult) {
         strategy: 'resume',
         targetConversationId: delegation.targetConversationId,
         workspaceLease: delegation.workspaceLease,
-        instruction: workspaceConflictInstruction(delegation, workspaceResult),
+        instruction: prependAiConversationSource(workspaceConflictInstruction(delegation, workspaceResult), 'delegation',
+          await resolveAiConversationSource(delegation.parentConversationId, delegationParentMachineId(delegation), delegationTargetMachineId(delegation))),
       },
     })
   } catch (error) {

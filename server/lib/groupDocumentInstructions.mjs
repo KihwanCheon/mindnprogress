@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { MNP_CONTEXT_BOOTSTRAP_INSTRUCTION } from '../../src/utils/aiContextInstructions.mjs'
+import { prependAiConversationSource } from './aiConversationDisplay.mjs'
 
 export const GROUP_DOCUMENT_INSTRUCTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_:-]{0,95}$/
 export const GROUP_DOCUMENT_INSTRUCTION_TYPES = Object.freeze([
@@ -141,6 +142,7 @@ export function buildGroupDocumentInstruction({
   editorId,
   attributionToken,
   documentCoordinatorInstruction,
+  sourceConversation,
 }) {
   const defaultReplyConversationId = String(parentConversationId ?? '').trim()
   const explicitReplyConversationId = replyTarget?.mode === 'explicit'
@@ -157,7 +159,7 @@ export function buildGroupDocumentInstruction({
       : approvalScope === 'implementation'
         ? '승인된 구현 범위는 문서 내부의 실제 하위 업무 카드에 AI 위임하고, 문서 루트 AI가 코드·Prefab을 직접 수정하지 마세요.'
         : '승인된 검증 범위만 수행하고 새로운 구현이나 범위 확대가 필요하면 총괄 AI에 수정안을 반환하세요.'
-  return `# MindNProgress 그룹 문서 지시
+  return prependAiConversationSource(`# MindNProgress 그룹 문서 지시
 
 이 전문은 그룹 총괄 문서 AI가 소속 문서의 루트 카드 AI에 전달한 지시입니다. AI 작업 위임이나 worker 작업공간 배정이 아닙니다. 지시 수신 자체를 업무 완료로 처리하지 말고, 실제 카드와 문서 내부 위임 결과를 기준으로 진행·완료를 판단하세요.
 
@@ -200,7 +202,7 @@ ${approvalEvidence.trim()}
 
 ## 총괄 AI 지시
 
-${instruction.trim()}`
+${instruction.trim()}`, 'delegation', sourceConversation ?? { conversationId: defaultReplyConversationId })
 }
 
 export function groupDocumentInstructionPublicView(instruction, { includeContent = false } = {}) {

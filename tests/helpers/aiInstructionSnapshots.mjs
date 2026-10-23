@@ -120,6 +120,7 @@ export async function buildAiInstructionSnapshots() {
       approvalEvidence: '사용자가 이 문서의 구현 범위를 승인했습니다.', instruction: workerInstruction,
       editorId: identity.editorId, attributionToken: identity.attributionToken,
       documentCoordinatorInstruction: DOCUMENT_COORDINATOR_INSTRUCTION,
+      sourceConversation: identity.sourceConversation,
     }) },
     { name: 'worker-new-no-lease', text: buildDelegatedInstruction({ ...identity, instruction: workerInstruction }) },
     { name: 'worker-new-lease', text: buildDelegatedInstruction({ ...identity, instruction: workerInstruction, workspaceLease }) },
