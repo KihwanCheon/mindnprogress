@@ -20,8 +20,8 @@
     "perToolWrapperChars": 35,
     "note": "과거 캡처·상수이며 이번 전체 주입량 실측값이 아닙니다."
   },
-  "dynamicTotalChars": 41054,
-  "maxDynamicChars": 4684,
+  "dynamicTotalChars": 41848,
+  "maxDynamicChars": 4804,
   "repetitionCounts": {
     "contextBootstrap": 12,
     "workspace": 3,
@@ -94,18 +94,18 @@
     },
     {
       "name": "worker-new-no-lease",
-      "chars": 1688,
-      "sha256": "456cc6bacd339b8285a036f82774956590261db0ee41f187a7ce5d2a901dee84"
+      "chars": 1822,
+      "sha256": "358b604da3e5f0e0b99153a9c9a1c2ec33b709c0251ff40b8e0347c6569865c2"
     },
     {
       "name": "worker-new-lease",
-      "chars": 3323,
-      "sha256": "c9f88823d6d96536edfadb886f84c6418930bcd2f7c415e4d5b06d6dbd71ac66"
+      "chars": 3457,
+      "sha256": "3f119c1b1e742c254b8d6ecd2afcc6bbd54cee48f3450724e38a35047cccf451"
     },
     {
       "name": "worker-resume",
-      "chars": 1688,
-      "sha256": "456cc6bacd339b8285a036f82774956590261db0ee41f187a7ce5d2a901dee84"
+      "chars": 1822,
+      "sha256": "358b604da3e5f0e0b99153a9c9a1c2ec33b709c0251ff40b8e0347c6569865c2"
     },
     {
       "name": "shared-knowledge-proposal",
@@ -114,18 +114,18 @@
     },
     {
       "name": "parent-wake",
-      "chars": 2258,
-      "sha256": "c871c46141fadfdf9cedb89ede5be3e3857f33046883b2171423ac1bdada1a9d"
+      "chars": 2387,
+      "sha256": "48bc1a867efbf04ad8812067c607aa0daa730d14a21565da618ed665ca1aefdc"
     },
     {
       "name": "group-parent-wake",
-      "chars": 4675,
-      "sha256": "af027ad1bad743a597bebb637b8084e1e6d7e320b0034dbbbffb4caf52a0996d"
+      "chars": 4804,
+      "sha256": "2c7caf4a4cc135b2770c879cec7f1b6cf7fc3894b5898beda0aa39a5da84ea61"
     },
     {
       "name": "user-stop-recovery",
-      "chars": 4113,
-      "sha256": "fba629d13c8dd13eed15f849613e379f7aa7e73c3f34b547bb1c644aa31b731a"
+      "chars": 4247,
+      "sha256": "06a6aa6ee7510ff97978aaab693cb3d1e13af2efcc5a44e626c12b2af88521cb"
     },
     {
       "name": "reconstruction",

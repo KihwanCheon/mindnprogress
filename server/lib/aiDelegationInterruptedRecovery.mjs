@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { aiDelegationWorkspaceLeaseMatches, retryableAiExecutionFailureCategory } from './aiDelegations.mjs'
 import { sameExecutionWorkspace } from './doorayExecutionWorkspace.mjs'
 import { readAiDelegationDispatchStatus } from './aiDelegationStatusLookup.mjs'
+import { stripAiConversationSource } from './aiConversationDisplay.mjs'
 
 export class AiDelegationInterruptedRecoveryError extends Error {
   constructor(reason) {
@@ -54,7 +55,7 @@ function originalRequest(delegation, origin, conversation, message) {
     || message.created_at > startedAt + 300_000) return null
   if (!origin || origin.conversationId !== conversation.id || origin.mapId !== delegation.mapId
     || origin.cardId !== delegation.targetCardId || origin.startedBy !== delegation.startedBy) hold('origin-mismatch')
-  const text = content.replace(/\r\n?/g, '\n'), marker = '\n# 상위 AI 지시\n\n'
+  const text = stripAiConversationSource(content).replace(/\r\n?/g, '\n'), marker = '\n# 상위 AI 지시\n\n'
   const split = text.indexOf(marker)
   if (!text.startsWith('# MindNProgress 하위 카드 위임 작업 요청\n') || split < 0
     || text.indexOf(marker, split + 1) >= 0) return null

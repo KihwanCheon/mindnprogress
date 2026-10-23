@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { sameExecutionWorkspace } from './doorayExecutionWorkspace.mjs'
+import { stripAiConversationSource } from './aiConversationDisplay.mjs'
 
 const fail = () => Object.assign(new Error('원본 실행 기록이 만료됐고 대화의 최초 위임 전문·시작 카드·작업공간을 확증하지 못했습니다.'), { status: 409, code: 'AI_DELEGATION_ORIGINAL_MESSAGE_UNCONFIRMED' })
 
@@ -16,7 +17,7 @@ function verifyOriginalMessage(delegation, origin, conversation, message, comple
   if (!Number.isFinite(createdAt) || !Number.isFinite(messageCreatedAt) || !Number.isFinite(startedAt)
     || createdAt < startedAt - 1000 || createdAt > startedAt + 300_000
     || messageCreatedAt < createdAt || messageCreatedAt > createdAt + 300_000) throw fail()
-  const text = content.replace(/\r\n?/g, '\n')
+  const text = stripAiConversationSource(content).replace(/\r\n?/g, '\n')
   const marker = '\n# 상위 AI 지시\n\n'
   const split = text.indexOf(marker)
   if (!text.startsWith('# MindNProgress 하위 카드 위임 작업 요청\n') || split < 0 || text.indexOf(marker, split + 1) >= 0) throw fail()

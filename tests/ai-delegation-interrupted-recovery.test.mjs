@@ -9,6 +9,7 @@ import { aiDelegationRecoveryAvailability, aiDelegationLimitState, aiDelegationS
 import { assertAiDelegationInterruptedLease, readAiDelegationInterruptedProof,
   verifyAiDelegationInterruptedHistory } from '../server/lib/aiDelegationInterruptedRecovery.mjs'
 import { originalDelegationMessage } from './helpers/aiDelegationOriginalMessage.mjs'
+import { prependAiConversationSource } from '../server/lib/aiConversationDisplay.mjs'
 import { WorkspacePoolManager } from '../server/lib/workspacePool.mjs'
 import { RemoteWorkspacePool } from '../server/lib/remoteWorkspacePool.mjs'
 
@@ -63,6 +64,19 @@ test('resume 원 전문과 내구 hash로 같은 job을 확인하며 최신 수�
   assert.equal(JSON.stringify(proof).includes('승인된 작업만'), false)
   assertAiDelegationInterruptedLease({ ...f.delegation.workspaceLease, status: 'quarantined', result: f.delegation.workspaceResult },
     proof, { mapId: 'map-a', cardId: 'card-a', conversationId: 'chat-a' })
+})
+
+test('발신 대화 표시 정보가 있는 중단 전문도 원 지시와 lease로만 복구를 판정한다', () => {
+  const f = fixture()
+  f.message.content.content = prependAiConversationSource(f.message.content.content, 'delegation', {
+    conversationId: 'parent-1', name: '상위 대화', externalUrl: 'http://main.example:7777/#/conversation/parent-1',
+  })
+  const proof = verifyAiDelegationInterruptedHistory(f.delegation, f.origin, f.conversation, f.pages)
+  assert.equal(proof.originalRequest.instructionHash, f.delegation.instructionHash)
+  f.message.content.content = f.message.content.content.replace('lease-a', 'other-lease')
+  assert.throws(() => verifyAiDelegationInterruptedHistory(f.delegation, f.origin, f.conversation, f.pages), {
+    code: 'AI_DELEGATION_INTERRUPTED_SOURCE_UNCONFIRMED',
+  })
 })
 
 for (const [label, mutate] of [

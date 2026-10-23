@@ -16,6 +16,7 @@ import { SHARED_KNOWLEDGE_WRITE_INSTRUCTION } from '../../src/utils/sharedKnowle
 import { buildWorkspaceInstruction } from '../../server/lib/workspacePool.mjs'
 import { buildGroupDocumentInstruction } from '../../server/lib/groupDocumentInstructions.mjs'
 import { buildDoorayReviewPrompt } from '../../server/lib/doorayResponses.mjs'
+import { prependAiConversationSource } from '../../server/lib/aiConversationDisplay.mjs'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -42,8 +43,10 @@ ${extract('function aiDelegationResultSection(', 'function aiDelegationRecoveryK
   readMap: async () => null, documentRoot: () => null,
   aiDelegationReportResult: () => ({ availability: 'captured', text: '구현과 검증을 완료했습니다.' }),
   aiDelegationSucceeded: () => true,
-  resolveAiConversationDisplay: async () => ({ displayLabel: '하위 대화' }),
+  prependAiConversationSource,
+  resolveAiConversationSource: async (conversationId) => ({ conversationId, name: '하위 대화', displayLabel: '하위 대화' }),
   delegationTargetMachineId: () => 'machine-fixture',
+  delegationParentMachineId: () => 'machine-fixture',
 })
 const { buildDelegatedInstruction, delegationRecoveryInstruction, parentWakeInstruction } = instructionBuilders
 
@@ -52,6 +55,7 @@ const identity = {
   cardId: 'card-fixture',
   editorId: 'editor-fixture',
   attributionToken: 'token-fixture',
+  sourceConversation: { conversationId: 'conversation-parent', name: '상위 대화' },
 }
 
 const workspaceLease = {

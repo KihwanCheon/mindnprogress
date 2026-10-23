@@ -46,7 +46,7 @@ import { applyProgressRollup } from './lib/progressRollup.mjs'
 import { detectReleasedWaitingItems } from './lib/waitingItems.mjs'
 import { resolveAttributionWithoutToken, resolveScopedAttribution } from './lib/attributionScope.mjs'
 import { readAionUiSubscriptionUsage } from './lib/aionUiSubscriptionUsage.mjs'
-import { resolveConversationDisplay } from './lib/aiConversationDisplay.mjs'
+import { prependAiConversationSource, resolveConversationDisplay, resolveConversationSource } from './lib/aiConversationDisplay.mjs'
 import { applyAiConversationDelegationModelPolicy, assessAiConversationContextHealth, isAiDelegationModelBlocked } from './lib/aiConversationContextHealth.mjs'
 import { blockedAiModelLabels, filterAutomatedAiAgents } from './lib/aiModelPolicy.mjs'
 import { summarizeAiConversationMessages } from './lib/aiConversationMessageStatistics.mjs'
@@ -2435,10 +2435,10 @@ function issueDelegatedAttribution({ mapId, cardId, conversationId, selection, s
   return { token, attribution }
 }
 
-function buildDelegatedInstruction({ mapId, cardId, editorId, attributionToken, instruction, workspaceLease }) {
+function buildDelegatedInstruction({ mapId, cardId, editorId, attributionToken, instruction, workspaceLease, sourceConversation }) {
   const workspaceInstruction = buildWorkspaceInstruction(workspaceLease)
   const resultInstruction = instruction.includes(AI_DELEGATION_RESULT_INSTRUCTION) ? '' : `${AI_DELEGATION_RESULT_INSTRUCTION}\n\n`
-  return `# MindNProgress 하위 카드 위임 작업 요청
+  return prependAiConversationSource(`# MindNProgress 하위 카드 위임 작업 요청
 
 ${MNP_CONTEXT_BOOTSTRAP_INSTRUCTION}
 
@@ -2461,7 +2461,7 @@ ${resultInstruction}${workspaceInstruction ? `${workspaceInstruction}\n` : ''}
 
 # 상위 AI 지시
 
-${instruction.trim()}`
+${instruction.trim()}`, 'delegation', sourceConversation)
 }
 
 function sendGroupDocumentInstructionResponse(response, statusCode, reasonCode, message, payload = {}) {
@@ -3192,6 +3192,7 @@ async function dispatchPreparedAiDelegation({
     attributionToken,
     instruction,
     workspaceLease,
+    sourceConversation: await resolveAiConversationSource(parentAttribution.conversationId, parentHomeMachineId, targetHomeMachineId),
   })
   const delegatedConversationTitle = strategy === 'new'
     ? await formatAiCardConversationTitle(map, targetCard)
@@ -3791,11 +3792,12 @@ async function parentWakeInstruction(delegation, reportResult = aiDelegationRepo
   const workspaceResult = delegation.workspaceResult
     ? `- 작업공간: ${delegation.workspaceResult.workspaceId ?? delegation.workspaceLease?.workspaceId ?? '미확인'}\n- 체크포인트: ${delegation.workspaceResult.headCommit ?? '변경 없음'}\n- 통합 커밋: ${delegation.workspaceResult.integratedCommit ?? '통합되지 않음'}\n- 작업공간 결과: ${delegation.workspaceResult.status ?? '미확인'}\n`
     : ''
-  const conversationDisplay = await resolveAiConversationDisplay(
+  const conversationDisplay = await resolveAiConversationSource(
     delegation.targetConversationId,
     delegationTargetMachineId(delegation),
+    delegationParentMachineId(delegation),
   )
-  return `# MindNProgress 하위 AI 작업 결과
+  return prependAiConversationSource(`# MindNProgress 하위 AI 작업 결과
 
 상위 카드에서 위임한 하위 카드 작업이 ${outcome} 상태가 되었습니다.
 대상 문서: ${delegation.mapId}. 상위 문서: ${delegation.parentMapId ?? delegation.mapId}.
@@ -3818,7 +3820,7 @@ ${aiDelegationResultSection(reportResult)}## 상위 AI의 결과 처리
 
 ${AI_DELEGATION_REPORT_INSTRUCTION}
 
-목표 대비 달성 여부와 판정 근거, 남은 필수 작업을 먼저 보고하세요. 보완을 이어가면 미충족 조건과 종료 조건을, 보완을 마치면 완료 근거와 다음 단계를 명시하세요. 선택 개선은 별도 제안으로 구분하세요.`
+목표 대비 달성 여부와 판정 근거, 남은 필수 작업을 먼저 보고하세요. 보완을 이어가면 미충족 조건과 종료 조건을, 보완을 마치면 완료 근거와 다음 단계를 명시하세요. 선택 개선은 별도 제안으로 구분하세요.`, 'report', conversationDisplay)
 }
 
 function aiDelegationRecoveryKey(delegation) {
@@ -5598,6 +5600,15 @@ function resolveAiConversationDisplay(conversationId, machineId = conversationHo
     `/api/conversations/${encodeURIComponent(id)}`,
     { timeoutMs: 2_500 },
   ))
+}
+
+function resolveAiConversationSource(conversationId, sourceMachineId, targetMachineId) {
+  return resolveConversationSource(conversationId, {
+    sourceMachineId,
+    targetMachineId,
+    readConversation: (id) => fetchAionUiOn(sourceMachineId, `/api/conversations/${encodeURIComponent(id)}`, { timeoutMs: 2_500 }),
+    createConversationUrl: (id) => createAionUiConversationWebUrl(aionUiWebBaseUrlForMachine(sourceMachineId), id),
+  })
 }
 
 function refreshAiConversationRuntimeForMap(mapId, suppliedRuntimeSnapshots = null, forceSnapshots = false) {
@@ -9552,6 +9563,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         attributionToken,
         instruction: requestedInstruction,
         workspaceLease,
+        sourceConversation: await resolveAiConversationSource(delegation.parentConversationId, delegationParentMachineId(delegation), delegationTargetMachineId(delegation)),
       })
 
       const dispatchBody = { operationId, actorConversationId: delegation.parentConversationId, strategy: 'resume',
@@ -10610,6 +10622,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         attributionToken,
         instruction: crossDocument ? `${DOCUMENT_COORDINATOR_INSTRUCTION}\n\n${instruction}` : instruction,
         workspaceLease,
+        sourceConversation: await resolveAiConversationSource(parentAttribution.conversationId, parentHomeMachineId, targetHomeMachineId),
       })
 
       const delegatedConversationTitle = strategy === 'new'

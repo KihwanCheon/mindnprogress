@@ -84,6 +84,21 @@ test('기존 문서 담당 위임에도 결과 보고 지침을 한 번만 전�
   assert.doesNotMatch(prompt, /당신은 이 하위 작업을 위임한 상위 AI입니다/)
 })
 
+test('신규·재개·복구 위임에는 상위 대화, 결과 보고에는 하위 대화의 이동 정보를 붙인다', async () => {
+  const snapshots = await buildAiInstructionSnapshots()
+  for (const name of ['worker-new-no-lease', 'worker-new-lease', 'worker-resume', 'user-stop-recovery', 'parent-wake', 'group-parent-wake']) {
+    const content = snapshots.find((item) => item.name === name).text
+    const report = name.endsWith('parent-wake')
+    assert.equal(content.split('\n')[0], '[[MNP_CONVERSATION_SOURCE]]', name)
+    assert.deepEqual(JSON.parse(content.split('\n')[1]), {
+      kind: report ? 'report' : 'delegation',
+      conversationId: report ? 'conversation-child' : 'conversation-parent',
+      name: report ? '하위 대화' : '상위 대화',
+    }, name)
+    assert.doesNotMatch(content, /reply_to:|session send-message/)
+  }
+})
+
 test('신규·재개·복구 위임은 수행 보고와 조건부 지식 갱신을 구분해 전달한다', async () => {
   const snapshots = await buildAiInstructionSnapshots()
   for (const name of ['worker-new-no-lease', 'worker-new-lease', 'worker-resume', 'user-stop-recovery']) {

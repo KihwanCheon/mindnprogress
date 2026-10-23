@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import test from 'node:test'
 import { verifyAiDelegationOriginalMessage } from '../server/lib/aiDelegationDispatchRecovery.mjs'
 import { originalDelegationMessage } from './helpers/aiDelegationOriginalMessage.mjs'
+import { prependAiConversationSource } from '../server/lib/aiConversationDisplay.mjs'
 
 function fixture() {
   const delegation = { mapId: 'map-a', targetCardId: 'card-a', startedBy: 'user-a', strategy: 'new',
@@ -33,6 +34,21 @@ test('Windows 경로 표기와 메시지 줄바꿈 차이는 같은 원본으로
   conversation.extra.workspace = 'c:/test/worker/'
   message.content.content = message.content.content.replaceAll('\n', '\r\n')
   assert.ok(verifyAiDelegationOriginalMessage(delegation, origin, conversation, message))
+})
+
+test('발신 대화 표시 정보가 붙어도 원 위임을 복구하고 실제 지시 변조는 거부한다', () => {
+  for (const newline of ['\n', '\r\n']) {
+    const f = fixture()
+    f.message.content.content = prependAiConversationSource(f.message.content.content, 'delegation', {
+      conversationId: 'parent-1', name: '상위 대화',
+    }).replaceAll('\n', newline)
+    const proof = verifyAiDelegationOriginalMessage(f.delegation, f.origin, f.conversation, f.message)
+    assert.equal(proof.recoveryProof.instructionHash, f.delegation.instructionHash)
+    f.message.content.content += '\n추가 구현'
+    assert.throws(() => verifyAiDelegationOriginalMessage(f.delegation, f.origin, f.conversation, f.message), {
+      code: 'AI_DELEGATION_ORIGINAL_MESSAGE_UNCONFIRMED',
+    })
+  }
 })
 
 for (const [label, mutate] of [
