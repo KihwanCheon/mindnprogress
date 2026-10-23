@@ -11,6 +11,9 @@ export function createAionUiLaunchTracking({ now = Date.now } = {}) {
     return entry
   }
   return {
+    remove(key) {
+      entries.delete(key)
+    },
     register(key, ownerId, expiresAt) {
       for (const [id, entry] of entries) if (entry.expiresAt <= now()) entries.delete(id)
       entries.set(key, { ownerId, expiresAt, status: 'pending', error: '', conversationId: null })

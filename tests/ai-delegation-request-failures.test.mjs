@@ -59,6 +59,86 @@ function memoryLedger(initial = []) {
   return { dependencies, disk: () => structuredClone(disk) }
 }
 
+test('문서 영구 삭제는 대상·상위 문서에 속한 실패 기록을 지우고 다른 기록은 재시작 뒤에도 보존한다', async () => {
+  const memory = memoryLedger()
+  const ledger = await createAiDelegationRequestFailures(memory.dependencies)
+  await ledger.record({ ...context, requestId: 'target', mapId: 'map-delete', parentMapId: 'map-keep' }, failure)
+  await ledger.record({ ...context, requestId: 'parent', mapId: 'map-keep', parentMapId: 'map-delete' }, failure)
+  await ledger.record({ ...context, requestId: 'keep', mapId: 'map-keep', parentMapId: 'map-other' }, failure)
+  const retained = ledger.get('keep')
+
+  assert.equal(await ledger.purgeMaps(new Set(['map-delete'])), 2)
+  assert.deepEqual(memory.disk(), [retained])
+  const restarted = await createAiDelegationRequestFailures(memory.dependencies)
+  assert.deepEqual(restarted.list({ mapId: 'map-delete', delegations: new Map() }), [])
+  assert.deepEqual(restarted.get('keep'), retained)
+})
+
+test('삭제할 실패 기록이 없거나 같은 삭제를 반복해도 늦은 대상·상위 문서 실패 기록을 다시 만들지 않는다', async () => {
+  const memory = memoryLedger()
+  const ledger = await createAiDelegationRequestFailures(memory.dependencies)
+  assert.equal(await ledger.purgeMaps(['map-delete', 'map-delete']), 0)
+  assert.equal(await ledger.purgeMaps([]), 0)
+  assert.equal(await ledger.purgeMaps(['map-delete']), 0)
+  assert.equal(await ledger.record({ ...context, mapId: 'map-delete' }, failure), null)
+  assert.equal(await ledger.record({ ...context, parentMapId: 'map-delete' }, failure), null)
+  assert.deepEqual(memory.disk(), [])
+  const retained = await ledger.record({ ...context, requestId: 'keep' }, failure)
+  assert.equal(retained.id, 'keep')
+  assert.equal(memory.disk().length, 1)
+})
+
+test('진행 중 저장·영구 삭제·늦은 실패 기록을 같은 큐에서 처리해 삭제된 기록이 되살아나지 않는다', async () => {
+  const memory = memoryLedger()
+  const writeJson = memory.dependencies.writeJson
+  let releaseWrite
+  let markWriting
+  const writing = new Promise(resolve => { markWriting = resolve })
+  const blocked = new Promise(resolve => { releaseWrite = resolve })
+  let writes = 0
+  memory.dependencies.writeJson = async (file, records) => {
+    if (++writes === 1) { markWriting(); await blocked }
+    return writeJson(file, records)
+  }
+  const ledger = await createAiDelegationRequestFailures(memory.dependencies)
+  const beforeDelete = ledger.record({ ...context, requestId: 'before', mapId: 'map-delete' }, failure)
+  await writing
+  const deletion = ledger.purgeMaps(['map-delete'])
+  const late = ledger.record({ ...context, requestId: 'late', parentMapId: 'map-delete' }, failure)
+  const unrelated = ledger.record({ ...context, requestId: 'keep' }, failure)
+  releaseWrite()
+  await beforeDelete
+  assert.equal(await deletion, 1)
+  assert.equal(await late, null)
+  await unrelated
+  assert.deepEqual(memory.disk(), [ledger.get('keep')])
+  assert.equal(ledger.get('before'), null)
+  assert.equal(writes, 3)
+})
+
+test('영구 삭제 저장이 실패하면 기존 기록을 유지하고 같은 큐에서 다시 삭제할 수 있다', async () => {
+  const memory = memoryLedger()
+  const writeJson = memory.dependencies.writeJson
+  let failNextWrite = false
+  memory.dependencies.writeJson = async (file, records) => {
+    if (failNextWrite) { failNextWrite = false; throw new Error('삭제 저장 실패') }
+    return writeJson(file, records)
+  }
+  const ledger = await createAiDelegationRequestFailures(memory.dependencies)
+  await ledger.record({ ...context, requestId: 'delete', mapId: 'map-delete' }, failure)
+  await ledger.record({ ...context, requestId: 'keep' }, failure)
+  const before = memory.disk()
+  failNextWrite = true
+
+  await assert.rejects(ledger.purgeMaps(['map-delete']), /삭제 저장 실패/)
+  assert.deepEqual(memory.disk(), before)
+  assert.deepEqual(ledger.get('delete'), before[0])
+  assert.equal((await ledger.record({ ...context, requestId: 'before-retry', mapId: 'map-delete' }, failure)).id, 'before-retry')
+  assert.equal(await ledger.purgeMaps(['map-delete']), 2)
+  assert.deepEqual(memory.disk(), [before[1]])
+  assert.equal(await ledger.record({ ...context, mapId: 'map-delete' }, failure), null)
+})
+
 test('미접수 요청 종료는 원 오류를 보존하고 재시작·재확인·반복 요청에도 경고를 다시 만들지 않는다', async () => {
   const memory = memoryLedger()
   const ledger = await createAiDelegationRequestFailures(memory.dependencies)

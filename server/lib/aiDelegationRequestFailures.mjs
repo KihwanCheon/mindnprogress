@@ -86,12 +86,13 @@ export function safeDelegationFailureMessage(message, instruction = '') {
 }
 
 // Request failures are not executable delegations and never enter the delegation poller.
-export async function createAiDelegationRequestFailures({ filePath, readJson, writeJson }) {
+export async function createAiDelegationRequestFailures({ filePath, readJson, writeJson, deletedMapIds = new Set() }) {
   let records = await readJson(filePath)
   let queue = Promise.resolve()
   return {
     record(context, { status, reasonCode, message }) {
       const action = async () => {
+        if (deletedMapIds.has(context.mapId) || deletedMapIds.has(context.parentMapId)) return null
         const now = new Date().toISOString()
         const record = {
           id: context.requestId || `request-${randomUUID()}`, kind: 'request-failure', state: 'request-failed',
@@ -114,6 +115,20 @@ export async function createAiDelegationRequestFailures({ filePath, readJson, wr
         await writeJson(filePath, next)
         records = next
         return publicFailure(record)
+      }
+      const result = queue.catch(() => {}).then(action)
+      queue = result.catch(() => {})
+      return result
+    },
+    purgeMaps(mapIds) {
+      const ids = new Set(mapIds)
+      const action = async () => {
+        const next = records.filter(item => !ids.has(item.mapId) && !ids.has(item.parentMapId))
+        const removedCount = records.length - next.length
+        if (removedCount) await writeJson(filePath, next)
+        records = next
+        for (const mapId of ids) deletedMapIds.add(mapId)
+        return removedCount
       }
       const result = queue.catch(() => {}).then(action)
       queue = result.catch(() => {})

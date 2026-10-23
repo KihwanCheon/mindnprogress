@@ -6044,7 +6044,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     const mapIds = deleteAll ? trashedDocuments.map((document) => document.id) : [...selectedTrashIds]
     if (mapIds.length === 0) return
     const targetLabel = deleteAll ? `휴지통의 문서 ${mapIds.length}개를 모두` : `선택한 문서 ${mapIds.length}개를`
-    if (!window.confirm(`${targetLabel} 영구 삭제할까요?\n\n문서, 댓글, 변경 이력이 함께 삭제되며 이 작업은 되돌릴 수 없습니다.`)) return
+    if (!window.confirm(`${targetLabel} 영구 삭제할까요?\n\n문서, 댓글, 변경 이력과 MnP의 AI 위임·결과 보고·연결·복구 기록이 함께 삭제되며 이 작업은 되돌릴 수 없습니다.`)) return
 
     setTrashDeleting(true)
     setSaveError('')
