@@ -46,9 +46,10 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
   const assignee = data.assignee
   // Ref 표시를 제목 문자열에 두면 제목이 길 때 가장 먼저 잘리므로 별도 배지로 분리한다.
   const isReference = Boolean(data.reference)
-  const isMaterial = !showsProgress && !isReference && data.kind === 'task' && !data.hasChildren
-  // 자료 카드는 배지가 없어도 상단 공간을 확보해 제목 위치를 유지한다.
-  const showsTopline = isMaterial || showsProgress || Boolean(data.commentCount) || Boolean(data.aiDelegationStatus)
+  // 일반 자료와 자료만 묶은 카드는 같은 스타일을 사용한다. 문서 루트·Ref 표시는 유지한다.
+  const isMaterial = !showsProgress && !isReference && data.kind !== 'root'
+  // 자료·Ref 카드는 배지가 없어도 상단 공간을 확보해 제목 위치를 유지한다.
+  const showsTopline = isMaterial || isReference || showsProgress || Boolean(data.commentCount) || Boolean(data.aiDelegationStatus)
   const referenceBroken = data.referenceUnresolved === true
   const displayLabel = isReference
     ? data.label.replace(/\s*\(ref\)\s*$/i, '').trim() || data.label
@@ -85,7 +86,7 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
   return (
     <>
       <NodeOverlapBadge data={data} />
-      <article className={`mind-node ${data.kind} ${isMaterial ? 'material' : ''} ${showsProgress ? `status-${displayStatus}` : ''} ${isCompleted ? 'completed' : ''} ${showsSelectedStyle ? 'selected' : ''}`}>
+      <article className={`mind-node ${data.kind} ${isMaterial ? 'material' : ''} ${isReference ? 'reference' : ''} ${showsProgress ? `status-${displayStatus}` : ''} ${isCompleted ? 'completed' : ''} ${showsSelectedStyle ? 'selected' : ''}`}>
       <Handle type="target" position={Position.Left} isConnectable={isConnectable} />
       {([
         ['top', Position.Top],
@@ -173,7 +174,7 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
       ) : isReference ? (
         <div className="node-title-row">
           {referenceBadge}
-          <h3>{displayLabel}</h3>
+          <h3 title={displayLabel}>{displayLabel}</h3>
         </div>
       ) : isMaterial ? (
         <div className="node-title-row">

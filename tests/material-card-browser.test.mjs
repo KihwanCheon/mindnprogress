@@ -21,16 +21,17 @@ window.setTheme = applyUiTheme;
 applyUiTheme('light');
 const card = (id, data={}, x=0, y=0) => ({id,type:'mind',position:{x,y},data:{
   kind:'task',label:id,description:'원본 설명 보존',sharedKnowledge:'원본 공유 지식 보존',status:'planned',progress:0,isWork:false,...data}});
-const material = card('material',{label:'원장·감사 SHOP · 27건',status:'in-progress',progress:45,
+const material = card('material',{kind:'branch',label:'구현 기준 · KR 흐름 재사용·JP 화면 유지',status:'in-progress',progress:45,
   checklist:[{id:'check',text:'기존 체크리스트',done:false}],dueDate:'2026-12-31'},320,0);
 const nodes = [card('root',{kind:'root',label:'문서 루트'},0,140),material,
   card('materials',{kind:'branch',label:'자료 묶음'},0,0),
+  card('criteria',{kind:'branch',label:'요구사항 단계 배정표'},320,-140),
   card('tasks',{kind:'branch',label:'업무 묶음'},0,300),
   card('planned',{label:'실제 예정 업무',isWork:true},320,180),
   card('done',{label:'완료 업무',isWork:true,status:'done',progress:100},320,370)];
 const edge = (source,target) => ({id:source+'-'+target,source,target});
 const map = {id:'map-purpose',title:'카드 용도 검증',color:'violet',version:1,updatedAt:'2026-10-25T00:00:00Z',nodes,
-  edges:[edge('root','materials'),edge('root','tasks'),edge('materials','material'),edge('tasks','planned'),edge('tasks','done')]};
+  edges:[edge('root','materials'),edge('root','tasks'),edge('materials','material'),edge('materials','criteria'),edge('tasks','planned'),edge('tasks','done')]};
 const summary = () => ({...map,nodeCount:map.nodes.length,rootProgress:50,rootStatus:'in-progress',waitingCount:0});
 window.savedMap = map;
 window.saveAttempts = 0;
@@ -62,8 +63,21 @@ const gallery = [card('plain',{label:'원장·감사 SHOP · 27건'}),
   card('dooray',{label:'Dooray 링크가 있는 긴 제목 자료 카드도 한 줄로 표시합니다',taskUrl:'https://fixture.dooray.com/task/1/2',commentCount:1},520,180),
   card('planned',{label:'실제 예정 업무',isWork:true},0,380),
   card('wiki',{label:'Wiki 링크가 있는 자료',taskUrl:'https://fixture.dooray.com/wiki/1/2'},260,380),
-  card('runtime',{label:'AI 승인 대기 중인 자료',aiConversationRuntime:{state:'waiting-confirmation',pendingConfirmations:1}},520,380)];
+  card('runtime',{label:'AI 승인 대기 중인 자료',aiConversationRuntime:{state:'waiting-confirmation',pendingConfirmations:1}},520,380),
+  card('branch-leaf',{kind:'branch',label:'하위 카드가 없는 기준 자료'},0,550),
+  card('branch-group',{kind:'branch',label:'기준 · 자료 묶음',hasChildren:true,hiddenDescendantCount:2},260,550),
+  card('task-group',{label:'일반 카드로 만든 자료 묶음',hasChildren:true,hiddenDescendantCount:2},520,550)];
 window.showGallery = () => root.render(React.createElement(ReactFlow,{nodes:gallery,nodeTypes:{mind:MindNode},fitView:true}));
+const refCard = (id, data, x, y) => card(id,{reference:{mapId:'other',nodeId:'source'},...data},x,y);
+const references = [
+  refCard('ref-plain',{label:'댓글 없는 Ref 자료'},0,0),
+  refCard('ref-comments',{label:'댓글 있는 Ref 자료',commentCount:3},260,0),
+  refCard('ref-broken',{label:'원본 연결이 끊긴 Ref 자료',referenceUnresolved:true},520,0),
+  refCard('ref-work',{label:'진행 중인 원본 참조',kind:'branch',isWork:true,status:'in-progress',progress:40},0,180),
+  refCard('ref-work-comments',{label:'댓글 있는 원본 참조',kind:'branch',isWork:true,status:'in-progress',progress:40,commentCount:3},260,180),
+  refCard('ref-done',{label:'완료된 원본 참조',isWork:true,status:'done',progress:100},520,180),
+];
+window.showReferences = () => root.render(React.createElement(ReactFlow,{nodes:references,nodeTypes:{mind:MindNode},fitView:true}));
 if (location.pathname==='/mindmap/gallery') window.showGallery();
 else root.render(React.createElement(React.StrictMode,null,React.createElement(App)));
 `
@@ -150,6 +164,8 @@ test('자료 제목을 세로 중앙 한 줄로 표시하고 용도 전환 시 �
     }
     const state = id => evaluate(`(() => {const n=document.querySelector('.react-flow__node[data-id="${id}"] .mind-node');const h=n?.querySelector('h3');return n && {
       height:n.offsetHeight,width:n.offsetWidth,material:n.classList.contains('material'),text:n.textContent,
+      background:getComputedStyle(n).backgroundColor,backgroundImage:getComputedStyle(n).backgroundImage,border:getComputedStyle(n).borderTopColor,
+      descriptionTop:n.querySelector('p')?.offsetTop,
       titleTop:h.offsetTop,titleHeight:h.offsetHeight,titleLineHeight:parseFloat(getComputedStyle(h).lineHeight),
       titleOverflow:getComputedStyle(h).textOverflow,titleWhiteSpace:getComputedStyle(h).whiteSpace,
       titleClipped:h.scrollWidth>h.clientWidth,titleTooltip:h.title,titleText:h.textContent,
@@ -180,8 +196,11 @@ test('자료 제목을 세로 중앙 한 줄로 표시하고 용도 전환 시 �
       assert.equal(plain.progress, undefined)
       assert.equal(long.height, plain.height)
       assert.equal(long.titleClipped, true, '긴 제목은 카드 너비 안에서 잘린다')
-      for (const id of ['plain','long','comments','alerts','dooray','wiki','runtime']) {
+      for (const id of ['plain','long','comments','alerts','dooray','wiki','runtime','branch-leaf','branch-group','task-group']) {
         const cardState = await state(id)
+        assert.equal(cardState.material, true, `${id}: 자료는 내부 종류·하위 자료 유무와 관계없이 자료 스타일을 적용한다`)
+        assert.equal(cardState.height, plain.height)
+        assert.equal(cardState.background, plain.background)
         assert.equal(cardState.titleTop, plain.titleTop, `${id}: 상단 배지·링크·AI 표시와 무관하게 제목 위치를 유지한다`)
         assert.ok(Math.abs(cardState.titleTop + cardState.titleHeight / 2 - cardState.height / 2) <= 1, `${id}: 제목을 카드의 세로 중앙에 배치한다`)
         assert.ok(cardState.titleHeight <= Math.ceil(cardState.titleLineHeight), `${id}: 제목은 한 줄이다`)
@@ -197,6 +216,30 @@ test('자료 제목을 세로 중앙 한 줄로 표시하고 용도 전환 시 �
     }
     await evaluate('document.querySelector(".node-waiting").click()')
     assert.equal(await evaluate('window.waitingOpened'), true)
+    await evaluate('window.showReferences()')
+    await until(() => state('ref-plain'), 'Ref 검증 화면 준비 실패')
+    for (const theme of ['light', 'dark']) {
+      await evaluate(`window.setTheme('${theme}');new Promise(resolve=>setTimeout(resolve,250))`)
+      for (const [withoutComments, withComments] of [['ref-plain','ref-comments'], ['ref-work','ref-work-comments']]) {
+        const plain = await state(withoutComments), comments = await state(withComments)
+        assert.equal(plain.titleTop, comments.titleTop, '댓글 유무와 관계없이 Ref 제목 위치를 유지한다')
+        assert.equal(plain.descriptionTop, comments.descriptionTop, '댓글 유무와 관계없이 Ref 본문 위치를 유지한다')
+        assert.equal(plain.height, comments.height)
+        assert.ok(plain.reference && comments.reference)
+      }
+      if (theme === 'dark') {
+        const plain = await state('ref-plain')
+        assert.equal(plain.background, 'rgb(26, 29, 39)', 'Ref 배경은 어두운 자료 카드 색상과 일치한다')
+        for (const id of ['ref-comments','ref-broken','ref-work','ref-work-comments','ref-done']) {
+          const reference = await state(id)
+          assert.equal(reference.background, plain.background)
+          assert.equal(reference.backgroundImage, 'none', '원본 상태의 배경 그라데이션이 Ref 색상을 덮지 않는다')
+          assert.equal(reference.border, plain.border)
+        }
+      }
+      assert.match((await state('ref-done')).status, /완료/)
+      await screenshot(`references-${theme}`)
+    }
     await send('Page.navigate', { url: base + '/mindmap/map-purpose/material' })
     await until(() => evaluate('Boolean(document.querySelector(".card-purpose-options"))'), '카드 용도 선택 준비 실패')
     const saved = () => evaluate('window.savedMap.nodes.find(n=>n.id==="material").data')
@@ -206,9 +249,24 @@ test('자료 제목을 세로 중앙 한 줄로 표시하고 용도 전환 시 �
     assert.equal(await evaluate('Boolean(document.querySelector(".progress-field"))'), false)
     assert.equal(await evaluate('document.querySelector(".card-purpose-options button[aria-pressed=true]").textContent'), '자료')
     assert.equal(await evaluate('document.querySelector(".description-field textarea").value'), original.description)
-    assert.equal((await state('materials')).status, undefined, '자료만 묶으면 상태를 표시하지 않는다')
+    for (const id of ['material', 'materials', 'criteria']) {
+      const cardState = await state(id)
+      assert.equal(cardState.material, true, `${id}: 자료인 branch 카드와 그 부모에 자료 스타일을 적용한다`)
+      assert.equal(cardState.status, undefined, '자료만 묶으면 상태를 표시하지 않는다')
+      assert.ok(cardState.height >= 80 && cardState.height <= 100)
+    }
+    assert.equal((await state('tasks')).material, false, '실제 하위 업무가 있으면 집계 카드 표시를 유지한다')
     assert.match((await state('tasks')).progress, /업무 2개.*50%/, '실제 업무만 자동 집계한다')
     assert.match((await state('root')).progress, /업무 2개.*50%/)
+    const collapse = () => evaluate('document.querySelector(\'.react-flow__node[data-id="materials"] .node-collapse-toggle\').click()')
+    await collapse()
+    await until(() => evaluate('!document.querySelector(\'.react-flow__node[data-id="material"]\') && !document.querySelector(\'.react-flow__node[data-id="criteria"]\')'), '자료 묶음 접기 실패')
+    assert.equal((await state('materials')).material, true, '접힌 자료 묶음도 자료 표시를 유지한다')
+    await collapse()
+    await until(() => state('material'), '자료 묶음 펼치기 실패')
+    // 숨겨진 자식의 선택은 해제되므로, 펼친 카드를 다시 선택한 뒤 용도를 바꾼다.
+    await evaluate('document.querySelector(\'.react-flow__node[data-id="material"]\').click()')
+    await until(() => evaluate('document.querySelectorAll(".card-purpose-options button").length===2'), '펼친 자료 카드 선택 실패')
     for (const isWork of [true, false]) {
       const before = await evaluate('window.saveAttempts')
       await evaluate(`document.querySelectorAll('.card-purpose-options button')[${isWork ? 0 : 1}].click()`)
@@ -216,6 +274,8 @@ test('자료 제목을 세로 중앙 한 줄로 표시하고 용도 전환 시 �
       assert.deepEqual(await saved(), { ...original, isWork }, '용도만 변경하고 본문·지식·업무 값을 보존한다')
       assert.equal(await hasStatus(), isWork)
       assert.equal((await state('material')).material, !isWork)
+      assert.equal((await state('materials')).material, !isWork, '하위 자료의 업무 전환에 따라 부모 표시도 전환한다')
+      if (isWork) assert.match((await state('materials')).progress, /업무 1개.*45%/)
       if (isWork) assert.match((await state('material')).status, /진행 중/, '기존 상태를 복원한다')
     }
     await evaluate('window.setTheme("dark")')

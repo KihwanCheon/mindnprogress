@@ -1241,8 +1241,10 @@
   box-shadow: 0 8px 24px rgba(0, 0, 0, .28);
 }
 
-[data-theme="dark"] .mind-node.material {
-  background: #2d3543;
+[data-theme="dark"] .mind-node.material,
+[data-theme="dark"] .mind-node.reference {
+  border-color: var(--theme-border);
+  background: var(--theme-surface);
 }
 
 [data-theme="dark"] .mind-node:hover {
@@ -1250,7 +1252,7 @@
   box-shadow: 0 12px 30px rgba(0, 0, 0, .36);
 }
 
-[data-theme="dark"] .mind-node.root {
+[data-theme="dark"] .mind-node.root:where(:not(.reference)) {
   color: white;
   border-color: var(--theme-node-root);
   background: linear-gradient(145deg, #4b427d, #342d5b);
@@ -1262,12 +1264,12 @@
   box-shadow: 0 0 0 3px rgba(148, 135, 255, .17), 0 12px 30px rgba(0, 0, 0, .4);
 }
 
-[data-theme="dark"] .mind-node.branch.status-in-progress {
+[data-theme="dark"] .mind-node.branch.status-in-progress:where(:not(.reference)) {
   border-left-color: var(--theme-accent);
   background: linear-gradient(180deg, #242334, #1d1d29);
 }
 
-[data-theme="dark"] .mind-node.completed {
+[data-theme="dark"] .mind-node.completed:where(:not(.reference)) {
   border-color: #36765f;
   background: #182a24;
   box-shadow: 0 9px 25px rgba(0, 0, 0, .3);
