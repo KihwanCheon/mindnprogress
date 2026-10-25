@@ -44,10 +44,10 @@
 .mind-node h3 { max-width: 185px; margin: 10px 0 4px; overflow: hidden; color: #332e3b; font-size: 13px; font-weight: 720; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
 .node-title-row { max-width: 185px; display: flex; align-items: center; gap: 6px; margin: 10px 0 4px; }
 .node-title-row h3 { min-width: 0; max-width: none; flex: 1; margin: 0; }
-.mind-node.material { min-height: 64px; display: flex; flex-direction: column; justify-content: center; padding: 12px 14px; }
-.mind-node.material .node-topline { flex-wrap: wrap; margin-bottom: 8px; }
-.mind-node.material .node-title-row { max-width: none; margin: 0; }
-.mind-node.material h3 { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; white-space: normal; overflow-wrap: anywhere; }
+.mind-node.material { min-height: 90px; display: grid; grid-template-rows: 18px 20px 18px; row-gap: 6px; padding: 10px 14px; background: #f0f4f8; }
+.mind-node.material .node-topline { grid-row: 1; height: 18px; flex-wrap: nowrap; margin: 0; }
+.mind-node.material .node-title-row { grid-row: 2; min-width: 0; max-width: none; height: 20px; margin: 0; }
+.mind-node.material .node-work-meta { grid-row: 3; min-height: 18px; margin: 0; padding: 0; border-top: 0; }
 .node-material-icon { width: 16px; height: 16px; display: inline-flex; flex: none; opacity: .7; }
 .node-material-icon svg { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 1.2; stroke-linecap: round; stroke-linejoin: round; }
 .dooray-linked-icon { width: 16px; height: 16px; display: grid; flex: none; place-items: center; color: white; border-radius: 5px; background: #4f79d8; font-size: 8px; font-weight: 850; line-height: 1; }

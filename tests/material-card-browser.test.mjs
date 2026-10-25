@@ -53,18 +53,22 @@ window.fetch = async (url,init={}) => {
 };
 const root = createRoot(document.getElementById('root'));
 const gallery = [card('plain',{label:'원장·감사 SHOP · 27건'}),
-  card('long',{label:'긴 제목 자료 카드도 두 줄로 읽을 수 있고 너비는 기존 카드와 동일하게 유지합니다'},260,0),
+  card('long',{label:'긴 제목 자료 카드는 한 줄로 표시하고 넘치는 부분은 말줄임표로 표시합니다'},260,0),
+  card('comments',{label:'댓글이 있는 자료',commentCount:3},520,0),
   card('alerts',{label:'복구가 필요한 자료',commentCount:2,unresolvedCommentCount:1,
     aiConversationRuntime:{state:'running'},aiDelegationStatus:{kind:'attention',recoveryCount:1,reportCount:0,title:'검증용 복구'},
     waitingItems:[{id:'waiting',label:'검토',since:'2026-10-25'}],onOpenWaitingItems:()=>window.waitingOpened=true},0,180),
   card('reference',{label:'다른 문서 자료 (Ref)',reference:{mapId:'other',nodeId:'source'}},260,180),
-  card('planned',{label:'실제 예정 업무',isWork:true},0,380)];
+  card('dooray',{label:'Dooray 링크가 있는 긴 제목 자료 카드도 한 줄로 표시합니다',taskUrl:'https://fixture.dooray.com/task/1/2',commentCount:1},520,180),
+  card('planned',{label:'실제 예정 업무',isWork:true},0,380),
+  card('wiki',{label:'Wiki 링크가 있는 자료',taskUrl:'https://fixture.dooray.com/wiki/1/2'},260,380),
+  card('runtime',{label:'AI 승인 대기 중인 자료',aiConversationRuntime:{state:'waiting-confirmation',pendingConfirmations:1}},520,380)];
 window.showGallery = () => root.render(React.createElement(ReactFlow,{nodes:gallery,nodeTypes:{mind:MindNode},fitView:true}));
 if (location.pathname==='/mindmap/gallery') window.showGallery();
 else root.render(React.createElement(React.StrictMode,null,React.createElement(App)));
 `
 
-test('자료 카드는 작게 표시하고 용도 전환 시 원문·업무 값과 하위 업무 집계·알림을 보존한다', {
+test('자료 제목을 세로 중앙 한 줄로 표시하고 용도 전환 시 원문·업무 값과 하위 업무 집계·알림을 보존한다', {
   skip: process.env.MNP_BROWSER_TEST !== '1', timeout: 120_000,
 }, async t => {
   const { build } = await import('vite')
@@ -144,8 +148,11 @@ test('자료 카드는 작게 표시하고 용도 전환 시 원문·업무 값�
       if (result.exceptionDetails) throw Error(JSON.stringify(result.exceptionDetails))
       return result.result.value
     }
-    const state = id => evaluate(`(() => {const n=document.querySelector('.react-flow__node[data-id="${id}"] .mind-node');return n && {
+    const state = id => evaluate(`(() => {const n=document.querySelector('.react-flow__node[data-id="${id}"] .mind-node');const h=n?.querySelector('h3');return n && {
       height:n.offsetHeight,width:n.offsetWidth,material:n.classList.contains('material'),text:n.textContent,
+      titleTop:h.offsetTop,titleHeight:h.offsetHeight,titleLineHeight:parseFloat(getComputedStyle(h).lineHeight),
+      titleOverflow:getComputedStyle(h).textOverflow,titleWhiteSpace:getComputedStyle(h).whiteSpace,
+      titleClipped:h.scrollWidth>h.clientWidth,titleTooltip:h.title,titleText:h.textContent,
       status:n.querySelector('.node-status-badge')?.textContent,progress:n.querySelector('.node-progress')?.getAttribute('aria-label'),
       description:Boolean(n.querySelector('p')),comments:Boolean(n.querySelector('.node-comments-badge')),
       runtime:Boolean(n.querySelector('.ai-conversation-runtime-badge')),recovery:Boolean(n.querySelector('.ai-delegation-status-badge')),
@@ -165,13 +172,23 @@ test('자료 카드는 작게 표시하고 용도 전환 시 원문·업무 값�
       // 배경색 전환 중간 프레임이 아닌 최종 화면을 확인한다.
       await evaluate('new Promise(resolve=>setTimeout(resolve,250))')
       const plain = await state('plain'), long = await state('long'), work = await state('planned'), alerts = await state('alerts')
-      assert.ok(plain.height >= 60 && plain.height <= 80, `자료 카드 높이: ${plain.height}`)
+      assert.ok(plain.height >= 80 && plain.height <= 100, `자료 카드 높이: ${plain.height}`)
       assert.equal(plain.width, work.width)
       assert.ok(plain.height < work.height)
       assert.equal(plain.status, undefined)
       assert.equal(plain.description, false)
       assert.equal(plain.progress, undefined)
-      assert.ok(long.height <= 80)
+      assert.equal(long.height, plain.height)
+      assert.equal(long.titleClipped, true, '긴 제목은 카드 너비 안에서 잘린다')
+      for (const id of ['plain','long','comments','alerts','dooray','wiki','runtime']) {
+        const cardState = await state(id)
+        assert.equal(cardState.titleTop, plain.titleTop, `${id}: 상단 배지·링크·AI 표시와 무관하게 제목 위치를 유지한다`)
+        assert.ok(Math.abs(cardState.titleTop + cardState.titleHeight / 2 - cardState.height / 2) <= 1, `${id}: 제목을 카드의 세로 중앙에 배치한다`)
+        assert.ok(cardState.titleHeight <= Math.ceil(cardState.titleLineHeight), `${id}: 제목은 한 줄이다`)
+        assert.equal(cardState.titleWhiteSpace, 'nowrap')
+        assert.equal(cardState.titleOverflow, 'ellipsis')
+        assert.equal(cardState.titleTooltip, cardState.titleText, '마우스를 올리면 전체 제목을 확인할 수 있다')
+      }
       assert.match(work.status, /예정/)
       assert.equal(alerts.status, undefined)
       assert.ok(alerts.comments && alerts.runtime && alerts.recovery && alerts.waiting)
