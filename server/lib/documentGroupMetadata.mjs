@@ -1,9 +1,11 @@
 // 문서 소속은 목록 배치에서 읽는다. 총괄 설정 유무나 과거 위임의 groupId로 추측하지 않는다.
-export function createDocumentGroupMetadata({ listMaps, readLayout, readMap, readProject }) {
+export function createDocumentGroupMetadata({ listMaps, listMapIds, readLayout, readMap, readProject }) {
   return async function readDocumentGroups(mapIds, supplied = {}) {
     const ids = [...new Set(mapIds)]
     if (!ids.length) return []
-    const activeMaps = supplied.maps ?? await listMaps()
+    const activeMaps = supplied.maps ?? (listMapIds
+      ? (await listMapIds()).map((id) => ({ id }))
+      : await listMaps())
     const layout = supplied.layout ?? await readLayout(activeMaps.map((map) => map.id))
     const active = new Map(activeMaps.map((map) => [map.id, map]))
     const groups = new Map(layout.groups.flatMap((group) => group.mapIds.map((id) => [id, group])))
@@ -13,7 +15,8 @@ export function createDocumentGroupMetadata({ listMaps, readLayout, readMap, rea
       return projects.get(groupId)
     }
     return Promise.all(ids.map(async (mapId) => {
-      const map = active.get(mapId) ?? await readMap(mapId)
+      // ID 목록에는 본문에만 남은 구형 휴지통 표시가 없으므로 요청 대상은 실제 상태를 확인한다.
+      const map = listMapIds && !supplied.maps ? await readMap(mapId) : active.get(mapId) ?? await readMap(mapId)
       const membership = !map ? 'missing' : map.trashedAt ? 'trashed' : map.archivedAt ? 'archived'
         : map.reconstructionPending ? 'pending' : active.has(mapId) ? 'active' : 'unavailable'
       const group = membership === 'active' ? groups.get(mapId) : null

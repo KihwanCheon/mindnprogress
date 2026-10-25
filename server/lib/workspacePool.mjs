@@ -6,6 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { promisify } from 'node:util'
 import { aiDelegationBusyDispatchRejected, aiDelegationWorkspaceLeaseMatches, integrationGitLockFailure, integrationHeadChangedFailure, integrationCandidateWorktreeFailure, integrationCandidateDirtyReasonCode, localChangesIntegrationCommits, retryableExternalLimitCategory } from './aiDelegations.mjs'
 import { replaceFileWithRetry } from './replaceFileWithRetry.mjs'
+import { completedWorkspaceLeaseIds, latestHistoryTime } from './completedAiHistory.mjs'
 import { assertAiDelegationSourceCompletionLease } from './aiDelegationSourceCompletion.mjs'
 import { assertAiDelegationInterruptedLease } from './aiDelegationInterruptedRecovery.mjs'
 import { acquireWorkspaceLock, git as ownershipGit, jsonFile, saveJson } from './remoteWorkspaceProtocol.mjs'
@@ -685,7 +686,7 @@ export class WorkspacePoolManager {
       if (lease?.workspaceId !== workspaceId) return latest
       const timestamp = Date.parse(String(lease.startedAt ?? ''))
       return Number.isFinite(timestamp) ? Math.max(latest, timestamp) : latest
-    }, 0)
+    }, Date.parse(this.state?.lastAssignedAt?.[workspaceId] ?? '') || 0)
   }
 
   orderedRecoverableWorkers(preferredWorkspace = null) {
@@ -1405,6 +1406,8 @@ export class WorkspacePoolManager {
             startedAt,
           })
           this.state.leases[leaseId] = lease
+          this.state.lastAssignedAt ??= {}
+          this.state.lastAssignedAt[workspace.id] = startedAt
           this.state.workspaces[workspace.id] = {
             status: 'leased',
             jobId,
@@ -3348,6 +3351,33 @@ export class WorkspacePoolManager {
     }
     await atomicJson(path.join(this.registry.sharedRoot, 'job-results', `${lease.jobId}.json`), stored)
     return stored
+  }
+
+  async pruneCompletedLeases(options = {}) {
+    return this.runExclusive(async () => {
+      if (!this.state) return { removed: 0, resultFilesFailed: 0 }
+      const leases = Object.values(this.state.leases ?? {})
+      const candidates = completedWorkspaceLeaseIds(this.state, options)
+      if (!candidates.size) return { removed: 0, resultFilesFailed: 0 }
+      const previous = this.state
+      const lastAssignedAt = { ...previous.lastAssignedAt }
+      for (const lease of leases) {
+        const at = latestHistoryTime(lastAssignedAt[lease.workspaceId], lease.startedAt)
+        if (at !== null) lastAssignedAt[lease.workspaceId] = new Date(at).toISOString()
+      }
+      this.state = { ...previous, lastAssignedAt,
+        leases: Object.fromEntries(Object.entries(previous.leases).filter(([id]) => !candidates.has(id))) }
+      try { await this.persist() } catch (error) { this.state = previous; throw error }
+      let resultFilesFailed = 0
+      const resultRoot = path.resolve(this.registry.sharedRoot, 'job-results')
+      for (const lease of leases.filter((item) => candidates.has(item.leaseId))) {
+        if (!/^[a-zA-Z0-9_-]+$/.test(lease.jobId ?? '')) continue
+        const file = path.resolve(resultRoot, `${lease.jobId}.json`)
+        if (path.dirname(file) !== resultRoot) continue
+        try { await rm(file, { force: true }) } catch { resultFilesFailed++ }
+      }
+      return { removed: candidates.size, resultFilesFailed }
+    })
   }
 
   async persist() {

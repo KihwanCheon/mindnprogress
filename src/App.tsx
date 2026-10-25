@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type CSSProperties, type Dispatch, type FormEvent as ReactFormEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type SetStateAction, type TouchEvent as ReactTouchEvent } from 'react'
+import { createCoalescedRefresh } from './utils/coalescedRefresh.mjs'
 import {
   addEdge,
   Background,
@@ -658,6 +659,7 @@ type DocumentLayout = {
 type DocumentLibraryResponse = {
   maps: MapSummary[]
   documentLayout: DocumentLayout
+  lifecycleCounts?: { archived: number; trashed: number }
 }
 
 const EMPTY_DOCUMENT_LAYOUT: DocumentLayout = { version: 1, items: [], groups: [] }
@@ -2366,7 +2368,8 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
   const [nodes, setNodes, onNodesChange] = useNodesState<MindMapNode>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState<MindMapEdge>([])
   const { canUndo, canRedo, undo, redo, resetHistory, rebaseline: rebaselineHistory, beginTransaction: beginHistoryTransaction, endTransaction: endHistoryTransaction, cancelTransaction: cancelHistoryTransaction } = useMapHistory(nodes, setNodes, edges, setEdges)
-  const [activeMapId, setActiveMapId] = useState('')
+  const [activeMapId, setActiveMapId] = useState(initialGroupId ? '' : initialDeepLink?.mapId ?? '')
+  const [lifecycleCounts, setLifecycleCounts] = useState<{ archived: number; trashed: number } | null>(null)
   const [activeDocumentRecord, setActiveDocumentRecord] = useState<MapDocument | null>(null)
   const accountMode: AccessMode = user.role === 'viewer' ? 'viewer' : 'editor'
   const documentArchived = activeDocumentRecord?.id === activeMapId && Boolean(activeDocumentRecord.archivedAt)
@@ -3507,11 +3510,16 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
 
   useEffect(() => {
     const availableTrashIds = new Set(trashedDocuments.map((document) => document.id))
+    setLifecycleCounts((current) => current ? { ...current, trashed: trashedDocuments.length } : current)
     setSelectedTrashIds((current) => {
       const next = new Set([...current].filter((mapId) => availableTrashIds.has(mapId)))
       return next.size === current.size ? current : next
     })
   }, [trashedDocuments])
+
+  useEffect(() => {
+    setLifecycleCounts((current) => current ? { ...current, archived: archivedDocuments.length } : current)
+  }, [archivedDocuments])
 
   useEffect(() => {
     if (!collapsedDocumentGroupsInitialized.current) return
@@ -3543,21 +3551,10 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
 
   useEffect(() => {
     let active = true
-    void Promise.all([
-      apiRequest<DocumentLibraryResponse>('/api/maps'),
-      accountMode === 'editor'
-        ? apiRequest<{ maps: MapSummary[] }>('/api/maps/trash')
-        : Promise.resolve({ maps: [] as MapSummary[] }),
-      apiRequest<{ maps: MapSummary[] }>('/api/maps/archive').catch((error) => {
-        // 개발 중 이전 API와 새 UI가 잠시 함께 동작해도 기존 문서 목록을 유지한다.
-        if (error instanceof ApiRequestError && [400, 404].includes(error.status)) return { maps: [] as MapSummary[] }
-        throw error
-      }),
-    ])
-      .then(async ([{ maps, documentLayout: loadedDocumentLayout }, { maps: trash }, { maps: archive }]) => {
+    void apiRequest<DocumentLibraryResponse>('/api/maps')
+      .then(async ({ maps, documentLayout: loadedDocumentLayout, lifecycleCounts: counts }) => {
         if (!active) return
-        setArchivedDocuments(archive)
-        setTrashedDocuments(trash)
+        if (counts) setLifecycleCounts(counts)
         setDocumentLayout(loadedDocumentLayout)
         setDocuments(maps)
         if (!collapsedDocumentGroupsInitialized.current) {
@@ -3572,6 +3569,12 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         // 그룹 링크로 들어오면 마지막 문서보다 총괄 페이지를 우선한다.
         // 빈 그룹도 열 수 있으며 관계없는 문서를 뒤에서 불러오지 않는다.
         if (initialGroupId) return
+        // 링크로 지정한 문서는 목록과 병렬로 열었다. 보관 문서 또는 빈 목록일 때만 보관함을 조회한다.
+        const needsArchive = maps.length === 0 || Boolean(initialDeepLink?.mapId && !maps.some((map) => map.id === initialDeepLink.mapId))
+        const archive = needsArchive ? (await apiRequest<{ maps: MapSummary[] }>('/api/maps/archive')).maps : []
+        if (!active) return
+        if (needsArchive) setArchivedDocuments(archive)
+        if (initialDeepLink?.mapId && [...maps, ...archive].some((map) => map.id === initialDeepLink.mapId)) return
         if (maps.length > 0 || archive.length > 0) {
           const deepLink = pendingDeepLink.current
           const requestedDocument = deepLink?.mapId
@@ -3612,7 +3615,16 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       })
       .finally(() => { if (active) setDocumentLibraryLoaded(true) })
     return () => { active = false }
-  }, [initialGroupId, accountMode, setEdges, setNodes])
+  }, [initialDeepLink, initialGroupId, accountMode, setEdges, setNodes])
+
+  useEffect(() => {
+    if (!trashOpen || accountMode !== 'editor') return
+    let active = true
+    void apiRequest<{ maps: MapSummary[] }>('/api/maps/trash').then(({ maps }) => {
+      if (active) setTrashedDocuments(maps)
+    }).catch((error) => { if (active) setSaveError(error instanceof Error ? error.message : '휴지통을 불러오지 못했습니다.') })
+    return () => { active = false }
+  }, [trashOpen, accountMode])
 
   useEffect(() => {
     if (selectedGroupId) {
@@ -3797,14 +3809,15 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     let disposed = false
     let eventSource: EventSource | null = null
     let lastEventAt = Date.now()
+    const libraryRefresh = createCoalescedRefresh(() => apiRequest<DocumentLibraryResponse>('/api/maps'))
 
     const synchronizeAfterReconnect = async () => {
       const [notificationResult, library, trashResult] = await Promise.all([
         user.publicAccess
           ? Promise.resolve(null)
           : apiRequest<{ notifications: UserNotification[] }>('/api/notifications').catch(() => null),
-        apiRequest<DocumentLibraryResponse>('/api/maps').catch(() => null),
-        mode === 'editor'
+        libraryRefresh.request().catch(() => null),
+        mode === 'editor' && trashOpen
           ? apiRequest<{ maps: MapSummary[] }>('/api/maps/trash').catch(() => null)
           : Promise.resolve(null),
       ])
@@ -3814,6 +3827,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
 
       setDocuments(library.maps)
       setDocumentLayout(library.documentLayout)
+      if (library.lifecycleCounts) setLifecycleCounts(library.lifecycleCounts)
       if (trashResult) setTrashedDocuments(trashResult.maps)
 
       const remoteMap = library.maps.find((map) => map.id === activeMapId) ?? null
@@ -3968,14 +3982,15 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         if (event.sourceClientId === CLIENT_ID) return
         void (async () => {
           const [library, trashResult] = await Promise.all([
-            apiRequest<DocumentLibraryResponse>('/api/maps'),
-            mode === 'editor'
+            libraryRefresh.request(),
+            mode === 'editor' && trashOpen
               ? apiRequest<{ maps: MapSummary[] }>('/api/maps/trash')
-              : Promise.resolve({ maps: [] as MapSummary[] }),
+              : Promise.resolve(null),
           ])
           setDocuments(library.maps)
           setDocumentLayout(library.documentLayout)
-          if (mode === 'editor') setTrashedDocuments(trashResult.maps)
+          if (library.lifecycleCounts) setLifecycleCounts(library.lifecycleCounts)
+          if (trashResult) setTrashedDocuments(trashResult.maps)
 
           if (event.action === 'trashed' && event.mapId === activeMapId) {
             setActiveMapId(library.maps[0]?.id ?? '')
@@ -4024,13 +4039,14 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
 
     return () => {
       disposed = true
+      libraryRefresh.dispose()
       window.clearInterval(watchdog)
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       window.removeEventListener('online', handleOnline)
       window.removeEventListener('focus', handleFocus)
       eventSource?.close()
     }
-  }, [activeMapId, mode, reconcileRemoteMap, refreshResolvedReferences, selectCardAndReveal, setNodes, user.id, user.publicAccess])
+  }, [activeMapId, mode, trashOpen, reconcileRemoteMap, refreshResolvedReferences, selectCardAndReveal, setNodes, user.id, user.publicAccess])
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -5971,6 +5987,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     const [library, archive, trash] = await Promise.all([apiRequest<DocumentLibraryResponse>('/api/maps'), apiRequest<{ maps: MapSummary[] }>('/api/maps/archive'),
       accountMode === 'editor' ? apiRequest<{ maps: MapSummary[] }>('/api/maps/trash') : Promise.resolve({ maps: [] as MapSummary[] })])
     setDocuments(library.maps); setDocumentLayout(library.documentLayout); setArchivedDocuments(archive.maps)
+    if (library.lifecycleCounts) setLifecycleCounts(library.lifecycleCounts)
     setTrashedDocuments(trash.maps)
     if (activeMapId && ![...library.maps, ...archive.maps].some((document) => document.id === activeMapId)) {
       setLoadedMapId(null); setActiveMapId(library.maps[0]?.id ?? '')
@@ -7637,13 +7654,13 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
           )}
           {mode === 'editor' && (
             <button className={`sidebar-trash ${trashOpen ? 'active' : ''}`} onClick={() => { setTrashOpen((current) => !current); setCreatingMap(false) }}>
-              <span><Icon name="trash" size={15} />휴지통</span><small>{trashedDocuments.length}</small>
+              <span><Icon name="trash" size={15} />휴지통</span><small>{lifecycleCounts?.trashed ?? (trashedDocuments.length || '—')}</small>
             </button>
           )}
           <button className="sidebar-trash" onClick={() => {
             if (!documentArchived && serverBaseline.current && !mapContentsEqual(createPersistedMapContent(nodesRef.current, edgesRef.current), serverBaseline.current)) { setSaveError('현재 문서의 변경이 저장된 뒤 문서 재구성을 열어 주세요.'); return }
             setLifecycleOpen(true)
-          }}><span><Icon name="folder" size={15} />보관함 · 문서 재구성</span><small>{archivedDocuments.length}</small></button>
+          }}><span><Icon name="folder" size={15} />보관함 · 문서 재구성</span><small>{lifecycleCounts?.archived ?? (archivedDocuments.length || '—')}</small></button>
           <div className="sidebar-footer">
             <span>현재 보기</span>
             <strong><span className={`access-dot ${mode}`} />{mode === 'editor' ? '편집 가능' : '읽기 전용'}</strong>

@@ -59,6 +59,20 @@ function memoryLedger(initial = []) {
   return { dependencies, disk: () => structuredClone(disk) }
 }
 
+test('완료 상세 삭제 전에 재접수 근거를 보존해 재시작 후 실패 경고가 되살아나지 않는다', async () => {
+  const memory = memoryLedger()
+  const ledger = await createAiDelegationRequestFailures(memory.dependencies)
+  await ledger.record(context, failure)
+  const delegations = new Map([[context.delegationId, { ...context, id: context.delegationId, createdAt: '2999-01-01' }]])
+  await ledger.preserveResolutionsBeforeCleanup(new Set([context.delegationId]), delegations)
+  delegations.clear()
+  const restarted = await createAiDelegationRequestFailures(memory.dependencies)
+  const records = restarted.list({ mapId: 'map-test', delegations })
+  assert.equal(records[0].resolvedByDelegationId, context.delegationId)
+  assert.equal(aiDelegationDisplayItems([], records).length, 0)
+  assert.equal(records[0].reasonCode, failure.reasonCode)
+})
+
 test('문서 영구 삭제는 대상·상위 문서에 속한 실패 기록을 지우고 다른 기록은 재시작 뒤에도 보존한다', async () => {
   const memory = memoryLedger()
   const ledger = await createAiDelegationRequestFailures(memory.dependencies)

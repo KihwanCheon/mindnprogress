@@ -1,4 +1,8 @@
 import { createServer } from 'node:http'
+import { createDocumentReadStore } from './lib/documentReadStore.mjs'
+import { completedDelegationIds, completedRequestReceipt, completedWorkspaceLeaseIds, referencedHistoryIds } from './lib/completedAiHistory.mjs'
+import { saveHistoryCleanupBackup, pruneHistoryCleanupBackups, readCompletedJobResults } from './lib/historyCleanupBackup.mjs'
+import { startRequestTiming } from './lib/requestTiming.mjs'
 import { normalizeUntrackedMetaRecovery } from './lib/workspaceMetaRecovery.mjs'
 import { createIntegrationRecoveryQueue, integrationRecoveryPending, integrationRecoveryPublicView } from './lib/aiIntegrationRecovery.mjs'
 import { createAiDelegationRequestFailures, safeDelegationFailureMessage, withDelegationTaskCompletion } from './lib/aiDelegationRequestFailures.mjs'
@@ -39,7 +43,7 @@ import { AI_EXECUTION_APPROVAL_INSTRUCTION, GROUP_APPROVAL_INSTRUCTION, GROUP_AI
 import { MNP_CONTEXT_BOOTSTRAP_INSTRUCTION } from '../src/utils/aiContextInstructions.mjs'
 import { applyMapContentPatch, MapContentPatchError } from '../src/utils/mapContentPatch.mjs'
 import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto'
-import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { hostname, networkInterfaces, tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -99,7 +103,6 @@ import {
   nextAiDelegationWaitPoll,
   shouldReconcileAiDelegationChildWorkspace,
   AI_DELEGATION_COMPLETION_NOTIFICATION_TYPE,
-  aiDelegationCompletionNotice,
 } from './lib/aiDelegations.mjs'
 import {
   detectImageAssetType,
@@ -263,6 +266,7 @@ const aiAttributionsFile = path.join(dataDirectory, '_ai-attributions.json')
 const aiConversationAttributionsFile = path.join(dataDirectory, '_ai-conversation-attributions.json')
 const aiConversationOriginsFile = path.join(dataDirectory, '_ai-conversation-origins.json')
 const aiDelegationsFile = path.join(dataDirectory, '_ai-delegations.json')
+const aiRequestReceiptsFile = path.join(dataDirectory, '_ai-request-receipts.json')
 const cardMoveOperationsFile = path.join(dataDirectory, '_card-move-operations.json')
 const groupDocumentInstructionsFile = path.join(dataDirectory, '_group-document-instructions.json')
 const workspacePoolStateFile = path.join(dataDirectory, '_workspace-pool.json')
@@ -333,6 +337,7 @@ const aiConversationRuntimeRequests = new Map()
 const aiConversationRuntimeSummaries = new Map()
 const deletedAiDocumentIds = new Set()
 const aiDelegations = createAiDocumentRecordMap(deletedAiDocumentIds)
+const aiRequestReceipts = createAiDocumentRecordMap(deletedAiDocumentIds)
 const aiDelegationRequestContexts = new WeakMap()
 let aiDelegationRequestFailures
 const aiDelegationActions = new Set()
@@ -1381,22 +1386,39 @@ function mapSummary(map) {
   }
 }
 
-async function readMap(mapId, options = {}) {
-  try {
-    const stored = JSON.parse(await readFile(mapFileForId(mapId), 'utf8'))
-    return normalizeMapForPersistence({
+const documentReads = createDocumentReadStore({ fileForId: mapFileForId })
+
+async function readMapProjection(mapId, options = {}, select = (value) => value.map) {
+  const lifecycle = options?.lifecycleMetadata ?? documentReconstruction?.metadata(mapId) ?? {}
+  const key = JSON.stringify([lifecycle, users.filter((user) => user.role === 'editor').map((user) => user.id)])
+  return documentReads.select(mapId, key, (stored) => {
+    const map = normalizeMapForPersistence({
       ...stored,
-      ...(options?.lifecycleMetadata ?? documentReconstruction?.metadata(mapId)),
+      ...lifecycle,
       id: mapId,
       title: normalizeTitle(stored.title, '새 마인드맵'),
       createdAt: stored.createdAt ?? stored.updatedAt ?? null,
       createdBy: stored.createdBy ?? stored.updatedBy ?? null,
       version: Number.isInteger(stored.version) && stored.version > 0 ? stored.version : 1,
     })
-  } catch (error) {
-    if (error?.code === 'ENOENT') return null
-    throw error
-  }
+    return { map, summary: { ...mapSummary(map), reconstructionPending: Boolean(map.reconstructionPending) },
+      runtime: { id: mapId, trashedAt: map.trashedAt, nodes: map.nodes.flatMap((node) => {
+        const links = aiConversationLinksFromData(node.data)
+        return links.length ? [{ id: node.id, data: { aiConversations: links } }] : []
+      }) } }
+  }, select)
+}
+
+async function readMap(mapId, options = {}) {
+  return readMapProjection(mapId, options)
+}
+
+async function listActiveMapIds() {
+  const lifecycle = documentReconstruction?.metadataSnapshot() ?? {}
+  return (await readdir(dataDirectory, { withFileTypes: true }))
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.json') && isValidMapId(entry.name.slice(0, -5)))
+    .map((entry) => entry.name.slice(0, -5))
+    .filter((id) => !lifecycle[id]?.trashedAt && !lifecycle[id]?.archivedAt && !lifecycle[id]?.reconstructionPending)
 }
 
 async function listMaps({ trashedOnly = false, archivedOnly = false, includeArchived = false, includePending = false, includeTrashed = false, lifecycleRetries = 3 } = {}) {
@@ -1409,12 +1431,12 @@ async function listMaps({ trashedOnly = false, archivedOnly = false, includeArch
   }
   const maps = await Promise.all(entries
     .filter((entry) => entry.isFile() && entry.name.endsWith('.json') && isValidMapId(entry.name.slice(0, -5)))
-    .map((entry) => readMap(entry.name.slice(0, -5), { lifecycleMetadata: lifecycleSnapshot?.[entry.name.slice(0, -5)] ?? {} })))
+    .map((entry) => readMapProjection(entry.name.slice(0, -5), { lifecycleMetadata: lifecycleSnapshot?.[entry.name.slice(0, -5)] ?? {} }, (value) => value.summary)))
   const summaries = maps
     .filter((map) => map && (includeTrashed || (trashedOnly ? Boolean(map.trashedAt) : !map.trashedAt))
       && (includePending || !map.reconstructionPending)
       && (archivedOnly ? Boolean(map.archivedAt) : trashedOnly || includeArchived || !map.archivedAt))
-    .map(mapSummary)
+    .map(({ reconstructionPending: _pending, ...summary }) => summary)
   if (trashedOnly) {
     return summaries.sort((first, second) => String(second.trashedAt ?? '').localeCompare(String(first.trashedAt ?? '')))
   }
@@ -1621,6 +1643,7 @@ async function writeStoredMap(mapId, payload, reconstructionCreate = false) {
   await writeFile(temporaryFile, `${JSON.stringify(payload, null, 2)}\n`, 'utf8')
   if (!reconstructionCreate) documentReconstruction?.assertWritable(mapId)
   await replaceFileWithRetry(temporaryFile, mapFile)
+  documentReads.invalidate(mapId)
 }
 
 async function migrateStoredMapEdges() {
@@ -1776,6 +1799,82 @@ function persistAiDelegations() {
   aiDelegationWriteQueue = aiDelegationWriteQueue.catch(() => {})
     .then(() => writeStoredArray(aiDelegationsFile, storedDelegations))
   return aiDelegationWriteQueue
+}
+
+async function removeLegacyAiCompletionNotifications() {
+  let removed = 0
+  for (const user of users) {
+    const file = notificationFileForUser(user.id)
+    const stored = await readStoredArray(file)
+    const remaining = stored.filter((item) => item.type !== AI_DELEGATION_COMPLETION_NOTIFICATION_TYPE)
+    if (remaining.length === stored.length) continue
+    await writeStoredArray(file, remaining)
+    removed += stored.length - remaining.length
+  }
+  return removed
+}
+
+let completedHistoryCleanup = null
+function cleanupCompletedAiHistory() {
+  if (process.env.MNP_COMPLETED_AI_CLEANUP_DISABLED === '1') return Promise.resolve({ disabled: true })
+  if (completedHistoryCleanup) return completedHistoryCleanup
+  completedHistoryCleanup = (async () => {
+    const release = await acquireDocumentMutation(true)
+    try {
+      const leases = { ...localWorkspacePoolManager.state?.leases, ...remoteWorkspacePool.state?.leases }
+      const records = [...aiDelegations.values()]
+      const unfinishedLeases = Object.values(leases).filter((lease) => !['completed', 'cancelled'].includes(lease.status))
+      const occupiedLeaseIds = referencedHistoryIds(unfinishedLeases, new Set(Object.keys(leases)))
+      for (const state of [localWorkspacePoolManager.state, remoteWorkspacePool.state]) {
+        if (state?.integrationLeaseId) occupiedLeaseIds.add(state.integrationLeaseId)
+        for (const current of Object.values(state?.workspaces ?? {})) if (current.leaseId) occupiedLeaseIds.add(current.leaseId)
+      }
+      const ids = completedDelegationIds(records, { leases,
+        busy: (id) => aiDelegationActions.has(id) || integrationRecoveryQueue.running.has(id),
+        extraReferences: [...groupDocumentInstructions.values(), ...unfinishedLeases], protectedLeaseIds: occupiedLeaseIds,
+        remoteLeaseIds: new Set(Object.keys(remoteWorkspacePool.state?.leases ?? {})),
+      })
+      const protectedLeaseIds = referencedHistoryIds([...records.filter((item) => !ids.has(item.id)), ...groupDocumentInstructions.values()], new Set(Object.keys(leases)))
+      const localIds = completedWorkspaceLeaseIds(localWorkspacePoolManager.state, { protectedLeaseIds })
+      const remoteIds = completedWorkspaceLeaseIds(remoteWorkspacePool.state, { protectedLeaseIds, remote: true })
+      const localLeases = structuredClone(Object.fromEntries([...localIds].map((id) => [id, localWorkspacePoolManager.state.leases[id]])))
+      const remoteLeases = structuredClone(Object.fromEntries([...remoteIds].map((id) => [id, remoteWorkspacePool.state.leases[id]])))
+      const backups = path.join(dataDirectory, '_completed-ai-cleanup-backups')
+      if (ids.size || localIds.size || remoteIds.size) {
+        const localResultFiles = await readCompletedJobResults(localWorkspacePoolManager.registry?.sharedRoot, localLeases)
+        await saveHistoryCleanupBackup(backups, {
+          delegations: records.filter((item) => ids.has(item.id)), localLeases, remoteLeases, localResultFiles,
+        })
+      }
+      if (ids.size) {
+        await aiDelegationRequestFailures.preserveResolutionsBeforeCleanup(ids, aiDelegations)
+        const nextReceipts = new Map(aiRequestReceipts)
+        for (const record of records) if (ids.has(record.id)) nextReceipts.set(record.id, completedRequestReceipt(record))
+        // 중복 방지 정보를 먼저 저장한다. 중간 종료 시 상세 이력 정리는 다음 실행에서 반복할 수 있다.
+        await writeStoredArray(aiRequestReceiptsFile, [...nextReceipts.values()])
+        const receiptFile = await open(aiRequestReceiptsFile, 'r+')
+        try { await receiptFile.sync() } finally { await receiptFile.close() }
+        for (const [id, receipt] of nextReceipts) aiRequestReceipts.set(id, receipt)
+        for (const id of ids) aiDelegations.delete(id)
+        try { await persistAiDelegations() } catch (error) {
+          for (const record of records) if (ids.has(record.id)) aiDelegations.set(record.id, record)
+          throw error
+        }
+        for (const id of ids) aiDelegationWaitPolls.delete(id)
+      }
+      const local = await localWorkspacePoolManager.pruneCompletedLeases({ protectedLeaseIds,
+        allowedLeaseIds: localIds, expectedLeases: localLeases })
+      const remote = await remoteWorkspacePool.pruneCompletedLeases({ protectedLeaseIds,
+        allowedLeaseIds: remoteIds, expectedLeases: remoteLeases })
+      await pruneHistoryCleanupBackups(backups)
+      if (ids.size || local.removed || remote.removed) console.log('[AI history cleanup]', JSON.stringify({
+        delegations: ids.size, localLeases: local.removed, remoteLeases: remote.removed,
+        resultFilesFailed: local.resultFilesFailed,
+      }))
+      return { delegations: ids.size, local, remote }
+    } finally { release() }
+  })().finally(() => { completedHistoryCleanup = null })
+  return completedHistoryCleanup
 }
 
 function persistGroupDocumentInstructions() {
@@ -2013,6 +2112,9 @@ async function recoverAiConversationOrigins() {
 }
 
 async function loadAiDelegations() {
+  for (const receipt of await readStoredArray(aiRequestReceiptsFile)) {
+    if (isValidAiDelegationId(receipt?.id)) aiRequestReceipts.set(receipt.id, receipt)
+  }
   const storedDelegations = await readStoredArray(aiDelegationsFile)
   let rejectedCount = 0
   let repairedCount = 0
@@ -3015,7 +3117,7 @@ async function sendAiDelegationResponse(response, statusCode, reasonCode, messag
       parentHomeMachineId: context.parentHomeMachineId, targetHomeMachineId: context.targetHomeMachineId,
       status: statusCode, reasonCode }))
   }
-  if (statusCode >= 400 && context && !aiDelegations.has(context.delegationId)) {
+  if (statusCode >= 400 && context && !aiDelegations.has(context.delegationId) && !aiRequestReceipts.has(context.delegationId)) {
     try {
       const failure = await aiDelegationRequestFailures.record(context, { status: statusCode, reasonCode, message })
       if (failure) {
@@ -3881,19 +3983,6 @@ async function ensureAiDelegationNotification(delegation, { kind, message, dedup
     [notificationKey]: dedupeKey,
     [`${kind}NotificationId`]: notification.id,
     [`${kind}NotifiedAt`]: notification.createdAt,
-  })
-}
-
-// 하위 작업 완료 알림은 차단 알림과 다른 타입으로 만들어 화면에서 구분한다.
-// 이미 알린 위임은 dedupeKey로 건너뛰므로 보고 재전달·결과 재확인이 반복돼도 중복 생성되지 않는다.
-async function ensureAiDelegationCompletionNotification(delegation) {
-  const notice = aiDelegationCompletionNotice(delegation)
-  if (!notice) return delegation
-  return ensureAiDelegationNotification(delegation, {
-    kind: 'completed',
-    type: AI_DELEGATION_COMPLETION_NOTIFICATION_TYPE,
-    dedupeKey: notice.dedupeKey,
-    message: notice.message,
   })
 }
 
@@ -5114,11 +5203,6 @@ async function pollAiDelegations() {
       if (remoteLease && ['preparing', 'quarantined'].includes(remoteLease.status)
         && ['recovery-required', 'integration-recovery-required'].includes(delegation.state)) continue
       if (delegation.resultCorrection?.phase === 'preparing') continue
-      try {
-        delegation = await ensureAiDelegationCompletionNotification(delegation)
-      } catch (error) {
-        console.warn('[AI delegation completion notification]', error)
-      }
       const delivered = aiDelegationStoredReportDeliveryPatch(delegation)
       if (delivered) {
         await updateAiDelegation(delegation.id, delivered)
@@ -5530,7 +5614,7 @@ function fetchAiConversationRuntime(conversationId) {
 
 function aiConversationDelegationContextStats(conversationId, { excludeDelegationId = null, excludeInstructionId = null } = {}) {
   const records = [
-    ...[...aiDelegations.values()]
+    ...[...aiDelegations.values(), ...[...aiRequestReceipts.values()].filter((item) => !aiDelegations.has(item.id))]
       .filter((delegation) => delegation.id !== excludeDelegationId && delegation.targetConversationId === conversationId)
       .map((delegation) => ({ strategy: delegation.strategy, createdAt: delegation.createdAt })),
     ...[...groupDocumentInstructions.values()]
@@ -5635,7 +5719,7 @@ function refreshAiConversationRuntimeForMap(mapId, suppliedRuntimeSnapshots = nu
   if (existing) return existing
 
   const refresh = (async () => {
-    const map = await readMap(mapId)
+    const map = await readMapProjection(mapId, {}, (value) => value.runtime)
     const targets = map && !map.trashedAt
       ? map.nodes.flatMap((node) => {
           const conversations = aiConversationLinksFromData(node.data).map((link) => ({
@@ -6414,7 +6498,7 @@ async function listNotifications(userId) {
     notifications = []
   }
   return notifications
-    .filter((notification) => notification?.userId === userId)
+    .filter((notification) => notification?.userId === userId && notification.type !== AI_DELEGATION_COMPLETION_NOTIFICATION_TYPE)
     .sort((first, second) => String(second.createdAt).localeCompare(String(first.createdAt)))
     .slice(0, 200)
 }
@@ -7279,7 +7363,7 @@ async function permanentlyDeleteTrashedMaps(mapIds) {
     if (aiRecordReferencesMaps(launch, deletedMapIds)) aiLaunchTracking.remove(key)
   }
   removeAiDocumentRecords(uniqueMapIds, deletedAiDocumentIds, [
-    aiAttributions, aiConversationAttributions, aiConversationOrigins, aiDelegations, groupDocumentInstructions, aiConversationLaunches,
+    aiAttributions, aiConversationAttributions, aiConversationOrigins, aiDelegations, aiRequestReceipts, groupDocumentInstructions, aiConversationLaunches,
   ])
   for (const id of removedDelegationIds) aiDelegationWaitPolls.delete(id)
   for (const id of uniqueMapIds) clearAiConversationRuntimeMap(id)
@@ -7287,6 +7371,7 @@ async function permanentlyDeleteTrashedMaps(mapIds) {
   const cleanupResults = await Promise.allSettled([
     persistAiAttributions(), persistAiConversationAttributions(), persistAiConversationOrigins(),
     persistAiDelegations(), persistGroupDocumentInstructions(), aiDelegationRequestFailures.purgeMaps(uniqueMapIds),
+    writeStoredArray(aiRequestReceiptsFile, [...aiRequestReceipts.values()]),
   ])
   if (cleanupResults.some((result) => result.status === 'rejected')) {
     throw reconstructionError('AI 기록 정리가 일부 실패했습니다. 문서는 휴지통에 남아 있습니다. 저장소 상태를 확인한 뒤 영구 삭제를 다시 시도하세요.', 500, 'TRASH_AI_RECORD_CLEANUP_FAILED')
@@ -7495,7 +7580,7 @@ const groupProjects = createGroupProjects({
   documentInstructions: groupDocumentInstructions, publicDocumentInstruction: groupDocumentInstructionPublicView,
 })
 const readDocumentGroups = createDocumentGroupMetadata({
-  listMaps, readMap, readLayout: readDocumentLayout, readProject: groupProjects.read,
+  listMaps, listMapIds: listActiveMapIds, readMap, readLayout: readDocumentLayout, readProject: groupProjects.read,
 })
 
 const aiDialogPreferences = await createAiDialogPreferences({ dataDirectory, replaceFile: replaceFileWithRetry })
@@ -7520,8 +7605,11 @@ const doorayResponses = createDoorayResponseIntegration({
 })
 
 const acquireDocumentMutation = createDocumentMutationGate()
+await removeLegacyAiCompletionNotifications().catch((error) => console.warn('[AI completion notification cleanup]', error))
+await cleanupCompletedAiHistory().catch((error) => console.warn('[AI history cleanup deferred]', error))
 
 const server = createServer(runtimeLifecycle.request(async (request, response) => {
+  const requestTiming = startRequestTiming(request, response)
   const loopbackLocation = localLoopbackRedirectLocation(request)
   if (loopbackLocation) {
     response.writeHead(307, {
@@ -7563,7 +7651,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         || /^\/api\/maps\/[^/]+\/content-patch$/.test(url.pathname)
         || /^\/api\/document-reconstructions\/(apply|[^/]+\/rollback)$/.test(url.pathname)
         || /^\/api\/card-layouts\/[^/]+\/apply$/.test(url.pathname)
-      releaseDocumentMutation = await acquireDocumentMutation(isTransition)
+      releaseDocumentMutation = await requestTiming.measure('mutationWaitMs', () => acquireDocumentMutation(isTransition))
     }
     const writableMapRoute = url.pathname.match(/^\/api\/maps\/([^/]+)(\/.*)?$/)
     if (writableMapRoute && !['GET', 'HEAD', 'OPTIONS'].includes(request.method) && writableMapRoute[2] !== '/archive') {
@@ -10178,6 +10266,17 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         newConversation: body.newConversation,
       })
       const existingDelegation = aiDelegations.get(id)
+      const completedReceipt = aiRequestReceipts.get(id)
+      if (!existingDelegation && completedReceipt) {
+        if (completedReceipt.requestSignature !== requestSignature) return sendAiDelegationResponse(response, 409,
+          'AI_DELEGATION_IDEMPOTENCY_CONFLICT', '완료된 요청 ID를 다른 위임에 사용할 수 없습니다.')
+        return sendAiDelegationResponse(response, 200, 'AI_DELEGATION_REPEATED',
+          '이미 완료된 위임입니다. 유예기간이 지난 상세 이력은 삭제됐으며 작업을 다시 실행하지 않았습니다.', {
+            delegation: { id, mapId: completedReceipt.mapId, state: 'completed', displayState: 'completed',
+              workCompleted: true, reportStatus: 'received', reportPending: false, historyDeleted: true },
+            repeated: true, executionRequested: false,
+          })
+      }
       requestContext.requestSignature = requestSignature
       try {
         requestContext.retryOfRequestId = aiDelegationRequestFailures.validateRetry(requestContext, body.retryOfRequestId, aiDelegations)
@@ -12127,7 +12226,10 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
     if (request.method === 'GET' && url.pathname === '/api/maps') {
       const user = requireUser(request, response)
       if (!user) return
-      const maps = await listMaps()
+      const allMaps = await listMaps({ includeArchived: true, includeTrashed: true })
+      const maps = allMaps.filter((map) => !map.archivedAt && !map.trashedAt)
+      const lifecycleCounts = { archived: allMaps.filter((map) => map.archivedAt && !map.trashedAt).length,
+        trashed: allMaps.filter((map) => map.trashedAt).length }
       const documentLayout = await readDocumentLayout(maps.map((map) => map.id))
       let payload
       try {
@@ -12142,7 +12244,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         payload = { maps, documentLayout, documentGroupsStatus: 'unavailable',
           documentGroupsWarning: '문서 목록은 확인했지만 그룹 부가 정보를 확인하지 못했습니다. 소속 없음으로 판단하지 말고 그룹 정보를 다시 조회하세요.' }
       }
-      return sendJson(response, 200, payload)
+      return sendJson(response, 200, { ...payload, lifecycleCounts })
     }
 
     if (request.method === 'GET' && url.pathname === '/api/shared-knowledge/audit') {
@@ -13000,11 +13102,11 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       if (!user) return
 
       if (request.method === 'GET') {
-        const map = await readMap(mapId)
+        const map = await requestTiming.measure('readMapMs', () => readMap(mapId))
         if (!map || map.trashedAt) return sendJson(response, 404, { error: '마인드맵을 찾을 수 없습니다.' })
-        const resolved = await resolveReferencesForMap(map)
+        const resolved = await requestTiming.measure('referencesMs', () => resolveReferencesForMap(map))
         const delegationOrigin = await resolveOrRememberDelegationSource(integrationRequestScope(request), mapId, map)
-        const documentGroups = await readDocumentGroups([mapId])
+        const documentGroups = await requestTiming.measure('groupsMs', () => readDocumentGroups([mapId]))
         return sendJson(response, 200, {
           map: resolved.map,
           ...documentGroupFields(documentGroups[0]),
@@ -13138,6 +13240,7 @@ runtimeLifecycle.interval(() => {
 runtimeLifecycle.interval(() => refreshVisibleAiConversationRuntimes(), aiConversationRuntimePollIntervalMs, 'AI conversation runtime poll')
 
 runtimeLifecycle.interval(() => pollAiDelegations(), aiDelegationPollIntervalMs, 'AI delegation poll')
+runtimeLifecycle.interval(() => cleanupCompletedAiHistory(), 15 * 60_000, 'Completed AI history cleanup')
 
 runtimeLifecycle.interval(() => {
   for (const delegation of aiDelegations.values()) if (integrationRecoveryPending(delegation)) startIntegrationRecovery(delegation.id)

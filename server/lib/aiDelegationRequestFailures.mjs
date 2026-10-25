@@ -140,6 +140,24 @@ export async function createAiDelegationRequestFailures({ filePath, readJson, wr
         && (!targetCardId || item.targetCardId === targetCardId)).map(item => verificationView(item, delegations, records))
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
     },
+    preserveResolutionsBeforeCleanup(delegationIds, delegations) {
+      const action = async () => {
+        let changed = false
+        const next = records.map((record) => {
+          if (record.resolution || record.requestClosure) return record
+          const verified = verifiedReplacement(record, delegations, records)
+          if (!verified || !delegationIds.has(verified.id)) return record
+          changed = true
+          const at = new Date().toISOString()
+          return { ...record, updatedAt: at, resolution: { delegationId: verified.id, method: verified.method,
+            at, actorId: 'system', note: '완료 상세 이력 정리 전에 정상 재접수 근거를 확인했습니다.' } }
+        })
+        if (changed) { await writeJson(filePath, next); records = next }
+      }
+      const result = queue.catch(() => {}).then(action)
+      queue = result.catch(() => {})
+      return result
+    },
     validateRetry(context, requestId, delegations) {
       if (requestId === undefined) return null
       const failure = records.find(item => item.id === requestId)

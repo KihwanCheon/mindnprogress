@@ -4,6 +4,7 @@ import path from 'node:path'
 import { WorkspacePoolManager, WorkspacePoolUnavailableError, integrationWorktreeDirtyReasonCode } from './workspacePool.mjs'
 import { RemoteWorkspaceArtifacts } from './remoteWorkspaceArtifacts.mjs'
 import { aiDelegationBusyDispatchRejected, aiDelegationWorkspaceLeaseMatches } from './aiDelegations.mjs'
+import { completedWorkspaceLeaseIds } from './completedAiHistory.mjs'
 import { assertAiDelegationInterruptedLease } from './aiDelegationInterruptedRecovery.mjs'
 import { REMOTE_WORKSPACE_VERSION, identifier, commitId, git, hasCommit, jsonFile, saveJson, stableHash, workspaceError, assignmentMatches } from './remoteWorkspaceProtocol.mjs'
 
@@ -30,6 +31,27 @@ export class RemoteWorkspacePool {
     return result
   }
   persist() { return saveJson(this.stateFile, this.state) }
+  pruneCompletedLeases(options = {}) {
+    return this.exclusive(async () => {
+      if (!this.state) return { removed: 0 }
+      const leases = Object.values(this.state.leases)
+      const ids = completedWorkspaceLeaseIds(this.state, { now: this.now(), ...options, remote: true })
+      if (!ids.size) return { removed: 0 }
+      const previous = this.state
+      const generations = { ...previous.workerGenerations }
+      const completedRequests = { ...previous.completedRequests }
+      for (const lease of leases) {
+        const key = `${lease.ownership.machineId}:${lease.ownership.poolId}:${lease.workspaceId}`
+        generations[key] = Math.max(generations[key] ?? 0, lease.ownership.generation)
+        if (ids.has(lease.leaseId) && lease.requestId) completedRequests[lease.requestId] = lease.leaseId
+      }
+      this.state = { ...previous, workerGenerations: generations, completedRequests,
+        leases: Object.fromEntries(Object.entries(previous.leases).filter(([id]) => !ids.has(id))) }
+      try { await this.persist() } catch (error) { this.state = previous; throw error }
+      for (const id of ids) this.stages.delete(id)
+      return { removed: ids.size }
+    })
+  }
   async initialize() {
     const stored = await jsonFile(this.stateFile)
     this.state = stored ?? { schemaVersion: 1, coordinatorId: `mnp-${randomUUID()}`, pools: {}, reports: {}, leases: {} }
@@ -194,6 +216,7 @@ export class RemoteWorkspacePool {
       await this.cleanupCompletedLeases()
       const { machineId, requestId, mapId, cardId, conversationId = '', cardLabel } = options
       identifier(requestId)
+      if (this.state.completedRequests?.[requestId]) throw workspaceError('REMOTE_WORKSPACE_REQUEST_COMPLETED')
       const prior = Object.values(this.state.leases).find((lease) => lease.requestId === requestId)
       if (prior) {
         if (prior.ownership.machineId !== machineId || prior.mapId !== mapId || prior.cardId !== cardId) throw workspaceError('REMOTE_WORKSPACE_REQUEST_CONFLICT')
@@ -230,13 +253,16 @@ export class RemoteWorkspacePool {
       }
       const baselineMode = baselineCommit === baseCommit ? 'present' : 'delta'
       const jobId = `job-${randomUUID()}`, leaseId = `lease-${randomUUID()}`
-      const generation = Math.max(worker.generation ?? 0, ...Object.values(this.state.leases).filter((item) => item.ownership.machineId === machineId && item.workspaceId === worker.workspaceId).map((item) => item.ownership.generation)) + 1
+      const generationKey = `${machineId}:${pool.poolId}:${worker.workspaceId}`
+      const generation = Math.max(worker.generation ?? 0, this.state.workerGenerations?.[generationKey] ?? 0, ...Object.values(this.state.leases).filter((item) => item.ownership.machineId === machineId && item.workspaceId === worker.workspaceId).map((item) => item.ownership.generation)) + 1
       const lease = { poolId: pool.poolId, workspaceId: worker.workspaceId, jobId, leaseId, requestId,
         ownership: { coordinatorId: this.state.coordinatorId, machineId, poolId: pool.poolId, generation },
         projectRoot: worker.projectRoot, sharedRoot: report.sharedRoot, assetsPath: worker.assetsPath, unityInstanceHash: worker.unityInstanceHash,
         branch: `mnp/${jobId}`, baseBranch, baseCommit, baselineCommit, baselineMode, mapId, cardId, cardLabel, conversationId,
         status: 'preparing', startedAt: new Date().toISOString(), checkpoints: [] }
       this.state.leases[leaseId] = lease
+      this.state.workerGenerations ??= {}
+      this.state.workerGenerations[generationKey] = generation
       await this.persist()
       if (baselineMode === 'delta') {
         const file = this.artifacts.file(leaseId, 'baseline')
