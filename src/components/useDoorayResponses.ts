@@ -143,8 +143,8 @@ export function useDoorayResponses(clientId: string, userId: string) {
       return false
     } finally { if (!signal?.aborted) { setSettingsSaving(false); if (current === settingsSequence.current) setSettingsLoading(false) } }
   }, [cacheSettings, requestJson, userId])
-  const request = async (itemKey: string) => {
-    if (pending.current.has(itemKey)) return
+  const request = async (itemKey: string): Promise<boolean> => {
+    if (pending.current.has(itemKey)) return false
     // 상태가 표시된 버튼은 기록을 여는 동작이다. 재제안은 refine에서만 요청한다.
     const previous = jobs.find((job) => job.itemKey === itemKey)
     if (previous) {
@@ -153,7 +153,7 @@ export function useDoorayResponses(clientId: string, userId: string) {
       setOpen(true)
       setError('')
       setNotice('')
-      return
+      return true
     }
     pending.current.add(itemKey)
     setPendingKeys(new Set(pending.current))
@@ -162,15 +162,17 @@ export function useDoorayResponses(clientId: string, userId: string) {
     const signal = controllerRef.current?.signal
     try {
       const { job } = await requestJson<{ job: DoorayResponseJob }>(base, { method: 'POST', body: JSON.stringify({ itemKey }) })
-      if (signal?.aborted) return
+      if (signal?.aborted) return false
       sequence.current++
       setJobs((current) => [job, ...current.filter((entry) => entry.id !== job.id)])
       setSelectedId(job.id)
       setShowCompleted(Boolean(job.completedAt))
       void loadSettings().catch(() => {})
       setNotice('')
+      return true
     } catch (failure) {
       if (!signal?.aborted) setError(failure instanceof Error ? failure.message : 'AI 대응 요청에 실패했습니다.')
+      return false
     } finally {
       pending.current.delete(itemKey)
       if (!signal?.aborted) setPendingKeys(new Set(pending.current))

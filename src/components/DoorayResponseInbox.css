@@ -24,6 +24,16 @@
 .dooray-response-settings button:disabled { opacity: .6; cursor: default; }
 .dooray-response-settings-help, .dooray-response-settings > p { flex-basis: 100%; margin: 0; color: var(--theme-text-muted, #837c92); }
 .dooray-response-settings > p[role="alert"] { color: #b54444; }
+.dooray-response-request-dialog { width: min(480px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); box-sizing: border-box; padding: 0; overflow-y: auto; border: 1px solid var(--theme-border, #ddd8e5); border-radius: 14px; background: var(--theme-surface, #fff); color: var(--theme-text, #332e3b); box-shadow: 0 24px 70px rgba(25, 18, 44, .32); }
+.dooray-response-request-dialog::backdrop { background: rgba(28, 23, 42, .52); }
+.dooray-response-request-dialog header { padding: 18px 20px 0; }
+.dooray-response-request-dialog h2 { margin: 0; font-size: 16px; }
+.dooray-response-request-dialog header p { margin: 8px 0 0; overflow-wrap: anywhere; font-size: 13px; color: var(--theme-text-muted, #837c92); }
+.dooray-response-request-dialog .dooray-response-settings { display: grid; align-items: stretch; max-height: none; border: 0; padding: 18px 20px; }
+.dooray-response-request-dialog .dooray-response-settings label { max-width: none; }
+.dooray-response-request-dialog .dooray-response-settings select { width: 100%; padding: 8px; }
+.dooray-response-request-dialog .dooray-response-settings-actions { flex-wrap: wrap; margin-top: 6px; }
+.dooray-response-request-dialog .dooray-response-settings-actions button { padding: 8px 12px; }
 .dooray-response-notice { margin: 8px 20px; line-height: 1.5; }
 .dooray-response-completion-help { color: var(--theme-text-muted, #837c92); font-size: 11px; }
 .dooray-response-handoff { margin-top: 12px; padding: 10px; border: 1px solid var(--theme-border, #ddd); border-radius: 8px; }
