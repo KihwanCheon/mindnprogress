@@ -8586,7 +8586,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                   )}
                   {knowledgeError && <em>{knowledgeError}</em>}
                 </section>
-                <label>
+                {(selectedNode.data.isWork || selectedProgressRollup) && <label>
                   <span>상태</span>
                   <select
                     value={selectedProgress >= 100 ? 'done' : selectedStatus}
@@ -8605,7 +8605,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                     <option value="in-progress">진행 중</option>
                     <option value="done">완료</option>
                   </select>
-                </label>
+                </label>}
                 {(selectedNode.data.isWork || selectedProgressRollup) && (
                   <label className={`progress-field ${selectedProgressRollup ? 'automatic' : ''}`}>
                     <span>
@@ -8637,23 +8637,26 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                 <section className={`work-section ${selectedNode.data.isWork ? 'enabled' : ''}`}>
                   <div className="work-section-heading">
                     <div>
-                      <span>업무 관리</span>
+                      <span>카드 용도</span>
                       <small>{selectedNode.data.isWork
-                        ? '담당자와 실행 항목을 관리합니다.'
-                        : selectedHasWaitingItems
-                          ? '업무 관리와 별개로 등록된 대기 항목을 확인합니다.'
-                          : '이 노드를 실행 가능한 업무로 전환합니다.'}</small>
+                        ? '상태·진행률·담당자를 관리하는 업무입니다.'
+                        : selectedProgressRollup
+                          ? '자료 카드이며 하위 업무의 진행률은 자동 집계합니다.'
+                          : '자료·지식을 보관하며 업무 상태를 표시하지 않습니다.'}</small>
                     </div>
-                    <button
-                      type="button"
-                      className={`work-switch ${selectedNode.data.isWork ? 'on' : ''}`}
-                      onClick={() => updateNode(selectedNode.id, { isWork: !selectedNode.data.isWork })}
-                      disabled={selectedReferenceReadOnly}
-                      aria-label={selectedNode.data.isWork ? '업무 관리 해제' : '업무로 전환'}
-                      aria-pressed={Boolean(selectedNode.data.isWork)}
-                    >
-                      <span />
-                    </button>
+                    <div className="card-purpose-options" role="group" aria-label="카드 용도">
+                      {([{ label: '업무', isWork: true }, { label: '자료', isWork: false }]).map((option) => (
+                        <button
+                          key={option.label}
+                          type="button"
+                          onClick={() => updateNode(selectedNode.id, { isWork: option.isWork })}
+                          disabled={selectedReferenceReadOnly}
+                          aria-pressed={Boolean(selectedNode.data.isWork) === option.isWork}
+                        >
+                          {option.label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
 
                   {(selectedNode.data.isWork || selectedHasWaitingItems) && (

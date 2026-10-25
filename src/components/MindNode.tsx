@@ -46,6 +46,8 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
   const assignee = data.assignee
   // Ref 표시를 제목 문자열에 두면 제목이 길 때 가장 먼저 잘리므로 별도 배지로 분리한다.
   const isReference = Boolean(data.reference)
+  const isMaterial = !showsProgress && !isReference && data.kind === 'task' && !data.hasChildren
+  const showsTopline = showsProgress || Boolean(data.commentCount) || Boolean(data.aiDelegationStatus)
   const referenceBroken = data.referenceUnresolved === true
   const displayLabel = isReference
     ? data.label.replace(/\s*\(ref\)\s*$/i, '').trim() || data.label
@@ -82,7 +84,7 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
   return (
     <>
       <NodeOverlapBadge data={data} />
-      <article className={`mind-node ${data.kind} status-${displayStatus} ${isCompleted ? 'completed' : ''} ${showsSelectedStyle ? 'selected' : ''}`}>
+      <article className={`mind-node ${data.kind} ${isMaterial ? 'material' : ''} ${showsProgress ? `status-${displayStatus}` : ''} ${isCompleted ? 'completed' : ''} ${showsSelectedStyle ? 'selected' : ''}`}>
       <Handle type="target" position={Position.Left} isConnectable={isConnectable} />
       {([
         ['top', Position.Top],
@@ -124,11 +126,11 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
           {data.collapsed && <b>{data.hiddenDescendantCount}</b>}
         </button>
       )}
-      <div className="node-topline">
-        <span className={`node-status-badge ${displayStatus}`}>
+      {showsTopline && <div className="node-topline">
+        {showsProgress && <span className={`node-status-badge ${displayStatus}`}>
           <span className="node-status-icon" aria-hidden="true">{statusIcon[displayStatus]}</span>
           <span>{statusText[displayStatus]}</span>
-        </span>
+        </span>}
         {Boolean(data.commentCount) && (
           <span className={`node-comments-badge ${data.unresolvedCommentCount ? 'unresolved' : ''}`} title={`댓글 ${data.commentCount}개 · 미해결 스레드 ${data.unresolvedCommentCount ?? 0}개`}>
             <span aria-hidden="true">💬</span>{data.commentCount}
@@ -140,7 +142,7 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
             {hasProgressRollup ? `${progressRollupScope} ${data.progress}%` : `${data.progress}%`}
           </strong>
         )}
-      </div>
+      </div>}
       {doorayUrl ? (
         <div className="node-title-row dooray-linked-title">
           <span className="dooray-linked-icon" title={isDoorayWiki ? 'Dooray Wiki' : 'Dooray 업무'} aria-label={isDoorayWiki ? 'Dooray Wiki' : 'Dooray 업무'}>D</span>
@@ -172,8 +174,18 @@ export function MindNode({ data, selected, isConnectable }: NodeProps<MindNodeTy
           {referenceBadge}
           <h3>{displayLabel}</h3>
         </div>
+      ) : isMaterial ? (
+        <div className="node-title-row">
+          <span className="node-material-icon" title="자료 카드" aria-label="자료 카드">
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M3.25 1.75h6.2l3.3 3.3v8.2a1 1 0 0 1-1 1h-8.5a1 1 0 0 1-1-1v-10.5a1 1 0 0 1 1-1Z" />
+              <path d="M9.25 1.9v3.35h3.35M4.75 8h5.5M4.75 10.5h5.5" />
+            </svg>
+          </span>
+          <h3 title={data.label}>{data.label}</h3>
+        </div>
       ) : <h3>{data.label}</h3>}
-      <p>{data.description}</p>
+      {!isMaterial && <p>{data.description}</p>}
       {showsProgress && (
         <div className="node-progress" aria-label={hasProgressRollup ? progressRollupAriaLabel : `진행률 ${data.progress}%`}>
           <span style={{ width: `${data.progress}%` }} />
