@@ -40,6 +40,8 @@ AionUi와 AionCore에는 개인 fork를 `origin`, 공식 저장소를 `upstream`
 
 Codex는 `CODEX_HOME`, Claude Code는 `CLAUDE_CONFIG_DIR` 환경변수가 있으면 해당 경로를 대신 사용합니다. 두 전역 구성 폴더의 존재 여부는 서로 독립적으로 처리합니다. 둘 다 없거나 하나만 있어도 설치기는 두 대상 모두에 필요한 폴더를 생성하며, 기존 지침 파일이 있으면 원문을 보존한 채 MnP Suite 관리 블록만 병합합니다.
 
+AionUi에 Claude 계정을 2개 이상 등록해 쓰는 경우 설치기는 위 Claude 폴더 한 곳에만 설치합니다. 두 번째 계정 폴더의 지침 가져오기와 스킬 복사는 [Claude 멀티 계정](../../docs/ai-claude-accounts.md#mnp-suite-설치기와-두-번째-계정)을 따릅니다.
+
 `workspace-pool\workspaces.json`에는 integration과 worker 예시가 `enabled=false`로 생성됩니다. 따라서 실제 Unity 프로젝트 경로를 설정하기 전에는 어떤 작업공간도 점유하지 않습니다.
 
 현재 AionUi fork에 bootstrap이 아직 포함되지 않은 경우 설치기는 `overlays\AionUi-MindNProgress-Mcp.patch`와 `overlays\AionUi-MnPSuite-Optional-Mcp.patch`를 순서대로 사전 검사한 뒤 AionUi 작업 트리에 적용합니다. 첫 overlay는 필수 MindNProgress MCP, 두 번째 overlay는 설치 중 선택한 Dooray·PowerPoint MCP를 처리합니다. fork가 같은 기능을 포함하면 해당 overlay는 자동으로 생략됩니다. overlay가 적용된 AionUi 저장소에는 의도된 로컬 변경이 남으므로, 원격 업데이트 전에는 아래의 업데이트 주의사항을 확인하세요.

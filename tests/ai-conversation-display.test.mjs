@@ -5,6 +5,7 @@ import test from 'node:test'
 import vm from 'node:vm'
 import { buildGroupDocumentInstruction, groupDocumentInstructionOperationId } from '../server/lib/groupDocumentInstructions.mjs'
 import { createAionUiConversationWebUrl } from '../server/lib/aionUiExternalLaunch.mjs'
+import { claudeAccountRequestId } from '../server/lib/aiClaudeAccounts.mjs'
 import {
   formatAiConversationDisplay,
   normalizeAiConversationName,
@@ -80,7 +81,7 @@ function deliveryHarness({ remote = false, unavailable = false } = {}) {
     isAiDelegationModelBlocked: () => false,
     issueDelegatedAttribution: () => ({ token: 'test-token', attribution: { startedBy: 'editor' } }),
     persistAiAttributions: async () => {},
-    buildGroupDocumentInstruction, groupDocumentInstructionOperationId,
+    buildGroupDocumentInstruction, groupDocumentInstructionOperationId, claudeAccountRequestId,
     DOCUMENT_COORDINATOR_INSTRUCTION: '문서 루트 AI 운영 지침',
     formatAiCardConversationTitle: async () => '대상 문서',
     validAiConversationId: value => Boolean(value),

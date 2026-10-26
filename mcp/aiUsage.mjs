@@ -54,5 +54,11 @@ export function buildAiUsageResult(usage, { provider = 'all', now = Date.now() }
       updatedAt: usage?.updatedAt ?? null,
     },
     providers: Object.fromEntries(names.map((name) => [name, providerUsage(usage?.[name], name, now)])),
+    // Claude 멀티 계정: 계정이 2개 이상일 때만 공유 번호 순서의 계정별 값을 더한다. providers.claude는 AionUi 기본 계정이다.
+    ...(names.includes('claude') && Array.isArray(usage?.claudeAccounts) && usage.claudeAccounts.length >= 2
+      ? { claudeAccounts: usage.claudeAccounts.map((account) => ({
+          id: account.id, number: account.number, label: account.label, ...providerUsage(account, 'claude', now),
+        })) }
+      : {}),
   }
 }

@@ -9,10 +9,13 @@ type DoorayApproval = { revision: string; approvedAt: string; approvedBy: { id: 
   handoffs?: { id: string; target: { mapId: string; cardId: string; documentTitle: string; cardTitle: string };
     conversation?: { conversationId: string; homeMachineRole: 'main' | 'sub'; linkedAt: string } }[] }
 
-export type ResponseSettings = { agentId?: string; modelId?: string; mode?: string; thoughtLevel?: string; machineId?: string; proposalWorkspace?: string }
+export type ResponseSettings = { agentId?: string; modelId?: string; mode?: string; thoughtLevel?: string; machineId?: string; proposalWorkspace?: string
+  claudeAccountId?: string }
 type Option = { id: string; label: string }
-type Agent = { id: string; name: string; models: Option[]; modes: Option[]; thoughtLevels: Option[]; defaultModelId: string; defaultMode: string; defaultThoughtLevel: string }
-export type Options = { machineId: string; machineRole?: 'main' | 'sub'; machines: { machineId: string; label: string }[]; agents: Agent[] }
+type Agent = { id: string; name: string; models: Option[]; modes: Option[]; thoughtLevels: Option[]; defaultModelId: string; defaultMode: string; defaultThoughtLevel: string
+  claudeAccounts?: { id: string; number: number; label: string }[] }
+export type Options = { machineId: string; machineRole?: 'main' | 'sub'; machines: { machineId: string; label: string }[]; agents: Agent[]
+  claudeAccountPolicy?: { coordinator?: string; others?: string } }
 export type DoorayResponseJob = {
   id: string; itemKey: string; postId: string; subject: string; sourceUrl: string; status: string; proposal: string; error: string
   createdAt: string; updatedAt: string; conversationId: string | null; homeMachineRole: 'main' | 'sub'; canRetry: boolean

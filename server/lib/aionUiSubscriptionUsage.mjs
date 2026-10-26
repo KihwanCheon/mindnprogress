@@ -85,7 +85,20 @@ export function normalizeAionUiSubscriptionUsage(value, {
       : null,
     claude: normalizeClaude(value.claude, now, staleAfterMs),
     codex: normalizeCodex(value.codex, now, staleAfterMs),
+    ...normalizeClaudeAccounts(value.claudeAccounts, now, staleAfterMs),
   }
+}
+
+// Claude 멀티 계정: 계정이 2개 이상일 때만 계정별 사용량을 더한다. `claude`는 기본 계정이다.
+function normalizeClaudeAccounts(value, now, staleAfterMs) {
+  if (!Array.isArray(value) || value.length < 2) return {}
+  const claudeAccounts = value.flatMap((account) => {
+    const id = String(account?.id ?? '').trim().slice(0, 120)
+    const number = Number(account?.number)
+    if (!id || !Number.isInteger(number) || number < 1) return []
+    return [{ id, number, label: String(account?.label ?? '').trim().slice(0, 80) || id, ...normalizeClaude(account, now, staleAfterMs) }]
+  })
+  return claudeAccounts.length >= 2 ? { claudeAccounts } : {}
 }
 
 export async function readAionUiSubscriptionUsage(filePath, {

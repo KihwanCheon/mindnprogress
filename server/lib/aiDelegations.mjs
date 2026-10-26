@@ -269,6 +269,8 @@ function partialAiDelegationSelectionFromSource(source) {
     disabledBuiltinSkillIds: normalizedSelectionList(source.disabledBuiltinSkillIds),
     mcpIds: normalizedSelectionList(source.mcpIds ?? source.mcpServers),
     workspace: String(source.workspace ?? '').trim().slice(0, 4_096) || null,
+    // Claude 멀티 계정: 계정이 1개면 비어 있어 기존 선택과 같다.
+    claudeAccountId: String(source.claudeAccountId ?? '').trim().slice(0, 120) || null,
   }
 }
 
@@ -309,6 +311,9 @@ export function mergeAiDelegationSelections(...sources) {
     disabledBuiltinSkillIds: firstList(['disabledBuiltinSkillIds'], 'disabledBuiltinSkillIds'),
     mcpIds: firstList(['mcpIds', 'mcpServers'], 'mcpIds'),
     workspace: firstValue('workspace', entries),
+    // 계정은 같은 AI 종류의 선택에서만 물려받는다.
+    claudeAccountId: firstValue('claudeAccountId', compatibleEntries
+      .filter((entry) => !entry.selection.agent || entry.selection.agent.id === agent?.id)),
   }
   return merged.agent && merged.model ? merged : null
 }

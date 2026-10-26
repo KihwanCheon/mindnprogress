@@ -51,6 +51,7 @@ import type { AiConversationLink, AiConversationRuntime, AiDelegationCardStatus,
 import { aiDelegationStatusByCard } from './utils/aiDelegationStatus.mjs'
 import { delegationHierarchyPathNodeIds, delegationPreviewEdgeState, delegationPreviewNodeRole, type AiDelegationSummary } from './utils/aiDelegationManagement.mjs'
 import { resolveAiConversationTarget, type AiConversationExplicitTarget } from './utils/aiConversationLaunch.mjs'
+import { claudeAccountMark, mostUsedClaudeUsageEntry } from './utils/claudeAccounts.mjs'
 import { applyBoxSelection, boxSelectionNodeIds, boxSelectionRect, isBoxSelectionDrag } from './utils/boxSelection.mjs'
 import { copyTextToClipboard } from './utils/clipboardText.mjs'
 import { parseGroupDeepLink } from './utils/groupDeepLink.mjs'
@@ -596,19 +597,23 @@ type SubscriptionUsageWindow = {
   resetsAt: string | null
 }
 
+type ClaudeSubscriptionUsageView = {
+  state: 'loading' | 'ready' | 'unavailable'
+  updatedAt: string | null
+  stale: boolean
+  session: SubscriptionUsageWindow | null
+  weekly: SubscriptionUsageWindow | null
+}
+
 type AionUiSubscriptionUsage = {
   available: boolean
   state: 'loading' | 'ready' | 'partial' | 'unavailable'
   generatedAt: string | null
   updatedAt: string | null
   retryAfterMs: number | null
-  claude: {
-    state: 'loading' | 'ready' | 'unavailable'
-    updatedAt: string | null
-    stale: boolean
-    session: SubscriptionUsageWindow | null
-    weekly: SubscriptionUsageWindow | null
-  } | null
+  claude: ClaudeSubscriptionUsageView | null
+  /** Claude 멀티 계정: 계정이 2개 이상일 때만 있다. `claude`는 기본 계정이다. */
+  claudeAccounts?: Array<ClaudeSubscriptionUsageView & { id: string; number: number; label: string }>
   codex: {
     state: 'loading' | 'ready' | 'unavailable'
     updatedAt: string | null
@@ -1409,13 +1414,26 @@ function AionUiSubscriptionUsageIndicator({ onOpen }: { onOpen?: () => void }) {
 
   const claude = usage?.claude
   const codex = usage?.codex
-  const claudeLoading = claude?.state === 'loading'
   const codexLoading = codex?.state === 'loading'
-  const showClaude = claudeLoading || Boolean(claude?.state === 'ready' && !claude.stale && (claude.session || claude.weekly))
+  // Claude 멀티 계정: 계정이 2개 이상이면 사용량이 가장 높은 계정 하나를 표시하고
+  // 전체 계정은 툴팁과 상세 목록에 보여 준다. 1개면 기존 단일 표시와 같다.
+  const claudeEntries = usage?.claudeAccounts?.length
+    ? usage.claudeAccounts.map((account) => ({
+        key: account.id,
+        label: `Claude ${claudeAccountMark(account.number)}`,
+        name: `Claude ${claudeAccountMark(account.number)} ${account.label}`,
+        value: account as ClaudeSubscriptionUsageView | null | undefined,
+      }))
+    : [{ key: 'claude', label: 'Claude', name: 'Claude', value: claude }]
+  const claudeUsageVisible = (value: ClaudeSubscriptionUsageView | null | undefined) => value?.state === 'loading'
+    || Boolean(value?.state === 'ready' && !value.stale && (value.session || value.weekly))
+  const visibleClaudeEntries = claudeEntries.filter(({ value }) => claudeUsageVisible(value))
+  const pillClaudeEntry = mostUsedClaudeUsageEntry(visibleClaudeEntries)
+  const pillClaudeEntries = pillClaudeEntry ? [pillClaudeEntry] : []
+  const showClaude = visibleClaudeEntries.length > 0
   const showCodex = codexLoading || Boolean(codex?.state === 'ready' && !codex.stale && codex.weekly)
   const visibleUsageValues = [
-    showClaude ? claude?.session?.usedPercent : null,
-    showClaude ? claude?.weekly?.usedPercent : null,
+    ...visibleClaudeEntries.flatMap(({ value }) => [value?.session?.usedPercent, value?.weekly?.usedPercent]),
     showCodex ? codex?.weekly?.usedPercent : null,
     showCodex && codex?.limitReached ? 100 : null,
   ].filter((value): value is number => Number.isFinite(value))
@@ -1424,31 +1442,37 @@ function AionUiSubscriptionUsageIndicator({ onOpen }: { onOpen?: () => void }) {
 
   if (!usage?.available || (!showClaude && !showCodex)) return null
 
-  const claudeTitle = claude?.state === 'ready'
+  const claudeTitle = (name: string, value: ClaudeSubscriptionUsageView | null | undefined) => value?.state === 'ready'
     ? [
-        'Claude 사용량',
-        claude.session ? `5시간 ${Math.round(claude.session.usedPercent)}% · ${usageResetLabel(claude.session.resetsAt)}` : null,
-        claude.weekly ? `주간 ${Math.round(claude.weekly.usedPercent)}% · ${usageResetLabel(claude.weekly.resetsAt)}` : null,
+        `${name} 사용량`,
+        value.session ? `5시간 ${Math.round(value.session.usedPercent)}% · ${usageResetLabel(value.session.resetsAt)}` : null,
+        value.weekly ? `주간 ${Math.round(value.weekly.usedPercent)}% · ${usageResetLabel(value.weekly.resetsAt)}` : null,
       ].filter(Boolean).join('\n')
-    : 'Claude 사용량을 조회하고 있습니다.'
+    : `${name} 사용량을 조회하고 있습니다.`
+  const claudePillTitle = (name: string, value: ClaudeSubscriptionUsageView | null | undefined) => claudeEntries.length > 1
+    ? claudeEntries.map((entry) => claudeUsageVisible(entry.value)
+        ? claudeTitle(entry.name, entry.value)
+        : `${entry.name} 사용량 정보 없음`).join('\n\n')
+    : claudeTitle(name, value)
   const codexTitle = codex?.state === 'ready' && codex.weekly
     ? `Codex 사용량\n주간 ${Math.round(codex.weekly.usedPercent)}% · ${usageResetLabel(codex.weekly.resetsAt)}`
     : 'Codex 사용량을 조회하고 있습니다.'
 
   return (
     <div className="subscription-usage-summary" aria-label="AI 구독 사용량" ref={containerRef}>
-      {showClaude && <div
-        className={`subscription-usage-pill claude ${usageTone(claude?.session?.usedPercent, claude?.weekly?.usedPercent)}`}
-        title={claudeTitle}
+      {pillClaudeEntries.map(({ key, label, name, value }) => <div
+        key={key}
+        className={`subscription-usage-pill claude ${usageTone(value?.session?.usedPercent, value?.weekly?.usedPercent)}`}
+        title={claudePillTitle(name, value)}
       >
-        <strong>Claude</strong>
-        {claudeLoading
+        <strong>{label}</strong>
+        {value?.state === 'loading'
           ? <LoadingUsageDots />
           : <span>{[
-              claude?.session ? `${Math.round(claude.session.usedPercent)}%` : null,
-              claude?.weekly ? `${Math.round(claude.weekly.usedPercent)}%` : null,
+              value?.session ? `${Math.round(value.session.usedPercent)}%` : null,
+              value?.weekly ? `${Math.round(value.weekly.usedPercent)}%` : null,
             ].filter(Boolean).join(' · ')}</span>}
-      </div>}
+      </div>)}
       {showCodex && <div
         className={`subscription-usage-pill codex ${usageTone(codex?.weekly?.usedPercent, codex?.limitReached ? 100 : null)}`}
         title={codexTitle}
@@ -1487,15 +1511,15 @@ function AionUiSubscriptionUsageIndicator({ onOpen }: { onOpen?: () => void }) {
           </button>
         </header>
         <div className="subscription-usage-provider-list">
-          {showClaude && <section className={usageTone(claude?.session?.usedPercent, claude?.weekly?.usedPercent)}>
-            <strong>Claude</strong>
-            {claudeLoading
+          {visibleClaudeEntries.map(({ key, name, value }) => <section key={key} className={usageTone(value?.session?.usedPercent, value?.weekly?.usedPercent)}>
+            <strong>{name}</strong>
+            {value?.state === 'loading'
               ? <LoadingUsageDots />
               : <div>
-                  {claude?.session && <span><b>5시간 {Math.round(claude.session.usedPercent)}%</b><small>{usageResetLabel(claude.session.resetsAt)}</small></span>}
-                  {claude?.weekly && <span><b>주간 {Math.round(claude.weekly.usedPercent)}%</b><small>{usageResetLabel(claude.weekly.resetsAt)}</small></span>}
+                  {value?.session && <span><b>5시간 {Math.round(value.session.usedPercent)}%</b><small>{usageResetLabel(value.session.resetsAt)}</small></span>}
+                  {value?.weekly && <span><b>주간 {Math.round(value.weekly.usedPercent)}%</b><small>{usageResetLabel(value.weekly.resetsAt)}</small></span>}
                 </div>}
-          </section>}
+          </section>)}
           {showCodex && <section className={usageTone(codex?.weekly?.usedPercent, codex?.limitReached ? 100 : null)}>
             <strong>Codex</strong>
             {codexLoading

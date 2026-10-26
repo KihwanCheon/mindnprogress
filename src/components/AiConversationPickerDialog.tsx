@@ -1,8 +1,11 @@
 import { useEffect, useState } from 'react'
 import type { AiConversationLink, AiConversationRuntime } from '../types/mindMap'
+import { claudeAccountMark } from '../utils/claudeAccounts.mjs'
 import './AiConversationPickerDialog.css'
 
 type ConversationListItem = AiConversationLink & {
+  /** Claude 멀티 계정: 계정이 2개 이상일 때만 서버가 붙인다. */
+  claudeAccount?: { id: string; number: number; label: string }
   homeMachineLabel: string
   homeMachineRole: 'main' | 'sub'
   accessible: boolean
@@ -144,7 +147,9 @@ export function AiConversationPickerDialog({ mapId, cardId, cardTitle, onSelect,
                   </span>
                   <strong>{conversation.name || 'AionUi 대화'}</strong>
                   <span className="ai-conversation-choice-model">
-                    {conversation.agent?.label ?? 'AI 종류 정보 없음'} <span>({conversation.model?.label ?? '모델 정보 없음'})</span>
+                    {conversation.agent?.label ?? 'AI 종류 정보 없음'}
+                    {conversation.claudeAccount && ` ${claudeAccountMark(conversation.claudeAccount.number)} ${conversation.claudeAccount.label}`}
+                    {' '}<span>({conversation.model?.label ?? '모델 정보 없음'})</span>
                   </span>
                   <span className="ai-conversation-choice-options">
                     <span>실행 머신 {conversation.homeMachineLabel}{conversation.homeMachineRole === 'main' ? ' · 메인' : ' · 서브'}</span>

@@ -3,7 +3,8 @@ import { mkdir, readFile, writeFile, rm } from 'node:fs/promises'
 import path from 'node:path'
 import { replaceFileWithRetry } from './replaceFileWithRetry.mjs'
 
-const fields = new Map([['agentId', 160], ['modelId', 160], ['thoughtLevel', 160], ['mode', 160], ['machineId', 120], ['proposalWorkspace', 2000]])
+const fields = new Map([['agentId', 160], ['modelId', 160], ['thoughtLevel', 160], ['mode', 160], ['machineId', 120], ['proposalWorkspace', 2000],
+  ['claudeAccountId', 120]])
 const invalid = () => Object.assign(new Error('제안 AI 설정의 종류·모델·사고 레벨을 확인해 주세요.'), { status: 400 })
 
 export function validateDoorayResponseSettings(value) {

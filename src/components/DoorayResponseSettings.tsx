@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { availableAiRuntimeOptionId } from '../utils/aiRuntimeSelections.mjs'
+import { claudeAccountMark, resolveDialogClaudeAccountId } from '../utils/claudeAccounts.mjs'
 import type { Options, ResponseSettings, useDoorayResponses } from './useDoorayResponses'
 import './DoorayResponseInbox.css'
 
@@ -31,14 +32,18 @@ export function DoorayResponseSettings({ response, onClose, onConfirm }: {
     return () => { mounted = false }
   }, [loadSettings, requestJson])
   const agent = options?.agents.find((entry) => entry.id === draft.agentId)
+  // Claude 멀티 계정: 계정이 1개면 claudeAccounts가 없어 설정에 계정을 넣지 않는다.
+  const claudeAccountId = resolveDialogClaudeAccountId(agent?.claudeAccounts, draft.claudeAccountId, options?.claudeAccountPolicy?.others)
   const disabled = loading || response.settingsSaving || submitting
   const canSubmit = !disabled && !error && agent?.models.some((model) => model.id === draft.modelId)
   const submit = async () => {
     if (!canSubmit || submittingRef.current) return
     submittingRef.current = true
     setSubmitting(true)
+    const { claudeAccountId: _previous, ...rest } = draft
+    const settings = claudeAccountId ? { ...rest, claudeAccountId } : rest
     try {
-      if (await (onConfirm ? onConfirm(draft) : saveSettings(draft))) onClose()
+      if (await (onConfirm ? onConfirm(settings) : saveSettings(settings))) onClose()
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : '제안 AI 설정을 적용하지 못했습니다.')
     } finally {
@@ -59,6 +64,9 @@ export function DoorayResponseSettings({ response, onClose, onConfirm }: {
           thoughtLevel: availableAiRuntimeOptionId(next.thoughtLevels, '', next.defaultThoughtLevel),
           mode: availableAiRuntimeOptionId(next.modes, '', next.defaultMode) })
       }}>{options?.agents.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select></label>
+      {agent.claudeAccounts && <label>Claude 계정<select value={claudeAccountId} disabled={disabled} onChange={(event) => setDraft({ ...draft, claudeAccountId: event.target.value })}>
+        {agent.claudeAccounts.map((entry) => <option key={entry.id} value={entry.id}>{`${claudeAccountMark(entry.number)} ${entry.label}`}</option>)}
+      </select></label>}
       <label>AI 모델<select value={draft.modelId ?? ''} disabled={disabled} onChange={(event) => setDraft({ ...draft, modelId: event.target.value })}>
         {agent.models.map((entry) => <option key={entry.id} value={entry.id}>{entry.label}</option>)}
       </select></label>

@@ -69,6 +69,7 @@ export function normalizeAiConversationLink(value) {
     mcpServers: cleanOptions(value.mcpServers),
     ...(cleanText(value.workspace, 4_096) ? { workspace: cleanText(value.workspace, 4_096) } : {}),
     ...(workspacePoolId ? { workspacePoolId } : {}),
+    ...(cleanText(value.claudeAccountId, 120) ? { claudeAccountId: cleanText(value.claudeAccountId, 120) } : {}),
     ...(cleanText(value.requestPreview, 240) ? { requestPreview: cleanText(value.requestPreview, 240) } : {}),
     ...(startedBy ? { startedBy } : {}),
     ...(startedAt ? { startedAt } : {}),
@@ -128,6 +129,7 @@ export function aiConversationLinkFromAionUiConversation(conversation) {
   const modelId = String(extra.current_model_id ?? '').trim()
   const modeId = String(extra.current_mode_id ?? extra.session_mode ?? '').trim()
   const thoughtLevelId = String(extra.thought_level ?? '').trim()
+  const claudeAccountId = String(extra.claude_account_id ?? '').trim()
   const skills = optionValues(extra.skills).map((skill) => {
     if (skill && typeof skill === 'object') {
       const id = String(skill.id ?? skill.name ?? '').trim()
@@ -144,6 +146,7 @@ export function aiConversationLinkFromAionUiConversation(conversation) {
     skills,
     mcpServers: parallelOptions(extra.mcp_server_ids, extra.mcp_servers),
     workspace: extra.workspace,
+    ...(claudeAccountId ? { claudeAccountId } : {}),
     startedAt: conversation.created_at,
   })
 }

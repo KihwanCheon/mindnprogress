@@ -35,6 +35,7 @@ import { useAiDialogSections } from './useAiDialogSections'
 import { useAiWorkspaceHistory } from './useAiWorkspaceHistory'
 import { useAiLaunchConfirmation } from './useAiLaunchConfirmation'
 import { loadWorkspaceContext, saveWorkspaceSetting, type WorkspaceContext, type WorkspaceChoice } from '../utils/workspaceSettings'
+import { CLAUDE_ACCOUNT_ROLE_LABELS, claudeAccountMark, claudeAccountRole, resolveDialogClaudeAccountId, type ClaudeAccountOption, type ClaudeAccountPolicy } from '../utils/claudeAccounts.mjs'
 
 type RuntimeOption = { id: string; label: string; description: string; providerId?: string }
 type AionAgent = {
@@ -49,6 +50,8 @@ type AionAgent = {
   defaultMode: string
   thoughtLevels: RuntimeOption[]
   defaultThoughtLevel: string
+  /** Claude 멀티 계정: 계정이 2개 이상인 Claude 행에만 있다. */
+  claudeAccounts?: ClaudeAccountOption[]
 }
 type AionSkill = { id: string; name: string; description: string; autoInject: boolean }
 type AionMcpServer = { id: string; name: string; description: string; toolCount: number; required: boolean }
@@ -68,6 +71,7 @@ type AionOptions = {
   agents: AionAgent[]
   skills: AionSkill[]
   mcpServers: AionMcpServer[]
+  claudeAccountPolicy?: ClaudeAccountPolicy
 }
 const runtimeSelectionsStorageKey = 'mindnprogress-ai-runtime-selections'
 const mcpSelectionsStorageKey = 'mindnprogress-ai-mcp-selections'
@@ -162,6 +166,8 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
   const [modelId, setModelId] = useState('')
   const [mode, setMode] = useState('')
   const [thoughtLevel, setThoughtLevel] = useState('')
+  const [claudeAccountId, setClaudeAccountId] = useState('')
+  const [saveClaudeAccountDefault, setSaveClaudeAccountDefault] = useState(false)
   const [delegationSelection, setDelegationSelection] = useState<{ userId: string; machineId: string; value: AiDelegationPreferences; notice: string } | null>(null)
   const activeDelegationSelection = delegationSelection?.userId === userId && delegationSelection.machineId === machineId ? delegationSelection : null
   const delegationPreferences = activeDelegationSelection?.value ?? normalizeAiDelegationPreferences(null)
@@ -268,6 +274,11 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
 
   const selectedAgent = useMemo(() => options?.agents.find((agent) => agent.id === agentId) ?? null, [agentId, options])
   const selectedModel = selectedAgent?.models.find((model) => model.id === modelId)
+  // Claude 멀티 계정: 계정이 1개면 claudeAccounts가 없어 아래 값과 화면이 모두 비활성이다.
+  const claudeAccounts = selectedAgent?.claudeAccounts
+  const claudeAccountPurposeRole = claudeAccountRole(purpose)
+  const claudeAccountPolicyId = options?.claudeAccountPolicy?.[claudeAccountPurposeRole]
+  const effectiveClaudeAccountId = resolveDialogClaudeAccountId(claudeAccounts, claudeAccountId, claudeAccountPolicyId)
   const delegationAgent = options?.agents.find((agent) => agent.id === delegationRuntime.agentId)
   const delegationModel = delegationAgent?.models.find((item) => item.id === delegationRuntime.modelId)
   const delegationMode = delegationAgent?.modes.find((item) => item.id === delegationRuntime.mode)
@@ -463,6 +474,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
           workspaceToken: workspaceContext.token,
           workspaceConfirmed: workspaceExplicit,
           requestPreview: userRequest.trim() || automaticRequest,
+          ...(claudeAccounts ? { claudeAccountId: effectiveClaudeAccountId, saveClaudeAccountDefault } : {}),
         }),
       })
       const attribution = await attributionResponse.json().catch(() => ({})) as { attributionToken?: string; completionUrl?: string; statusUrl?: string; editorId?: string; workspace?: string; error?: string; approvalRequest?: string }
@@ -529,6 +541,8 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
       setLaunching(false)
     }
   }
+
+  const renderAgentField = (agents: AionAgent[]) => <label><span>AI 종류</span><select value={agentId} onChange={(event) => changeAgent(event.target.value)}>{agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label>
 
   return (<>
     <div className="ai-dialog-backdrop" onPointerDown={(event) => { if (!launching && event.target === event.currentTarget) onClose() }}>
@@ -598,11 +612,21 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
               <small>MindNProgress가 대화 목적에 맞춰 자동으로 전달하며 편집할 수 없습니다.</small>
             </label>
             <div className="ai-dialog-grid">
-              <label><span>AI 종류</span><select value={agentId} onChange={(event) => changeAgent(event.target.value)}>{options.agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label>
+              {claudeAccounts
+                ? <div className="ai-agent-account-pair">
+                  {renderAgentField(options.agents)}
+                  <label><span>Claude 계정</span><select value={effectiveClaudeAccountId} onChange={(event) => { setClaudeAccountId(event.target.value); setSaveClaudeAccountDefault(false) }}>{claudeAccounts.map((account) => <option key={account.id} value={account.id}>{`${claudeAccountMark(account.number)} ${account.label}`}</option>)}</select></label>
+                </div>
+                : renderAgentField(options.agents)}
               <label><span>모델</span><select value={modelId} onChange={(event) => setModelId(event.target.value)}>{selectedAgent?.models.map((model) => <option key={`${model.providerId ?? ''}-${model.id}`} value={model.id}>{model.label}</option>)}</select></label>
               {selectedAgent && selectedAgent.modes.length > 0 && <label><span>권한</span><select value={mode} onChange={(event) => setMode(event.target.value)}>{selectedAgent.modes.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>}
-              {selectedAgent && selectedAgent.thoughtLevels.length > 0 && <label><span>사고 수준</span><select value={thoughtLevel} onChange={(event) => setThoughtLevel(event.target.value)}>{selectedAgent.thoughtLevels.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>}
-            </div>
+              {selectedAgent && selectedAgent.thoughtLevels.length > 0 && <label><span>사고 수준</span><select value={thoughtLevel} onChange={(event) => setThoughtLevel(event.target.value)}>{selectedAgent.thoughtLevels.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>}            </div>
+            {claudeAccounts && (effectiveClaudeAccountId === claudeAccountPolicyId
+              ? <p className="ai-claude-account-default">{CLAUDE_ACCOUNT_ROLE_LABELS[claudeAccountPurposeRole]}의 기본 계정입니다. AI가 만드는 위임 대화는 문서·카드 대화와 AI 위임의 기본 계정을 사용합니다.</p>
+              : <label className="ai-claude-account-default">
+                <input type="checkbox" checked={saveClaudeAccountDefault} onChange={(event) => setSaveClaudeAccountDefault(event.target.checked)} />
+                <span>이 계정을 {CLAUDE_ACCOUNT_ROLE_LABELS[claudeAccountPurposeRole]}의 기본 계정으로 사용</span>
+              </label>)}
             <details className="ai-delegation-model-section">
               <summary><span className="ai-section-label">AI 위임 모델</span><span className="ai-section-selection" title={delegationSummary}>{delegationSummary}</span></summary>
               <div className="ai-delegation-model-content">

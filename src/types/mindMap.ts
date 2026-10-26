@@ -116,6 +116,8 @@ export type AiConversationLink = {
   mcpServers: AiConversationOptionSnapshot[]
   workspace?: string
   workspacePoolId?: string
+  /** Claude 멀티 계정: 기본 계정이 아닌 계정으로 만든 대화만 값이 있다. */
+  claudeAccountId?: string
   requestPreview?: string
   startedBy?: AiConversationOptionSnapshot
   startedAt?: string

@@ -10,6 +10,8 @@ import { aiRecordReferencesMaps, createAiDocumentRecordMap, removeAiDocumentReco
 import { createRuntimeLifecycle, installRuntimeShutdown } from './lib/runtimeLifecycle.mjs'
 import { retryDispatchStatus, throwIfRuntimeStopping } from './lib/runtimeStopping.mjs'
 import { createAiWorkspaceSettings } from './lib/aiWorkspaceSettings.mjs'
+import { claudeAccountRequestId, claudeAccountRoleForPurpose, createAiClaudeAccountPolicy, findClaudeAccount,
+  formatAiAuthorName, normalizeClaudeAccounts, resolveClaudeAccountSelection } from './lib/aiClaudeAccounts.mjs'
 import { createAiDialogPreferences } from './lib/aiDialogPreferences.mjs'
 import { replaceFileWithRetry } from './lib/replaceFileWithRetry.mjs'
 import { backfillDailyBackupHistory } from './lib/dailyBackupHistory.mjs'
@@ -2500,6 +2502,15 @@ async function delegationCreateSelection(targetCard, requestedSelection, parentA
   selection.agent = { id: resolvedAgent.id, label: resolvedAgent.name }
   selection.model = { id: resolvedModel.id, label: resolvedModel.label }
   selection.providerId = resolvedModel.providerId ?? selection.providerId
+  // Claude 멀티 계정: AI가 만드는 새 대화(위임·그룹 지시)는 '그 외' 용도 정책 계정을 쓰고,
+  // 정책이 없으면 상위 대화의 계정을 물려받는다. 계정이 1개면 값이 비워진다.
+  selection.claudeAccountId = resolveClaudeAccountSelection({
+    accounts: resolvedAgent.claudeAccounts,
+    requested: selection.claudeAccountId,
+    policyAccountId: aiClaudeAccountPolicy.get(machineId).others,
+    enforcePolicy: true,
+  })
+  selection.claudeAccount = findClaudeAccount(resolvedAgent.claudeAccounts, selection.claudeAccountId)
 
   const mcpServers = normalizeAionUiMcpServers(rawMcpServers)
   const requiredMcpIds = mcpServers.filter((server) => server.required).map((server) => server.id)
@@ -2511,7 +2522,7 @@ function issueDelegatedAttribution({ mapId, cardId, conversationId, selection, s
   const token = randomBytes(32).toString('base64url')
   const now = Date.now()
   const attribution = {
-    authorName: `${selection.agent.label}(${selection.model.label})`,
+    authorName: formatAiAuthorName(selection.agent.label, selection.model.label, selection.claudeAccount),
     agentId: selection.agent.id,
     agentName: selection.agent.label,
     modelId: selection.model.id,
@@ -2530,6 +2541,7 @@ function issueDelegatedAttribution({ mapId, cardId, conversationId, selection, s
       skills: selection.enabledSkillIds.map((id) => ({ id, label: id })),
       mcpServers: selection.mcpIds.map((id) => ({ id, label: id })),
       workspace: selection.workspace,
+      ...(selection.claudeAccountId ? { claudeAccountId: selection.claudeAccountId } : {}),
     },
     createdAt: now,
     expiresAt: now + aiAttributionDurationMs,
@@ -2689,6 +2701,7 @@ async function linkGroupDocumentInstructionConversation({ instruction, targetMap
     skills: selection.enabledSkillIds.map((skillId) => ({ id: skillId, label: skillId })),
     mcpServers: selection.mcpIds.map((mcpId) => ({ id: mcpId, label: mcpId })),
     workspace: selection.workspace,
+    claudeAccountId: selection.claudeAccountId,
     requestPreview: instruction.instructionPreview,
     startedBy: { id: attribution.startedBy, label: users.find((candidate) => candidate.id === attribution.startedBy)?.name ?? attribution.startedBy },
     startedAt: new Date().toISOString(),
@@ -2829,6 +2842,7 @@ async function runGroupDocumentInstructionDispatch(instruction, user) {
                 disabledBuiltinSkillIds: selection.disabledBuiltinSkillIds,
                 mcpIds: selection.mcpIds,
                 workspace: selection.workspace,
+                ...(claudeAccountRequestId(selection.claudeAccountId) ? { claudeAccountId: claudeAccountRequestId(selection.claudeAccountId) } : {}),
               } }),
           instruction: deliveredInstruction,
         },
@@ -3331,6 +3345,7 @@ async function dispatchPreparedAiDelegation({
             disabledBuiltinSkillIds: selection.disabledBuiltinSkillIds,
             mcpIds: selection.mcpIds,
             workspace: selection.workspace,
+            ...(claudeAccountRequestId(selection.claudeAccountId) ? { claudeAccountId: claudeAccountRequestId(selection.claudeAccountId) } : {}),
           },
         }),
         instruction: delegatedInstruction,
@@ -3468,6 +3483,7 @@ async function dispatchPreparedAiDelegation({
         skills: selection.enabledSkillIds.map((skillId) => ({ id: skillId, label: skillId })),
         mcpServers: selection.mcpIds.map((mcpId) => ({ id: mcpId, label: mcpId })),
         workspace: selection.workspace,
+        claudeAccountId: selection.claudeAccountId,
         workspacePoolId: workspaceLease?.poolId ?? null,
         requestPreview: instruction,
         startedBy: { id: attribution.startedBy, label: users.find((candidate) => candidate.id === attribution.startedBy)?.name ?? attribution.startedBy },
@@ -5846,6 +5862,43 @@ function normalizeAionUiOption(option) {
   }
 }
 
+// Claude 멀티 계정: 실행 머신별 계정 목록(30초 캐시). 계정이 1개면 빈 목록이다.
+const claudeAccountCatalogCache = new Map()
+async function claudeAccountCatalog(machineId) {
+  const cached = claudeAccountCatalogCache.get(machineId)
+  if (cached && cached.expiresAt > Date.now()) return cached.value
+  const value = new Map()
+  try {
+    const agents = await fetchAionUiOn(machineId, '/api/agents/management')
+    for (const agent of Array.isArray(agents) ? agents : []) {
+      const accounts = normalizeClaudeAccounts(agent)
+      if (accounts) value.set(String(agent.id), accounts)
+    }
+  } catch (error) {
+    throwIfRuntimeStopping(error, runtimeLifecycle.signal)
+  }
+  claudeAccountCatalogCache.set(machineId, { value, expiresAt: Date.now() + 30_000 })
+  return value
+}
+
+/**
+ * 대화 목록에 계정 번호를 붙인다. 계정이 1개인 머신의 대화는 그대로 둔다.
+ * 연결 목록(view=linked)처럼 머신에 묻지 않는 응답을 늦추지 않도록, 이미 상세 조회에
+ * 성공한 대화의 머신만 조회한다.
+ */
+async function attachClaudeAccounts(conversations) {
+  const machineIds = [...new Set(conversations
+    .filter((conversation) => conversation.liveStatusChecked && conversation.available && conversation.agent?.id)
+    .map((conversation) => conversation.homeMachineId || machineRegistry.mainMachineId))]
+  if (machineIds.length === 0) return conversations
+  const catalogs = new Map(await Promise.all(machineIds.map(async (machineId) => [machineId, await claudeAccountCatalog(machineId)])))
+  return conversations.map((conversation) => {
+    const catalog = catalogs.get(conversation.homeMachineId || machineRegistry.mainMachineId)
+    const account = findClaudeAccount(catalog?.get(conversation.agent?.id), conversation.claudeAccountId)
+    return account ? { ...conversation, claudeAccount: account } : conversation
+  })
+}
+
 function normalizeAionUiAgent(agent, providers) {
   const rawConfigOptions = agent?.config_options
   const configOptions = Array.isArray(rawConfigOptions)
@@ -5875,6 +5928,7 @@ function normalizeAionUiAgent(agent, providers) {
     icon: typeof agent.icon === 'string' ? `${activeAionUiBaseUrl}${agent.icon}` : null,
     backend: String(agent.backend ?? agent.agent_type ?? ''),
     status: String(agent.status ?? 'unknown'),
+    ...(normalizeClaudeAccounts(agent) ? { claudeAccounts: normalizeClaudeAccounts(agent) } : {}),
     models: availableModels.length > 0 ? availableModels : providerModels,
     defaultModelId: String(
       agent?.available_models?.current_model_id
@@ -6071,7 +6125,8 @@ async function resolveConversationAttribution(
   if (!agentId || !modelId || !agentName || !modelName) throw new Error('AIONUI_ATTRIBUTION_NOT_FOUND')
 
   let resolvedStartedBy = startedBy || fallback?.startedBy || null
-  const authorName = `${agentName}(${modelName})`
+  const authorName = formatAiAuthorName(agentName, modelName,
+    findClaudeAccount(agent?.claudeAccounts, cleanAionUiValue(conversation?.extra?.claude_account_id)))
   if (!resolvedStartedBy && inferStartedBy) {
     const comments = await listComments(mapId)
     const previousAuthor = [...comments].reverse().find((comment) => comment.nodeId === cardId
@@ -7593,12 +7648,14 @@ const aiWorkspaceSettings = await createAiWorkspaceSettings({
 })
 
 const doorayResponsePreferences = await createDoorayResponsePreferences({ dataDirectory, replaceFile: replaceFileWithRetry })
+const aiClaudeAccountPolicy = await createAiClaudeAccountPolicy({ dataDirectory, replaceFile: replaceFileWithRetry })
 const doorayResponses = createDoorayResponseIntegration({
   dataDirectory, readStoredRecord, writeStoredRecord, getDoorayApiConfig, listMaps, readMap, readDocumentLayout, groupProjects,
   aionUiCandidateBaseUrls, fetchAionUiOn, resolveTargetMachineForUser, normalizeAionUiAgent, normalizeAiConversationRuntime,
   conversationHomeMachineId, machineAccessibleByUser, listComments, saveMap, broadcastEvent, publicUser,
   rememberAiConversationOrigin, persistAiConversationOrigins, readAionUiMessageContent,
   mainMachineId: machineRegistry.mainMachineId, responsePreferences: doorayResponsePreferences,
+  claudeAccountPolicy: aiClaudeAccountPolicy,
   user: (id) => users.find((user) => user.id === id && user.active !== false && canEdit(user)),
   activeDelegations: (mapId, cardId) => [...aiDelegations.values()].some((delegation) => delegation.mapId === mapId
     && delegation.targetCardId === cardId && !aiDelegationIsTerminal(delegation)),
@@ -8681,10 +8738,21 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         const model = agent?.models.find((candidate) => candidate.id === modelId
           && (!providerId || !candidate.providerId || candidate.providerId === providerId))
         if (!agent || !model) return sendJson(response, 400, { error: '선택한 AI 종류 또는 모델을 AionUi에서 확인할 수 없습니다.' })
+        // Claude 멀티 계정: 사람의 선택이 정책 기본값보다 우선한다.
+        const claudeAccountRole = claudeAccountRoleForPurpose(purpose)
+        const claudeAccountId = resolveClaudeAccountSelection({
+          accounts: agent.claudeAccounts,
+          requested: body.claudeAccountId,
+          policyAccountId: aiClaudeAccountPolicy.get(homeMachineId)[claudeAccountRole],
+        })
+        if (claudeAccountId && body.saveClaudeAccountDefault === true) {
+          await aiClaudeAccountPolicy.set(homeMachineId, claudeAccountRole, claudeAccountId)
+        }
+        const claudeAccount = findClaudeAccount(agent.claudeAccounts, claudeAccountId)
 
         const agentName = agent.name.replace(/\s+/g, ' ').trim().slice(0, 80) || agent.id
         const modelName = model.label.replace(/\s+/g, ' ').trim().slice(0, 120) || model.id
-        const authorName = `${agentName}(${modelName})`
+        const authorName = formatAiAuthorName(agentName, modelName, claudeAccount)
         const attributionToken = randomBytes(32).toString('base64url')
         const completionToken = randomBytes(32).toString('base64url')
         const expiresAt = Date.now() + aiAttributionDurationMs
@@ -8705,7 +8773,10 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           cardId,
           homeMachineId,
           startedBy: user.id,
-          selection: aiConversationSelectionSnapshot(body, agent, model, normalizedSkills, normalizedMcpServers),
+          selection: {
+            ...aiConversationSelectionSnapshot(body, agent, model, normalizedSkills, normalizedMcpServers),
+            ...(claudeAccountId ? { claudeAccountId } : {}),
+          },
           createdAt: Date.now(),
           expiresAt,
         })
@@ -8799,6 +8870,8 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           if (!payload.prompt.includes(context.launch.initialRequest)) return sendJson(response, 409, { error: '승인 전문이 변경되거나 누락되었습니다. 다시 확인해 주세요.' })
         }
         if (!sameExecutionWorkspace(attribution.selection?.workspace, payload.workspace)) return sendJson(response, 409, { error: '확인한 작업공간과 실행 경로가 다릅니다. 다시 시작해 주세요.' })
+        const claudeAccountId = claudeAccountRequestId(attribution.selection?.claudeAccountId)
+        if (claudeAccountId) payload.claudeAccountId = claudeAccountId
         const ticket = await aiLaunchTracking.issue(sessionTokenKey(completionToken), payload, async () => {
           const result = await fetchAionUiOn(launch.homeMachineId, '/api/internal/external-conversation-launches', {
             method: 'POST',
@@ -10806,6 +10879,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
                 disabledBuiltinSkillIds: selection.disabledBuiltinSkillIds,
                 mcpIds: selection.mcpIds,
                 workspace: selection.workspace,
+                ...(claudeAccountRequestId(selection.claudeAccountId) ? { claudeAccountId: claudeAccountRequestId(selection.claudeAccountId) } : {}),
               },
             }),
             instruction: delegatedInstruction,
@@ -10923,6 +10997,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
             skills: selection.enabledSkillIds.map((skillId) => ({ id: skillId, label: skillId })),
             mcpServers: selection.mcpIds.map((mcpId) => ({ id: mcpId, label: mcpId })),
             workspace: selection.workspace,
+            claudeAccountId: selection.claudeAccountId,
             workspacePoolId: workspaceLease?.poolId ?? null,
             requestPreview: instruction,
             startedBy: { id: attribution.startedBy, label: users.find((candidate) => candidate.id === attribution.startedBy)?.name ?? attribution.startedBy },
@@ -11220,6 +11295,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
             mcpServers: recordedLink.mcpServers.length > 0 ? recordedLink.mcpServers : recoveredLink?.mcpServers,
             workspace: currentWorkspace,
             workspacePoolId: currentWorkspacePoolId,
+            claudeAccountId: recordedLink.claudeAccountId ?? recoveredLink?.claudeAccountId,
             startedAt: recordedLink.startedAt ?? recoveredLink?.startedAt,
           }) ?? recordedLink
           const linkedModelId = cardLinks.find((link) => link.conversationId === recordedLink.conversationId)?.model?.id
@@ -11271,7 +11347,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         mapId,
         cardId,
         latestConversationId: card.data?.aiConversationId ?? null,
-        conversations,
+        conversations: await attachClaudeAccounts(conversations),
       })
     }
 
@@ -11935,6 +12011,8 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           agents: url.searchParams.get('purpose') === 'dooray-response' ? filterAutomatedAiAgents(normalizedAgents) : normalizedAgents,
           skills: normalizedSkills,
           mcpServers: normalizedMcpServers,
+          ...(normalizedAgents.some((agent) => agent.claudeAccounts)
+            ? { claudeAccountPolicy: aiClaudeAccountPolicy.get(machineId) } : {}),
         })
       } catch (error) {
         throwIfRuntimeStopping(error, runtimeLifecycle.signal)

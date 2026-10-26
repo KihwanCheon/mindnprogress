@@ -7,6 +7,7 @@ import { createDoorayRateLimiter } from './doorayMentions.mjs'
 import { redactDoorayTranscript } from './doorayExecutionHandoff.mjs'
 import { aiModelPolicy, assertAutomatedAiModelAllowed, canReuseAutomatedAiConversation, isAiModelBlocked, resolveAutomatedAiModel } from './aiModelPolicy.mjs'
 import { doorayResponseSettingsFromResolved, validateDoorayResponseSettings } from './doorayResponsePreferences.mjs'
+import { claudeAccountRequestId, resolveClaudeAccountSelection } from './aiClaudeAccounts.mjs'
 
 const fail = (message, status = 409) => Object.assign(new Error(message), { status, doorayResponseError: true })
 const excerpt = (value, limit) => typeof value === 'string' ? value.slice(0, limit) : ''
@@ -162,7 +163,10 @@ export function createDoorayResponseIntegration(d) {
     }
     return { machineId, proposalWorkspace, machineRole: machineId === d.mainMachineId ? 'main' : 'sub', agentId: agent.id, agentName: agent.name, modelId: model.id, modelName: model.label, modelPolicy, mcpServers,
       mode: option(agent.modes, requested.mode, agent.defaultMode),
-      thoughtLevel: option(agent.thoughtLevels, requested.thoughtLevel, agent.defaultThoughtLevel) }
+      thoughtLevel: option(agent.thoughtLevels, requested.thoughtLevel, agent.defaultThoughtLevel),
+      // Claude 멀티 계정: 저장된 선택을 따르고, 없으면 '그 외' 용도 정책 계정을 쓴다.
+      claudeAccountId: resolveClaudeAccountSelection({ accounts: agent.claudeAccounts, requested: requested.claudeAccountId,
+        policyAccountId: d.claudeAccountPolicy?.get(machineId).others }) }
   }
   const loadMaps = async () => {
     const summaries = await d.listMaps()
@@ -229,7 +233,8 @@ export function createDoorayResponseIntegration(d) {
           skill_ids: [], mcp_ids: mcpIds,
         } },
         extra: { custom_workspace: true, workspace, selected_mcp_server_ids: mcpIds, mnpDoorayOperationId: operationId,
-          mnpDoorayResponseId: owner.id, mnpDoorayUserId: owner.userId },
+          mnpDoorayResponseId: owner.id, mnpDoorayUserId: owner.userId,
+          ...(claudeAccountRequestId(settings.claudeAccountId) ? { claude_account_id: claudeAccountRequestId(settings.claudeAccountId) } : {}) },
       } })
       if (!/^[a-zA-Z0-9_-]{1,120}$/.test(conversation?.id ?? '')) throw fail('AionUi가 생성한 대화 ID를 확인할 수 없습니다.', 502)
       return { ...conversation, workspace }
