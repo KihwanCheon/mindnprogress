@@ -281,7 +281,7 @@ async function apiRequest(pathname, init = {}) {
     aiEditorId,
     aiType,
     aiModel,
-    timeoutMs = 10_000,
+    timeoutMs = 30_000,
     requestAttributionContinuation,
     allowUnresolvedAttribution = false,
     ...requestInit
