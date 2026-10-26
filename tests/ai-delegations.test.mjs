@@ -7,6 +7,8 @@ import {
   aiDelegationWaitPollDue,
   aiDelegationBlocksResume,
   aiDelegationRecoveryAvailability,
+  localChangesIntegrationCommits,
+  integrationGitLockFailure,
   aiDelegationReportResult,
   aiDelegationLimitState,
   aiDelegationAttemptHistory,
@@ -30,6 +32,85 @@ import {
   AI_DELEGATION_COMPLETION_NOTIFICATION_TYPE,
   aiDelegationCompletionNotice,
 } from '../server/lib/aiDelegations.mjs'
+
+test('로컬 변경으로 중단된 완료 커밋 통합은 AI 재개와 구분해서 복구한다', () => {
+  const commit = 'a'.repeat(40)
+  const result = { status: 'quarantined', childStatus: 'completed', headCommit: commit,
+    integrationBranch: 'mnp/integrate/job-test', integrationBaseCommit: 'b'.repeat(40),
+    error: `Command failed: git cherry-pick ${commit}\nerror: your local changes would be overwritten by cherry-pick.\nhint: commit or stash` }
+  const delegation = { state: 'failed', workspaceLease: { leaseId: 'lease-test' }, workspaceResult: result }
+  assert.deepEqual(localChangesIntegrationCommits(result), [commit])
+  assert.deepEqual(aiDelegationRecoveryAvailability(delegation), {
+    failurePhase: 'integration', failureCategory: 'workspace-local-changes', recoveryAvailable: true,
+    recommendedAction: 'retry-integration', recoveryTool: 'mindnprogress_recover_ai_delegation',
+  })
+  for (const patch of [{ childStatus: 'failed' }, { integratedCommit: commit }, { integrationBranch: null },
+    { conflictRound: 1 }, { unmergedFiles: ['file'] }, { error: 'fatal: permission denied' },
+    { error: `Command failed: git cherry-pick ${commit}\nerror: untracked working tree files would be overwritten by merge` }]) {
+    assert.equal(localChangesIntegrationCommits({ ...result, ...patch }), null)
+    assert.notEqual(aiDelegationRecoveryAvailability({ ...delegation, workspaceResult: { ...result, ...patch } })?.recommendedAction, 'retry-integration')
+  }
+  assert.equal(aiDelegationRecoveryAvailability({ ...delegation, state: 'completed' }), null)
+  assert.equal(aiDelegationRecoveryAvailability({ ...delegation, pendingRecovery: {} }).recoveryAvailable, false)
+})
+
+test('통합 Git 잠금 분류는 완료된 fast-forward 실패만 통합 재시도로 안내한다', () => {
+  const commit = 'a'.repeat(40)
+  const result = { status: 'quarantined', childStatus: 'completed', headCommit: commit,
+    integrationBranch: 'mnp/integrate/job-test', integrationBaseCommit: 'b'.repeat(40),
+    error: `Command failed: git merge --ff-only --no-overwrite-ignore ${commit}\nerror: Unable to create 'C:/main/.git/index.lock': File exists.\n` }
+  const delegation = { state: 'failed', workspaceLease: { leaseId: 'lease-test' }, workspaceResult: result }
+  assert.deepEqual(integrationGitLockFailure(result), { candidateCommit: commit, lockPath: 'C:/main/.git/index.lock' })
+  assert.equal(aiDelegationRecoveryAvailability(delegation).failureCategory, 'integration-git-lock')
+  assert.equal(aiDelegationRecoveryAvailability(delegation).recommendedAction, 'retry-integration')
+  assert.ok(integrationGitLockFailure({ ...result, error: result.error.replace(' --no-overwrite-ignore', '') }))
+  assert.ok(integrationGitLockFailure({ ...result, error: result.error.replaceAll('\n', '\r\n').replace('C:/main/.git/index.lock', '/main/.git/index.lock') }))
+  for (const patch of [{ childStatus: 'failed' }, { integratedCommit: commit }, { integrationBranch: null },
+    { conflictRound: 1 }, { unmergedFiles: ['file'] }, { integrationHeadCommit: 'c'.repeat(40) },
+    { error: result.error.replace('File exists.', 'Permission denied.') },
+    { error: result.error.replace('git merge --ff-only --no-overwrite-ignore', 'git cherry-pick') },
+    { error: result.error.replace('index.lock', 'config.lock') }, { error: 'fatal: unknown Git error' }]) {
+    assert.equal(integrationGitLockFailure({ ...result, ...patch }), null)
+    assert.notEqual(aiDelegationRecoveryAvailability({ ...delegation, workspaceResult: { ...result, ...patch } })?.recommendedAction, 'retry-integration')
+  }
+  assert.equal(aiDelegationRecoveryAvailability({ ...delegation, state: 'completed' }), null)
+})
+
+test('완료 결과의 통합 복구는 중단된 상위 보고를 먼저 끝내지 않아도 요청할 수 있다', () => {
+  const commit = 'a'.repeat(40)
+  const base = { childStatus: 'completed', workspaceLease: { leaseId: 'lease-test' },
+    parentDispatchState: 'waiting-resume', childOperationId: 'child-operation', childTurnId: 'child-turn' }
+  const result = { status: 'quarantined', childStatus: 'completed', headCommit: commit,
+    workspaceId: 'fork-test', integrationBranch: 'mnp/integrate/job-test',
+    integrationBaseCommit: 'b'.repeat(40), integrationHeadCommit: commit }
+  const failures = [
+    ['integration-git-lock', `Command failed: git merge --ff-only --no-overwrite-ignore ${commit}\nerror: Unable to create 'C:/main/.git/index.lock': File exists.\n`],
+    ['workspace-local-changes', `Command failed: git cherry-pick ${commit}\nerror: your local changes would be overwritten by cherry-pick.\n`],
+    ['integration-head-changed', '통합 직전에 통합 작업공간의 HEAD가 변경되었습니다.'],
+    ['integration-candidate-worktree-dirty', '통합 브랜치에 커밋되지 않은 변경이 남아 있습니다.'],
+  ]
+  for (const [category, error] of failures) {
+    const delegation = { ...base, workspaceResult: { ...result, error } }
+    for (const state of ['waiting-parent', 'waking-parent', 'parent-wake-failed']) {
+      const current = { ...delegation, state }
+      const recovery = aiDelegationRecoveryAvailability(current)
+      assert.equal(recovery.failureCategory, category)
+      assert.equal(recovery.recoveryAvailable, true)
+      assert.equal(recovery.recommendedAction, 'retry-integration')
+      for (const patch of [{ childStatus: 'running' }, { workspaceLease: null },
+        { workspaceResult: { ...current.workspaceResult, childStatus: 'failed' } },
+        { workspaceResult: { ...current.workspaceResult, integratedCommit: commit } },
+        { workspaceResult: { ...current.workspaceResult, unmergedFiles: ['conflict.cs'] } },
+        { workspaceResult: { ...current.workspaceResult, error: '확인되지 않은 실패' } },
+        { integrationRecoveryRequest: { status: 'queued' } }, { pendingRecovery: {} }, { resultCorrection: { phase: 'dispatched' } }]) {
+        assert.notEqual(aiDelegationRecoveryAvailability({ ...current, ...patch })?.recommendedAction, 'retry-integration')
+      }
+    }
+    for (const state of ['running', 'integration-running', 'completed', 'closed', 'superseded']) {
+      assert.notEqual(aiDelegationRecoveryAvailability({ ...delegation, state })?.recommendedAction, 'retry-integration')
+    }
+  }
+})
 
 test('하위 작업 완료 알림은 실제 완료 판정에 도달한 위임에 한 번만 만들고 차단 알림과 타입을 구분한다', () => {
   const completed = {
@@ -384,6 +465,13 @@ test('새 대화에서 명시하지 않은 실행 환경은 최근 대화와 상
   assert.equal(selection.workspace, 'C:\\Git\\Game_Integration\\game-client')
 })
 
+test('상위 대화가 GPT-6.1-Sol이어도 대상 카드의 최근 GPT-6-Sol이 모델 상속에서 우선한다', () => {
+  const target = { agent: { id: 'codex', label: 'Codex CLI' }, model: { id: 'gpt-6-sol', label: 'GPT-6-Sol' } }
+  const parent = { agent: { id: 'codex', label: 'Codex CLI' }, model: { id: 'gpt-6.1-sol', label: 'GPT-6.1-Sol' } }
+  assert.equal(mergeAiDelegationSelections(undefined, target, parent).model.id, 'gpt-6-sol')
+  assert.equal(mergeAiDelegationSelections({ agentId: 'codex', modelId: 'gpt-6.1-sol' }, target, parent).model.id, 'gpt-6.1-sol')
+})
+
 test('명시적인 빈 스킬과 MCP 목록은 상위 설정으로 다시 채우지 않는다', () => {
   const selection = mergeAiDelegationSelections(
     { agentId: 'claude', modelId: 'opus', enabledSkillIds: [], mcpIds: [] },
@@ -395,6 +483,8 @@ test('명시적인 빈 스킬과 MCP 목록은 상위 설정으로 다시 채우
 
 test('AI 위임으로 만든 새 대화 제목에 문서와 카드 제목을 함께 사용한다', () => {
   assert.equal(formatAiConversationTitle('JP-로그인', '더미 UI 준비'), 'JP-로그인: 더미 UI 준비')
+  assert.equal(formatAiConversationTitle('문서', '루트', { isDocumentRoot: true }), '[상위] 문서: 루트')
+  assert.equal(formatAiConversationTitle('총괄', '루트', { isDocumentRoot: true, purpose: 'group-coordination' }), '[그룹 총괄] 총괄: 루트')
   assert.equal(formatAiConversationTitle('문서\n제목', '카드   제목'), '문서 제목: 카드 제목')
   assert.equal(formatAiConversationTitle('문서', '카드'.repeat(60)).length, 120)
 })

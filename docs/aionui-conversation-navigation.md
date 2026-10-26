@@ -4,9 +4,15 @@ AionUi 백엔드는 현재 대화가 MindNProgress 카드에 연결되어 있는
 
 브라우저에 MindNProgress 연동 토큰을 노출하지 않도록 두 API는 AionUi 백엔드에서 호출한다.
 
+## 서브 머신 Runner 중계
+
+서브 머신의 AionCore는 로컬 MnP를 사용할 수 없으면 AionUi Runner의 로컬 중계 정보를 읽어 같은 조회·선택 API를 호출한다. Runner는 로컬 전용 토큰을 검증하고 메인 MnP로 보낼 때만 머신 토큰을 사용한다. 브라우저와 AionCore에는 머신 토큰을 전달하지 않는다.
+
+Runner 요청에는 `X-MnP-Runner-MCP-Machine-Id`와 `X-MnP-AI-Conversation-Id`가 포함된다. 서버는 머신 토큰, 대화 원본의 실행 머신과 시작 계정, URL의 대화 ID와 헤더의 일치를 검증한다. 조회 경로는 GET, `/select` 경로는 POST만 허용한다. AionCore에서 구한 `X-MNP-Selection-Device-Address`를 중계에서도 보존하여 같은 계정·디바이스의 화면에만 선택 이벤트를 보낸다.
+
 ## 인증과 선택 식별자
 
-두 API 모두 MindNProgress 데이터 폴더의 `_integration-token` 값을 Bearer 토큰으로 사용한다.
+로컬 직접 연결에서는 두 API 모두 MindNProgress 데이터 폴더의 `_integration-token` 값을 Bearer 토큰으로 사용한다. 서브 머신은 위 Runner 중계 절차로 인증한다.
 
 ```http
 Authorization: Bearer {integration-token}
@@ -31,7 +37,7 @@ MnP 대화 연결 기록과 이 헤더가 모두 있으면 두 값이 같아야 
 
 `X-MNP-Selection-Device-Address`도 AionUi 백엔드가 요청 소켓 또는 신뢰하는 프록시 체인에서 구한 원본 브라우저 주소를 사용한다. AionUi 백엔드가 사용자 디바이스에서 직접 실행되어 MindNProgress를 호출한다면 이 헤더를 생략할 수 있고, 이때 MindNProgress는 요청 소켓 주소를 사용한다. 중앙 AionUi 서버가 외부 브라우저 요청을 중계한다면 반드시 이 헤더를 보낸다.
 
-MindNProgress는 주소를 정규화한 뒤 해시만 SSE 접속 정보에 보관한다. 주소 원문이나 해시는 API 응답에 포함하지 않는다.
+MindNProgress는 주소를 정규화한 뒤 해시만 SSE 접속 정보에 보관한다. 카드 선택용 디바이스 비교에서는 루프백 주소와 MnP 서버 PC의 실제 네트워크 인터페이스 주소를 하나의 로컬 디바이스로 묶는다. 따라서 메인 PC에서 MnP를 `127.0.0.1`로 열고 서브 머신의 AionUi에 LAN으로 접속해도 같은 계정의 MnP 화면을 찾을 수 있다. 다른 PC의 주소는 각각 구분하며, 작업공간 탐색 등 로컬 전용 API의 접근 허용 기준은 바꾸지 않는다. 주소 원문이나 해시는 API 응답에 포함하지 않는다.
 
 ## 연결 조회
 
@@ -62,6 +68,8 @@ GET /api/integrations/aionui/conversations/{conversationId}/mindnprogress
 }
 ```
 
+`target.titlePrefix`는 최신 문서 계층으로 판정한 대화 역할의 접두어다. 그룹 총괄 루트는 `[그룹 총괄] `, 일반 문서의 최상위 원본 카드는 `[상위] `, 하위 카드와 참조 카드는 빈 문자열을 반환한다. 신규 대화 제목과 자동 위임으로 생성한 제목에 같은 규칙을 적용한다. 기존 대화는 AionUi의 제목 동기화 버튼으로 반영하며, `[지식정리]` 등 별도 작업 용도의 접두어는 유지한다. 구버전 MnP가 이 필드를 생략하면 AionUi는 기존 역할 접두어를 보존한다.
+
 ## 같은 계정·디바이스 화면 선택
 
 ```http
@@ -84,6 +92,22 @@ MindNProgress는 현재 SSE 연결 가운데 다음 조건을 모두 만족하�
 - `403 MNP_SELECTION_ACCOUNT_MISMATCH`: 선택 헤더와 MnP 대화 연결 기록의 계정이 다름. GET과 POST 모두 해당
 - `404 MNP_AI_CONVERSATION_NOT_FOUND`: 연결된 문서·카드를 찾을 수 없음
 - `409 MNP_MATCHING_VIEW_NOT_CONNECTED`: 같은 계정·디바이스의 MnP 화면이 현재 연결되어 있지 않음
+
+## 수신 메시지의 발신 대화 이동
+
+다른 대화에 전달하는 전문에는 표시 전용 `MNP_CONVERSATION_SOURCE` 정보를 맨 앞에 붙인다. AionUi는 메시지 우상단에 발신 제목을 표시하고 해당 대화로 이동한다.
+
+| 전달 경로 | 표시하는 대화 |
+| --- | --- |
+| 그룹 문서 지시의 신규·재개·대기 후 전달 | 지시한 그룹 총괄 대화 |
+| 하위 카드 신규·재개·복구 위임, 체크포인트 보완, 통합 충돌 해결 요청 | 위임한 상위 대화 |
+| 하위 결과의 이력 저장·상위 재개 보고, 복구 필요·통합 대기 알림 | 해당 하위 대화 |
+
+요청은 `kind=delegation`, 보고·알림은 `kind=report`인 기존 표시 계약을 사용한다. 이 구분은 표시용이며 그룹 문서 지시를 worker 위임으로 바꾸거나 회신 대상·승인 범위를 변경하지 않는다. 회신 대상을 별도로 지정해도 발신 표시는 실제 지시한 대화를 가리킨다.
+
+같은 머신의 대화는 내부에서 이동하고, 다른 머신은 발신 머신의 WebUI 주소를 사용한다. 제목 조회가 실패하면 ID를 표시한다. 다른 머신의 주소를 확인하지 못하면 이동을 비활성화하고 본문 전달은 유지한다. 하위 대화가 아직 생성되지 않은 통합 대기 알림은 발신 대화를 임의로 만들지 않는다.
+
+사용자가 MnP 화면에서 직접 시작한 대화와 Dooray 자동 접수는 발신 AI 대화가 없으므로 표시 정보를 추가하지 않는다. 이전에 저장된 전문과 완료 보고의 고정 원문·해시는 다시 쓰지 않으며, 발신 정보 추가는 변경 반영 후 전달되는 전문부터 적용한다.
 
 ## 네트워크 경계
 

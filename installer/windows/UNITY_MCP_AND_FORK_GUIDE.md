@@ -73,15 +73,15 @@ Unity worker는 같은 저장소를 서로 다른 폴더에 독립적으로 clon
 
 ### 작업공간 풀 템플릿 설정
 
-설치 스크립트는 다음 공용 구조를 만들며, 기존 파일이 있으면 덮어쓰지 않습니다.
+설치 스크립트는 다음 공용 구조를 만듭니다. 기존 `workspaces.json`은 덮어쓰지 않고, 설치기가 관리하는 `common\MULTI_WORKSPACE.md`는 재설치 때 최신 규칙으로 갱신합니다.
 
 ```text
 <설치 루트>\workspace-pool\
   workspaces.json
   common\MULTI_WORKSPACE.md
-  knowledge-inbox\
-  knowledge-applied\
 ```
+
+이전 설치본이 만든 `knowledge-inbox\`, `knowledge-applied\` 폴더는 더 이상 사용하지 않습니다. 설치 프로그램은 기존 폴더를 지우지 않습니다.
 
 초기 `workspaces.json`의 integration과 worker 예시는 모두 `enabled=false`입니다. 다음 순서로 구성합니다.
 

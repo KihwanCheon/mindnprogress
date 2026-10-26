@@ -1,5 +1,6 @@
 import { groupWaitingPresentation } from './groupWaiting.mjs'
 import { groupProjectCriteriaEqual } from './groupPlanningSources.mjs'
+import { aiDelegationRequiresRecovery } from './aiDelegationStatus.mjs'
 
 export function groupProjectDraftAfterRefresh(current, previousBase, incoming) {
   if (!current || !previousBase) return incoming
@@ -40,9 +41,20 @@ const completedReportLabels = {
 
 export function groupDelegationPresentation(item) {
   if (!item) return { label: '위임 없음', tone: 'muted', attention: false }
+  if (item.kind === 'request-failure') return {
+    label: item.executionState === 'unknown' ? '접수 미확인 · 실행 여부 확인 필요' : '위임 접수 실패 · 실행하지 않음',
+    tone: 'danger', attention: true,
+  }
+  if (item.kind === 'task-attention') return {
+    label: '카드 업무 미완료 · 확인 필요', tone: 'warning', attention: true,
+  }
+  if (['queued', 'checking'].includes(item.integrationRecoveryRequest?.status)) return { label: '통합 재시도 검증 중', tone: 'active', attention: false }
   const state = item.displayState ?? item.state
-  const attention = attentionStates.has(state) || item.recovery?.recoveryAvailable === true || item.recovery?.reportRetryAvailable === true
-  const label = item.workCompleted && item.reportStatus === 'received' && ['completed', 'waking-parent'].includes(state)
+  const quarantined = item.workspaceResult?.status === 'quarantined' && aiDelegationRequiresRecovery(item)
+  const attention = quarantined || attentionStates.has(state) || item.recovery?.recoveryAvailable === true || item.recovery?.reportRetryAvailable === true
+  const label = quarantined
+    ? item.childStatus === 'completed' || item.workspaceResult?.childStatus === 'completed' ? '통합 복구 필요' : '작업공간 복구 필요'
+    : item.workCompleted && item.reportStatus === 'received' && ['completed', 'waking-parent'].includes(state)
     ? '작업 완료 · 총괄 수신 완료'
     : item.workCompleted && item.reportPending && completedReportLabels[state] ? completedReportLabels[state]
     : state === 'waiting-integration' && ['integration-worktree-dirty', 'integration-untracked-collision'].includes(item.workspaceResult?.reasonCode) ? '작업 완료 · 통합 정리 대기'
@@ -53,6 +65,22 @@ export function groupDelegationPresentation(item) {
 }
 
 export function groupDelegationReportHint(item) {
+  if (['queued', 'checking'].includes(item?.integrationRecoveryRequest?.status)) return item.integrationRecoveryRequest.message
+  if (item?.integrationRecoveryRequest?.status === 'failed') return item.integrationRecoveryRequest.message
+  if (item?.kind === 'request-failure') return item.executionState === 'unknown'
+    ? '실행 기록과 별개의 요청 오류입니다. 전달 여부를 확인하지 못했으므로 새 요청을 자동으로 실행하지 않습니다.'
+    : '실행 기록과 별개의 접수 실패 요청입니다. 담당 상위 AI가 원인을 확인한 뒤 다시 요청할 수 있으며 자동 재실행하지 않습니다.'
+  if (item?.kind === 'task-attention') return `카드 전체 업무가 아직 완료되지 않았습니다. 완료된 실행 ${item.completedExecutionCount ?? 1}건은 단계별 완료일 수 있으며, 기록 누락이나 실행 실패를 뜻하지 않습니다. 카드의 남은 업무와 완료 조건을 확인하세요. 자동 재실행하지 않습니다.`
+  if (item?.workspaceResult?.status === 'result-correction-held') return '결과 정정 실행 또는 Git 상태를 확인할 수 없어 자료와 통합 잠금을 보존합니다. 별도 증거 검토가 필요합니다.'
+  if (item?.recovery?.recommendedAction === 'correct-integration-result') return '원 담당 AI에게 통합 대기 결과 정정을 요청할 수 있습니다. 기존 후보와 이력, 통합 사용자 파일을 보존하며 새 변경 체크포인트 이후에만 다시 통합합니다.'
+  if (item?.workspaceResult?.status === 'quarantined' && aiDelegationRequiresRecovery(item)) {
+    if (item.recovery?.failureCategory === 'integration-candidate-worktree-dirty') return 'main이 아니라 Fork의 통합 후보에 변경이 남아 차단된 기록입니다. 현재 파일을 확인하고 원본 보존·정리 후 통합 재시도를 요청하세요. 기존 체크포인트를 검증하며 하위 AI는 다시 실행하지 않습니다.'
+    if (item.recovery?.recommendedAction === 'retry-integration') return '로컬 변경 또는 Git 잠금 등 통합 차단 원인을 해소한 뒤 통합 재시도를 요청하세요. 완료된 하위 AI 작업과 커밋을 그대로 사용합니다.'
+      + (item.recovery.recoveryAvailable ? ' 상위 보고 완료를 기다리지 않고 이 화면에서 통합 재시도를 요청할 수 있습니다.' : '')
+    return item.recovery?.recoveryAvailable
+      ? '작업공간이 격리되어 복구가 필요합니다. 오류와 보존된 변경을 확인하고 기존 위임을 복구하세요.'
+      : '작업공간이 격리되어 수동 확인과 복구가 필요합니다. 오류와 보존된 변경을 확인해 작업공간을 복구하세요.'
+  }
   if ((item?.displayState ?? item?.state) === 'waiting-integration') {
     const result = item.workspaceResult
     if (result?.waitingReason) {
@@ -62,6 +90,12 @@ export function groupDelegationReportHint(item) {
   }
   if (item?.reportArchivePending) return '결과는 보존되어 있으며 상위 대화에 완료 전문을 기록하는 중입니다. AionCore 연결·업데이트 후 AI 실행 없이 자동 재시도합니다.'
   if (item?.reportStatus === 'received') return '결과 수신이 확인됐습니다. 상위 AI의 후속 작업이나 품질 검수 완료를 뜻하지 않습니다.'
+  if (['waiting-parent', 'waking-parent'].includes(item?.state) && item.parentWakeRetry?.status === 'scheduled') {
+    const retry = item.parentWakeRetry
+    const next = retry.nextAttemptAt ? ` 다음 확인: ${new Date(retry.nextAttemptAt).toLocaleString('ko-KR')}.` : ''
+    return `${item.state === 'waking-parent' ? '상위 재개 요청의 접수 여부를 같은 요청 ID로 자동 재조회합니다. 새 실행은 만들지 않습니다.' : '상위 재개 전 조회 실패를 자동 재시도합니다. 하위 실행과 통합은 반복하지 않습니다.'}${next}${retry.lastFailure ? ` 최근 오류: ${retry.lastFailure.code} · ${retry.lastFailure.phase}.` : ''}`
+  }
+  if (item?.state === 'parent-wake-failed' && item.parentWakeRetry?.status === 'stopped') return `상위 보고 자동 복구를 중지했습니다(${item.parentWakeRetry.stopReason}). 기존 결과·요청을 확인한 뒤 결과만 재전달하거나 수신 확인하세요. 하위 실행과 통합은 반복하지 않습니다.`
   if (item?.state === 'parent-wake-failed') return '하위 실행 결과는 보존되어 있습니다. 전달 상태를 확인한 뒤 필요한 경우 결과만 재전달하세요.'
   if (item?.state === 'waking-parent') return '상위 대화로 결과 전달을 요청했습니다. 실행 요청 접수와 수신 확인은 구분됩니다.'
   if (item?.state !== 'waiting-parent') return ''

@@ -97,6 +97,75 @@ test('적용·원본 보존·멱등·보관 복원·충돌·재시작 복구를 
   assert.equal(manager.isUnavailable('map-partial'), true)
 })
 
+test('보관함과 휴지통 왕복은 원문·전환 근거를 보존하고 실패·중복·오래된 상태를 거부한다', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'mnp-archive-trash-unit-'))
+  t.after(async () => {
+    assert.equal(path.dirname(directory), path.resolve(tmpdir()))
+    assert.match(path.basename(directory), /^mnp-archive-trash-unit-/)
+    await rm(directory, { recursive: true, force: true })
+  })
+  const source = original(); const originalBytes = JSON.stringify(source)
+  const file = path.join(directory, '_document-lifecycle.json')
+  let manager; let busy = false; let failWrite = false
+  const user = { id: 'test-editor', name: '검증 편집자' }
+  const options = {
+    dataDirectory: directory, isValidMap,
+    readMap: async (id) => id === source.id ? { ...structuredClone(source), ...manager?.metadata(id) } : null,
+    listMaps: async () => [source], readLayout: async () => ({ groups: [], items: [] }),
+    saveMap: async () => { throw Error('원문 저장을 호출하면 안 됩니다.') },
+    writeJson: async (target, value) => { if (failWrite) throw Error('저장 실패'); await writeFile(target, JSON.stringify(value)) },
+    checkIdle: async () => { if (busy) throw Error('AI 실행 중') },
+  }
+  manager = await createDocumentReconstruction(options)
+  const body = { baseVersion: source.version, baseLifecycleVersion: 1, trashed: true }
+  await assert.rejects(manager.setArchivedTrash(source.id, body, user), /보관 상태/)
+  await manager.archive(source.id, { baseVersion: source.version, baseLifecycleVersion: 0, archived: true }, user)
+  const state = JSON.parse(await readFile(file, 'utf8'))
+  state.documents[source.id].reconstructionId = 'preserved-operation'
+  state.documents[source.id].successorMapIds = ['map-next']
+  state.operations['preserved-operation'] = { id: 'preserved-operation', state: 'applied', reason: '보존할 전환 근거' }
+  await writeFile(file, JSON.stringify(state))
+  manager = await createDocumentReconstruction(options)
+  const archived = structuredClone(manager.metadata(source.id))
+  const preservedState = await readFile(file)
+  await assert.rejects(manager.setArchivedTrash(source.id, null, user), /휴지통 이동 또는 복원/)
+  await assert.rejects(manager.setArchivedTrash('map-missing', body, user), /찾을 수 없습니다/)
+  for (const invalid of [{ ...body, baseVersion: 99 }, { ...body, baseLifecycleVersion: 0 }, { ...body, trashed: false }]) {
+    await assert.rejects(manager.setArchivedTrash(source.id, invalid, user), /상태가 변경/)
+  }
+  busy = true
+  await assert.rejects(manager.setArchivedTrash(source.id, body, user), /AI 실행/)
+  busy = false; failWrite = true
+  await assert.rejects(manager.setArchivedTrash(source.id, body, user), /저장 실패/)
+  failWrite = false
+  assert.deepEqual(manager.metadata(source.id), archived)
+  assert.deepEqual(await readFile(file), preservedState)
+  const attempts = await Promise.allSettled([manager.setArchivedTrash(source.id, body, user), manager.setArchivedTrash(source.id, body, user)])
+  assert.deepEqual(attempts.map((result) => result.status), ['fulfilled', 'rejected'])
+  assert.equal(manager.metadata(source.id).lifecycleVersion, 2)
+  assert.equal(manager.metadata(source.id).trashHistory.length, 1)
+  assert.deepEqual(manager.metadata(source.id).trashedBy, user)
+  assert.throws(() => manager.assertWritable(source.id), /보관/)
+  manager = await createDocumentReconstruction(options)
+  assert.ok(manager.metadata(source.id).trashedAt, '재시작 후에도 휴지통 상태 유지')
+  await manager.setArchivedTrash(source.id, { ...body, baseLifecycleVersion: 2, trashed: false }, user)
+  const restored = manager.metadata(source.id)
+  for (const [key, value] of Object.entries(archived)) if (key !== 'lifecycleVersion') assert.deepEqual(restored[key], value)
+  assert.equal(Object.hasOwn(restored, 'trashedAt'), false, '일반 문서의 후속 휴지통 이동을 가리지 않는다')
+  assert.equal(Object.hasOwn(restored, 'trashedBy'), false)
+  assert.equal(restored.lifecycleVersion, 3)
+  assert.deepEqual(restored.trashHistory.map((entry) => entry.trashed), [true, false])
+  assert.equal(JSON.stringify(source), originalBytes)
+  assert.equal(manager.get('preserved-operation').reason, '보존할 전환 근거')
+  assert.throws(() => manager.assertWritable(source.id), /보관/)
+  await assert.rejects(manager.setArchivedTrash(source.id, body, user), /상태가 변경/)
+  const pendingState = JSON.parse(await readFile(file, 'utf8'))
+  pendingState.documents[source.id].reconstructionPending = 'pending-operation'
+  await writeFile(file, JSON.stringify(pendingState))
+  manager = await createDocumentReconstruction(options)
+  await assert.rejects(manager.setArchivedTrash(source.id, { ...body, baseLifecycleVersion: 3 }, user), /보관 상태/)
+})
+
 test('보관·전환만 변경 요청을 독점하며 앞선 변경과 뒤의 변경을 안전하게 분리한다', async () => {
   const acquire = createDocumentMutationGate()
   const first = await acquire(); const second = await acquire()

@@ -1,89 +1,48 @@
 ---
 name: pptx
 description: >
-  pptx 파일 내용을 확인하거나 pptx에 담긴 기획 내용을 정리할 때 사용한다.
-  PowerPoint COM을 1순위 렌더러로 사용하고, COM을 사용할 수 없는 PC에서는 AionUi에 기본
-  포함된 officecli의 HTML 렌더러로 모든 슬라이드를 PNG로 저장한다. 추출한 텍스트·표 구조와 이미지를 함께
-  보고 판단하며 렌더러 차이와 PowerPoint 직접 확인 필요 여부를 기록한다.
-  pptx, ppt, 파워포인트, 발표 자료, 기획서 슬라이드를 읽어야 할 때 읽는다.
+  pptx·ppt·파워포인트 파일이나 기획서 슬라이드를 확인할 때 사용한다. pptx-mcp로 전 슬라이드의
+  PNG·텍스트·표를 준비하거나 원본 일치가 확인된 공용 산출물을 재사용하고, 이미지와 텍스트를
+  함께 검토한다. 최초 전수 추출, 담당 범위 검토, 원본 구조와 렌더링 차이 확인, 렌더러 대체와
+  기록을 다룬다. pptx 내용 확인·검토는 AionUi 기본 officecli 스킬보다 이 스킬을 우선한다.
 ---
 
 # pptx 확인 절차
 
-텍스트 추출만으로 판단하면 도형 배치·표 병합·이미지 안의 글자를 놓친다. 이미지와 텍스트를 항상 함께 본다.
+텍스트 추출만으로 판단하면 도형 배치·표 병합·이미지 안의 글자를 놓친다. 이미지와 텍스트·표를 항상 함께 확인한다.
 
-## 렌더러 우선순위
+## officecli와의 경계
 
-1. `pptx-mcp`의 `export_slides_to_images`를 먼저 사용한다. Windows에서는 PowerPoint COM으로 렌더링되며, 성공 응답의 `renderer`가 `powerpoint-com`인지 확인한다.
-2. PowerPoint 미설치, COM 등록 없음, `pywin32` 없음처럼 **COM을 사용할 수 없다는 오류**가 발생한 경우에만 AionUi 기본 `officecli` HTML 렌더러로 전환한다.
-3. 파일 손상, 암호 보호, 잘못된 슬라이드 번호처럼 COM 가용성과 무관한 오류는 fallback으로 숨기지 말고 원인을 보고한다.
-4. 한 번 fallback으로 전환한 작업에서는 같은 파일에 COM 내보내기를 반복하지 않는다.
+- pptx 내용 확인·기획서 검토는 이 스킬의 절차를 따른다. officecli 스킬의 텍스트 추출이나 `view text`만으로 내용을 판단하지 않는다.
+- 이 스킬 안에서 officecli는 아래의 표 구조 조회와 렌더러 대체에만 쓴다. 둘 다 원본을 바꾸지 않는 조회 명령(`get`, `view`)만 사용한다.
+- pptx를 새로 만들거나 편집하는 작업은 officecli 스킬을 따른다. 기획서 원본은 편집 요청이 없으면 수정하지 않는다.
 
-## 확인 순서
+## 렌더러 우선순위와 기록
 
-1. `pptx-mcp`로 파일을 연다.
-2. `pptx-mcp`로 슬라이드 텍스트와 표 구조를 추출한다.
-3. 위 렌더러 우선순위에 따라 모든 슬라이드를 PNG 이미지로 저장한다.
-4. 저장된 PNG 이미지를 이미지 확인 도구로 모두 열어 시각적으로 확인한다.
-5. 이미지와 텍스트를 함께 보고 기획 내용을 정리한다.
-6. 사용한 렌더러를 결과에 기록한다.
-7. 이미지와 추출 구조가 다르면 차이를 기록하고 PowerPoint에서 직접 확인할 필요가 있는지 명시한다.
+1. pptx-mcp의 `export_slides_to_images`를 먼저 사용한다. 응답의 `renderer` 값(Windows는 `powerpoint-com`)을 확인한다.
+2. PowerPoint 미설치, COM 등록 없음, `pywin32` 없음처럼 **COM을 사용할 수 없다는 오류**일 때만 officecli HTML 렌더러로 전환한다. `officecli --version`으로 실행 파일을 확인한 뒤 `officecli view <원본> stats --json`의 슬라이드 수만큼 `officecli view <원본> screenshot --render html --page <번호> --screenshot-width <폭> -o <PNG 경로> --json`을 실행한다. `--render html`을 명시해 네이티브 렌더러를 다시 시도하지 않는다. 폭은 `officecli get <원본> / --depth 0 --json`의 슬라이드 가로 크기를 150 DPI 기준 픽셀로 환산한 값이다.
+3. 파일 손상, 암호 보호, 잘못된 슬라이드 번호처럼 COM 가용성과 무관한 오류는 대체 렌더러로 숨기지 말고 원인을 보고한다. 대체로 전환한 작업에서는 같은 파일에 COM 내보내기를 반복하지 않는다.
+4. 사용한 렌더러(`powerpoint-com`, `officecli-html` 등)를 결과와 산출물 기록에 남긴다. HTML 렌더링은 폰트 대체·SmartArt·차트·효과 배치가 PowerPoint와 다를 수 있으므로 그 차이를 판단에 반영한다.
+5. officecli도 쓸 수 없으면 텍스트만으로 내용을 확정하지 말고, 이미지 미확인 범위와 PowerPoint가 있는 PC에서의 확인 필요성을 보고한다.
 
-## officecli fallback
+## 최초 준비 또는 새 원본
 
-PowerPoint COM을 사용할 수 없을 때만 다음 PowerShell 흐름을 사용한다. `--render html`을 명시해 Office 네이티브 렌더러를 다시 시도하지 않는다. 작성자가 지정한 슬라이드 가로 크기를 150 DPI 기준 픽셀로 환산해 `--screenshot-width`로 전달한다. 높이 계산과 최대 변 1920px 상한 내 비례 축소는 OfficeCLI에 맡긴다.
+1. pptx-mcp로 원본을 열고 위 렌더러 우선순위에 따라 모든 슬라이드를 PNG로 저장한다.
+2. pptx-mcp(`extract_presentation_text` 또는 `extract_slide_text`)로 모든 슬라이드의 텍스트를 추출한다. 이 도구의 `table_text`는 빈 셀을 빼고 병합 정보를 주지 않는다. 그래서 `has_tables`가 참인 슬라이드는 `officecli get <원본> "/slide[N]/table[K]" --depth 2 --json`으로 행·열 위치와 `colspan`·`rowspan`(이어지는 셀은 `hmerge`·`vmerge`)을 함께 확보해 표 구조로 기록한다.
+3. 전 슬라이드 PNG를 사용 가능한 이미지 열람 도구로 직접 열어 텍스트·표와 함께 확인한다. 도구 이름을 특정 AI의 `Read`로 한정하지 않는다.
+4. 원본 주소·개별 버전·해시·전체 슬라이드 수, PNG·텍스트·표 목록과 슬라이드 대응, 사용한 렌더러, 접근 경로를 함께 남긴다. 해시는 원본 파일 바이트의 SHA-256이다(`Get-FileHash -Algorithm SHA256` 또는 `sha256sum`). Dooray 첨부는 `dooray_project_download_attachment`로 받은 파일로 계산하고, 알고리즘 이름을 값과 함께 적는다. 여러 기획서는 각각 식별하며 추가 원본을 기존 원본의 대체본으로 간주하지 않는다.
 
-```powershell
-$deckPath = 'C:\path\to\presentation.pptx'
-$outputDirectory = 'C:\path\to\rendered-slides'
-New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
+## 공용 산출물을 받는 경우
 
-function Convert-OfficeCliLengthToEmu {
-  param([Parameter(Mandatory)][string]$Length)
+1. 요청 기준 원본의 버전·해시가 산출물의 출처와 일치하는지 확인한다. 해시는 위와 같은 방식(원본 파일 SHA-256)으로 계산해 비교한다. 파일명이나 이전 AI의 요약만으로 최신 원본이라고 판단하지 않는다.
+2. 필요한 슬라이드의 PNG·텍스트·표와 원본 위치 대응이 빠짐없이 있고 현재 작업공간에서 읽을 수 있는지 확인한다. 기록된 렌더러가 `powerpoint-com`이 아니면 렌더링 차이 가능성을 판단에 반영한다.
+3. 조건을 충족하면 기존 산출물을 우선 재사용한다. 재사용만을 위해 pptx-mcp로 다시 열거나 재추출하지 않는다.
+4. 자료가 없거나 불일치·손상됐으면 원인을 알리고 필요한 범위만 pptx-mcp로 다시 준비한다. 새 원본은 최초 준비 절차를 적용한다. 원본을 확인할 수 없으면 최신성·완전성을 추측하지 말고 미확인 범위를 보고한다.
 
-  if ($Length -notmatch '^\s*(?<value>\d+(?:\.\d+)?)\s*(?<unit>emu|cm|mm|in|pt|px)\s*$') {
-    throw "지원하지 않는 슬라이드 크기 형식입니다: $Length"
-  }
+공통 분석 결과를 재사용해도 원본 이미지의 직접 확인, 담당 요구사항 상세 검토와 현재 구현 감사는 생략하지 않는다. 기록·공유 또는 외부 도구 쓰기는 현재 작업에서 승인된 범위에 한한다.
 
-  $value = [double]::Parse($Matches.value, [Globalization.CultureInfo]::InvariantCulture)
-  switch ($Matches.unit.ToLowerInvariant()) {
-    'emu' { return $value }
-    'cm'  { return $value * 360000 }
-    'mm'  { return $value * 36000 }
-    'in'  { return $value * 914400 }
-    'pt'  { return $value * 12700 }
-    'px'  { return $value * 9525 }
-  }
-}
+## 직접 확인할 범위와 차이 처리
 
-$presentation = officecli get $deckPath / --depth 0 --json | ConvertFrom-Json
-if ($LASTEXITCODE -ne 0) { throw 'officecli 슬라이드 크기 확인 실패' }
-$slideFormat = $presentation.data.results[0].format
-$slideWidthEmu = Convert-OfficeCliLengthToEmu $slideFormat.slideWidth
-if ($slideWidthEmu -le 0) { throw '유효하지 않은 슬라이드 가로 크기입니다.' }
-
-$renderDpi = 150
-$renderWidth = [int][Math]::Round(
-  $slideWidthEmu * $renderDpi / 914400,
-  0,
-  [MidpointRounding]::ToEven
-)
-if ($renderWidth -lt 1) { throw '유효하지 않은 렌더 너비입니다.' }
-
-$stats = officecli view $deckPath stats --json | ConvertFrom-Json
-$slideCount = [int]$stats.data.slides
-if ($slideCount -lt 1) { throw '렌더링할 슬라이드가 없습니다.' }
-
-for ($slideNumber = 1; $slideNumber -le $slideCount; $slideNumber++) {
-  $fileName = 'slide_{0:D3}.png' -f $slideNumber
-  $outputPath = Join-Path $outputDirectory $fileName
-  officecli view $deckPath screenshot --render html --page $slideNumber `
-    --screenshot-width $renderWidth -o $outputPath --json
-  if ($LASTEXITCODE -ne 0) { throw "officecli 슬라이드 렌더링 실패: $slideNumber" }
-}
-```
-
-- 먼저 `officecli --version`으로 AionUi가 제공하는 실행 파일을 사용할 수 있는지 확인한다.
-- 150 DPI는 슬라이드의 실제 가로 크기를 목표 픽셀로 환산하는 기준이다. OfficeCLI는 원본 비율로 높이를 자동 계산하고 최대 변이 1920px를 넘으면 두 변을 함께 축소한다. HTML 렌더러가 만든 PNG의 메타데이터 DPI는 96으로 남을 수 있다.
-- HTML 렌더링은 PowerPoint와 폰트 대체, SmartArt, 차트, 효과 배치가 달라질 수 있다. 결과에 `officecli-html`을 사용했다고 명시한다.
-- `officecli`도 사용할 수 없으면 텍스트만으로 내용을 확정하지 말고 AionUi 실행 환경 이상 또는 PowerPoint가 있는 PC에서의 확인 필요성을 사용자에게 알린다.
+- 전체 기획 분석·공통 최초 준비·최종 전수 검증은 모든 슬라이드를 직접 확인한다.
+- 담당 문서·하위 업무의 제한된 검토는 담당 슬라이드 전체와 판단에 필요한 공통·연관 슬라이드를 직접 확인한다. 확인하지 않은 나머지를 전수 검토했다고 보고하지 않는다.
+- 이미지와 텍스트·표가 다르면 원본 구조와 렌더링 차이를 기록하고 PowerPoint 직접 확인이 필요한지 명시한다.

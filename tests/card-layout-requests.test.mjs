@@ -55,10 +55,15 @@ test('배치 요청은 승인·실측·소유자·버전·표시 검증을 거�
   await assert.rejects(service.apply(request.id, { previewHash: preview.previewHash, approved: true }, actor), /만료/)
   const verify = async (options = {}) => {
     let p = await service.preview(request.id, actor, options)
+    const positions = p.map.nodes.map((node) => node.position)
+    for (const position of positions) assert.ok(Number.isInteger(position.x / 24) && Number.isInteger(position.y / 24))
     const selection = { variant: p.variant, target: p.target }
     p = await service.inspect(request.id, { previewHash: p.previewHash, measurements: measured(p.map) }, false, actor)
     assert.deepEqual({ variant: p.variant, target: p.target }, selection)
-    return service.inspect(request.id, { previewHash: p.previewHash, measurements: measured(p.map) }, true, actor)
+    assert.deepEqual(p.map.nodes.map((node) => node.position), positions, '재측정 후에도 같은 격자 좌표')
+    p = await service.inspect(request.id, { previewHash: p.previewHash, measurements: measured(p.map) }, true, actor)
+    assert.deepEqual(p.map.nodes.map((node) => node.position), positions, '최종 검증도 같은 격자 좌표')
+    return p
   }
   preview = await verify(); time += 31 * 60_000
   await assert.rejects(service.apply(request.id, { previewHash: preview.previewHash, approved: true }, actor), /만료/)
@@ -83,7 +88,7 @@ test('배치 요청은 승인·실측·소유자·버전·표시 검증을 거�
   await assert.rejects(service.apply(request.id, { previewHash: oldPreview.previewHash, approved: true, measurements: measured(oldPreview.map) }, actor), /만료/)
   assert.deepEqual(source, original, '후보·목표를 바꿔도 원본 불변')
   await service.apply(request.id, { previewHash: preview.previewHash, approved: true, measurements: measured(preview.map) }, actor)
-  assert.deepEqual((await service.get(request.id, actor)).appliedLayout, { version: 'card-layout-v3', target: preview.target, variant })
+  assert.deepEqual((await service.get(request.id, actor)).appliedLayout, { version: 'card-layout-v4', target: preview.target, variant })
   assert.deepEqual(source.nodes.map(({ position: _p, ...n }) => n), original.nodes.map(({ position: _p, ...n }) => n))
   assert.deepEqual(source.edges, original.edges)
   assert.deepEqual(source.nodes.map((n) => n.position), preview.map.nodes.map((n) => n.position))

@@ -27,6 +27,7 @@ import {
 import { createRunnerLoop } from './lib/runnerLoop.mjs'
 import { createAionUiCaller } from './lib/aionUiClient.mjs'
 import { startCompletionRelay } from './lib/completionRelay.mjs'
+import { createWorkspaceAgent, workspaceRuntimeIdle } from './lib/workspaceAgent.mjs'
 
 let config
 try {
@@ -81,10 +82,10 @@ const callAionUi = createAionUiCaller({
   onConnected: (baseUrl) => { activeAionUiBaseUrl = baseUrl },
 })
 
-async function mnpRequest(url, body, timeoutMs, { headers = {}, signal = null } = {}) {
+async function mnpRequest(url, body, timeoutMs, { headers = {}, signal = null, method = 'POST' } = {}) {
   const timeoutSignal = AbortSignal.timeout(timeoutMs)
   const response = await fetch(url, {
-    method: 'POST',
+    method,
     headers: {
       Authorization: `Bearer ${config.token}`,
       Accept: 'application/json',
@@ -98,6 +99,7 @@ async function mnpRequest(url, body, timeoutMs, { headers = {}, signal = null } 
   if (!response.ok) {
     const error = new Error(responseBody?.error ?? `MNP_REQUEST_FAILED:${response.status}`)
     error.status = response.status
+    error.reasonCode = responseBody.reasonCode
     throw error
   }
   return responseBody
@@ -106,6 +108,23 @@ async function mnpRequest(url, body, timeoutMs, { headers = {}, signal = null } 
 let longPollMs = 25_000
 const claimAbortController = new AbortController()
 let completionRelay = null
+const workspaceAgent = await createWorkspaceAgent({ registryFile: process.env.MNP_RUNNER_WORKSPACE_REGISTRY,
+  machineId: config.machineId, request: (pathname, body, method) => mnpRequest(`${config.apiBaseUrl}${pathname}`, body, 30_000, { method }),
+  runtimeIdle: workspaceRuntimeIdle(callAionUi) })
+
+async function callRunner(request) {
+  try {
+    if (request.pathname === '/mnp/workspaces' && request.method === 'POST') {
+      if (!workspaceAgent) throw Object.assign(new Error('원격 workspace agent 설정이 없습니다.'), { code: 'REMOTE_WORKSPACE_AGENT_UNAVAILABLE' })
+      return { ok: true, data: await workspaceAgent.execute(request.body) }
+    }
+    if (request.pathname === '/api/internal/external-conversation-dispatches' && request.method === 'POST') {
+      if (request.body?.workspaceLease?.ownership && !workspaceAgent) throw Object.assign(new Error('원격 workspace agent 설정이 없습니다.'), { code: 'REMOTE_WORKSPACE_AGENT_UNAVAILABLE' })
+      await workspaceAgent?.validateDispatch(request.body)
+    }
+    return callAionUi(request)
+  } catch (error) { return { ok: false, status: error.status ?? 409, code: error.reasonCode ?? error.code, message: error.message } }
+}
 
 async function forwardCompletion(pathname, body) {
   return mnpRequest(`${config.apiBaseUrl}${pathname}`, body, 30_000)
@@ -131,6 +150,7 @@ function reportResult(operationId, result, resultToken) {
 async function heartbeat() {
   const body = await mnpRequest(runnerHeartbeatUrl(config), {
     callbackBaseUrl: completionRelay?.baseUrl,
+    workspacePool: await workspaceAgent?.report(),
   }, 10_000)
   if (Number.isInteger(body?.longPollMs) && body.longPollMs > 0) longPollMs = body.longPollMs
   return body
@@ -138,7 +158,7 @@ async function heartbeat() {
 
 const loop = createRunnerLoop({
   claimOperations,
-  callAionUi,
+  callAionUi: callRunner,
   reportResult,
   concurrency: config.concurrency,
   retryDelayMs: config.retryDelayMs,

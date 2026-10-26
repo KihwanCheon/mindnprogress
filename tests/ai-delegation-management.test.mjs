@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { completedReplacementDelegations, delegationHierarchyPathNodeIds, delegationPreviewEdgeState, delegationPreviewNodeRole } from '../src/utils/aiDelegationManagement.mjs'
+import { completedReplacementDelegations, requestFailureReplacementDelegations, delegationHierarchyPathNodeIds, delegationPreviewEdgeState, delegationPreviewNodeRole } from '../src/utils/aiDelegationManagement.mjs'
 
 const delegation = (id, state, createdAt, overrides = {}) => ({
   id, state, createdAt, updatedAt: createdAt,
@@ -24,6 +24,20 @@ test('그룹 위임과 변경이 보존된 한도 중단에는 일반 문서 종
   })
   assert.deepEqual(completedReplacementDelegations(grouped, [{ ...completed, groupId: 'group-a' }]), [])
   assert.deepEqual(completedReplacementDelegations(quarantined, [completed]), [])
+})
+
+test('접수 실패의 재접수 후보는 진행 중도 포함하고 다른 업무 범위·머신·과거 요청은 제외한다', () => {
+  const original = delegation('failure', 'request-failed', '2026-10-13', {
+    kind: 'request-failure', phase: 'preflight', executionState: 'not-started', targetHomeMachineId: 'main',
+  })
+  const accepted = delegation('revision-2', 'running', '2026-10-14', { targetHomeMachineId: 'main' })
+  assert.deepEqual(requestFailureReplacementDelegations(original, [original, accepted,
+    { ...accepted, id: 'other-machine', targetHomeMachineId: 'mac' },
+    { ...accepted, id: 'other-card', targetCardId: 'other' },
+    { ...accepted, id: 'old', createdAt: '2026-10-12' },
+  ]).map(item => item.id), [accepted.id])
+  assert.deepEqual(requestFailureReplacementDelegations({ ...original, executionState: 'unknown' }, [accepted]), [])
+  assert.deepEqual(requestFailureReplacementDelegations({ ...original, resolvedByDelegationId: accepted.id }, [accepted]), [])
 })
 
 test('위임 미리보기는 상위 카드에서 대상 카드까지 연결된 모든 계층 경로를 유지한다', () => {

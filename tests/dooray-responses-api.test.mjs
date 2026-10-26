@@ -34,6 +34,8 @@ test('로그인 계정의 실제 서버 API에서 제안 접수·삭제 초기�
     { id: 'worker', root: path.join(directory, 'worker'), role: 'worker', enabled: true },
   ] }))
   const operations = new Map()
+  const dispatchStates = new Map()
+  const manualMessages = new Map()
   const created = []
   const paths = []
   const mcpNames = ['MindNProgress', 'unityMCP', 'docker-dooray-mcp', 'pptx-mcp']
@@ -46,6 +48,7 @@ test('로그인 계정의 실제 서버 API에서 제안 접수·삭제 초기�
   const reviewProposal = '금액 포맷터를 확인하고 경계값을 검증하는 작업을 제안합니다.\n' + '상세 조건을 확인합니다.\n'.repeat(320) + '제안의 마지막 검증 조건입니다.'
   let conversationFailure = null
   let approvalMode = false
+  let recoveryMode = false
   let selectedComment = '김용민님, 금액 표시를 확인해 주세요.'
   const approvalTickets = []
   const approvalDecision = { kind: 'approval', reason: '그룹·총괄 구성의 사실은 충분하고 실행 동의만 남았습니다.', questions: [],
@@ -68,14 +71,19 @@ test('로그인 계정의 실제 서버 API에서 제안 접수·삭제 초기�
     }
     if (url.pathname === '/project/v1/projects') return send([], 200, true)
     if (url.pathname === '/api/agents/management') return send([{ id: 'test-agent', name: '검증 AI', installed: true, enabled: true,
-      available_models: { current_model_id: 'test-model', available_models: [{ id: 'test-model', name: '검증 모델' }] } }])
+      config_options: [{ category: 'thought_level', currentValue: 'medium', options: [{ value: 'medium', name: '보통' }, { value: 'high', name: '높음' }] }],
+      available_models: { current_model_id: 'gpt-5.6-sol', available_models: [
+        { id: 'test-model', name: '검증 모델' }, { id: 'gpt-5.6-sol', name: 'GPT-5.6-Sol' },
+        { id: 'gpt-6-sol', name: 'GPT-6.0-Sol' }, { id: 'gpt-6.1-sol', name: 'GPT-6.1-Sol' },
+      ] } }, { id: 'other-agent', name: '다른 검증 AI', installed: true, enabled: true,
+        available_models: { current_model_id: 'other-model', available_models: [{ id: 'other-model', name: '다른 모델' }] } }])
     if (url.pathname === '/api/mcp/servers') return send([...requiredMcps, { id: 'kept-mcp', name: 'existing-mcp', enabled: true }])
     if (url.pathname === '/api/providers' || url.pathname === '/api/skills') return send([])
     if (url.pathname === '/api/conversations' && request.method === 'POST') {
       created.push(body)
       assert.deepEqual(body.assistant.conversation_overrides.mcp_ids, requiredMcpIds)
       assert.deepEqual(body.extra.selected_mcp_server_ids, requiredMcpIds)
-      extraByConversation.set(`created-${created.length}`, { ...body.extra, mcp_server_ids: requiredMcpIds, mcp_servers: mcpNames })
+      extraByConversation.set(`created-${created.length}`, { ...body.extra, current_model_id: body.assistant.conversation_overrides.model, mcp_server_ids: requiredMcpIds, mcp_servers: mcpNames })
       return send({ id: `created-${created.length}`, name: body.name }, 201)
     }
     const mcpReload = url.pathname.match(/^\/api\/conversations\/([^/]+)\/mcp-servers$/)
@@ -89,13 +97,16 @@ test('로그인 계정의 실제 서버 API에서 제안 접수·삭제 초기�
     }
     const messageMatch = url.pathname.match(/^\/api\/conversations\/([^/]+)\/messages$/)
     if (messageMatch) {
+      if (manualMessages.has(messageMatch[1])) return send({ items: manualMessages.get(messageMatch[1]), has_more_before: false })
       if (messageMatch[1] === 'approved-work') return send(url.searchParams.has('before') ? {
         items: [{ id: 'approval-user', position: 'right', type: 'text', created_at: 1, content: { content: '2단계 분석 계획 승인. 기존 결과는 재사용하세요.' } }], has_more_before: false,
       } : { items: [{ id: 'approval-answer', position: 'left', type: 'text', created_at: 2, content: { content: '문서 구성 완료. 남은 분석만 진행합니다.\n- attributionToken: secret-only-for-test-1234567890' } }], has_more_before: true, oldest_cursor: 'earlier-page' })
       if (messageMatch[1] === 'existing-chat') return send({ items: [{ position: 'left', type: 'text', content: { content: '기존 담당 대화의 확정 사항: 소수점 둘째 자리까지 표시' } }] })
       const op = [...operations.values()].reverse().find((entry) => entry.targetConversationId === messageMatch[1])
       if (!op) return send({ items: [] })
-      const result = approvalMode ? { requestId: op.operationId, action: 'clarify', proposal: reviewProposal, decision: approvalDecision }
+      const result = recoveryMode ? { requestId: op.operationId, action: 'direct', mapId: 'map-test', cardId: 'task1', conversationId: 'other-card-chat',
+        requestSummary: '완료 제안 회수', reason: '담당 카드는 유지하고 잘못된 참고 대화만 제외', proposal: reviewProposal, decision: approvalDecision }
+        : approvalMode ? { requestId: op.operationId, action: 'clarify', proposal: reviewProposal, decision: approvalDecision }
         : op.operationId.includes('-route-') ? { requestId: op.operationId, action: 'direct', mapId: 'map-test', cardId: 'task1', conversationId: 'existing-chat',
         requestSummary: '베팅 금액 표시 확인', reason: '해당 업무 URL이 연결된 담당 카드' } : { requestId: op.operationId, proposal: reviewProposal }
       return send({ items: [{ position: 'left', type: 'text', content: { content: `\`\`\`json\n${JSON.stringify(result)}\n\`\`\`` } }] })
@@ -127,7 +138,8 @@ test('로그인 계정의 실제 서버 API에서 제안 접수·삭제 초기�
       return send({ conversationId: body.targetConversationId, operationId: body.operationId, state: 'completed' }, 202)
     }
     const dispatch = url.pathname.match(/^\/api\/internal\/external-conversation-dispatches\/([^/]+)$/)
-    if (dispatch && operations.has(dispatch[1])) return send({ conversationId: operations.get(dispatch[1]).targetConversationId, operationId: dispatch[1], state: 'completed' })
+    if (dispatch && operations.has(dispatch[1])) return send({ conversationId: operations.get(dispatch[1]).targetConversationId,
+      operationId: dispatch[1], state: dispatchStates.get(dispatch[1]) ?? 'completed', turnId: 'original-test-turn', errorMessage: '모델 용량 초과' })
     if (url.pathname === '/api/internal/conversation-runtimes/active') return send({ items: [] })
     const archive = url.pathname.match(/^\/api\/sidebar\/conversation\/([^/]+)\/archive$/)
     if (archive && request.method === 'POST') { assert.notEqual(archive[1], 'existing-chat'); archived.push(archive[1]); return send(null) }
@@ -147,7 +159,7 @@ test('로그인 계정의 실제 서버 API에서 제안 접수·삭제 초기�
   const password = 'response-test-password'
   let serverErrors = ''
   const server = spawn(process.execPath, ['server/index.mjs'], { cwd: projectDirectory, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'], env: {
-    ...process.env, MNP_DATA_DIR: directory, MNP_API_HOST: '127.0.0.1', MNP_API_PORT: String(port), MNP_WEB_PORT: String(port),
+    ...process.env, MNP_DATA_DIR: directory, MNP_API_HOST: '127.0.0.1', MNP_API_PORT: String(port), MNP_WEB_PORT: String(port), MNP_PUBLIC_VIEWER_ENABLED: 'true',
     MNP_WORKSPACE_POOL_REGISTRY: registryFile,
     MNP_ADMIN_PASSWORD: password, MNP_DOORAY_API_KEY: 'test-only', MNP_DOORAY_BASE_URL: upstreamUrl, MNP_AIONUI_URL: upstreamUrl, MNP_AIONUI_WEB_URL: upstreamUrl,
   } })
@@ -166,7 +178,26 @@ test('로그인 계정의 실제 서버 API에서 제안 접수·삭제 초기�
   const login = await fetch(`${baseUrl}/api/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'admin@mind.local', password }) })
   assert.equal(login.status, 200)
   const headers = { Cookie: login.headers.get('set-cookie').split(';')[0], 'Content-Type': 'application/json' }
+  const settingsEndpoint = `${baseUrl}/api/integrations/dooray/mentions/response-settings`
+  const settingsApi = async (body, extraHeaders = headers) => {
+    const response = await fetch(settingsEndpoint, { method: body ? 'PUT' : 'GET', headers: extraHeaders, ...(body ? { body: JSON.stringify(body) } : {}) })
+    return { status: response.status, body: await response.json() }
+  }
+  assert.equal((await fetch(settingsEndpoint)).status, 401)
+  const integrationToken = (await readFile(path.join(directory, '_integration-token'), 'utf8')).trim()
+  assert.equal((await fetch(settingsEndpoint, { headers: { Authorization: `Bearer ${integrationToken}`, 'X-MNP-Editor-Id': 'user-admin' } })).status, 401)
+  const viewer = await fetch(`${baseUrl}/api/auth/viewer-access`, { method: 'POST' })
+  assert.equal((await settingsApi(undefined, { Cookie: viewer.headers.get('set-cookie').split(';')[0] })).status, 403)
+  assert.equal((await settingsApi()).body.settings, null)
+  for (const settings of [null, {}, [], { agentId: 'test-agent', modelId: 'invented' }, { agentId: 'test-agent', modelId: 'test-model', thoughtLevel: 'invented' }]) {
+    assert.equal((await settingsApi({ expectedUserId: 'user-admin', settings })).status, 400)
+  }
+  assert.equal((await settingsApi({ expectedUserId: 'different-user', settings: { agentId: 'test-agent', modelId: 'test-model' } })).status, 409)
+  assert.equal((await settingsApi({ expectedUserId: 'user-admin', userId: 'different-user', settings: {} })).status, 400)
+  assert.equal((await fetch(settingsEndpoint, { method: 'DELETE', headers })).status, 405)
   const executionOptions = await (await fetch(`${baseUrl}/api/integrations/aionui/options?purpose=dooray-response`, { headers })).json()
+  assert.deepEqual(executionOptions.agents[0].models.map((model) => model.id), ['test-model', 'gpt-6.1-sol'])
+  assert.equal(executionOptions.agents[0].defaultModelId, 'gpt-6.1-sol')
   assert.equal(executionOptions.defaultWorkspace, '', '담당 미지정 시 MnP나 Holdem으로 임의 귀속하지 않는다')
   assert.deepEqual(executionOptions.workspaceContext.choices, [])
   const cardWorkspaceOptions = await (await fetch(`${baseUrl}/api/integrations/aionui/options?purpose=dooray-response&mapId=map-test&cardId=task1`, { headers })).json()
@@ -179,12 +210,16 @@ test('로그인 계정의 실제 서버 API에서 제안 접수·삭제 초기�
   assert.ok(maintenanceOptions.workspaceContext.choices.some((item) => item.workspace === projectDirectory))
   extraByConversation.set('existing-chat', originalExtra)
   const normalOptions = await (await fetch(`${baseUrl}/api/integrations/aionui/options`, { headers })).json()
+  assert.ok(normalOptions.agents[0].models.some((model) => model.id === 'gpt-5.6-sol'), '수동 대화의 모델 목록은 자동 요청 정책으로 바꾸지 않는다')
   assert.equal(normalOptions.defaultWorkspace, '', '일반 카드도 MnP 기본 경로로 대체하지 않는다')
   assert.deepEqual((await (await fetch(endpoint, { headers })).json()).jobs, [])
   assert.equal((await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ itemKey: 'foreign' }) })).status, 404)
-  const response = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ itemKey: item.key, settings: { agentId: 'test-agent', modelId: 'test-model' }, url: 'http://untrusted.invalid' }) })
+  const response = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ itemKey: item.key, settings: { agentId: 'test-agent', modelId: 'gpt-5.6-sol' }, url: 'http://untrusted.invalid' }) })
   const accepted = await response.json()
   assert.equal(response.status, 202, JSON.stringify(accepted))
+  assert.equal(accepted.job.settings.modelId, 'gpt-6.1-sol')
+  assert.equal(accepted.job.modelPolicy.previousModelId, 'gpt-5.6-sol')
+  assert.ok(accepted.job.modelPolicy.message.includes('gpt-6.1-sol'))
   const duplicate = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ itemKey: item.key }) })
   assert.equal((await duplicate.json()).job.id, accepted.job.id)
   let latest
@@ -201,11 +236,30 @@ test('로그인 계정의 실제 서버 API에서 제안 접수·삭제 초기�
   assert.match(created[0].extra.workspace, /user-admin[\\/]Dooray AI 대응$/)
   assert.notEqual(created[0].extra.mnpDoorayOperationId, created[1].extra.mnpDoorayOperationId)
   assert.equal(created[0].assistant.id, 'bare:test-agent')
-  assert.equal(created[0].assistant.conversation_overrides.model, 'test-model')
+  assert.equal(created[0].assistant.conversation_overrides.model, 'gpt-6.1-sol')
   assert.equal(operations.size, 2)
   assert.deepEqual(mcpReloads, [], '기존 업무 대화의 MCP를 변경하지 않는다')
   assert.ok(extraByConversation.get('existing-chat').mcp_server_ids.includes('kept-mcp'))
   assert.deepEqual(extraByConversation.get('existing-chat').session_mcp_servers, [{ name: 'session-tool', command: 'test-only' }])
+  assert.equal((await settingsApi()).body.settings.modelId, 'gpt-6.1-sol', '첫 제안의 실제 선택도 계정별로 저장한다')
+  const configured = await settingsApi({ expectedUserId: 'user-admin', settings: { agentId: 'test-agent', modelId: 'gpt-6.1-sol', thoughtLevel: 'high' } })
+  assert.equal(configured.status, 200)
+  const secondLogin = await fetch(`${baseUrl}/api/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'admin@mind.local', password }) })
+  const secondHeaders = { Cookie: secondLogin.headers.get('set-cookie').split(';')[0], 'Content-Type': 'application/json' }
+  assert.deepEqual((await settingsApi(undefined, secondHeaders)).body.settings, configured.body.settings, '다른 브라우저 세션도 같은 계정 설정을 읽는다')
+  const migrated = await settingsApi({ expectedUserId: 'user-admin', settings: { agentId: 'test-agent', modelId: 'gpt-5.6-sol' }, onlyIfUnset: true })
+  assert.deepEqual(migrated.body.settings, configured.body.settings, '예전 브라우저 값이 새 선택을 덮어쓰지 않는다')
+  const editorResponse = await fetch(`${baseUrl}/api/admin/editors`, { method: 'POST', headers,
+    body: JSON.stringify({ name: '설정 분리 검증', email: 'response-settings@mind.local', password }) })
+  assert.equal(editorResponse.status, 201)
+  const editorLogin = await fetch(`${baseUrl}/api/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: 'response-settings@mind.local', password }) })
+  assert.equal(editorLogin.status, 200)
+  const editorHeaders = { Cookie: editorLogin.headers.get('set-cookie').split(';')[0], 'Content-Type': 'application/json' }
+  const separateAccount = (await settingsApi(undefined, editorHeaders)).body
+  assert.equal(separateAccount.settings, null)
+  assert.equal((await settingsApi({ expectedUserId: separateAccount.userId, settings: { agentId: 'other-agent', modelId: 'other-model' } }, editorHeaders)).status, 200)
+  assert.deepEqual((await settingsApi()).body.settings, configured.body.settings, '다른 계정의 AI 선택은 기존 계정을 변경하지 않는다')
   const originalComment = selectedComment
   selectedComment += ' 편집된 원문입니다.'
   const sourceReads = paths.filter((entry) => entry.startsWith('GET /project/')).length
@@ -253,6 +307,11 @@ test('로그인 계정의 실제 서버 API에서 제안 접수·삭제 초기�
   assert.equal(latest.status, 'proposal', JSON.stringify(latest))
   assert.equal(latest.conversationId, 'created-4', '업무 대화 대신 새로운 전용 검토 대화를 만든다')
   assert.equal(created.length, 4)
+  for (const conversation of created.slice(2, 4)) {
+    assert.equal(conversation.assistant.id, 'bare:test-agent')
+    assert.equal(conversation.assistant.conversation_overrides.model, 'gpt-6.1-sol')
+    assert.equal(conversation.assistant.conversation_overrides.thought_level, 'high', '새 접수·검토 대화에 계정이 선택한 사고 레벨을 전달한다')
+  }
   assert.equal(operations.size, 6)
   assert.equal(new Set(created.map((conversation) => conversation.extra.workspace)).size, 1, '서로 다른 요청도 같은 전용 프로젝트에 모인다')
   const handoffEndpoint = `${endpoint}/${latest.id}/handoff`
@@ -335,14 +394,27 @@ test('로그인 계정의 실제 서버 API에서 제안 접수·삭제 초기�
     const payload = approvalTickets[0]
     assert.ok(payload.prompt.includes(request))
     assert.ok(payload.prompt.includes(reviewProposal))
-    assert.match(payload.prompt, /서버에 저장된 사용자 승인을 검증/)
+    assert.match(payload.prompt, /mindnprogress_get_dooray_response_approval.*서버에 저장된 사용자 승인을 검증.*승인 범위와 제외 범위를 그대로 따르세요/s)
     assert.match(payload.title, /^\[Dooray 승인\]/)
     assert.equal(payload.workspace, executionWorkspace)
     assert.equal(payload.agentId, 'test-agent')
     assert.equal(payload.autoSend, true)
+    const statusUrl = payload.completionUrl.replace(/\/conversation$/, '/status')
+    assert.equal((await fetch(statusUrl)).status, 401)
+    const pendingStatus = await fetch(statusUrl, { headers })
+    assert.equal(pendingStatus.headers.get('cache-control'), 'no-store')
+    const pendingLaunch = await pendingStatus.json()
+    assert.equal(pendingLaunch.status, 'pending')
+    assert.equal(pendingLaunch.desktopLaunchUrl, `aionui://conversation/new?launchId=${'a'.repeat(64)}`)
+    assert.equal('prompt' in pendingLaunch, false)
+    assert.equal((await fetch(payload.completionUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ conversationId: 'invalid id' }) })).status, 400)
+    assert.equal((await (await fetch(statusUrl, { headers })).json()).status, 'confirmation-failed')
     assert.equal((await fetch(`${contextUrl}&execution=1&conversationId=approved-work`, { headers })).status, 409)
     const linked = await fetch(payload.completionUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ conversationId: 'approved-work' }) })
     assert.equal(linked.status, 200, JSON.stringify(await linked.json()))
+    const confirmedLaunch = await (await fetch(statusUrl, { headers })).json()
+    assert.equal(confirmedLaunch.status, 'completed')
+    assert.equal(confirmedLaunch.conversationId, 'approved-work')
     assert.equal((await fetch(payload.completionUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ conversationId: 'approved-work' }) })).status, 200)
     assert.equal((await fetch(`${contextUrl}&execution=1&conversationId=approved-work`, { headers })).status, 200)
     assert.equal((await fetch(`${contextUrl}&execution=1&conversationId=other-work`, { headers })).status, 409)
@@ -361,8 +433,10 @@ test('로그인 계정의 실제 서버 API에서 제안 접수·삭제 초기�
     }) })
     const attribution = await attributionResponse.json()
     assert.equal(attributionResponse.status, 201, JSON.stringify(attribution))
+    assert.equal(`${baseUrl}${attribution.statusUrl}`, attribution.completionUrl.replace(/\/conversation$/, '/status'))
     const { buildAiConversationPrompt, aiConversationTitle } = await import('../src/utils/aiConversationLaunch.mjs')
-    const prompt = buildAiConversationPrompt({ ...launch, editorId: attribution.editorId, attributionToken: attribution.attributionToken, request: attribution.approvalRequest })
+    const prompt = buildAiConversationPrompt({ ...launch, editorId: attribution.editorId, attributionToken: attribution.attributionToken,
+      request: `${attribution.approvalRequest}\n# 사용자 추가 요청\n${'누락 없이 승인 범위만 확인합니다.\n'.repeat(600)}` })
     const payload = { agentId: 'test-agent', modelId: 'test-model', completionUrl: attribution.completionUrl, prompt,
       title: aiConversationTitle(launch), workspace: executionWorkspace, autoSend: true }
     const wrongWorkspace = await fetch(`${baseUrl}/api/integrations/aionui/external-conversation-launches`, { method: 'POST', headers, body: JSON.stringify({ ...payload, workspace: projectDirectory }) })
@@ -371,7 +445,17 @@ test('로그인 계정의 실제 서버 API에서 제안 접수·삭제 초기�
     const bad = await fetch(`${baseUrl}/api/integrations/aionui/external-conversation-launches`, { method: 'POST', headers, body: JSON.stringify({ ...payload, prompt: '전문 누락' }) })
     assert.equal(bad.status, 409)
     const ticket = await fetch(`${baseUrl}/api/integrations/aionui/external-conversation-launches`, { method: 'POST', headers, body: JSON.stringify(payload) })
-    assert.equal(ticket.status, 201, JSON.stringify(await ticket.json()))
+    const ticketResult = await ticket.json()
+    assert.equal(ticket.status, 201, JSON.stringify(ticketResult))
+    assert.ok(Buffer.from(JSON.stringify(payload)).toString('base64').length > 32767, '운영 오류와 같은 긴 승인 전문을 검증한다')
+    assert.ok(ticketResult.desktopLaunchUrl.length < 128)
+    assert.equal(approvalTickets[0].prompt, prompt, '시작 URL 길이를 줄여도 전문은 누락하지 않는다')
+    const repeatedTicket = await fetch(`${baseUrl}/api/integrations/aionui/external-conversation-launches`, { method: 'POST', headers, body: JSON.stringify(payload) })
+    assert.equal(repeatedTicket.status, 201)
+    assert.deepEqual(await repeatedTicket.json(), ticketResult)
+    assert.equal(approvalTickets.length, 1)
+    const alteredTicket = await fetch(`${baseUrl}/api/integrations/aionui/external-conversation-launches`, { method: 'POST', headers, body: JSON.stringify({ ...payload, title: '바꾼 제목' }) })
+    assert.equal(alteredTicket.status, 409)
     await completeLaunch(launch.initialRequest)
     assert.equal((await fetch(`${endpoint}/${approvalJob.id}/complete`, { method: 'POST', headers })).status, 200)
   }
@@ -467,4 +551,95 @@ test('로그인 계정의 실제 서버 API에서 제안 접수·삭제 초기�
   assert.equal(verifiedHandoff.job.approval.handoffs[0].request, undefined, '목록에는 긴 전문을 반복하지 않는다')
   assert.equal((await fetch(`${contextUrl}&execution=1&conversationId=unrelated-work`, { headers })).status, 409)
   assert.equal((await fetch(`${contextUrl}&execution=1&conversationId=approved-work`, { headers })).status, 200)
+
+  // 이전 버전의 연결 오류를 저장한 단일 기록만 복구한다. 클라이언트 제안은 받지 않는다.
+  recoveryMode = true
+  const responseFile = path.join(directory, '_dooray-responses', 'user-admin.json')
+  const responseState = JSON.parse(await readFile(responseFile, 'utf8'))
+  const legacy = structuredClone(responseState.jobs.find((job) => job.router))
+  const routerOperation = [...operations.values()].reverse().find((op) => op.operationId.includes('-route-'))
+  Object.assign(legacy, { id: 'legacy-link-failure', status: 'failed', completedAt: null, approval: null,
+    error: 'AI가 선택한 대화가 담당 카드에 연결되어 있지 않습니다.', proposal: '', decision: null,
+    route: null, review: null, handoff: null, proposalSource: null, routingWarning: null, resultRecovery: null,
+    updatedAt: '2026-09-28T00:00:00.000Z',
+    operation: { id: routerOperation.operationId, kind: 'router', machineId: legacy.router.machineId,
+      conversationId: routerOperation.targetConversationId, dispatchAttempted: true },
+    router: { ...legacy.router, conversationId: routerOperation.targetConversationId },
+  })
+  responseState.jobs.unshift(legacy)
+  await writeFile(responseFile, JSON.stringify(responseState))
+  const recoveryUrl = `${endpoint}/${legacy.id}/recover-result`
+  const recoveryBody = JSON.stringify({ expectedUpdatedAt: legacy.updatedAt, proposal: '클라이언트가 주입한 내용은 무시한다.' })
+  const integrationHeaders = { 'Content-Type': 'application/json', Authorization: `Bearer ${(await readFile(path.join(directory, '_integration-token'), 'utf8')).trim()}`,
+    'X-Mnp-Ai-Editor-Id': 'user-admin' }
+  assert.equal((await fetch(recoveryUrl, { method: 'POST', body: recoveryBody })).status, 401)
+  assert.equal((await fetch(recoveryUrl, { method: 'POST', headers: { ...integrationHeaders, 'X-Mnp-Ai-Editor-Id': '' }, body: recoveryBody })).status, 403)
+  assert.equal((await fetch(`${endpoint}/${legacy.id}/approve`, { method: 'POST', headers: integrationHeaders, body: '{}' })).status, 401)
+  assert.equal((await fetch(recoveryUrl, { method: 'POST', headers, body: JSON.stringify({ expectedUpdatedAt: 'stale' }) })).status, 409)
+  const upstreamBefore = paths.length
+  const mapBefore = await readFile(path.join(directory, 'map-test.json'), 'utf8')
+  if (['1', 'recovery'].includes(process.env.MNP_RESPONSE_BROWSER_CHECK)) {
+    await checkDoorayResponseBrowser({ directory, baseUrl, password, recoveryFlow: true })
+  }
+  const recoveryResponse = await fetch(recoveryUrl, { method: 'POST', headers: integrationHeaders, body: recoveryBody })
+  const recovery = await recoveryResponse.json()
+  assert.equal(recoveryResponse.status, 200, JSON.stringify(recovery))
+  assert.equal(recovery.job.proposal, reviewProposal)
+  assert.equal(recovery.job.status, 'needs-approval')
+  assert.equal(recovery.job.proposalSource, 'router')
+  assert.equal(recovery.job.approval, null)
+  assert.equal(recovery.job.route.conversationId, null)
+  assert.equal(recovery.job.conversationId, legacy.router.conversationId)
+  assert.equal((await fetch(recoveryUrl, { method: 'POST', headers, body: recoveryBody })).status, 200)
+  assert.ok(paths.slice(upstreamBefore).every((entry) => entry.startsWith('GET ')), '복구 시 AionUi·Dooray에 쓰기 요청을 보내지 않는다')
+  assert.equal(await readFile(path.join(directory, 'map-test.json'), 'utf8'), mapBefore)
+  const afterRecovery = JSON.parse(await readFile(responseFile, 'utf8'))
+  assert.equal(afterRecovery.jobs.length, responseState.jobs.length)
+  assert.deepEqual(afterRecovery.jobs.filter((job) => job.id !== legacy.id), responseState.jobs.filter((job) => job.id !== legacy.id))
+
+  // 모델 실패 뒤 사용자가 같은 전용 대화에서 이어 완료한 제안도 실행 없이 회수한다.
+  const manual = structuredClone(legacy)
+  Object.assign(manual, { id: 'manual-result-test', conversationPolicy: 'dedicated', status: 'failed', error: '모델 용량 초과',
+    createdAt: new Date(Date.now() - 180_000).toISOString(), updatedAt: new Date().toISOString() })
+  manual.operation = { id: `${manual.id}-route-3-0`, kind: 'router', machineId: manual.settings.machineId,
+    conversationId: 'manual-proposal-chat', dispatchAttempted: true, settings: structuredClone(manual.settings),
+    prompt: '현재 요청의 제안만 작성하고 실제 실행은 하지 마세요.' }
+  manual.router.conversationId = manual.operation.conversationId
+  const manualProposal = '수동 이어가기의 최종 제안\n\n원문과 공백을 그대로 회수합니다.  \n'
+  const manualDecision = { kind: 'proposal', reason: '지금은 승인이나 실행 없이 검토 자료만 제시합니다.', questions: [], approval: null }
+  operations.set(manual.operation.id, { operationId: manual.operation.id, targetConversationId: manual.operation.conversationId })
+  dispatchStates.set(manual.operation.id, 'failed')
+  extraByConversation.set(manual.operation.conversationId, { mnpDoorayResponseId: manual.id, mnpDoorayUserId: 'user-admin',
+    mnpDoorayOperationId: `${manual.id}-route-0-0`, workspace: manual.settings.proposalWorkspace })
+  manualMessages.set(manual.operation.conversationId, [
+    { id: 'original-input', conversation_id: manual.operation.conversationId, position: 'right', type: 'text', status: 'finish',
+      created_at: Date.now() - 120_000, content: { content: manual.operation.prompt } },
+    { id: 'manual-final', conversation_id: manual.operation.conversationId, position: 'left', type: 'text', status: 'finish', hidden: false,
+      created_at: Date.now() - 60_000, backend_turn_id: 'manual-final-turn', content: { content: JSON.stringify({
+        requestId: manual.operation.id, action: 'direct', mapId: 'map-test', cardId: 'task1', conversationId: null,
+        requestSummary: '최종 검토 자료 제안', reason: '현재 담당 카드의 검토 범위', proposal: manualProposal, decision: manualDecision,
+      }) } },
+  ])
+  const stateBeforeManual = JSON.parse(await readFile(responseFile, 'utf8'))
+  stateBeforeManual.jobs.unshift(manual)
+  await writeFile(responseFile, JSON.stringify(stateBeforeManual))
+  const beforeManualPaths = paths.length
+  const manualUrl = `${endpoint}/${manual.id}/recover-result`
+  const recoveredManualResponse = await fetch(manualUrl, { method: 'POST', headers: integrationHeaders,
+    body: JSON.stringify({ expectedUpdatedAt: manual.updatedAt, proposal: '클라이언트의 다른 제안은 채택하지 않는다.' }) })
+  const recoveredManual = await recoveredManualResponse.json()
+  assert.equal(recoveredManualResponse.status, 200, JSON.stringify(recoveredManual))
+  assert.equal(recoveredManual.job.status, 'proposal')
+  assert.equal(recoveredManual.job.proposal, manualProposal)
+  assert.equal(recoveredManual.job.proposalSource, 'router')
+  assert.equal(recoveredManual.job.approval, null)
+  assert.deepEqual(recoveredManual.job.decision, manualDecision)
+  const manualStored = JSON.parse(await readFile(responseFile, 'utf8')).jobs.find(job => job.id === manual.id)
+  assert.equal(manualStored.resultRecovery.previousError, '모델 용량 초과')
+  assert.equal(manualStored.resultRecovery.dispatchState, 'failed')
+  assert.equal(manualStored.resultRecovery.resultBackendTurnId, 'manual-final-turn')
+  assert.ok(paths.slice(beforeManualPaths).every(entry => entry.startsWith('GET ')))
+  assert.equal(await readFile(path.join(directory, 'map-test.json'), 'utf8'), mapBefore)
+  assert.equal((await fetch(manualUrl, { method: 'POST', headers: integrationHeaders,
+    body: JSON.stringify({ expectedUpdatedAt: manual.updatedAt }) })).status, 200)
 })

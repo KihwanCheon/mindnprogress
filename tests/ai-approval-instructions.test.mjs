@@ -7,6 +7,8 @@ import {
   GROUP_COORDINATOR_INSTRUCTION,
   DOCUMENT_COORDINATOR_INSTRUCTION,
   AI_DELEGATION_FOLLOWUP_INSTRUCTION,
+  AI_DELEGATION_REVIEW_INSTRUCTION,
+  AI_DELEGATION_RESULT_INSTRUCTION,
   GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION,
   buildGroupCoordinatorRequest,
   buildGroupDocumentRequest,
@@ -48,6 +50,14 @@ test('총괄 역할 지침은 승인 정책 전문을 복제하지 않는다', (
   assert.ok(!GROUP_COORDINATOR_INSTRUCTION.includes(GROUP_APPROVAL_INSTRUCTION))
 })
 
+test('총괄은 하위 결과를 공유 지식에 누적하지 않고 공통 결정만 조건부 갱신한다', () => {
+  const request = buildGroupCoordinatorRequest({ groupId: 'group-test' })
+  assert.match(request, /실행 결과는 담당 추적 카드의 댓글/)
+  assert.match(request, /여러 문서의 판단·구현에 필요한 새 결정·공통 제약.*현재 결론으로 통합/)
+  assert.match(request, /하위 완료 보고를 복사하지 마세요.*새 지식이 없으면 변경하지 마세요/)
+  assert.doesNotMatch(request, /실행 결과와 현재 결정은 총괄 문서의 공유 지식/)
+})
+
 test('문서 담당은 그룹 승인 전문 없이 맡긴 범위를 수행하고 최신 원본 검토를 유지한다', () => {
   const request = buildGroupDocumentRequest({ groupId: 'group-test', groupName: '매니저' })
   assert.ok(request.includes(DOCUMENT_COORDINATOR_INSTRUCTION))
@@ -83,6 +93,30 @@ test('일반 결과 회수는 실제 산출물 검증 뒤 맡긴 범위의 후�
   assert.doesNotMatch(AI_DELEGATION_FOLLOWUP_INSTRUCTION, /사용자 승인|승인 대기|두 단계 승인/)
 })
 
+test('결과 검수는 원래 목표를 기준으로 필요한 보완과 선택 개선을 구분하고 종료한다', () => {
+  for (const instruction of [AI_DELEGATION_FOLLOWUP_INSTRUCTION, GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION]) {
+    assert.ok(instruction.startsWith(AI_DELEGATION_REVIEW_INSTRUCTION))
+    assert.equal(instruction.split(AI_DELEGATION_REVIEW_INSTRUCTION).length - 1, 1)
+  }
+  assert.match(AI_DELEGATION_REVIEW_INSTRUCTION, /목적.*범위.*완료 조건.*먼저/)
+  assert.match(AI_DELEGATION_REVIEW_INSTRUCTION, /원문·출처.*체크리스트.*후속 제안.*자동 채택하지/s)
+  assert.match(AI_DELEGATION_REVIEW_INSTRUCTION, /미충족 조건.*확인된 근거.*목표 달성에 필요한 이유.*종료 조건/)
+  assert.match(AI_DELEGATION_REVIEW_INSTRUCTION, /오류·회귀·필수 검증 누락/)
+  assert.match(AI_DELEGATION_REVIEW_INSTRUCTION, /완료 조건과 필수 검증을 충족하면.*보완을 종료/)
+  assert.match(AI_DELEGATION_REVIEW_INSTRUCTION, /선택 개선.*현재 업무의 완료 조건에 추가하지/)
+  assert.match(AI_DELEGATION_REVIEW_INSTRUCTION, /같은 지적과 같은 처방.*진전 없이 반복.*재위임.*멈추/s)
+  assert.match(AI_DELEGATION_REVIEW_INSTRUCTION, /미해결 문제를 완료 처리하지/)
+  assert.doesNotMatch(AI_DELEGATION_REVIEW_INSTRUCTION, /당신은.*상위 AI/)
+})
+
+test('하위 보고는 달성 결과와 필수 미완료 및 선택 개선을 분리하고 새 실행을 지시하지 않는다', () => {
+  assert.match(AI_DELEGATION_RESULT_INSTRUCTION, /맡은 목표.*달성 결과.*검증 근거/)
+  assert.match(AI_DELEGATION_RESULT_INSTRUCTION, /필수 미완료.*선택 개선/)
+  assert.match(AI_DELEGATION_RESULT_INSTRUCTION, /없으면.*없음/)
+  assert.match(AI_DELEGATION_RESULT_INSTRUCTION, /실행 지시나 새로운 완료 조건으로.*단정하지/)
+  assert.ok(DOCUMENT_COORDINATOR_INSTRUCTION.includes(AI_DELEGATION_RESULT_INSTRUCTION))
+})
+
 test('최대 길이의 그룹·문서 식별자에서도 승인 규칙과 마지막 검수 지침이 잘리지 않는다', () => {
   const requests = [
     buildGroupCoordinatorRequest({ groupId: 'group-' + 'g'.repeat(100) }),
@@ -99,7 +133,8 @@ test('최대 길이의 그룹·문서 식별자에서도 승인 규칙과 마지
   }
   assert.match(DEFAULT_AI_EDITOR_REQUEST, /필요한 필드만 먼저 수정하고 저장 결과를 확인/)
   assert.match(DEFAULT_AI_EDITOR_REQUEST, /결과 중심 체크리스트를 생성하거나 갱신/)
-  assert.doesNotMatch(DEFAULT_AI_EDITOR_REQUEST, /승인|읽기 전용/)
+  assert.ok(!DEFAULT_AI_EDITOR_REQUEST.includes(AI_EXECUTION_APPROVAL_INSTRUCTION))
+  assert.doesNotMatch(DEFAULT_AI_EDITOR_REQUEST, /승인 전에는 읽기 전용/)
 })
 
 test('그룹 시작 용도는 요청을 직접 바꿔도 승인을 유지하고 일반 용도에는 주입하지 않는다', () => {

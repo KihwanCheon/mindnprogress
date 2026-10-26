@@ -39,10 +39,12 @@ export function createAionUiCaller({ candidateBaseUrls, fetchImpl = fetch, onCon
         onConnected(baseUrl)
 
         if (!response.ok || responseBody?.success === false) {
+          const message = typeof responseBody?.error === 'string' ? responseBody.error : responseBody?.error?.message
           return {
             ok: false,
             status: response.status,
             code: responseBody?.error?.code ?? responseBody?.code ?? null,
+            ...(typeof message === 'string' ? { message } : {}),
           }
         }
         return { ok: true, data: responseBody?.data ?? responseBody }

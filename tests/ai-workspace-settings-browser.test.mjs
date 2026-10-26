@@ -81,7 +81,8 @@ window.fetch = async (url, init = {}) => {
     } else if(window.sectionFlags.hold) await new Promise(resolve=>window.sectionFlags.release=resolve);
     body={userId,sections:init.method==='PATCH'?window.sectionPreferences[userId]:saved};
   }
-  else if (url === '/api/integrations/aionui/attributions') body = {editorId:'fixture',attributionToken:'fixture',completionUrl:'http://fixture.invalid/completion'};
+  else if (url === '/api/integrations/aionui/attributions') body = {editorId:'fixture',attributionToken:'fixture',completionUrl:'http://fixture.invalid/completion',statusUrl:'/api/integrations/aionui/launches/'+ 'A'.repeat(43) +'/status'};
+  else if (url.endsWith('/status')) body = {status:'completed',conversationId:'fixture-conversation'};
   else if (url === '/api/integrations/aionui/external-conversation-launches') body = {launchUrl:'about:blank'};
   else throw new Error('예상하지 않은 테스트 요청: '+url);
   return new Response(JSON.stringify(body),{headers:{'Content-Type':'application/json'}});
@@ -110,12 +111,14 @@ window.renderWorkspaceModifierFocusHarness=()=>root.render(React.createElement(W
 window.fixtureReady = true;
 `
 
-test('작업공간 확인·문서/그룹 저장·공통 메뉴·이름 편집·계정별 접힘 상태를 검증한다', { skip: process.env.MNP_BROWSER_TEST !== '1', timeout: 60_000 }, async (t) => {
+test('작업공간 확인·문서/그룹 저장·공통 메뉴·이름 편집·계정별 접힘 상태를 검증한다', { skip: process.env.MNP_BROWSER_TEST !== '1', timeout: 120_000 }, async (t) => {
   const { createServer } = await import('vite')
   const react = (await import('@vitejs/plugin-react')).default
   const directory = await mkdtemp(path.join(tmpdir(), 'mnp-workspace-browser-'))
-  const server = await createServer({ configFile: false, root: path.resolve(import.meta.dirname, '..'), logLevel: 'error',
-    server: { host: '127.0.0.1', port: 0, hmr: false }, plugins: [react(), {
+  // 고정 UI 검사에는 전체 설치 폴더의 의존성 탐색·파일 감시와 운영 캐시 공유가 필요 없다.
+  const server = await createServer({ configFile: false, root: path.resolve(import.meta.dirname, '..'), cacheDir: path.join(directory, 'vite-cache'), logLevel: 'error',
+    optimizeDeps: { noDiscovery: true, include: ['react', 'react/jsx-runtime', 'react/jsx-dev-runtime', 'react-dom', 'react-dom/client'] },
+    server: { host: '127.0.0.1', port: 0, hmr: false, watch: null }, plugins: [react(), {
       name: 'role-fixture', resolveId: (id) => id === '/role-fixture.js' ? '\0role-fixture' : null,
       load: (id) => id === '\0role-fixture' ? fixture : null,
       configureServer(vite) { vite.middlewares.use('/role-check', async (_req, res) => {
@@ -173,13 +176,36 @@ test('작업공간 확인·문서/그룹 저장·공통 메뉴·이름 편집·�
         const styles = await evaluate('[document.querySelector(".ai-request > small"),...document.querySelectorAll(".ai-workspace-field > small")].map(el=>{const s=getComputedStyle(el);return {size:s.fontSize,weight:s.fontWeight,line:s.lineHeight}})')
         assert.ok(styles.length >= 2)
         for (const style of styles) assert.deepEqual(style, { size: '8px', weight: '500', line: '11.6px' }, `${theme}: 작업공간 안내는 다른 보조 설명과 같은 글꼴 규격`)
-        if (theme === 'dark') assert.deepEqual(await evaluate('[...document.querySelectorAll(".ai-dialog summary")].map(el=>getComputedStyle(el).color)'),['rgb(212, 207, 218)','rgb(212, 207, 218)','rgb(212, 207, 218)'],'접힘 제목도 다크모드에서 읽기 쉽게 표시')
+        if (theme === 'dark') assert.deepEqual(await evaluate('[...document.querySelectorAll(".ai-dialog summary")].map(el=>getComputedStyle(el).color)'),Array(4).fill('rgb(212, 207, 218)'),'접힘 제목도 다크모드에서 읽기 쉽게 표시')
       }
       await evaluate('document.documentElement.dataset.theme="light"')
     }
 
     const configured={mapId:'map-coordinator',groupId:'group-manager',groupName:'테스트 그룹',machineId:'fixture',machineRole:'main',documentSetting:{version:1,workspace:'/document'},groupSetting:{version:1,workspace:'/group'},source:'document',workspace:'/document',error:'',choices:[],token:'configured',needsSelection:false};
     const mixed={...configured,documentSetting:{version:0,workspace:''},groupSetting:{version:0,workspace:''},source:'none',workspace:'',needsSelection:true,token:'mixed',choices:[{workspace:'/project',reasons:['문서 루트 대화']},{workspace:'/mnp',reasons:['과거 대화']}]};
+    await t.test('session-message는 제공될 때만 기본 선택하고 사용자 해제를 시작 요청에 반영한다', async () => {
+      const flags={workspaceContext:configured,optionOverrides:{skills:[
+        {id:'session-message',name:'session-message',description:'세션 메시지 전달',autoInject:false},
+        {id:'other-skill',name:'다른 스킬',description:'선택하지 않음',autoInject:false},
+      ]}};
+      const checked=()=>evaluate('[...document.querySelectorAll(".ai-skills-section input")].map(el=>el.checked)');
+      await open({userId:'skill-default'},flags);
+      assert.deepEqual(await checked(),[true,false],'현재 머신에서 제공하는 session-message만 기본 선택');
+      await evaluate('document.querySelector(".ai-skills-section input").click()');
+      assert.deepEqual(await checked(),[false,false],'사용자가 기본 선택을 해제할 수 있다');
+      await evaluate('document.querySelector(".ai-dialog footer .primary").click()');
+      await waitFor(()=>evaluate('window.audit.closed===1'));
+      assert.deepEqual(await evaluate('window.audit.calls.find(c=>c.url.endsWith("/external-conversation-launches")).body.enabledSkillIds'),[]);
+
+      await open({userId:'skill-default'},flags);
+      assert.deepEqual(await checked(),[true,false],'새 대화 시작 창을 열면 기본 선택을 다시 적용');
+      await evaluate('document.querySelector(".ai-dialog footer .primary").click()');
+      await waitFor(()=>evaluate('window.audit.closed===1'));
+      assert.deepEqual(await evaluate('window.audit.calls.find(c=>c.url.endsWith("/external-conversation-launches")).body.enabledSkillIds'),['session-message']);
+
+      await open({userId:'skill-default'},{workspaceContext:configured,optionOverrides:{skills:[{id:'other-skill',name:'다른 스킬',description:'',autoInject:false}]}});
+      assert.deepEqual(await checked(),[false],'현재 머신에 없는 스킬을 선택하지 않는다');
+    });
     await t.test('작업공간 경로 입력 중 Ctrl 상태의 부모 재렌더링에도 포커스와 입력 대상을 유지한다', async () => {
       await evaluate('window.audit.workspaceContext='+JSON.stringify(mixed)+';window.renderWorkspaceModifierFocusHarness()');
       await waitFor(()=>evaluate('Boolean(document.querySelector(".workspace-settings-path input"))'));
@@ -447,16 +473,16 @@ test('작업공간 확인·문서/그룹 저장·공통 메뉴·이름 편집·�
     const longMcp='필수 MCP 서버 이름 '.repeat(24), longSkill='선택한 스킬 이름 '.repeat(24);
     const optionOverrides={mcpServers:[{id:'summary-required',name:longMcp,required:true,toolCount:1},{id:'summary-optional',name:'선택 MCP',required:false,toolCount:2},{id:'summary-excluded',name:'선택하지 않은 MCP',required:false,toolCount:1}],skills:[{id:'summary-skill',name:longSkill,description:''},{id:'summary-skill-two',name:'두 번째 스킬',description:''},{id:'summary-skill-excluded',name:'선택하지 않은 스킬',description:''}]};
     await open({userId:'summary-account'}, {workspaceContext:{...configured,workspace:longWorkspace},optionOverrides});
-    assert.equal(await evaluate('document.querySelectorAll(".ai-section-selection").length'),0,'펼침 상태에는 요약을 중복 표시하지 않는다');
+    assert.equal(await evaluate('document.querySelectorAll("details:not(.ai-delegation-model-section) .ai-section-selection").length'),0,'펼침 상태에는 요약을 중복 표시하지 않는다');
     await evaluate('document.querySelectorAll(".ai-mcp-section input")[1].click();document.querySelectorAll(".ai-skills-section input")[0].click();document.querySelectorAll(".ai-skills-section input")[1].click()');
     for(const key of ['workspace','mcp','skills']) await toggleSection(key);
-    await waitFor(()=>evaluate('document.querySelectorAll(".ai-section-selection").length===3'));
+    await waitFor(()=>evaluate('document.querySelectorAll("details:not(.ai-delegation-model-section) .ai-section-selection").length===3'));
     const expectedSummaries=[longWorkspace,longMcp+', 선택 MCP',longSkill+', 두 번째 스킬'];
     const screenshotDirectory=process.env.MNP_TEST_SCREENSHOTS==='1'?await mkdtemp(path.join(tmpdir(),'mnp-collapsed-selection-screenshots-')):null;
     for(const width of [1440,390]) for(const theme of ['light','dark']) {
       await send('Emulation.setDeviceMetricsOverride',{width,height:width===390?844:1000,deviceScaleFactor:1,mobile:width===390});
       await evaluate('document.documentElement.dataset.theme='+JSON.stringify(theme)+';document.documentElement.style.colorScheme='+JSON.stringify(theme)+';document.querySelector(".ai-dialog-content").scrollTop=99999');
-      const summaries=await evaluate('[...document.querySelectorAll(".ai-section-selection")].map(el=>{const s=getComputedStyle(el),r=el.getBoundingClientRect(),header=el.parentElement.getBoundingClientRect(),label=el.previousElementSibling.getBoundingClientRect();return {text:el.textContent,title:el.title,overflow:s.overflow,textOverflow:s.textOverflow,whiteSpace:s.whiteSpace,fontSize:s.fontSize,color:s.color,truncated:el.scrollWidth>el.clientWidth,within:r.left>=label.right+6&&r.right<=header.right-12,headerHeight:header.height}})');
+      const summaries=await evaluate('[...document.querySelectorAll("details:not(.ai-delegation-model-section) .ai-section-selection")].map(el=>{const s=getComputedStyle(el),r=el.getBoundingClientRect(),header=el.parentElement.getBoundingClientRect(),label=el.previousElementSibling.getBoundingClientRect();return {text:el.textContent,title:el.title,overflow:s.overflow,textOverflow:s.textOverflow,whiteSpace:s.whiteSpace,fontSize:s.fontSize,color:s.color,truncated:el.scrollWidth>el.clientWidth,within:r.left>=label.right+6&&r.right<=header.right-12,headerHeight:header.height}})');
       assert.deepEqual(summaries.map(s=>s.text),expectedSummaries);
       assert.deepEqual(summaries.map(s=>s.title),expectedSummaries,'말줄임 뒤의 전체 값은 툴팁으로 제공');
       for(const summary of summaries) {
@@ -474,17 +500,17 @@ test('작업공간 확인·문서/그룹 저장·공통 메뉴·이름 편집·�
     }
     if(screenshotDirectory) t.diagnostic('접힌 선택값 화면 캡처: '+screenshotDirectory);
     for(const key of ['workspace','mcp','skills']) await toggleSection(key);
-    await waitFor(()=>evaluate('document.querySelectorAll(".ai-section-selection").length===0'));
+    await waitFor(()=>evaluate('document.querySelectorAll("details:not(.ai-delegation-model-section) .ai-section-selection").length===0'));
     await evaluate('document.querySelectorAll(".ai-mcp-section input")[1].click();document.querySelectorAll(".ai-skills-section input")[0].click();document.querySelectorAll(".ai-skills-section input")[1].click();(()=>{const el=document.querySelector(".ai-workspace-input-row input");Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value").set.call(el,"");el.dispatchEvent(new Event("input",{bubbles:true}))})()');
     for(const key of ['workspace','mcp','skills']) await toggleSection(key);
-    await waitFor(()=>evaluate('document.querySelectorAll(".ai-section-selection").length===3'));
-    assert.deepEqual(await evaluate('[...document.querySelectorAll(".ai-section-selection")].map(el=>el.textContent)'),['선택 없음',longMcp,'선택 없음'],'선택 변경과 해제를 바로 반영');
+    await waitFor(()=>evaluate('document.querySelectorAll("details:not(.ai-delegation-model-section) .ai-section-selection").length===3'));
+    assert.deepEqual(await evaluate('[...document.querySelectorAll("details:not(.ai-delegation-model-section) .ai-section-selection")].map(el=>el.textContent)'),['선택 없음',longMcp,'선택 없음'],'선택 변경과 해제를 바로 반영');
     assert.deepEqual(await evaluate('[...document.querySelectorAll(".ai-dialog summary b")].map(el=>el.textContent)'),['1','0']);
     assert.equal(await evaluate('window.audit.calls.some(c=>c.url.endsWith("/attributions"))'),false,'요약 확인은 대화를 시작하지 않는다');
     await open({userId:'empty-summary-account'}, {workspaceContext:mixed,optionOverrides:{skills:[],mcpServers:[]}});
     for(const key of ['workspace','mcp','skills']) await toggleSection(key);
-    await waitFor(()=>evaluate('document.querySelectorAll(".ai-section-selection").length===3'));
-    assert.deepEqual(await evaluate('[...document.querySelectorAll(".ai-section-selection")].map(el=>el.textContent)'),['선택 없음','선택 없음','선택 없음']);
+    await waitFor(()=>evaluate('document.querySelectorAll("details:not(.ai-delegation-model-section) .ai-section-selection").length===3'));
+    assert.deepEqual(await evaluate('[...document.querySelectorAll("details:not(.ai-delegation-model-section) .ai-section-selection")].map(el=>el.textContent)'),['선택 없음','선택 없음','선택 없음']);
     await send('Emulation.setDeviceMetricsOverride',{width:1440,height:1000,deviceScaleFactor:1,mobile:false});
 
     for (const editScope of ['document','group']) {

@@ -86,11 +86,13 @@ Mind & Progress는 아이디어의 구조와 실제 업무 진행 상태를 하�
 - 카드에서 시작한 여러 AionUi 대화와 당시 선택한 AI·모델·권한·사고 수준·스킬·MCP·작업 공간을 보존하고 선택해 다시 열기
 - 마인드맵 노드 우클릭 메뉴에서 AI 대화 시작 또는 연결된 대화 열기
 - AI 종류, 모델, 권한, 사고 수준, 스킬, MCP, 작업 공간 선택
+- AionUi에 Claude 계정이 2개 이상이면 Claude 계정 선택과 용도별 기본 계정(그룹 총괄 / 문서·카드 대화와 AI 위임) 지정. AI가 만드는 위임 대화는 기본 계정 정책을 따르며, 구독 사용량은 가장 많이 쓴 계정을 대표로 표시합니다. 자세한 규칙은 [Claude 멀티 계정](docs/ai-claude-accounts.md)에 정리했습니다.
 - 문서별 작업 공간과 마지막 AI 옵션 기억
+- 사람용 전체 검색 화면과 AI용 `mindnprogress_search_content`가 같은 검색 서비스·권한·필터·커서를 사용
 - `mindnprogress_get_context`의 선행 지식·외부 업무 조사·대화 기록 조회 지침을 첫 요청에 전달
 - 선택 카드와 최상위 카드의 업무 링크를 독립적으로 AI 문맥에 제공
 - 카드에 연결된 AionUi 대화 전문을 MCP에서 필요할 때 조회
-- AI가 변경한 댓글과 변경 이력에 `{AI 종류}({모델})` 작성자 표시
+- AI가 변경한 댓글과 변경 이력에 `{AI 종류}({모델})` 작성자 표시(Claude 계정이 2개 이상이면 `Claude Code ②(Opus)`처럼 계정 번호 포함)
 - 문서·카드·업무·체크리스트·관계·댓글·대화·이력·휴지통·알림 MCP 도구
 
 ### 사용량 제한과 위임 복구
@@ -310,7 +312,7 @@ npm run dev
 | `MNP_AIONUI_URL` | 자동 탐색 | AionUi 백엔드 주소 강제 지정 |
 | `MNP_AIONUI_WEB_URL` | `MNP_PUBLIC_URL` 호스트의 7777 포트 | 원격 브라우저에서 AI 대화를 열 AionUi WebUI 주소 |
 | `MNP_AIONUI_DISCOVERY_FILE` | OS 임시 폴더의 `aionui-backend.json` | AionUi 가변 포트 탐색 파일 |
-| `MNP_WORKSPACE_POOL_REGISTRY` | 저장소의 `workspaces.json` | Unity integration·worker 작업공간 풀 구성 파일 |
+| `MNP_WORKSPACE_POOL_REGISTRY` | 저장소의 `workspaces.json` | Unity integration·worker 작업공간 풀 구성 파일. 선택 필드 `commitPrefix`로 체크포인트 커밋 제목 prefix를 지정 |
 | `MNP_AI_DELEGATION_POLL_INTERVAL_MS` | `3000` | 하위 AI 턴과 상위 대화 재개 상태 확인 간격. 최소 100ms |
 | `MNP_AI_ATTRIBUTION_DURATION_MS` | 8시간 | AI 종류·모델 작성자 귀속 정보의 유지 시간(ms) |
 | `MNP_DOORAY_API_KEY` | 없음 | Dooray API 키 우선 지정. `DOORAY_API_KEY`와 `DOORAY_API_TOKEN`도 지원하며, 모두 없으면 Claude와 AionUi의 Dooray MCP 등록을 순서대로 조회 |
@@ -364,7 +366,7 @@ MindNProgress는 AionUi가 OS 임시 디렉터리에 게시하는 `aionui-backen
 
 MNP에서 `AI 대화 시작`으로 AionUi에 전달하는 신규 대화 전문과 하위 AI 위임 전문은 `config/ai-delegation-instruction.md`를 공통 원본으로 사용합니다. 사용자별로 바꾸려면 `~/.mnp/ai-delegation-instruction.md`를 사용하며, 지시문을 바꾼 뒤에는 MNP 서버를 재시작하고 MNP 브라우저 화면을 새로고침해야 합니다. 이미 만들어진 AionUi 대화의 최초 전문은 자동으로 바뀌지 않습니다.
 
-상위 카드의 AI는 하위 카드에 연결된 대화 후보의 AI·모델·사고 강도·MCP·스킬·작업공간·최근 활동과 실행 상태를 비교하고, 필요한 후보의 전문만 확인해 기존 대화를 이어가거나 새 대화를 선택할 수 있습니다. 위임할 때는 수행할 작업·허용 범위·제외 범위와 완료 조건을 전달합니다. 하위 AI는 받은 지시를 수행하고, 분석·제안만 요청받았다면 구현으로 확대하지 않습니다. 일반 상위 AI는 결과 검증 뒤 맡긴 범위의 다음 작업을 이어가며, 그룹 총괄만 문서별 위임 전과 결과 회수 뒤 두 단계 사용자 승인 절차를 따릅니다. `MNP_WORKSPACE_POOL_REGISTRY`에 등록된 Unity 프로젝트는 MindNProgress가 `main`의 현재 HEAD를 기준으로 유휴 worker와 작업 브랜치를 lease하고, 기존 대화도 AionCore를 통해 새 CWD로 재바인딩하므로 독립 하위 작업을 병렬로 실행할 수 있습니다. 가용 worker가 없으면 위임은 `_ai-delegations.json`에 `waiting-workspace`로 보존되고, worker가 회수된 후 FIFO로 자동 시작됩니다. 등록된 pool 작업은 lease 없이 임시 폴더 대화로 우회하지 않습니다. 완료된 worker 변경은 AI가 제출한 실제 변경의 제목·배경·원인·수정 내용을 `[김용민]` 커밋 형식으로 고정한 뒤 worker의 최신 `main` 기반 통합 브랜치에서 먼저 적용하고, 충돌이 없을 때만 실제 `main`을 fast-forward합니다. 충돌이 발생하면 `main`을 건드리지 않고 해당 작업을 수행한 같은 AI 대화를 같은 worker에서 재개해 충돌 해결과 검증을 수행하며, 통합이 성공한 뒤에만 상위 AI를 재개합니다. 다른 완료 작업은 통합 잠금이 풀릴 때까지 대기하지만 구현 작업은 계속 병렬로 진행할 수 있습니다. 중단·불명확한 변경·반복해서 해결하지 못한 충돌은 자동 삭제하지 않고 격리하지만, 변경·체크포인트·통합 진행이 전혀 없는 시작 실패는 worker를 안전하게 자동 회수합니다. pool 미등록 프로젝트에만 기존 작업공간 방식을 사용합니다. 서버는 하위 대화의 해당 `turnId`가 완료되거나 실패할 때까지 문서 JSON 밖의 `_ai-delegations.json`에서 상태를 추적하고, 상위 대화가 유휴 상태가 되면 하위 AI의 마지막 응답과 카드 재확인 지침을 보내 상위 AI를 자동 재개합니다. 여러 하위 결과가 동시에 끝나면 같은 상위 대화에 한 번에 하나씩 전달해 턴 충돌을 막습니다. 새 대화를 만들 때만 대상 카드의 AI 대화 목록 연결로 문서 버전이 증가하며, 위임 상태와 작업공간 lease 자체는 문서 버전과 변경 이력을 변경하지 않습니다.
+상위 카드의 AI는 하위 카드에 연결된 대화 후보의 AI·모델·사고 강도·MCP·스킬·작업공간·최근 활동과 실행 상태를 비교하고, 필요한 후보의 전문만 확인해 기존 대화를 이어가거나 새 대화를 선택할 수 있습니다. 후보의 `contextHealth`는 확인 가능한 문맥 사용량, 메시지 이력과 연속 재사용 횟수를 종합해 `healthy`, `caution`, `saturated`, `unknown`으로 분류합니다. 일반적인 `resume`은 후보 조회에서 받은 최신 `assessmentId`를 함께 보내야 하며, 서버는 접수 시점과 작업공간·대화 대기 후 실제 전달 시점에 이를 다시 검증합니다. `saturated`와 `unknown`은 새 대화를 사용하고, `caution`은 새 대화를 권장하되 정확히 이어지는 작은 후속 작업만 명시적으로 재사용합니다. 사용자가 중지한 동일 위임의 복구는 새 위임이 아니므로 기존 복구 절차로 같은 대화를 이어갑니다. 위임할 때는 수행할 작업·허용 범위·제외 범위와 완료 조건을 전달합니다. 하위 AI는 받은 지시를 수행하고, 분석·제안만 요청받았다면 구현으로 확대하지 않습니다. 일반 상위 AI는 결과 검증 뒤 맡긴 범위의 다음 작업을 이어가며, 그룹 총괄만 문서별 위임 전과 결과 회수 뒤 두 단계 사용자 승인 절차를 따릅니다. `MNP_WORKSPACE_POOL_REGISTRY`에 등록된 Unity 프로젝트는 MindNProgress가 `main`의 현재 HEAD를 기준으로 유휴 worker와 작업 브랜치를 lease하고, 기존 대화도 AionCore를 통해 새 CWD로 재바인딩하므로 독립 하위 작업을 병렬로 실행할 수 있습니다. 가용 worker가 없으면 위임은 `_ai-delegations.json`에 `waiting-workspace`로 보존되고, worker가 회수된 후 FIFO로 자동 시작됩니다. 등록된 pool 작업은 lease 없이 임시 폴더 대화로 우회하지 않습니다. 완료된 worker 변경은 AI가 제출한 실제 변경의 제목·배경·원인·수정 내용을 `[김용민]` 커밋 형식으로 고정한 뒤 worker의 최신 `main` 기반 통합 브랜치에서 먼저 적용하고, 충돌이 없을 때만 실제 `main`을 fast-forward합니다. 충돌이 발생하면 `main`을 건드리지 않고 해당 작업을 수행한 같은 AI 대화를 같은 worker에서 재개해 충돌 해결과 검증을 수행하며, 통합이 성공한 뒤에만 상위 AI를 재개합니다. 다른 완료 작업은 통합 잠금이 풀릴 때까지 대기하지만 구현 작업은 계속 병렬로 진행할 수 있습니다. 중단·불명확한 변경·반복해서 해결하지 못한 충돌은 자동 삭제하지 않고 격리하지만, 변경·체크포인트·통합 진행이 전혀 없는 시작 실패는 worker를 안전하게 자동 회수합니다. pool 미등록 프로젝트에만 기존 작업공간 방식을 사용합니다. 서버는 하위 대화의 해당 `turnId`가 완료되거나 실패할 때까지 문서 JSON 밖의 `_ai-delegations.json`에서 상태를 추적하고, 상위 대화가 유휴 상태가 되면 하위 AI의 마지막 응답과 카드 재확인 지침을 보내 상위 AI를 자동 재개합니다. 여러 하위 결과가 동시에 끝나면 같은 상위 대화에 한 번에 하나씩 전달해 턴 충돌을 막습니다. 새 대화를 만들 때만 대상 카드의 AI 대화 목록 연결로 문서 버전이 증가하며, 위임 상태와 작업공간 lease 자체는 문서 버전과 변경 이력을 변경하지 않습니다.
 
 유휴 worker의 Git 추적 기준을 현재 `main` HEAD와 수동으로 맞출 때는 MindNProgress를 실행한 상태에서 `pwsh -File scripts/sync-ai-workspaces-to-main.ps1`을 실행합니다. 서버가 작업공간 관리자 큐 안에서 처리하므로 위임 중인 worker나 추적 변경이 있는 작업공간은 건드리지 않고 실패하며, 미추적 파일은 삭제하거나 복사하지 않습니다. 일부 worker만 지정하려면 `-WorkspaceId fork1,fork3`을 사용합니다.
 
@@ -473,9 +475,11 @@ node runner/index.mjs
 
 ## MindNProgress MCP 명령어
 
-카드가 선택된 작업은 먼저 `mindnprogress_get_context`로 최신 버전과 제품 규칙을 확인하고, 변경 후에는 `mindnprogress_get_document`로 실제 저장 결과를 다시 확인하는 흐름을 권장합니다. 조회 도구는 문서 버전을 변경하지 않으며 카드·관계 편집과 AI 대화 ID 연결 같은 저장 작업만 버전을 증가시킵니다. 선택 카드 이외의 형제·하위·선행 카드를 함께 수정할 때는 `mindnprogress_get_ai_work_states`로 다른 AI가 작업 중인지 먼저 확인합니다. 등록된 AI 작업공간의 최신 목록과 상태는 폴더명을 추측하지 않고 `mindnprogress_get_ai_workspace_pool`로 조회합니다.
+카드가 선택된 작업은 먼저 `mindnprogress_get_context`로 최신 버전과 제품 규칙을 확인하고, 변경 후에는 변경 도구의 응답 또는 대상별 조회 도구(카드는 `mindnprogress_get_card`, 문서 구조·버전은 `mindnprogress_get_document`의 `view=outline` 또는 `view=version`)로 실제 저장 결과를 다시 확인하는 흐름을 권장합니다. 재구성 계획·의미 보존 검토, `restore_history` 직전 백업, 요구사항 전수 감사와 지식선 전역 점검에는 `view`를 생략한 full 문서를 사용합니다. 조회 도구는 문서 버전을 변경하지 않으며 카드·관계 편집과 AI 대화 ID 연결 같은 저장 작업만 버전을 증가시킵니다. 선택 카드 이외의 형제·하위·선행 카드를 함께 수정할 때는 `mindnprogress_get_ai_work_states`로 다른 AI가 작업 중인지 먼저 확인합니다. 등록된 AI 작업공간의 최신 목록과 상태는 폴더명을 추측하지 않고 `mindnprogress_get_ai_workspace_pool`로 조회합니다.
 
 문서·카드 조회와 편집 결과는 총괄 없는 일반 그룹도 `group`으로 표시하고, 관련 문서의 소속을 `documentGroups`에 제공합니다. 현재 소속과 위임·보관 당시 기록은 구분하며 기획 지침 전문을 매번 복제하지 않습니다. 필드 의미·적용 범위·서버/MCP 재연결 절차는 [MCP 문서 소속 정보](docs/mcp-document-groups.md)를 참고하세요.
+
+전체 검색의 사람·AI 공통 범위와 관련도 검색의 한계, 전수 카탈로그 보완 절차는 [문서 전체 검색](docs/global-search.md)을 참고하세요.
 
 ### 시작과 조회
 
@@ -483,25 +487,27 @@ node runner/index.mjs
 | --- | --- |
 | `mindnprogress_read_me_first` | 문서 선택 없이 제품 개념, 작성 규칙과 권장 작업 순서를 조회합니다. |
 | `mindnprogress_list_documents` | 활성 문서 목록, 버전, 완료 현황과 문서 그룹·혼합 순서를 조회합니다. |
+| `mindnprogress_search_content` | 열람 가능한 활성 문서 전체의 사용자 콘텐츠를 관련도순으로 검색하거나, 정확성 보완이 필요할 때 모든 카드를 커서 기반 카탈로그로 순회합니다. 결과는 후보이므로 최종 판단 전에 `mindnprogress_get_card`로 최신 원문을 확인합니다. |
 | `mindnprogress_get_context` | 선택 카드와 문서 구조, 관계, 댓글, 담당자, 업무 링크 및 선행 지식을 작업 문맥으로 조회합니다. `detailLevel`은 `focused` 또는 `full`을 사용합니다. |
-| `mindnprogress_get_document` | 문서의 모든 카드와 연결 관계 및 외부 접근 URL을 조회합니다. |
+| `mindnprogress_get_document` | 문서의 모든 카드와 연결 관계 및 외부 접근 URL을 조회합니다. `view`를 생략하면 기존 full 응답이며, `compact`(카드 원문 유지·AI 대화 상세와 렌더링 값 축약), `outline`(구조·상태·관계·본문 길이와 `textIntegrity`, `cardIds`로 고른 카드만 전문), `version`(version과 `documentEtag`만)을 선택할 수 있습니다. 같은 `view`·`cardIds`로 받은 응답의 `documentEtag`를 `ifNoneMatch`로 전달했고 그 뒤 문서가 바뀌지 않았으면 본문을 생략하고 `notModified=true`를 반환합니다. `knownVersion`은 version 일치 여부만 `freshness`로 알려 주며 본문을 생략하지 않습니다(`view`를 생략한 full 응답에는 `freshness`가 없습니다). |
 | `mindnprogress_get_card` | 특정 카드의 설명, 공유 지식, 업무 필드와 댓글을 페이지 단위로 조회합니다. |
 | `mindnprogress_list_shared_knowledge_candidates` | 정리가 필요한 공유 지식 후보의 우선순위·길이·SHA-256·검토 상태를 원문 없이 페이지 단위로 조회합니다. |
 | `mindnprogress_get_shared_knowledge_review_context` | 후보 한 카드의 공유 지식 원문과 관계·최근 댓글·검토 기준을 조회합니다. |
 | `mindnprogress_get_ai_work_states` | 지정한 카드 또는 문서 전체에서 연결된 AI 대화의 현재 작업·승인 대기·유휴·확인 불가 상태를 조회합니다. 문서 버전은 변경하지 않습니다. |
+| `mindnprogress_get_ai_usage` | MnP 서버가 읽은 AionUi 구독 사용량을 조회합니다. `provider`는 `all`(기본값), `claude`, `codex`이며 사용률·참고 잔여율·UTC 초기화 시각과 제공자별 최신성을 반환합니다. `guide.aiUsage`에서 해석 기준을 확인합니다. |
 | `mindnprogress_get_ai_workspace_pool` | MindNProgress가 관리하는 AI 작업공간의 역할·경로·Unity 인스턴스 해시와 현재 상태를 조회합니다. 다른 대화의 lease·job 식별자는 노출하지 않습니다. |
 | `mindnprogress_checkpoint_ai_workspace` | `operation.action=commit-changes`이면 worker의 실제 변경 경로와 구조화 커밋 메시지를 체크포인트로 고정하고, `confirm-no-changes`이면 git status와 diff로 의도한 파일 변경이 없음을 확인합니다. 두 action의 입력은 서로 섞을 수 없습니다. |
-| `mindnprogress_list_ai_conversations` | 카드에 연결된 모든 AI 대화 후보의 실행 환경, 시작 정보, 최근 활동과 실시간 상태를 조회해 기존 대화 이어가기와 새 대화 시작 판단에 사용합니다. |
-| `mindnprogress_delegate_ai_work` | 대화 시작 카드의 모든 깊이 하위 카드에 실행 가능한 지시를 전달해 기존 대화를 이어가거나 새 대화를 만들고, 해당 턴 완료 후 결과와 함께 상위 대화를 자동 재개합니다. 다른 카드 조회는 위임 기준을 바꾸지 않습니다. |
+| `mindnprogress_list_ai_conversations` | 카드에 연결된 모든 AI 대화 후보의 실행 환경, 최근 활동, 실시간 상태와 `contextHealth`를 조회해 기존 대화 이어가기와 새 대화 시작 판단에 사용합니다. |
+| `mindnprogress_delegate_ai_work` | 대화 시작 카드의 모든 깊이 하위 카드에 실행 가능한 지시를 전달해 기존 대화를 이어가거나 새 대화를 만들고, 해당 턴 완료 후 결과와 함께 상위 대화를 자동 재개합니다. 일반 `resume`에는 후보의 최신 `contextHealth.assessmentId`가 필요합니다. 다른 카드 조회는 위임 기준을 바꾸지 않습니다. |
 | `mindnprogress_complete_ai_delegation` | 사용자가 중지한 하위 위임을 같은 대화에서 직접 이어 실제 작업을 완료했을 때, 카드 기록과 작업공간 체크포인트 이후 마지막 턴에 명시적 완료 신호를 보냅니다. 단순 질의 응답과 중간 보고에는 사용하지 않습니다. |
 | `mindnprogress_list_ai_delegations` | 하위 실행부터 상위 대화 재개까지 AI 작업 위임의 현재 상태, 대상 대화와 turnId를 조회합니다. 구버전 실행 기록의 자원 대기(`waiting-resource`) 상태도 호환 조회합니다. |
 | `mindnprogress_recover_ai_delegation` | AionCore 재시작으로 복구가 필요해진 위임을 원 지시 자동 재생 없이 기존 대화·작업공간에서 명시적으로 이어갑니다. |
 | `mindnprogress_finalize_ai_coordination` | 완료된 문서 조정 실행이 하위 업무·문서 검수 대기에 남았을 때, 카드 상태·진행률·외부 대기와 실제 미완료 하위 위임을 보존하고 후속 성공으로 해소된 과거 한도 시도만 정리한 채 조정 위임을 종료해 현재 결과를 상위 AI에 전달합니다. |
 | `mindnprogress_supersede_ai_delegation` | 한도에 막혀 변경 없이 끝난 과거 위임을 같은 카드에서 나중에 성공한 위임과 연결하여 `superseded`로 종료합니다. 카드나 작업공간을 수정하지 않습니다. |
-| `mindnprogress_get_ai_conversation_transcript` | 카드에 연결된 최근 AionUi 대화 또는 `conversationId`로 지정한 이전 대화 전문을 `전체 복사`와 같은 텍스트 형식으로 조회합니다. |
+| `mindnprogress_get_ai_conversation_transcript` | 카드에 연결된 최근 AionUi 대화 또는 `conversationId`로 지정한 이전 대화 전문을 페이지 단위 텍스트로 조회합니다. `coverage.complete=false`이면 `page.nextBefore`로 오래된 메시지를 이어서 조회합니다. |
 | `mindnprogress_list_users` | 담당자로 지정할 수 있는 편집자 계정 목록을 조회합니다. |
 
-변경 체크포인트의 `commitMessage.summary`에는 `[김용민]`이나 `[MnP]` 출처를 넣지 않습니다. 서버가 제목 prefix와 `[MnP]`·`[배경]`·`[원인]`·`[수정]`·선택적 `[적용 범위]` 섹션을 생성하며 `Co-Authored-By`는 거부합니다. `[MnP]`에는 체크포인트 시점의 문서·카드 제목, 안정적인 `mapId`·`cardId`와 호스트에 의존하지 않는 상대 경로가 기록됩니다. 파일 변경이 없으면 빈 `paths`를 보내지 않고 `operation.action=confirm-no-changes`를 사용합니다.
+변경 체크포인트의 `commitMessage.summary`에는 커밋 제목 prefix나 `[MnP]` 출처를 넣지 않습니다. 제목 prefix는 작업공간 풀 registry(`workspaces.json`)의 `commitPrefix`가 문자열로 지정되어 있으면 그 값(빈 문자열은 prefix 없음)을, 없으면 AI 대화를 시작한 MnP 편집자 계정 이름으로 만든 `[이름]`을 사용하고, 둘 다 확인할 수 없으면 붙이지 않습니다. 시작자는 대화 origin, 카드 대화 귀속, 카드의 대화 연결, 그 대화를 대상으로 한 위임 기록, 체크포인트 요청 사용자 순서로 찾으며 시스템 계정과 등록되지 않은 ID는 건너뜁니다. 체크포인트 기록의 `commitPrefixSource`(`configured`·`account`·`none`)로 출처를 확인할 수 있고, `none`이면 서버 로그에 경고를 남깁니다. 원격 Fork 작업공간은 runner 쪽 registry의 `commitPrefix`를 따릅니다. summary가 해석된 prefix로 시작하면 체크포인트를 거부합니다. 서버가 제목 prefix와 `[MnP]`·`[배경]`·`[원인]`·`[수정]`·선택적 `[적용 범위]` 섹션을 생성하며 `Co-Authored-By`는 거부합니다. `[MnP]`에는 체크포인트 시점의 문서·카드 제목, 안정적인 `mapId`·`cardId`와 호스트에 의존하지 않는 상대 경로가 기록됩니다. 파일 변경이 없으면 빈 `paths`를 보내지 않고 `operation.action=confirm-no-changes`를 사용합니다.
 
 ### 문서와 카드 편집
 
@@ -512,7 +518,7 @@ node runner/index.mjs
 | `mindnprogress_update_card` | 전달한 필드만 부분 병합하여 카드 제목, 설명, 공유 지식, 상태, 진행률과 업무 관리 필드를 수정합니다. 일반 카드에서 생략한 필드와 위치는 보존됩니다. 기본 `responseMode=full`은 저활용 필드를 제외한 최신 전체 문서를, `affected`는 직접·간접 변경 카드와 문서·Root 요약을 반환합니다. |
 | `mindnprogress_patch_card_text` | 조회한 SHA-256이 유지된 경우에만 설명 또는 공유 지식의 유일 문자열·경계 내부를 교체하거나 뒤에 추가합니다. 장문 필드 전체를 다시 생성하지 않습니다. |
 | `mindnprogress_apply_shared_knowledge_review` | 문서 버전과 카드별 SHA-256이 모두 일치할 때만 최대 20개 카드의 정리 결과와 검토 기록을 한 번에 저장합니다. |
-| `mindnprogress_move_card` | 카드와 전체 하위 구조를 다른 카드 아래로 이동합니다. 기본 `responseMode=affected`는 이동한 카드와 이전·새 상위 관계만, `full`은 변경 전과 같은 API 원본 전체 문서를 반환합니다. |
+| `mindnprogress_move_card` | 카드와 전체 하위 구조를 다른 카드 아래로 이동합니다. `targetMapId`를 지정하면 카드 ID와 댓글·AI 대화·완료 위임·이미지·Ref 연결을 유지한 채 다른 문서로 실제 이동합니다. 기본 `responseMode=affected`는 이동 결과와 이전·새 상위 관계만, `full`은 관련 원본 문서 전체를 반환합니다. |
 | `mindnprogress_delete_card` | 카드와 선택적으로 전체 하위 카드를 삭제합니다. Root 카드는 삭제할 수 없습니다. 기본 `responseMode=affected`는 삭제한 카드 ID와 끊어진 계층·지식선 관계 및 함께 조정된 카드만, `full`은 변경 전과 같은 API 원본 전체 문서를 반환합니다. |
 | `mindnprogress_manage_knowledge_line` | `operation.action=add/update/delete`로 지식선을 추가하거나 정책을 변경하거나 삭제합니다. add는 중복·순환을 거부하고 update는 중복 관계를 거부합니다. |
 | `mindnprogress_update_document_info` | 문서 이름 또는 아이콘 색상을 변경합니다. |
@@ -540,6 +546,8 @@ MCP 도구에서 카드를 지정할 때는 `cardId`를 사용합니다. 상위 
 
 `mindnprogress_add_card`, `mindnprogress_move_card`, `mindnprogress_delete_card`는 `responseMode`를 생략하면 `affected`입니다. 카드 하나를 추가·이동·삭제하는 호출에 문서 전체를 실어 보내면 응답이 문서 크기에 비례해 커지므로 기본값을 변경 결과로 두었습니다. `add_card`는 추가한 카드와 `parentCardId`, `move_card`는 이동한 카드와 `hierarchy`의 이전·새 상위 카드, `delete_card`는 `deletedCardIds`와 `relationChanges`를 돌려줍니다. `relationChanges`에는 삭제 전 상위 카드, 하위 카드를 함께 삭제하지 않아 연결이 끊어진 카드 ID, 삭제로 제거된 지식선이 포함됩니다. 세 도구 모두 문서 요약과 Root 요약, 서버가 함께 조정한 `affectedCards`를 포함하며 `card`로 이미 돌려주는 카드는 `affectedCards`에 중복해서 담지 않습니다. 저장 직후 변경 전과 같은 API 원본 전체 구조가 필요하면 `responseMode=full`을 지정하고, 저활용 필드를 제외한 최신 문서를 다시 조회하려면 `mindnprogress_get_document`를 호출합니다.
 
+문서 간 이동은 `mapId`를 원본 문서, `targetMapId`를 대상 문서, `newParentCardId`를 대상 문서의 새 상위 카드로 지정합니다. 서버는 두 문서의 최신 버전을 함께 확인하고 독점 변경 구간에서 하위 트리·댓글·AI 귀속·완료 이력·알림을 갱신하며, 이동된 카드 ID를 가리키는 활성 문서의 Ref는 새 문서 ID로 바꿉니다. 과거 내용은 원본 문서의 이동 직전 리비전에 남고 `_card-move-operations.json`의 감사 기록이 원본과 대상 버전을 연결합니다. 이동 트리와 원본의 나머지 카드 사이에 지식선 또는 `blockedBy` 관계가 있거나, 실행 중인 AI 대화·미종료 위임·전달 중인 그룹 지시가 있으면 이동하지 않고 관련 ID를 반환합니다. 관계를 명시적으로 제거하거나 Ref로 바꾸고, 실행을 종료한 뒤 다시 요청해야 합니다.
+
 전체 활성 문서의 공유 지식 현황은 인증된 `GET /api/shared-knowledge/audit`로 조회합니다. `mapId` 쿼리를 지정하면 한 문서만 검사하며, 응답에는 원문 대신 길이·UTF-8 바이트·SHA-256·문단과 목록 수·정확히 반복된 문장 수·15,000자 한도 사용률·지식선 소비 카드 수가 포함됩니다. 5,000자는 관심, 8,000자는 정리 권장, 12,000자는 우선 정리 기준이며 Ref 카드는 원본 카드에서만 정리하도록 직접 처리 후보에서 제외됩니다. 15,000자를 넘는 요구사항 원장처럼 독립적인 지식 영역은 한 카드의 상한을 더 늘리지 않고 영역별 카드로 분리해 필요한 카드에만 지식선으로 연결합니다.
 
 공유 지식 검토 기록은 서버가 검토 시각·검토자·본문 SHA-256·결과(`cleaned` 또는 `accepted-long`)를 소유하는 메타데이터입니다. 현재 본문 해시와 일치하는 검토 완료 카드는 현황에 표시하되 정리 후보에서 제외하고, 이후 본문이 달라지면 기존 기록을 보존한 채 `stale`로 분류해 다시 후보에 포함합니다. 일반 문서 저장 요청은 이 기록을 새로 만들거나 덮어쓸 수 없습니다.
@@ -559,7 +567,7 @@ AI 정리는 `mindnprogress_list_shared_knowledge_candidates`로 원문 없는 �
 | `mindnprogress_get_group_context` | 그룹의 기획 기준, 총괄 문서, 소속 문서 루트, 문서 지시와 과거 그룹 위임 결과를 조회합니다. |
 | `mindnprogress_update_group_project` | 그룹의 기획 기준과 총괄 문서 연결을 버전 조건부로 수정합니다. |
 | `mindnprogress_create_group_document` | 그룹에 기능 문서와 담당 범위·완료 조건을 담은 집계 루트를 만듭니다. |
-| `mindnprogress_send_group_document_instruction` | 총괄 루트 AI가 같은 그룹의 문서 루트 AI에 승인된 지시 전문을 전달합니다. |
+| `mindnprogress_send_group_document_instruction` | 총괄 루트 AI가 같은 그룹의 문서 루트 AI에 승인된 지시 전문을 전달합니다. 기존 루트 대화를 이어갈 때는 최신 `contextHealth.assessmentId`가 필요합니다. |
 | `mindnprogress_list_group_document_instructions` | 문서 지시의 대기·전달·응답 상태와 선택적으로 전문을 조회합니다. |
 
 그룹이나 혼합 순서를 변경할 때는 먼저 `mindnprogress_list_documents`의 `documentLayout`을 확인하고 모든 활성 문서를 정확히 한 번 포함해야 합니다.

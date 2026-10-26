@@ -26,7 +26,7 @@ test('총괄 뷰·루트 선택·우클릭·대화 목록의 신규 시작은 �
   assert.equal(expected.automaticRequest, request)
   for (const target of [rootSelection, picker]) assert.deepEqual(resolveAiConversationRole(target, context), expected)
   const combined = combineAiEditorRequest(expected.automaticRequest, '추가 확인 사항', expected.fullInitialRequest)
-  assert.equal(combined, `${request}\n\n추가 확인 사항`)
+  assert.equal(combined, `${request}\n\n# 사용자 요청\n추가 확인 사항`)
   const prompt = buildAiConversationPrompt({ ...input, purpose: expected.purpose, editorId: 'fixture-editor', attributionToken: 'fixture-token', request: combined })
   assert.ok(prompt.includes(request))
   assert.match(prompt, /# 그룹의 두 단계 사용자 승인/)
@@ -44,6 +44,22 @@ test('총괄 문서의 하위 카드·다른 문서 루트·미지정 그룹은 
     assert.equal(role.purpose, 'card')
     assert.equal(role.automaticRequest, DEFAULT_AI_EDITOR_REQUEST)
   }
+})
+
+test('일반 문서의 실제 최상위 원본만 상위 제목 역할로 구분한다', () => {
+  for (const groupProject of [null, { ...context.groupProject, role: 'document', coordinatorMapId: 'map-other' }]) {
+    const document = { ...context, groupProject }
+    const root = resolveAiConversationRole(input, document)
+    assert.equal(root.isDocumentRoot, true)
+    assert.equal(aiConversationTitle({ ...root, documentTitle: '문서', cardTitle: '루트' }), '[상위] 문서: 루트')
+    assert.equal(resolveAiConversationRole({ ...input, cardId: 'task' }, document).isDocumentRoot, false)
+  }
+  const reference = structuredClone(context)
+  reference.map.nodes[1].data.reference = { mapId: 'source', nodeId: 'root' }
+  assert.equal(resolveAiConversationRole(input, reference).isDocumentRoot, false)
+  const moved = structuredClone(context)
+  moved.map.edges = [{ source: 'task', target: 'root' }]
+  assert.equal(resolveAiConversationRole(input, moved).isDocumentRoot, false)
 })
 
 test('루트 kind만으로 총괄을 판정하지 않고 실제 계층과 원본 여부를 확인한다', () => {

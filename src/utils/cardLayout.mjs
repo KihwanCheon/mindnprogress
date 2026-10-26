@@ -1,12 +1,20 @@
 import { assertLayoutClear, validateLayoutMeasurements, verifyRenderedLayout } from './mindMapLayout.mjs'
+import { MINDMAP_GRID_SIZE, snapMindMapPosition } from './mindMapGrid.mjs'
 
-export const CARD_LAYOUT_VERSION = 'card-layout-v3'
+export const CARD_LAYOUT_VERSION = 'card-layout-v4'
 export const CARD_LAYOUT_GAP = 32
 export const CARD_LAYOUT_RATIOS = Object.freeze(['4:3', '16:9', '21:9'])
 export const CARD_LAYOUT_TARGET = Object.freeze({ ratio: '16:9' })
 const fail = (message) => { throw Object.assign(new Error(message), { status: 400, code: 'CARD_LAYOUT_INVALID', reconstructionError: true }) }
 const knowledge = (edge) => edge.data?.relation === 'knowledge'
 const finite = (value) => Number.isFinite(value)
+const snapPadding = MINDMAP_GRID_SIZE / 2
+// 반올림으로 각 축 최대 반 칸 이동해도 원래 점유 영역과 최소 여백을 지킨다.
+// 실측값 자체는 바꾸지 않아 돌출 영역의 검증 한도와 표시 크기를 보존한다.
+const reservedCardSize = (body) => ({ body,
+  width: body.width + body.outsets.left + body.outsets.right + MINDMAP_GRID_SIZE,
+  height: body.height + body.outsets.top + body.outsets.bottom + MINDMAP_GRID_SIZE,
+})
 
 export function cardLayoutGraph(map) {
   if (!Array.isArray(map?.nodes) || !map.nodes.length || map.nodes.length > 2000) fail('배치 제안은 문서당 1~2000개 카드를 지원합니다.')
@@ -55,7 +63,7 @@ const crosses = (a, b, c, d) => {
   return turn(a, b, c) * turn(a, b, d) < 0 && turn(c, d, a) * turn(c, d, b) < 0
 }
 
-function layoutHierarchyCards(map, measurements, plan) {
+function hierarchyBoxes(map, measurements, plan) {
   const { byId, children, parents, roots } = cardLayoutGraph(map)
   const supplied = new Map(validateLayoutMeasurements(map.nodes, measurements).map((item) => [item.cardId, item]))
   const order = plan ? validateCardLayoutPlan(map, plan).order : [...map.nodes].sort((a, b) => a.position.y - b.position.y || a.position.x - b.position.x).map((node) => node.id)
@@ -74,7 +82,7 @@ function layoutHierarchyCards(map, measurements, plan) {
   const treeRoots = roots.filter((id) => id === main || children.get(id).length).sort((a, b) => a === main ? -1 : b === main ? 1 : rank.get(a) - rank.get(b))
   const sizes = new Map(map.nodes.map(({ id }) => {
     const body = supplied.get(id)
-    return [id, { body, width: body.width + body.outsets.left + body.outsets.right, height: body.height + body.outsets.top + body.outsets.bottom }]
+    return [id, reservedCardSize(body)]
   }))
   const sequence = []; const depths = new Map(); const heights = new Map(); const columns = []
   for (const root of treeRoots) {
@@ -149,17 +157,7 @@ function layoutHierarchyCards(map, measurements, plan) {
     }).sort((a, b) => a.score - b.score)
     const box = options[0].box; placed.set(id, box); boxes.push(box)
   }
-  const originalRoot = byId.get(main).position; const rootBox = placed.get(main)
-  const delta = { x: originalRoot.x - rootBox.x - rootBox.body.outsets.left, y: originalRoot.y - rootBox.y - rootBox.body.outsets.top }
-  for (const box of boxes) { box.x += delta.x; box.y += delta.y }
-  assertLayoutClear(boxes)
-  const nodes = map.nodes.map((node) => {
-    const box = placed.get(node.id)
-    return { ...structuredClone(node), position: { x: box.x + box.body.outsets.left, y: box.y + box.body.outsets.top } }
-  })
-  return { map: { ...map, nodes }, layout: { version: CARD_LAYOUT_VERSION, gap: CARD_LAYOUT_GAP, boxes,
-    width: Math.max(...boxes.map((box) => box.x + box.width)) - Math.min(...boxes.map((box) => box.x)),
-    height: Math.max(...boxes.map((box) => box.y + box.height)) - Math.min(...boxes.map((box) => box.y)) } }
+  return finalizeCardBoxes(boxes, placed.get(main), byId.get(main).position)
 }
 
 export function validateCardLayoutTarget(target = CARD_LAYOUT_TARGET) {
@@ -187,6 +185,24 @@ const extent = (boxes) => {
   const left = Math.min(...boxes.map((b) => b.x)); const top = Math.min(...boxes.map((b) => b.y))
   const right = Math.max(...boxes.map((b) => b.x + b.width)); const bottom = Math.max(...boxes.map((b) => b.y + b.height))
   return { x: left, y: top, width: right - left, height: bottom - top }
+}
+
+function finalizeCardBoxes(reserved, root, origin) {
+  const delta = {
+    x: origin.x - root.x - root.body.outsets.left - snapPadding,
+    y: origin.y - root.y - root.body.outsets.top - snapPadding,
+  }
+  const boxes = reserved.map(({ cardId, x, y, body }) => {
+    const position = snapMindMapPosition({
+      x: x + delta.x + body.outsets.left + snapPadding,
+      y: y + delta.y + body.outsets.top + snapPadding,
+    })
+    return { cardId, x: position.x - body.outsets.left, y: position.y - body.outsets.top,
+      width: body.width + body.outsets.left + body.outsets.right,
+      height: body.height + body.outsets.top + body.outsets.bottom, body }
+  })
+  assertLayoutClear(boxes)
+  return { boxes, ...extent(boxes) }
 }
 // 단위 면적의 목표 비율로 비교한다. 실제 화면 해상도는 배치 계산에 관여하지 않는다.
 const screenCost = (bounds, ratio) => Math.max(bounds.width / Math.sqrt(ratio), bounds.height * Math.sqrt(ratio)) * (1 + 0.08 * Math.abs(Math.log(bounds.width / bounds.height / ratio)))
@@ -219,7 +235,7 @@ function compactBoxes(map, measurements, plan, heightLimit, target) {
   for (const [id, ids] of children) children.set(id, group(ids))
   const main = roots.find((id) => byId.get(id).data.kind === 'root' && !byId.get(id).data.reference) ?? roots.find((id) => children.get(id).length) ?? roots[0]
   const treeRoots = [main, ...group(roots.filter((id) => id !== main && children.get(id).length))]
-  const sizes = new Map(measurements.map((body) => [body.cardId, { body, width: body.width + body.outsets.left + body.outsets.right, height: body.height + body.outsets.top + body.outsets.bottom }]))
+  const sizes = new Map(measurements.map((body) => [body.cardId, reservedCardSize(body)]))
   const sequence = []; const stack = [...treeRoots].reverse()
   while (stack.length) { const id = stack.pop(); sequence.push(id); stack.push(...[...children.get(id)].reverse()) }
   const blocks = new Map()
@@ -281,10 +297,7 @@ function compactBoxes(map, measurements, plan, heightLimit, target) {
       .sort((a, b) => screenCost(extent([bounds, a]), target) - screenCost(extent([bounds, b]), target))
     for (const id of pending) { const p = packed.positions.get(id); const box = { cardId: id, x: areas[0].x + p.x, y: areas[0].y + p.y, ...sizes.get(id) }; boxes.push(box); placed.set(id, box) }
   }
-  const root = placed.get(main); const origin = byId.get(main).position
-  const delta = { x: origin.x - root.x - root.body.outsets.left, y: origin.y - root.y - root.body.outsets.top }
-  for (const box of boxes) { box.x += delta.x; box.y += delta.y }
-  return { boxes, ...extent(boxes) }
+  return finalizeCardBoxes(boxes, placed.get(main), byId.get(main).position)
 }
 
 export function createCardLayoutCandidates(map, measurements, plan, target = CARD_LAYOUT_TARGET) {
@@ -293,7 +306,7 @@ export function createCardLayoutCandidates(map, measurements, plan, target = CAR
   cardLayoutGraph(map)
   const supplied = validateLayoutMeasurements(map.nodes, measurements)
   if (plan) validateCardLayoutPlan(map, plan)
-  const area = supplied.reduce((sum, m) => sum + (m.width + m.outsets.left + m.outsets.right + 64) * (m.height + m.outsets.top + m.outsets.bottom + 48), 0)
+  const area = supplied.reduce((sum, body) => { const size = reservedCardSize(body); return sum + (size.width + 64) * (size.height + 48) }, 0)
   const idealHeight = Math.sqrt(area / ratio)
   const seen = new Set()
   const positionKey = (boxes) => { const byId = new Map(boxes.map((b) => [b.cardId, b])); return JSON.stringify(map.nodes.map((n) => { const b = byId.get(n.id); return [b.x, b.y] })) }
@@ -303,8 +316,9 @@ export function createCardLayoutCandidates(map, measurements, plan, target = CAR
     seen.add(key); return true
   })
   // 기존 계층형이 이미 화면에 더 잘 맞는 문서도 동일한 기준으로 비교한다.
-  const hierarchy = layoutHierarchyCards(map, supplied, plan)
-  if (!seen.has(positionKey(hierarchy.layout.boxes))) options.push(hierarchy.layout)
+  const hierarchy = hierarchyBoxes(map, supplied, plan)
+  const hierarchyKey = positionKey(hierarchy.boxes)
+  if (!seen.has(hierarchyKey)) options.push(hierarchy)
   options.sort((a, b) => screenCost(a, ratio) - screenCost(b, ratio))
   const first = options[0]
   const wider = options.find((option) => option.width / option.height > first.width / first.height * 1.15 && screenCost(option, ratio) < screenCost(first, ratio) * 1.5)
@@ -318,7 +332,7 @@ export function createCardLayoutCandidates(map, measurements, plan, target = CAR
   }
   const candidates = [make(first, 'balanced', '화면 균형형')]
   if (second) candidates.push(make(second, 'spread', second.width / second.height > first.width / first.height ? '가로 분산형' : '묶음 분산형'))
-  if (!candidates.some((candidate) => JSON.stringify(candidate.map.nodes.map((n) => n.position)) === JSON.stringify(hierarchy.map.nodes.map((n) => n.position)))) candidates.push({ id: 'hierarchy', label: '계층형 · 비교용', ...hierarchy, metrics: cardLayoutMetrics(hierarchy.layout, screen) })
+  if (!candidates.some((candidate) => positionKey(candidate.layout.boxes) === hierarchyKey)) candidates.push(make(hierarchy, 'hierarchy', '계층형 · 비교용'))
   return candidates
 }
 
@@ -330,6 +344,10 @@ export function layoutCards(map, measurements, plan, options = {}) {
 }
 
 export function verifyCardLayout(map, layout, measurements) {
+  if (layout.version !== CARD_LAYOUT_VERSION) fail('배치 방식이 변경되었습니다. 화면을 새로고침하고 미리보기를 다시 열어 주세요.')
+  for (const node of map.nodes) {
+    if (!finite(node.position?.x) || !finite(node.position?.y) || node.position.x % MINDMAP_GRID_SIZE !== 0 || node.position.y % MINDMAP_GRID_SIZE !== 0) fail(`카드 좌표가 ${MINDMAP_GRID_SIZE}px 격자에 맞지 않습니다. 미리보기를 다시 열어 주세요: ${node.id}`)
+  }
   verifyRenderedLayout(map, layout, measurements)
   const bodies = new Map(layout.boxes.map((box) => [box.cardId, box.body]))
   for (const item of measurements) {

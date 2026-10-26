@@ -3,10 +3,11 @@ import { aiDelegationReportResult, aiDelegationSucceeded } from './aiDelegations
 const reportStates = new Set(['waiting-parent', 'waking-parent', 'parent-wake-failed'])
 const sha256 = /^[a-f0-9]{64}$/
 
-function receivedPatch(receipt) {
+function receivedPatch(receipt, delegation) {
   return {
     state: 'completed', reportReceipt: receipt, reportWaitReason: null,
     reportApprovalRequired: false, parentError: null, completedAt: receipt.at,
+    ...(delegation?.parentWakeRetry ? { parentWakeRetry: { ...delegation.parentWakeRetry, status: 'received', nextAttemptAt: null } } : {}),
   }
 }
 
@@ -31,7 +32,7 @@ export function aiDelegationDeliveredReportPatch(delegation, dispatch, at = new 
       parentTurnId: turnId, operationId: delegation.wakeOperationId,
       payloadHash: delegation.reportPayloadHash, resultHash: delegation.reportResultHash ?? null,
       childTurnId: delegation.childTurnId ?? null,
-    }),
+    }, delegation),
     parentTurnId: turnId, parentDispatchState: dispatch.state,
   }
 }
@@ -60,7 +61,7 @@ export function acknowledgeAiDelegationReport(delegation, { conversationId, resu
   return receivedPatch({
     at, method: 'parent-acknowledged', parentConversationId: conversationId,
     resultHash, childTurnId: result.turnId,
-  })
+  }, delegation)
 }
 
 export function aiDelegationReportStatus(delegation) {

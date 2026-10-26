@@ -14,7 +14,7 @@
   ├─ tools/jdk-21/                     Dooray 선택 시, 기존 Java 21이 없을 때
   ├─ mcp/mnp-suite-mcp-bootstrap.json  선택 MCP의 AionUi 등록 정보, 비밀값 없음
   ├─ secrets/dooray-api-key.dpapi      Dooray 선택 시, 현재 사용자 DPAPI 암호화
-  ├─ workspace-pool/ Unity 작업공간 구성·공통 규칙·지식 제출 폴더
+  ├─ workspace-pool/ Unity 작업공간 구성·공통 규칙
   ├─ dev/            Dev 실행·중지·AionCore 재빌드 배치
   ├─ MindNProgress_Launcher.cjs  백업·복원 후 MnP 재시작 호환 실행 파일
   ├─ MindNProgress_Stop.bat      백업·복원 전 MnP 중지 호환 실행 파일
@@ -32,13 +32,15 @@ AionUi와 AionCore에는 개인 fork를 `origin`, 공식 저장소를 `upstream`
 <사용자 프로필>/
   ├─ .codex/
   │   ├─ AGENTS.md
-  │   └─ skills/<설치되는 스킬>/SKILL.md
+  │   └─ skills/<설치되는 스킬>/   스킬 폴더 전체(SKILL.md, references 등)
   └─ .claude/
       ├─ CLAUDE.md
-      └─ skills/<설치되는 스킬>/SKILL.md
+      └─ skills/<설치되는 스킬>/   스킬 폴더 전체(SKILL.md, references 등)
 ```
 
 Codex는 `CODEX_HOME`, Claude Code는 `CLAUDE_CONFIG_DIR` 환경변수가 있으면 해당 경로를 대신 사용합니다. 두 전역 구성 폴더의 존재 여부는 서로 독립적으로 처리합니다. 둘 다 없거나 하나만 있어도 설치기는 두 대상 모두에 필요한 폴더를 생성하며, 기존 지침 파일이 있으면 원문을 보존한 채 MnP Suite 관리 블록만 병합합니다.
+
+AionUi에 Claude 계정을 2개 이상 등록해 쓰는 경우 설치기는 위 Claude 폴더 한 곳에만 설치합니다. 두 번째 계정 폴더의 지침 가져오기와 스킬 복사는 [Claude 멀티 계정](../../docs/ai-claude-accounts.md#mnp-suite-설치기와-두-번째-계정)을 따릅니다.
 
 `workspace-pool\workspaces.json`에는 integration과 worker 예시가 `enabled=false`로 생성됩니다. 따라서 실제 Unity 프로젝트 경로를 설정하기 전에는 어떤 작업공간도 점유하지 않습니다.
 
@@ -82,7 +84,7 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\Install-MnPSui
   -NoLaunchPrompt
 ```
 
-`mnp-dooray`는 항상 Claude Code와 Codex 양쪽에 설치됩니다. `unity-work`와 `pptx`는 각 스위치를 지정할 때 설치되며 대화형 설치에서는 신규·재설치 여부와 관계없이 두 항목을 Y/N으로 각각 질문합니다. 패키지가 이전에 설치한 선택 스킬을 한쪽 전역 구성에서라도 발견하면 기본값은 `Y`이며, 사용자가 그대로 확인하면 양쪽 구성을 유지합니다. 무인 재설치는 기존 패키지 관리 선택을 유지하고, 각 스위치로 새 선택 항목을 추가할 수 있습니다.
+`mnp-dooray`와 `mnp-spec-driven-development`는 항상 Claude Code와 Codex 양쪽에 설치됩니다. `unity-work`와 `pptx`는 각 스위치를 지정할 때 설치되며 대화형 설치에서는 신규·재설치 여부와 관계없이 두 항목을 Y/N으로 각각 질문합니다. 패키지가 이전에 설치한 선택 스킬을 한쪽 전역 구성에서라도 발견하면 기본값은 `Y`이며, 사용자가 그대로 확인하면 양쪽 구성을 유지합니다. 무인 재설치는 기존 패키지 관리 선택을 유지하고, 각 스위치로 새 선택 항목을 추가할 수 있습니다.
 
 `-IncludeDoorayMcp`와 `-IncludePptxMcp`는 Git 저장소·Windows 런타임·AionUi 등록을 함께 선택합니다. Dooray 무인 설치에서는 API 키를 명령행에 넣지 말고 설치 프로세스를 시작하기 직전에 `DOORAY_API_KEY` 환경값으로 제공해야 합니다. 기존 DPAPI 파일을 현재 사용자가 복호화할 수 있으면 환경값 없이 재사용합니다. PowerPoint COM이 없는 PC에서도 `pptx-mcp`를 설치할 수 있으며, `pptx` 스킬이 AionUi에 기본 포함된 OfficeCLI HTML 렌더러를 fallback으로 사용합니다. 이전 자동화와의 인수 호환성을 위해 `-AllowPptxWithoutPowerPoint`는 계속 받을 수 있지만 더 이상 필요하지 않습니다.
 
@@ -97,10 +99,11 @@ Dooray DPAPI 파일은 같은 Windows 사용자와 PC에서만 재사용할 수 
 | 스킬 | 설치 | 역할 |
 | --- | --- | --- |
 | `mnp-dooray` | 필수 | MnP 장문 안전 편집·복구, 기록 역할, 상태·진행률, Dooray 권한과 AI 작성 표기 |
+| `mnp-spec-driven-development` | 필수 | MnP 그룹 공통 준비·계획, 문서별 소유권, 위임·결과 보고와 독립 검수, 최종 통합 검증. MnP 서버의 그룹 총괄 지시가 이 스킬을 직접 참조하므로 항상 설치 |
 | `unity-work` | 선택 | Unity 인스턴스 오수정 방지, `execute_code` 경로 가드, UI 레이아웃 책임 분리 |
 | `pptx` | 선택 | PPTX의 모든 슬라이드를 PNG와 텍스트·표 구조로 함께 확인하고 렌더링 차이 기록 |
 
-같은 스킬 원본을 Claude Code와 Codex의 각 사용자 전역 `skills` 폴더에 복사합니다. AI가 관련 작업 전에 스킬을 실제로 읽도록 Codex의 `AGENTS.md`와 Claude Code의 `CLAUDE.md`에도 짧은 불변 규칙과 스킬 호출 조건을 관리 블록으로 추가합니다. AionUi Assistant의 스킬 목록이나 시스템 프롬프트를 변경하는 방식은 아닙니다.
+`skills\<이름>` 폴더는 활성본(`~/.claude/skills`)에서 동기화한 파생본입니다. 원본·파생 관계와 갱신 절차는 ai-guidance-library README의 「원본과 파생본」을 따르며, 이 폴더를 먼저 고쳐 원본처럼 쓰지 않습니다. 설치기는 각 스킬 폴더 전체(`SKILL.md`와 `references` 등)를 Claude Code와 Codex의 각 사용자 전역 `skills` 폴더에 복사합니다. AI가 관련 작업 전에 스킬을 실제로 읽도록 Codex의 `AGENTS.md`와 Claude Code의 `CLAUDE.md`에도 짧은 불변 규칙과 스킬 호출 조건을 관리 블록으로 추가합니다. AionUi Assistant의 스킬 목록이나 시스템 프롬프트를 변경하는 방식은 아닙니다.
 
 전역 구성은 다음 원칙으로 갱신합니다.
 
@@ -199,10 +202,10 @@ MnP의 `AI 대화 시작` 작업공간 기본값도 서버가 현재 설치된 `
 ```text
 workspace-pool/
   ├─ workspaces.json
-  ├─ common/MULTI_WORKSPACE.md
-  ├─ knowledge-inbox/
-  └─ knowledge-applied/
+  └─ common/MULTI_WORKSPACE.md
 ```
+
+이전 설치본이 만든 `knowledge-inbox/`, `knowledge-applied/` 폴더는 더 이상 사용하지 않습니다. 설치 프로그램은 기존 폴더를 지우지 않습니다.
 
 `workspaces.json`에서 `originUrl`과 각 항목의 `root`, `assetsPath`, `unityInstanceHash`를 실제 값으로 바꿉니다. 같은 Git 저장소의 독립 clone 중 하나를 `role=integration`, 하나 이상을 `role=worker`로 등록한 뒤 사용할 항목만 `enabled=true`로 설정합니다. 최소한 활성 integration 한 개와 활성 worker 한 개가 있어야 풀이 초기화됩니다. 수정 후 MindNProgress를 다시 시작하세요.
 

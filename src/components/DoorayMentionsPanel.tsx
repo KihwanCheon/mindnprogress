@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './DoorayMentionsPanel.css'
 import { DoorayResponseInbox } from './DoorayResponseInbox'
+import { DoorayResponseSettings } from './DoorayResponseSettings'
+import { DoorayResponseRequestDialog } from './DoorayResponseRequestDialog'
 import type { DoorayHandoffLaunch } from './DoorayResponseHandoff'
 import { doorayResponseStatusLabel, useDoorayResponses, type DoorayResponseJob } from './useDoorayResponses'
 import { doorayMentionQuickRangeDates, doorayMentionQuickRanges, doorayMentionRequestRange, toLocalDateInputValue } from '../utils/doorayMentionRange.mjs'
@@ -172,6 +174,8 @@ export function DoorayMentionsPanel({ clientId, userId, aiRequestOpen = false, o
   onLaunchCard: (launch: DoorayHandoffLaunch) => void
 }) {
   const responses = useDoorayResponses(clientId, userId)
+  const [aiSettingsOpen, setAiSettingsOpen] = useState(false)
+  const [proposalItem, setProposalItem] = useState<DoorayMentionItem | null>(null)
   const today = useMemo(() => toLocalDateInputValue(new Date()), [])
   const [since, setSince] = useState(() => {
     const start = new Date()
@@ -218,13 +222,13 @@ export function DoorayMentionsPanel({ clientId, userId, aiRequestOpen = false, o
 
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (aiRequestOpen || event.key !== 'Escape') return
+      if (aiRequestOpen || proposalItem || event.key !== 'Escape') return
       event.preventDefault()
       onClose()
     }
     window.addEventListener('keydown', closeOnEscape)
     return () => { window.removeEventListener('keydown', closeOnEscape) }
-  }, [aiRequestOpen, onClose])
+  }, [aiRequestOpen, proposalItem, onClose])
 
   const loadProjects = useCallback(async () => {
     const signal = lifecycleControllerRef.current?.signal
@@ -533,7 +537,7 @@ export function DoorayMentionsPanel({ clientId, userId, aiRequestOpen = false, o
   const lastScan = data?.lastScan ?? null
   const progressRatio = scan && scan.total > 0 ? Math.min(1, scan.done / scan.total) : 0
 
-  return (
+  return (<>
     <div className="dooray-mentions-backdrop" role="presentation" inert={aiRequestOpen} onClick={() => { if (!aiRequestOpen) onClose() }}>
       <section
         className="dooray-mentions-panel"
@@ -548,8 +552,13 @@ export function DoorayMentionsPanel({ clientId, userId, aiRequestOpen = false, o
             <h2>Dooray 참조</h2>
             <p>기간 안에 나를 멘션했거나 내가 담당·참조로 걸린 업무 활동을 모읍니다.</p>
           </div>
-          <button type="button" className="dooray-mentions-close" onClick={onClose} aria-label="닫기">✕</button>
+          <div className="dooray-mentions-header-actions">
+            <button type="button" className="dooray-mentions-ai-settings" aria-expanded={aiSettingsOpen} aria-controls="dooray-response-settings"
+              onClick={() => setAiSettingsOpen(!aiSettingsOpen)}>제안 AI 설정</button>
+            <button type="button" className="dooray-mentions-close" onClick={onClose} aria-label="닫기">✕</button>
+          </div>
         </header>
+        {aiSettingsOpen && <DoorayResponseSettings response={responses} onClose={() => setAiSettingsOpen(false)} />}
 
         {loading && (
           <div className="dooray-mentions-initial-loading" role="status" aria-live="polite">
@@ -808,7 +817,10 @@ export function DoorayMentionsPanel({ clientId, userId, aiRequestOpen = false, o
                         </div>
                         {item.excerpt && <p className="dooray-mentions-excerpt">{item.excerpt}</p>}
                         <button type="button" className="dooray-response-request" disabled={responses.pendingKeys.has(item.key)}
-                          onClick={() => void responses.request(item.key)}>
+                          onClick={() => {
+                            if (responses.jobs.some((job) => job.itemKey === item.key)) void responses.request(item.key)
+                            else { setAiSettingsOpen(false); setProposalItem(item) }
+                          }}>
                           {responses.pendingKeys.has(item.key) ? '요청 준비 중…' : 'AI 대응 제안'}
                           {responses.jobs.find((job) => job.itemKey === item.key) && ` · ${doorayResponseStatusLabel(responses.jobs.find((job) => job.itemKey === item.key)!)}`}
                         </button>
@@ -823,5 +835,6 @@ export function DoorayMentionsPanel({ clientId, userId, aiRequestOpen = false, o
         </div>
       </section>
     </div>
-  )
+    {proposalItem && <DoorayResponseRequestDialog item={proposalItem} response={responses} onClose={() => setProposalItem(null)} />}
+  </>)
 }

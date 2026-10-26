@@ -66,6 +66,16 @@ test('로딩 재확인 간격은 안전한 범위로 제한한다', () => {
   assert.equal(usage.retryAfterMs, 1_000)
 })
 
+test('미확인 사용률은 실제 0%와 구분한다', () => {
+  for (const value of [null, undefined, '', false, '0']) {
+    const snapshot = readySnapshot()
+    snapshot.claude.session.usedPercent = value
+    const usage = normalizeAionUiSubscriptionUsage(snapshot, { now: NOW })
+    assert.equal(usage.claude.session, null)
+  }
+  assert.equal(normalizeAionUiSubscriptionUsage(readySnapshot(), { now: NOW }).claude.session.usedPercent, 0)
+})
+
 test('파일이 없거나 JSON이 손상되면 조용히 사용할 수 없는 상태를 반환한다', async () => {
   const missing = await readAionUiSubscriptionUsage('missing.json', {
     readText: async () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }) },

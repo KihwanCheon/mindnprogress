@@ -9,6 +9,7 @@ export type AiConversationRoleInput = {
   groupId?: string
 }
 export type AiConversationRole = {
+  isDocumentRoot: boolean
   purpose: AiConversationPurpose
   automaticRequest: string
   fullInitialRequest: boolean

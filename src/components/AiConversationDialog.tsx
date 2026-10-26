@@ -10,17 +10,31 @@ import {
 import {
   AI_EDITOR_REQUEST_MAX_LENGTH,
   aiConversationTitle,
+  buildAiDelegationModelInstruction,
   combineAiEditorRequest,
   type AiConversationPurpose,
   type DoorayApprovalLaunch,
 } from '../utils/aiConversationLaunch.mjs'
 import { loadAiConversationRole, type AiConversationRole } from '../utils/aiConversationRole.mjs'
+import { defaultAiSkillIds } from '../utils/aiSkillSelection.mjs'
+import {
+  AI_DELEGATION_NARRATIVE_MAX_LENGTH,
+  normalizeAiDelegationPreferences,
+  normalizeAiDelegationRuntime,
+  readAiDelegationPreferences,
+  resolveAiDelegationRuntime,
+  saveAiDelegationPreferences,
+  type AiDelegationPreferences,
+  type AiDelegationRuntime,
+} from '../utils/aiDelegationRuntimeSelection.mjs'
 import './AiConversationDialog.css'
 import { WorkspaceSettingsDialog } from './WorkspaceSettingsDialog'
 import { WorkspaceHistoryList } from './WorkspaceHistoryList'
 import { useAiDialogSections } from './useAiDialogSections'
 import { useAiWorkspaceHistory } from './useAiWorkspaceHistory'
+import { useAiLaunchConfirmation } from './useAiLaunchConfirmation'
 import { loadWorkspaceContext, saveWorkspaceSetting, type WorkspaceContext, type WorkspaceChoice } from '../utils/workspaceSettings'
+import { CLAUDE_ACCOUNT_ROLE_LABELS, claudeAccountMark, claudeAccountRole, resolveDialogClaudeAccountId, type ClaudeAccountOption, type ClaudeAccountPolicy } from '../utils/claudeAccounts.mjs'
 
 type RuntimeOption = { id: string; label: string; description: string; providerId?: string }
 type AionAgent = {
@@ -35,6 +49,8 @@ type AionAgent = {
   defaultMode: string
   thoughtLevels: RuntimeOption[]
   defaultThoughtLevel: string
+  /** Claude 멀티 계정: 계정이 2개 이상인 Claude 행에만 있다. */
+  claudeAccounts?: ClaudeAccountOption[]
 }
 type AionSkill = { id: string; name: string; description: string; autoInject: boolean }
 type AionMcpServer = { id: string; name: string; description: string; toolCount: number; required: boolean }
@@ -54,6 +70,7 @@ type AionOptions = {
   agents: AionAgent[]
   skills: AionSkill[]
   mcpServers: AionMcpServer[]
+  claudeAccountPolicy?: ClaudeAccountPolicy
 }
 const runtimeSelectionsStorageKey = 'mindnprogress-ai-runtime-selections'
 const mcpSelectionsStorageKey = 'mindnprogress-ai-mcp-selections'
@@ -110,13 +127,6 @@ function readMcpSelections(fallback = new Set<string>()) {
   }
 }
 
-function encodeBase64Json(value: unknown) {
-  const bytes = new TextEncoder().encode(JSON.stringify(value))
-  let binary = ''
-  for (const byte of bytes) binary += String.fromCharCode(byte)
-  return btoa(binary)
-}
-
 export function AiConversationDialog({ userId, documentId, documentTitle, cardId, cardTitle, purpose, groupId, knowledgeSources, initialRequest, fullInitialRequest, doorayApproval, reconstructionRequestId, cardLayoutRequestId, launchInWebUi, onClose }: {
   userId: string
   documentId: string
@@ -140,18 +150,28 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
   const [launching, setLaunching] = useState(false)
   const [error, setError] = useState('')
   const [launchError, setLaunchError] = useState('')
+  const launchBusy = useRef(false)
+  const confirmation = useAiLaunchConfirmation(JSON.stringify([userId, documentId, cardId, purpose,
+    doorayApproval?.responseId, doorayApproval?.proposalRevision, doorayApproval?.handoffId,
+    reconstructionRequestId, cardLayoutRequestId]), onClose)
   const dialogSections = useAiDialogSections(userId)
   const roleInput = useMemo(() => ({ mapId: documentId, cardId, purpose, groupId, initialRequest, fullInitialRequest }), [documentId, cardId, purpose, groupId, initialRequest, fullInitialRequest])
   const [roleResult, setRoleResult] = useState<{ input: typeof roleInput; role?: AiConversationRole; error?: string } | null>(null)
   const role = roleResult?.input === roleInput ? roleResult.role : undefined
   const roleError = roleResult?.input === roleInput ? roleResult.error : undefined
   const roleLoading = !role && !roleError
-  const automaticRequest = role?.automaticRequest ?? ''
   const [userRequest, setUserRequest] = useState('')
   const [agentId, setAgentId] = useState('')
   const [modelId, setModelId] = useState('')
   const [mode, setMode] = useState('')
   const [thoughtLevel, setThoughtLevel] = useState('')
+  const [claudeAccountId, setClaudeAccountId] = useState('')
+  const [saveClaudeAccountDefault, setSaveClaudeAccountDefault] = useState(false)
+  const [delegationSelection, setDelegationSelection] = useState<{ userId: string; machineId: string; value: AiDelegationPreferences; notice: string } | null>(null)
+  const activeDelegationSelection = delegationSelection?.userId === userId && delegationSelection.machineId === machineId ? delegationSelection : null
+  const delegationPreferences = activeDelegationSelection?.value ?? normalizeAiDelegationPreferences(null)
+  const resolvedDelegation = resolveAiDelegationRuntime(delegationPreferences.selection, options?.machineId === machineId ? options.agents : [])
+  const delegationRuntime = resolvedDelegation.selection
   const [workspace, setWorkspace] = useState('')
   const [workspaceExplicit, setWorkspaceExplicit] = useState(false)
   const [workspaceSavedScope, setWorkspaceSavedScope] = useState<'document' | 'group' | null>(null)
@@ -217,6 +237,8 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
         if (controller.signal.aborted) return
         setOptions(body)
         if (body.machineId !== machineId) setMachineId(body.machineId)
+        setDelegationSelection({ userId, machineId: body.machineId,
+          value: normalizeAiDelegationPreferences(readAiDelegationPreferences(userId, body.machineId)), notice: '' })
         setWorkspace(body.workspaceContext?.workspace ?? '')
         setWorkspaceExplicit(false)
         setWorkspaceSavedScope(null)
@@ -232,7 +254,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
           setMode(availableAiRuntimeOptionId(initialAgent.modes, savedAgentSelection.mode, initialAgent.defaultMode))
           setThoughtLevel(availableAiRuntimeOptionId(initialAgent.thoughtLevels, savedAgentSelection.thoughtLevel, initialAgent.defaultThoughtLevel))
         }
-        setSelectedSkillIds(new Set())
+        setSelectedSkillIds(defaultAiSkillIds(body.skills))
         // 현재 머신에 없는 ID도 보존한다. 표시와 실행 대상은 해당 머신의 목록에서만 고른다.
         setSelectedMcpIds(savedMcpIds)
       })
@@ -251,6 +273,29 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
 
   const selectedAgent = useMemo(() => options?.agents.find((agent) => agent.id === agentId) ?? null, [agentId, options])
   const selectedModel = selectedAgent?.models.find((model) => model.id === modelId)
+  // Claude 멀티 계정: 계정이 1개면 claudeAccounts가 없어 아래 값과 화면이 모두 비활성이다.
+  const claudeAccounts = selectedAgent?.claudeAccounts
+  const claudeAccountPurposeRole = claudeAccountRole(purpose)
+  const claudeAccountPolicyId = options?.claudeAccountPolicy?.[claudeAccountPurposeRole]
+  const effectiveClaudeAccountId = resolveDialogClaudeAccountId(claudeAccounts, claudeAccountId, claudeAccountPolicyId)
+  const delegationAgent = options?.agents.find((agent) => agent.id === delegationRuntime.agentId)
+  const delegationModel = delegationAgent?.models.find((item) => item.id === delegationRuntime.modelId)
+  const delegationMode = delegationAgent?.modes.find((item) => item.id === delegationRuntime.mode)
+  const delegationThoughtLevel = delegationAgent?.thoughtLevels.find((item) => item.id === delegationRuntime.thoughtLevel)
+  const delegationInstruction = buildAiDelegationModelInstruction({
+    narrativeMode: delegationPreferences.narrativeMode,
+    narrativeText: delegationPreferences.narrativeText,
+    agentName: delegationAgent?.name,
+    model: delegationModel?.label,
+    mode: delegationMode?.label,
+    thoughtLevel: delegationThoughtLevel?.label,
+  })
+  const delegationSummary = delegationPreferences.narrativeMode
+    ? `서술형 · ${delegationPreferences.narrativeText.trim().replace(/\s+/g, ' ') || '입력 없음'}`
+    : [delegationAgent?.name, delegationModel?.label, delegationMode?.label, delegationThoughtLevel?.label].filter(Boolean).join(', ') || '선택사항'
+  const delegationNotice = activeDelegationSelection?.notice || (!delegationPreferences.narrativeMode && resolvedDelegation.unavailableFields.length
+    ? `현재 목록에 없는 ${resolvedDelegation.unavailableFields.join('·')} 항목은 지정 안 함으로 두었습니다.` : '')
+  const automaticRequest = combineAiEditorRequest(role?.automaticRequest, '', role?.fullInitialRequest, delegationInstruction)
   const selectedMcpServers = options?.mcpServers.filter((server) => server.required || selectedMcpIds.has(server.id)) ?? []
   const workspaceSummary = workspace.trim() || '선택 없음'
   const mcpSummary = selectedMcpServers.map((server) => server.name).join(', ') || '선택 없음'
@@ -264,6 +309,18 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
     setModelId(nextAgent ? availableAiRuntimeOptionId(nextAgent.models, savedAgentSelection.modelId, nextAgent.defaultModelId) : '')
     setMode(nextAgent ? availableAiRuntimeOptionId(nextAgent.modes, savedAgentSelection.mode, nextAgent.defaultMode) : '')
     setThoughtLevel(nextAgent ? availableAiRuntimeOptionId(nextAgent.thoughtLevels, savedAgentSelection.thoughtLevel, nextAgent.defaultThoughtLevel) : '')
+  }
+
+  const changeDelegationPreferences = (value: AiDelegationPreferences) => {
+    if (loading || launching || confirmation.pending || !options || options.machineId !== machineId) return
+    const selection = normalizeAiDelegationPreferences(value)
+    const saved = saveAiDelegationPreferences(userId, machineId, selection)
+    setDelegationSelection({ userId, machineId, value: selection,
+      notice: !saved ? '마지막 위임 설정을 이 브라우저에 저장하지 못했습니다. 현재 입력은 유지됩니다.' : '' })
+  }
+
+  const changeDelegationRuntime = (value: AiDelegationRuntime) => {
+    changeDelegationPreferences({ ...delegationPreferences, selection: normalizeAiDelegationRuntime(value) })
   }
 
   const toggleSelection = (setter: Dispatch<SetStateAction<Set<string>>>, id: string) => {
@@ -300,6 +357,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
     setWorkspaceExplicit(false)
     setWorkspaceSavedScope(null)
     setWorkspacePrompt(false)
+    setDelegationSelection(null)
     setMachineId(value)
   }
 
@@ -348,12 +406,12 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
   }
 
   const launch = async () => {
-    if (!options || !selectedAgent || !modelId || !role || loading || error || launching) return
+    if (!options || !selectedAgent || !modelId || !role || loading || error || launching || launchBusy.current || confirmation.pending) return
     if (!workspace.trim() || (!workspaceExplicit && (!options.workspaceContext || options.workspaceContext.needsSelection))) {
       setWorkspacePrompt(true)
       return
     }
-    const request = combineAiEditorRequest(automaticRequest, userRequest, role.fullInitialRequest)
+    const request = combineAiEditorRequest(role.automaticRequest, userRequest, role.fullInitialRequest, delegationInstruction)
     if (!request) return
     const useWebLaunch = launchInWebUi || options.machineRole === 'sub'
     let launchTab: Window | null = null
@@ -372,6 +430,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
         // 빈 탭 상태 안내를 만들 수 없어도 ticket 발급과 이동은 계속합니다.
       }
     }
+    launchBusy.current = true
     setLaunching(true)
     setLaunchError('')
     try {
@@ -383,7 +442,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
       }
       const launchWorkspace = workspace.trim()
       const latestRole = await loadAiConversationRole(roleInput, { signal: AbortSignal.timeout(10_000) })
-      if (latestRole.purpose !== role.purpose || latestRole.groupId !== role.groupId || latestRole.automaticRequest !== role.automaticRequest) {
+      if (latestRole.purpose !== role.purpose || latestRole.groupId !== role.groupId || latestRole.isDocumentRoot !== role.isDocumentRoot || latestRole.automaticRequest !== role.automaticRequest) {
         setRoleResult({ input: roleInput, role: latestRole })
         throw new Error('문서의 그룹 역할이 변경되었습니다. 갱신된 자동 적용 내용을 확인한 뒤 다시 시작해 주세요. AI 대화는 시작하지 않았습니다.')
       }
@@ -415,17 +474,19 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
           workspaceConfirmed: workspaceExplicit,
           request,
           requestPreview: userRequest.trim() || automaticRequest,
+          ...(claudeAccounts ? { claudeAccountId: effectiveClaudeAccountId, saveClaudeAccountDefault } : {}),
         }),
       })
-      const attribution = await attributionResponse.json().catch(() => ({})) as { attributionToken?: string; completionUrl?: string; editorId?: string; workspace?: string; prompt?: string; error?: string; approvalRequest?: string }
+      const attribution = await attributionResponse.json().catch(() => ({})) as { attributionToken?: string; completionUrl?: string; statusUrl?: string; editorId?: string; workspace?: string; prompt?: string; error?: string; approvalRequest?: string }
       if (!attributionResponse.ok || !attribution.attributionToken || !attribution.completionUrl || !attribution.editorId || !attribution.prompt) {
         throw new Error(attribution.error ?? 'AI 작성자 정보를 준비하지 못했습니다.')
       }
       if (doorayApproval && !attribution.approvalRequest) throw new Error('서버에서 승인 전문을 확인하지 못했습니다. 대화를 시작하지 않았습니다.')
+      if (!attribution.statusUrl) throw new Error('서버가 대화 생성 확인을 지원하지 않습니다. MnP 서버를 업데이트해 주세요. 대화를 시작하지 않았습니다.')
       const launchPayload = {
         agentId: selectedAgent.id,
         completionUrl: attribution.completionUrl,
-        title: aiConversationTitle({ purpose: role.purpose, documentTitle, cardTitle }),
+        title: aiConversationTitle({ purpose: latestRole.purpose, isDocumentRoot: latestRole.isDocumentRoot, documentTitle, cardTitle }),
         prompt: attribution.prompt,
         modelId,
         providerId: selectedModel?.providerId,
@@ -437,46 +498,50 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
         workspace: attribution.workspace ?? launchWorkspace,
         autoSend: true,
       }
+      confirmation.begin(attribution.statusUrl, useWebLaunch)
+      const launchResponse = await fetch('/api/integrations/aionui/external-conversation-launches', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(launchPayload),
+        signal: AbortSignal.timeout(30_000),
+      })
+      const launchResult = await launchResponse.json().catch(() => ({})) as { launchUrl?: string; desktopLaunchUrl?: string; error?: string }
+      const launchUrl = useWebLaunch ? launchResult.launchUrl : launchResult.desktopLaunchUrl
+      if (!launchResponse.ok || !launchUrl) {
+        throw new Error(launchResult.error ?? 'AionUi 대화 시작 정보를 확인하지 못했습니다. 상태 확인 후 기존 시작 정보를 사용해 주세요.')
+      }
       if (useWebLaunch) {
-        const launchResponse = await fetch('/api/integrations/aionui/external-conversation-launches', {
-          method: 'POST',
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(launchPayload),
-        })
-        const launchResult = await launchResponse.json().catch(() => ({})) as { launchUrl?: string; error?: string }
-        if (!launchResponse.ok || !launchResult.launchUrl) {
-          throw new Error(launchResult.error ?? 'AionUi WebUI 대화 시작 정보를 발급하지 못했습니다.')
-        }
         if (!launchTab || launchTab.closed) {
           launchTab = null
-          throw new Error('준비 중이던 AionUi 탭이 닫혔습니다. 다시 시도해 주세요.')
+          throw new Error('준비 중이던 AionUi 탭이 닫혔습니다. 아래에서 같은 시작 정보를 다시 열어 주세요.')
         }
-        launchTab.location.href = launchResult.launchUrl
+        launchTab.location.href = launchUrl
         launchTab.focus()
         launchTab = null
       } else {
-        const data = encodeURIComponent(encodeBase64Json({ payload: JSON.stringify(launchPayload) }))
-        window.location.href = `${options.protocol}?v=1&data=${data}`
+        window.location.href = launchUrl
       }
       void rememberWorkspace(attribution.workspace ?? launchWorkspace)
       setWorkspacePrompt(false)
-      onClose()
     } catch (launchFailure) {
       if (launchTab && !launchTab.closed) launchTab.close()
       const message = launchFailure instanceof Error ? launchFailure.message : 'AI 대화를 시작하지 못했습니다.'
       setLaunchError(message)
     } finally {
+      launchBusy.current = false
       setLaunching(false)
     }
   }
 
+  const renderAgentField = (agents: AionAgent[]) => <label><span>AI 종류</span><select value={agentId} onChange={(event) => changeAgent(event.target.value)}>{agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label>
+
   return (<>
-    <div className="ai-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
+    <div className="ai-dialog-backdrop" onPointerDown={(event) => { if (!launching && event.target === event.currentTarget) onClose() }}>
       <section className="ai-dialog" role="dialog" aria-modal="true" aria-label="AI 대화 시작 옵션">
         <header>
           <div><span>AionUi 연동</span><strong>AI 대화 시작</strong><small>{cardTitle}</small></div>
-          <button type="button" onClick={onClose} aria-label="AI 대화 옵션 닫기">×</button>
+          <button type="button" onClick={onClose} disabled={launching} aria-label="AI 대화 옵션 닫기">×</button>
         </header>
         {doorayApproval && <p className="ai-dialog-message">{documentId && cardId ? `시작 카드: ${documentTitle} → ${cardTitle}` : '담당 카드 미지정: 승인된 문서 구성만 진행하며, 하위 작업은 생성된 문서의 상위 카드 대화로 인계해야 합니다.'}<br />승인한 제안을 새 대화에 전달합니다. 사용할 작업공간을 확인하세요. 취소하면 대화를 시작하지 않습니다.</p>}
         {roleLoading ? <div className="ai-dialog-message" role="status">문서의 대화 역할과 자동 적용 내용을 확인하는 중…</div> : roleError ? (
@@ -499,6 +564,7 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
           </div>
         ) : options && (
           <div className="ai-dialog-content">
+          <fieldset className="ai-dialog-options" disabled={launching || Boolean(confirmation.pending)} aria-label="대화 실행 옵션">
             {knowledgeSources.length > 0 && (
               <div className="ai-knowledge-notice">
                 <strong>선행 지식 {knowledgeSources.length}개를 먼저 사용합니다.</strong>
@@ -538,11 +604,58 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
               <small>MindNProgress가 대화 목적에 맞춰 자동으로 전달하며 편집할 수 없습니다.</small>
             </label>
             <div className="ai-dialog-grid">
-              <label><span>AI 종류</span><select value={agentId} onChange={(event) => changeAgent(event.target.value)}>{options.agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label>
+              {claudeAccounts
+                ? <div className="ai-agent-account-pair">
+                  {renderAgentField(options.agents)}
+                  <label><span>Claude 계정</span><select value={effectiveClaudeAccountId} onChange={(event) => { setClaudeAccountId(event.target.value); setSaveClaudeAccountDefault(false) }}>{claudeAccounts.map((account) => <option key={account.id} value={account.id}>{`${claudeAccountMark(account.number)} ${account.label}`}</option>)}</select></label>
+                </div>
+                : renderAgentField(options.agents)}
               <label><span>모델</span><select value={modelId} onChange={(event) => setModelId(event.target.value)}>{selectedAgent?.models.map((model) => <option key={`${model.providerId ?? ''}-${model.id}`} value={model.id}>{model.label}</option>)}</select></label>
               {selectedAgent && selectedAgent.modes.length > 0 && <label><span>권한</span><select value={mode} onChange={(event) => setMode(event.target.value)}>{selectedAgent.modes.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>}
-              {selectedAgent && selectedAgent.thoughtLevels.length > 0 && <label><span>사고 수준</span><select value={thoughtLevel} onChange={(event) => setThoughtLevel(event.target.value)}>{selectedAgent.thoughtLevels.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>}
-            </div>
+              {selectedAgent && selectedAgent.thoughtLevels.length > 0 && <label><span>사고 수준</span><select value={thoughtLevel} onChange={(event) => setThoughtLevel(event.target.value)}>{selectedAgent.thoughtLevels.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>}            </div>
+            {claudeAccounts && (effectiveClaudeAccountId === claudeAccountPolicyId
+              ? <p className="ai-claude-account-default">{CLAUDE_ACCOUNT_ROLE_LABELS[claudeAccountPurposeRole]}의 기본 계정입니다. AI가 만드는 위임 대화는 문서·카드 대화와 AI 위임의 기본 계정을 사용합니다.</p>
+              : <label className="ai-claude-account-default">
+                <input type="checkbox" checked={saveClaudeAccountDefault} onChange={(event) => setSaveClaudeAccountDefault(event.target.checked)} />
+                <span>이 계정을 {CLAUDE_ACCOUNT_ROLE_LABELS[claudeAccountPurposeRole]}의 기본 계정으로 사용</span>
+              </label>)}
+            <details className="ai-delegation-model-section">
+              <summary><span className="ai-section-label">AI 위임 모델</span><span className="ai-section-selection" title={delegationSummary}>{delegationSummary}</span></summary>
+              <div className="ai-delegation-model-content">
+                <div className="ai-delegation-model-guidance">
+                  <p>하위 카드에 위임할 AI 설정을 자동 적용 내용에 추가합니다. {delegationPreferences.narrativeMode ? '사용할 AI와 모델, 권한, 사고 수준 등의 조건을 자유롭게 작성하세요.' : 'AI 종류를 먼저 선택하고, 필요한 항목만 지정하세요.'} 마지막 설정은 이 계정·실행 머신별로 자동 복원됩니다.</p>
+                  <label className="ai-delegation-narrative-toggle">
+                    <input type="checkbox" checked={delegationPreferences.narrativeMode} onChange={(event) => changeDelegationPreferences({ ...delegationPreferences, narrativeMode: event.target.checked })} />
+                    <span>서술형 작성</span>
+                  </label>
+                </div>
+                {delegationNotice && <p className="ai-delegation-model-notice" role="status">{delegationNotice}</p>}
+                {delegationPreferences.narrativeMode ? <label className="ai-request ai-delegation-narrative">
+                  <span>위임 AI 설정 (선택사항)</span>
+                  <textarea value={delegationPreferences.narrativeText} rows={4} maxLength={AI_DELEGATION_NARRATIVE_MAX_LENGTH}
+                    onChange={(event) => changeDelegationPreferences({ ...delegationPreferences, narrativeText: event.target.value })}
+                    placeholder="예: 구현은 Claude Code의 Opus, 검수는 Codex를 사용하고 사고 수준은 높음으로 설정하세요." />
+                  <small>체크된 방식의 내용만 전달합니다. 비워 두면 위임 설정을 추가하지 않으며, 선택형 설정은 별도로 유지됩니다.</small>
+                </label> : <div className="ai-dialog-grid">
+                  <label><span>AI 종류 (선택사항)</span><select value={delegationAgent?.id ?? ''} onChange={(event) => changeDelegationRuntime({ agentId: event.target.value, modelId: '', mode: '', thoughtLevel: '' })}>
+                    <option value="">지정 안 함</option>
+                    {options.agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
+                  </select></label>
+                  <label><span>모델 (선택사항)</span><select value={delegationModel?.id ?? ''} disabled={!delegationAgent?.models.length} onChange={(event) => changeDelegationRuntime({ ...delegationRuntime, modelId: event.target.value })}>
+                    <option value="">지정 안 함</option>
+                    {delegationAgent?.models.map((item) => <option key={`${item.providerId ?? ''}-${item.id}`} value={item.id}>{item.label}</option>)}
+                  </select></label>
+                  <label><span>권한 (선택사항)</span><select value={delegationMode?.id ?? ''} disabled={!delegationAgent?.modes.length} onChange={(event) => changeDelegationRuntime({ ...delegationRuntime, mode: event.target.value })}>
+                    <option value="">지정 안 함</option>
+                    {delegationAgent?.modes.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+                  </select></label>
+                  <label><span>사고 수준 (선택사항)</span><select value={delegationThoughtLevel?.id ?? ''} disabled={!delegationAgent?.thoughtLevels.length} onChange={(event) => changeDelegationRuntime({ ...delegationRuntime, thoughtLevel: event.target.value })}>
+                    <option value="">지정 안 함</option>
+                    {delegationAgent?.thoughtLevels.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+                  </select></label>
+                </div>}
+              </div>
+            </details>
             <details className="ai-workspace-section" open={dialogSections.sections.workspace}>
               <summary onClick={(event) => { event.preventDefault(); dialogSections.toggle('workspace') }}>
                 <span className="ai-section-label">작업공간</span>
@@ -659,10 +772,16 @@ export function AiConversationDialog({ userId, documentId, documentTitle, cardId
               <div className="ai-capability-list">{options.skills.map((skill) => <label key={skill.id} title={skill.description}><input type="checkbox" checked={selectedSkillIds.has(skill.id)} onChange={() => toggleSelection(setSelectedSkillIds, skill.id)} /><span><strong>{skill.name}</strong><small>{skill.description || '설명 없음'}</small></span></label>)}</div>
             </details>
             {dialogSections.error && <div className="ai-section-preferences-error" role="alert"><span>{dialogSections.error}</span><button type="button" onClick={dialogSections.retry}>다시 시도</button></div>}
-            {launchError && <div className="ai-launch-error" role="alert">{launchError}</div>}
+          </fieldset>
           </div>
         )}
-        <footer><span>응답은 {options?.machineLabel ?? '선택한 머신'}의 AionUi에서만 처리됩니다.</span><div><button type="button" onClick={onClose}>취소</button><button type="button" className="primary" onClick={() => { void launch() }} disabled={roleLoading || Boolean(roleError) || loading || launching || Boolean(error) || !selectedAgent || !modelId}>{launching ? '준비 중…' : 'AionUi에서 시작'}</button></div></footer>
+        {(launchError || confirmation.error) && <div className="ai-launch-error" role="alert">{confirmation.error || launchError}</div>}
+        {confirmation.pending && <div className="ai-launch-confirmation" role="status">
+          <strong>대화 생성 확인 중…</strong>
+          <span>AionUi에서 실제 대화가 생성·연결되면 자동으로 닫힙니다. 지연되면 AionUi 실행·로그인 상태와 대화 목록을 확인하세요. 새 대화를 자동으로 재요청하지 않습니다.</span>
+          <div><button type="button" onClick={confirmation.check}>상태 다시 확인</button>{confirmation.canReopen && <button type="button" onClick={confirmation.reopen} disabled={launching}>같은 시작 정보로 AionUi 다시 열기</button>}{confirmation.canReset && <button type="button" disabled={launching} onClick={() => { if (confirmation.reset()) setLaunchError('') }}>대화 목록 확인 후 새로 준비</button>}</div>
+        </div>}
+        <footer><span>응답은 {options?.machineLabel ?? '선택한 머신'}의 AionUi에서만 처리됩니다.</span><div><button type="button" onClick={onClose} disabled={launching}>{confirmation.pending ? '닫기' : '취소'}</button><button type="button" className="primary" onClick={() => { void launch() }} disabled={roleLoading || Boolean(roleError) || loading || launching || Boolean(confirmation.pending) || Boolean(error) || !selectedAgent || !modelId}>{launching ? '준비 중…' : confirmation.pending ? '대화 생성 확인 중…' : 'AionUi에서 시작'}</button></div></footer>
       </section>
     </div>
     {workspacePrompt && <WorkspaceSettingsDialog key={`${userId}:${options?.machineId}`} userId={userId} mapId={documentId} machineId={options?.machineId} name={documentTitle || cardTitle} initialWorkspace={workspace} workspaceHistory={workspaceHistory} onRemoveWorkspaceHistory={deleteWorkspaceHistory} onConfirm={selectWorkspace} onClose={() => setWorkspacePrompt(false)} />}

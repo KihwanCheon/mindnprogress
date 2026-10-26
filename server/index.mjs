@@ -1,15 +1,34 @@
 import { createServer } from 'node:http'
+import { createDocumentReadStore } from './lib/documentReadStore.mjs'
+import { completedDelegationIds, completedRequestReceipt, completedWorkspaceLeaseIds, referencedHistoryIds } from './lib/completedAiHistory.mjs'
+import { saveHistoryCleanupBackup, pruneHistoryCleanupBackups, readCompletedJobResults } from './lib/historyCleanupBackup.mjs'
+import { startRequestTiming } from './lib/requestTiming.mjs'
+import { normalizeUntrackedMetaRecovery } from './lib/workspaceMetaRecovery.mjs'
+import { createIntegrationRecoveryQueue, integrationRecoveryPending, integrationRecoveryPublicView } from './lib/aiIntegrationRecovery.mjs'
+import { createAiDelegationRequestFailures, safeDelegationFailureMessage, withDelegationTaskCompletion } from './lib/aiDelegationRequestFailures.mjs'
+import { aiRecordReferencesMaps, createAiDocumentRecordMap, removeAiDocumentRecords, aiDocumentDeletionBusy } from './lib/aiDocumentCleanup.mjs'
 import { createRuntimeLifecycle, installRuntimeShutdown } from './lib/runtimeLifecycle.mjs'
+import { retryDispatchStatus, throwIfRuntimeStopping } from './lib/runtimeStopping.mjs'
 import { createAiWorkspaceSettings } from './lib/aiWorkspaceSettings.mjs'
+import { claudeAccountRequestId, claudeAccountRoleForPurpose, createAiClaudeAccountPolicy, findClaudeAccount,
+  formatAiAuthorName, normalizeClaudeAccounts, resolveClaudeAccountSelection } from './lib/aiClaudeAccounts.mjs'
 import { createAiDialogPreferences } from './lib/aiDialogPreferences.mjs'
+import { replaceFileWithRetry } from './lib/replaceFileWithRetry.mjs'
+import { backfillDailyBackupHistory } from './lib/dailyBackupHistory.mjs'
 import { createDocumentMutationGate, createDocumentReconstruction, reconstructionError } from './lib/documentReconstruction.mjs'
 import { createReconstructionRequests } from './lib/documentReconstructionRequests.mjs'
 import { createCardLayoutRequests } from './lib/cardLayoutRequests.mjs'
+import {
+  CrossDocumentCardMoveError,
+  planCrossDocumentCardMove,
+  rewriteMovedCardReferences,
+} from './lib/crossDocumentCardMove.mjs'
 import { createGroupProjects, documentRoot, DOCUMENT_COORDINATOR_INSTRUCTION } from './lib/groupProjects.mjs'
 import { createDocumentGroupMetadata, documentGroupFields } from './lib/documentGroupMetadata.mjs'
 import {
   buildGroupDocumentInstruction,
   containsApprovalEvidenceDuplicate,
+  createGroupDocumentInstructionDispatchCoordinator,
   createGroupDocumentInstructionSignature,
   groupDocumentInstructionOperationId,
   groupDocumentInstructionPublicView,
@@ -18,12 +37,15 @@ import {
   GROUP_DOCUMENT_INSTRUCTION_TYPES,
   isValidGroupDocumentInstructionId,
   legacyGroupDelegationCreationAllowed,
+  normalizeGroupDocumentReplyTarget,
 } from './lib/groupDocumentInstructions.mjs'
 import { createDoorayResponseIntegration } from './lib/doorayResponseIntegration.mjs'
-import { AI_EXECUTION_APPROVAL_INSTRUCTION, GROUP_APPROVAL_INSTRUCTION, GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION, AI_DELEGATION_FOLLOWUP_INSTRUCTION, AI_DELEGATION_REPORT_INSTRUCTION } from '../src/utils/aiApprovalInstructions.mjs'
+import { createDoorayResponsePreferences } from './lib/doorayResponsePreferences.mjs'
+import { AI_EXECUTION_APPROVAL_INSTRUCTION, GROUP_APPROVAL_INSTRUCTION, GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION, AI_DELEGATION_FOLLOWUP_INSTRUCTION, AI_DELEGATION_REPORT_INSTRUCTION, AI_DELEGATION_RESULT_INSTRUCTION } from '../src/utils/aiApprovalInstructions.mjs'
 import { MNP_CONTEXT_BOOTSTRAP_INSTRUCTION } from '../src/utils/aiContextInstructions.mjs'
-import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { applyMapContentPatch, MapContentPatchError } from '../src/utils/mapContentPatch.mjs'
+import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto'
+import { mkdir, open, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
 import { hostname, networkInterfaces, tmpdir } from 'node:os'
 import path from 'node:path'
@@ -33,9 +55,14 @@ import { applyProgressRollup } from './lib/progressRollup.mjs'
 import { detectReleasedWaitingItems } from './lib/waitingItems.mjs'
 import { resolveAttributionWithoutToken, resolveScopedAttribution } from './lib/attributionScope.mjs'
 import { readAionUiSubscriptionUsage } from './lib/aionUiSubscriptionUsage.mjs'
-import { resolveConversationDisplay } from './lib/aiConversationDisplay.mjs'
+import { prependAiConversationSource, resolveConversationDisplay, resolveConversationSource } from './lib/aiConversationDisplay.mjs'
+import { applyAiConversationDelegationModelPolicy, assessAiConversationContextHealth, isAiDelegationModelBlocked } from './lib/aiConversationContextHealth.mjs'
+import { blockedAiModelLabels, filterAutomatedAiAgents } from './lib/aiModelPolicy.mjs'
+import { summarizeAiConversationMessages } from './lib/aiConversationMessageStatistics.mjs'
 import { AiDelegationStatusLookupError, readAiDelegationDispatchStatus } from './lib/aiDelegationStatusLookup.mjs'
 import { aiDelegationReportArchived, aiDelegationReportArchivePending, createAiDelegationReportArchiver } from './lib/aiDelegationReportArchive.mjs'
+import { AI_DELEGATION_RESULT_HASH_BASIS, aiDelegationFullResult, buildAiDelegationResultCapture } from './lib/aiDelegationResultCapture.mjs'
+import { createAiParentWakeProcessor, recoverableLegacyParentWake } from './lib/aiParentWake.mjs'
 import {
   acknowledgeAiDelegationReport,
   aiDelegationDeliveredReportPatch,
@@ -53,7 +80,12 @@ import {
   aiDelegationWaitPollDue,
   aiDelegationBlocksResume,
   aiDelegationClosureAvailability,
+  preservedIntegrationReleaseClosure,
   aiDelegationRecoveryAvailability,
+  aiDelegationBusyDispatchRejected,
+  assertAiDelegationDatabaseRejection,
+  aiDelegationBusyRecoveryOperation,
+  rejectedAiDelegationRecoveryPatch,
   aiDelegationReportResult,
   aiDelegationLimitState,
   aiDelegationAttemptHistory,
@@ -61,7 +93,6 @@ import {
   aiDelegationIsTerminal,
   aiDelegationWorkPending,
   aiDelegationDisplayState,
-  aiDelegationStateAfterParentWake,
   aiDelegationSucceeded,
   aiDelegationWorkspaceLeaseMatches,
   aiDelegationSelectionFromSource,
@@ -76,7 +107,6 @@ import {
   nextAiDelegationWaitPoll,
   shouldReconcileAiDelegationChildWorkspace,
   AI_DELEGATION_COMPLETION_NOTIFICATION_TYPE,
-  aiDelegationCompletionNotice,
 } from './lib/aiDelegations.mjs'
 import {
   detectImageAssetType,
@@ -117,8 +147,9 @@ import {
   rememberAiWorkspace,
   removeAiWorkspace,
 } from '../src/utils/aiWorkspaceHistory.mjs'
-import { sharedKnowledgeMaxLength } from '../src/utils/sharedKnowledgePolicy.mjs'
+import { SHARED_KNOWLEDGE_WRITE_INSTRUCTION, sharedKnowledgeMaxLength } from '../src/utils/sharedKnowledgePolicy.mjs'
 import {
+  aiConversationTitlePrefix,
   isAiConversationPurpose,
 } from '../src/utils/aiConversationLaunch.mjs'
 import {
@@ -134,14 +165,17 @@ import {
 import {
   AionUiExternalLaunchPayloadError,
   createAionUiConversationWebUrl,
+  createAionUiDesktopLaunchUrl,
   createAionUiWebLaunchUrl,
   normalizeAionUiExternalLaunchPayload,
   parseMindNProgressCompletionToken,
 } from './lib/aionUiExternalLaunch.mjs'
+import { createAionUiLaunchTracking } from './lib/aionUiLaunchTracking.mjs'
 import {
   isLocalLoopbackRequest,
   localLoopbackRedirectLocation,
   normalizeClientAddress,
+  normalizeSelectionDeviceAddress,
   requestClientAddress,
 } from './lib/localLoopbackRedirect.mjs'
 import { listWorkspaceDirectory, listWorkspaceRoots } from './lib/workspaceBrowse.mjs'
@@ -152,7 +186,14 @@ import {
   aiDelegationStateReason,
 } from './lib/aiDelegations.mjs'
 import { verifyAiDelegationOriginalMessage } from './lib/aiDelegationDispatchRecovery.mjs'
+import { AiDelegationSourceCompletionError, assertAiDelegationSourceCompletionLease, readAiDelegationSourceCompletionProof } from './lib/aiDelegationSourceCompletion.mjs'
+import { readAiDelegationInterruptedProof } from './lib/aiDelegationInterruptedRecovery.mjs'
 import { buildSharedKnowledgeAudit } from './lib/sharedKnowledgeAudit.mjs'
+import {
+  GlobalSearchInputError,
+  normalizeGlobalSearchRequest,
+  searchGlobalContent,
+} from './lib/globalSearch.mjs'
 import {
   SubMachinePayloadError,
   distributedWorkTargets,
@@ -199,6 +240,7 @@ import {
   integrationStatusRetryReasonCode,
   integrationWorktreeDirtyMessage,
   integrationWorktreeDirtyReasonCode,
+  resolveCommitAuthorAccount,
 } from './lib/workspacePool.mjs'
 import {
   AI_CONVERSATION_REQUEST_MAX_LENGTH,
@@ -207,6 +249,7 @@ import {
   renderAiConversationPrompt,
   renderAiDelegationInstruction,
 } from './lib/aiDelegationInstructions.mjs'
+import { RemoteWorkspacePool, remoteWorkspaceFacade } from './lib/remoteWorkspacePool.mjs'
 
 const serverDirectory = path.dirname(fileURLToPath(import.meta.url))
 const projectDirectory = path.resolve(serverDirectory, '..')
@@ -235,6 +278,8 @@ const aiAttributionsFile = path.join(dataDirectory, '_ai-attributions.json')
 const aiConversationAttributionsFile = path.join(dataDirectory, '_ai-conversation-attributions.json')
 const aiConversationOriginsFile = path.join(dataDirectory, '_ai-conversation-origins.json')
 const aiDelegationsFile = path.join(dataDirectory, '_ai-delegations.json')
+const aiRequestReceiptsFile = path.join(dataDirectory, '_ai-request-receipts.json')
+const cardMoveOperationsFile = path.join(dataDirectory, '_card-move-operations.json')
 const groupDocumentInstructionsFile = path.join(dataDirectory, '_group-document-instructions.json')
 const workspacePoolStateFile = path.join(dataDirectory, '_workspace-pool.json')
 const aiWorkspaceHistoriesFile = path.join(dataDirectory, '_ai-workspace-histories.json')
@@ -303,19 +348,32 @@ const aiConversationRuntimeStates = new Map()
 const aiConversationRuntimeRefreshes = new Map()
 const aiConversationRuntimeRequests = new Map()
 const aiConversationRuntimeSummaries = new Map()
-const aiDelegations = new Map()
+const deletedAiDocumentIds = new Set()
+const aiDelegations = createAiDocumentRecordMap(deletedAiDocumentIds)
+const aiRequestReceipts = createAiDocumentRecordMap(deletedAiDocumentIds)
+const aiDelegationRequestContexts = new WeakMap()
+let aiDelegationRequestFailures
 const aiDelegationActions = new Set()
 let aiDelegationWriteQueue = Promise.resolve()
 let aiDelegationPollRunning = false
-const groupDocumentInstructions = new Map()
-const groupDocumentInstructionActions = new Set()
+const groupDocumentInstructions = createAiDocumentRecordMap(deletedAiDocumentIds)
+const groupDocumentInstructionActions = createGroupDocumentInstructionDispatchCoordinator()
 let groupDocumentInstructionWriteQueue = Promise.resolve()
 let groupDocumentInstructionPollRunning = false
 const aiDelegationWaitPolls = new Map()
-const workspacePoolManager = new WorkspacePoolManager({
+const localWorkspacePoolManager = new WorkspacePoolManager({
   registryFile: workspacePoolRegistryFile,
   stateFile: workspacePoolStateFile,
+  commitAuthorNameForLease: (lease) => aiWorkspaceCommitAuthorName({
+    conversationId: lease?.conversationId,
+    mapId: lease?.mapId,
+    cardId: lease?.cardId,
+  }),
 })
+const remoteWorkspacePool = new RemoteWorkspacePool({ local: localWorkspacePoolManager,
+  stateFile: path.join(dataDirectory, '_remote-workspace-pools.json'),
+  mainMachineId: () => machineRegistry.mainMachineId, callRunner: fetchAionUiOn })
+const workspacePoolManager = remoteWorkspaceFacade(localWorkspacePoolManager, remoteWorkspacePool)
 let aiConversationRuntimeLibraryRefresh = null
 const aiConversationRuntimeSnapshotStates = new Map()
 const aionCoreDispatchCapabilitiesCaches = new Map()
@@ -450,10 +508,11 @@ const integrationUser = {
 }
 let integrationToken = ''
 const aiAttributionDurationMs = Math.max(50, Number(process.env.MNP_AI_ATTRIBUTION_DURATION_MS) || 8 * 60 * 60 * 1000)
-const aiAttributions = new Map()
-const aiConversationAttributions = new Map()
-const aiConversationOrigins = new Map()
-const aiConversationLaunches = new Map()
+const aiAttributions = createAiDocumentRecordMap(deletedAiDocumentIds)
+const aiConversationAttributions = createAiDocumentRecordMap(deletedAiDocumentIds)
+const aiConversationOrigins = createAiDocumentRecordMap(deletedAiDocumentIds)
+const aiConversationLaunches = createAiDocumentRecordMap(deletedAiDocumentIds)
+const aiLaunchTracking = createAionUiLaunchTracking()
 const aiWorkspaceHistories = new Map()
 const distributedWorkSettings = new Map()
 let machineRegistry = normalizeMachineRegistry([])
@@ -468,6 +527,10 @@ const machineOperationQueue = new MachineOperationQueue({
   resultTimeoutMs: Math.max(10_000, Number(process.env.MNP_MACHINE_RESULT_TIMEOUT_MS) || 180_000),
   createOperationId: () => randomBytes(12).toString('base64url'),
 })
+runtimeLifecycle.signal.addEventListener('abort', () => {
+  const interrupted = machineOperationQueue.shutdown()
+  if (interrupted.length) console.warn('[Runtime] machine operation waits interrupted', JSON.stringify(interrupted))
+}, { once: true })
 const machinePairingStore = new MachinePairingStore()
 const runnerCallbackBaseUrls = new Map()
 const runnerObservedAddresses = new Map()
@@ -489,6 +552,43 @@ function accountUser(user) {
     updatedAt: user.updatedAt ?? null,
     lastLoginAt: user.lastLoginAt ?? null,
   }
+}
+
+/**
+ * Resolves the MnP account name of the human who started the AI conversation, for checkpoint commit prefixes.
+ * Order: conversation origin → persistent conversation attribution → card conversation link
+ * → delegations targeting the conversation → the requesting user. Unknown or system ids fall through.
+ */
+async function aiWorkspaceCommitAuthorName({ conversationId = '', mapId = '', cardId = '', user = null } = {}) {
+  const normalizedConversationId = String(conversationId ?? '').trim()
+  const origin = normalizedConversationId ? aiConversationOrigins.get(normalizedConversationId) : null
+  const scopeMapId = String(origin?.mapId ?? mapId ?? '').trim()
+  const scopeCardId = String(origin?.cardId ?? cardId ?? '').trim()
+  const candidates = [{ source: 'origin', id: origin?.startedBy }]
+  if (normalizedConversationId && scopeMapId && scopeCardId) {
+    const attribution = aiConversationAttributions.get(conversationAttributionKey(scopeMapId, scopeCardId))
+    if (attribution?.conversationId === normalizedConversationId) {
+      candidates.push({ source: 'attribution', id: attribution.startedBy })
+    }
+    let map = null
+    try {
+      map = isValidMapId(scopeMapId) ? await readMap(scopeMapId) : null
+    } catch (error) {
+      console.warn('[AI workspace commit author]', error)
+    }
+    const card = map?.nodes?.find((node) => node.id === scopeCardId)
+    const link = aiConversationLinksFromData(card?.data).find((item) => item.conversationId === normalizedConversationId)
+    candidates.push({ source: 'conversation-link', id: link?.startedBy?.id })
+  }
+  if (normalizedConversationId) {
+    const delegations = [...aiDelegations.values()]
+      .filter((delegation) => delegation.targetConversationId === normalizedConversationId)
+      .sort((first, second) => String(second.updatedAt ?? second.createdAt ?? '')
+        .localeCompare(String(first.updatedAt ?? first.createdAt ?? '')))
+    for (const delegation of delegations) candidates.push({ source: 'delegation', id: delegation.startedBy })
+  }
+  candidates.push({ source: 'request-user', id: user?.id })
+  return resolveCommitAuthorAccount({ candidates, users })?.name ?? null
 }
 
 function canEdit(user) {
@@ -528,22 +628,6 @@ function removeEventClient(client) {
   const clientInfo = eventClients.get(client)
   if (!eventClients.delete(client) || !clientInfo?.mapId) return
   queueMicrotask(() => broadcastPresence(clientInfo.mapId))
-}
-
-async function replaceFileWithRetry(temporaryFile, targetFile) {
-  const retryableCodes = new Set(['EACCES', 'EBUSY', 'EEXIST', 'EPERM'])
-  for (let attempt = 0; attempt < 6; attempt += 1) {
-    try {
-      await rename(temporaryFile, targetFile)
-      return
-    } catch (error) {
-      if (!retryableCodes.has(error?.code) || attempt === 5) {
-        await rm(temporaryFile, { force: true }).catch(() => undefined)
-        throw error
-      }
-      await new Promise((resolve) => setTimeout(resolve, 15 * (2 ** attempt)))
-    }
-  }
 }
 
 function broadcastEvent(payload, predicate = () => true) {
@@ -661,6 +745,15 @@ function rememberAiConversationOrigin(value) {
   return origin
 }
 
+async function formatAiCardConversationTitle(map, card) {
+  const isDocumentRoot = documentRoot(map)?.id === card.id && !card.data?.reference
+  const project = isDocumentRoot ? await groupProjects.forDocument(map.id) : null
+  return formatAiConversationTitle(map.title, card.data?.label ?? card.id, {
+    isDocumentRoot,
+    purpose: project?.role === 'coordinator' ? 'group-coordination' : 'card',
+  })
+}
+
 async function resolveAiConversationNavigation(conversationId) {
   const normalizedConversationId = String(conversationId ?? '').trim()
   const origin = aiConversationOrigins.get(normalizedConversationId)
@@ -669,6 +762,11 @@ async function resolveAiConversationNavigation(conversationId) {
   if (!map || map.trashedAt) return null
   const card = map.nodes.find((node) => node.id === origin.cardId)
   if (!card || !isAiConversationLinked(card.data, normalizedConversationId)) return null
+  const groupProject = await groupProjects.forDocument(map.id)
+  const isDocumentRoot = documentRoot(map)?.id === card.id && !card.data?.reference
+  const coordinatorGroup = groupProject?.role === 'coordinator' && isDocumentRoot
+    ? { id: groupProject.groupId, title: groupProject.name, role: 'coordinator' }
+    : null
   const conversationLink = aiConversationLinksFromData(card.data)
     .find((link) => link.conversationId === normalizedConversationId)
   const persistentAttribution = aiConversationAttributions.get(conversationAttributionKey(map.id, card.id))
@@ -686,6 +784,8 @@ async function resolveAiConversationNavigation(conversationId) {
       cardId: card.id,
       cardTitle: String(card.data?.label ?? '').trim() || '제목 없는 카드',
       archived: Boolean(map.archivedAt),
+      titlePrefix: aiConversationTitlePrefix({ isDocumentRoot, purpose: coordinatorGroup ? 'group-coordination' : 'card' }),
+      ...(coordinatorGroup ? { group: coordinatorGroup } : {}),
     },
     recordedStartedBy,
   }
@@ -696,7 +796,7 @@ function localEventClientCount() {
 }
 
 function aiConversationSelectionDeviceKey(address) {
-  const normalizedAddress = normalizeClientAddress(address)
+  const normalizedAddress = normalizeSelectionDeviceAddress(address)
   return normalizedAddress
     ? createHash('sha256').update(`mindnprogress-ai-selection-device:${normalizedAddress}`).digest('base64url')
     : null
@@ -995,17 +1095,7 @@ function getCurrentUser(request) {
 }
 
 async function readJsonBody(request) {
-  const chunks = []
-  let size = 0
-
-  for await (const chunk of request) {
-    size += chunk.length
-    if (size > 2_000_000) throw new Error('PAYLOAD_TOO_LARGE')
-    chunks.push(chunk)
-  }
-
-  if (chunks.length === 0) return {}
-  return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+  return runtimeLifecycle.readJsonBody(request)
 }
 
 function getDoorayApiConfig() {
@@ -1319,22 +1409,39 @@ function mapSummary(map) {
   }
 }
 
-async function readMap(mapId, options = {}) {
-  try {
-    const stored = JSON.parse(await readFile(mapFileForId(mapId), 'utf8'))
-    return normalizeMapForPersistence({
+const documentReads = createDocumentReadStore({ fileForId: mapFileForId })
+
+async function readMapProjection(mapId, options = {}, select = (value) => value.map) {
+  const lifecycle = options?.lifecycleMetadata ?? documentReconstruction?.metadata(mapId) ?? {}
+  const key = JSON.stringify([lifecycle, users.filter((user) => user.role === 'editor').map((user) => user.id)])
+  return documentReads.select(mapId, key, (stored) => {
+    const map = normalizeMapForPersistence({
       ...stored,
-      ...(options?.lifecycleMetadata ?? documentReconstruction?.metadata(mapId)),
+      ...lifecycle,
       id: mapId,
       title: normalizeTitle(stored.title, '새 마인드맵'),
       createdAt: stored.createdAt ?? stored.updatedAt ?? null,
       createdBy: stored.createdBy ?? stored.updatedBy ?? null,
       version: Number.isInteger(stored.version) && stored.version > 0 ? stored.version : 1,
     })
-  } catch (error) {
-    if (error?.code === 'ENOENT') return null
-    throw error
-  }
+    return { map, summary: { ...mapSummary(map), reconstructionPending: Boolean(map.reconstructionPending) },
+      runtime: { id: mapId, trashedAt: map.trashedAt, nodes: map.nodes.flatMap((node) => {
+        const links = aiConversationLinksFromData(node.data)
+        return links.length ? [{ id: node.id, data: { aiConversations: links } }] : []
+      }) } }
+  }, select)
+}
+
+async function readMap(mapId, options = {}) {
+  return readMapProjection(mapId, options)
+}
+
+async function listActiveMapIds() {
+  const lifecycle = documentReconstruction?.metadataSnapshot() ?? {}
+  return (await readdir(dataDirectory, { withFileTypes: true }))
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.json') && isValidMapId(entry.name.slice(0, -5)))
+    .map((entry) => entry.name.slice(0, -5))
+    .filter((id) => !lifecycle[id]?.trashedAt && !lifecycle[id]?.archivedAt && !lifecycle[id]?.reconstructionPending)
 }
 
 async function listMaps({ trashedOnly = false, archivedOnly = false, includeArchived = false, includePending = false, includeTrashed = false, lifecycleRetries = 3 } = {}) {
@@ -1347,12 +1454,12 @@ async function listMaps({ trashedOnly = false, archivedOnly = false, includeArch
   }
   const maps = await Promise.all(entries
     .filter((entry) => entry.isFile() && entry.name.endsWith('.json') && isValidMapId(entry.name.slice(0, -5)))
-    .map((entry) => readMap(entry.name.slice(0, -5), { lifecycleMetadata: lifecycleSnapshot?.[entry.name.slice(0, -5)] ?? {} })))
+    .map((entry) => readMapProjection(entry.name.slice(0, -5), { lifecycleMetadata: lifecycleSnapshot?.[entry.name.slice(0, -5)] ?? {} }, (value) => value.summary)))
   const summaries = maps
     .filter((map) => map && (includeTrashed || (trashedOnly ? Boolean(map.trashedAt) : !map.trashedAt))
       && (includePending || !map.reconstructionPending)
-      && (archivedOnly ? Boolean(map.archivedAt) : includeArchived || !map.archivedAt))
-    .map(mapSummary)
+      && (archivedOnly ? Boolean(map.archivedAt) : trashedOnly || includeArchived || !map.archivedAt))
+    .map(({ reconstructionPending: _pending, ...summary }) => summary)
   if (trashedOnly) {
     return summaries.sort((first, second) => String(second.trashedAt ?? '').localeCompare(String(first.trashedAt ?? '')))
   }
@@ -1369,6 +1476,60 @@ async function listMaps({ trashedOnly = false, archivedOnly = false, includeArch
       }
       return String(second.updatedAt ?? '').localeCompare(String(first.updatedAt ?? ''))
     })
+}
+
+function globalSearchRequestFromUrl(url) {
+  return normalizeGlobalSearchRequest({
+    query: url.searchParams.get('q') ?? '',
+    mode: url.searchParams.get('mode') ?? 'ranked',
+    cursor: url.searchParams.get('cursor') ?? '',
+    limit: url.searchParams.get('limit') ?? undefined,
+    mapIds: url.searchParams.getAll('mapId'),
+    groupIds: url.searchParams.getAll('groupId'),
+    fields: url.searchParams.getAll('field'),
+    kinds: url.searchParams.getAll('kind'),
+    statuses: url.searchParams.getAll('status'),
+    assigneeIds: url.searchParams.getAll('assigneeId'),
+    isWork: url.searchParams.get('isWork') ?? undefined,
+    hasWaitingItems: url.searchParams.get('hasWaitingItems') ?? undefined,
+  })
+}
+
+async function globalSearchResponse(url) {
+  const request = globalSearchRequestFromUrl(url)
+  const summaries = await listMaps()
+  const maps = (await Promise.all(summaries.map((summary) => readMap(summary.id)))).filter(Boolean)
+  const sourceMapIds = [...new Set(maps.flatMap((map) => (map.nodes ?? [])
+    .map((node) => node.data?.reference?.mapId)
+    .filter((mapId) => typeof mapId === 'string' && isValidMapId(mapId))))]
+  const missingSourceMapIds = sourceMapIds.filter((mapId) => !maps.some((map) => map.id === mapId))
+  const referencedMaps = (await Promise.all(missingSourceMapIds.map(async (mapId) => {
+    try {
+      return await readMap(mapId)
+    } catch {
+      return null
+    }
+  }))).filter(Boolean)
+  const sourceMaps = [...maps, ...referencedMaps]
+  const needsComments = request.mode === 'ranked'
+    && request.normalizedQuery
+    && (request.filters.fields.length === 0 || request.filters.fields.includes('comments'))
+  const commentsByMap = new Map()
+  if (needsComments) {
+    await Promise.all(sourceMaps.filter((map) => !map.trashedAt).map(async (map) => {
+      commentsByMap.set(map.id, await listComments(map.id))
+    }))
+  }
+  const documentLayout = await readDocumentLayout(summaries.map((summary) => summary.id))
+  return searchGlobalContent({
+    maps,
+    sourceMaps,
+    commentsByMap,
+    documentLayout,
+    users,
+    publicBaseUrl,
+    request,
+  })
 }
 
 function defaultDocumentLayout(mapIds) {
@@ -1505,6 +1666,7 @@ async function writeStoredMap(mapId, payload, reconstructionCreate = false) {
   await writeFile(temporaryFile, `${JSON.stringify(payload, null, 2)}\n`, 'utf8')
   if (!reconstructionCreate) documentReconstruction?.assertWritable(mapId)
   await replaceFileWithRetry(temporaryFile, mapFile)
+  documentReads.invalidate(mapId)
 }
 
 async function migrateStoredMapEdges() {
@@ -1662,6 +1824,82 @@ function persistAiDelegations() {
   return aiDelegationWriteQueue
 }
 
+async function removeLegacyAiCompletionNotifications() {
+  let removed = 0
+  for (const user of users) {
+    const file = notificationFileForUser(user.id)
+    const stored = await readStoredArray(file)
+    const remaining = stored.filter((item) => item.type !== AI_DELEGATION_COMPLETION_NOTIFICATION_TYPE)
+    if (remaining.length === stored.length) continue
+    await writeStoredArray(file, remaining)
+    removed += stored.length - remaining.length
+  }
+  return removed
+}
+
+let completedHistoryCleanup = null
+function cleanupCompletedAiHistory() {
+  if (process.env.MNP_COMPLETED_AI_CLEANUP_DISABLED === '1') return Promise.resolve({ disabled: true })
+  if (completedHistoryCleanup) return completedHistoryCleanup
+  completedHistoryCleanup = (async () => {
+    const release = await acquireDocumentMutation(true)
+    try {
+      const leases = { ...localWorkspacePoolManager.state?.leases, ...remoteWorkspacePool.state?.leases }
+      const records = [...aiDelegations.values()]
+      const unfinishedLeases = Object.values(leases).filter((lease) => !['completed', 'cancelled'].includes(lease.status))
+      const occupiedLeaseIds = referencedHistoryIds(unfinishedLeases, new Set(Object.keys(leases)))
+      for (const state of [localWorkspacePoolManager.state, remoteWorkspacePool.state]) {
+        if (state?.integrationLeaseId) occupiedLeaseIds.add(state.integrationLeaseId)
+        for (const current of Object.values(state?.workspaces ?? {})) if (current.leaseId) occupiedLeaseIds.add(current.leaseId)
+      }
+      const ids = completedDelegationIds(records, { leases,
+        busy: (id) => aiDelegationActions.has(id) || integrationRecoveryQueue.running.has(id),
+        extraReferences: [...groupDocumentInstructions.values(), ...unfinishedLeases], protectedLeaseIds: occupiedLeaseIds,
+        remoteLeaseIds: new Set(Object.keys(remoteWorkspacePool.state?.leases ?? {})),
+      })
+      const protectedLeaseIds = referencedHistoryIds([...records.filter((item) => !ids.has(item.id)), ...groupDocumentInstructions.values()], new Set(Object.keys(leases)))
+      const localIds = completedWorkspaceLeaseIds(localWorkspacePoolManager.state, { protectedLeaseIds })
+      const remoteIds = completedWorkspaceLeaseIds(remoteWorkspacePool.state, { protectedLeaseIds, remote: true })
+      const localLeases = structuredClone(Object.fromEntries([...localIds].map((id) => [id, localWorkspacePoolManager.state.leases[id]])))
+      const remoteLeases = structuredClone(Object.fromEntries([...remoteIds].map((id) => [id, remoteWorkspacePool.state.leases[id]])))
+      const backups = path.join(dataDirectory, '_completed-ai-cleanup-backups')
+      if (ids.size || localIds.size || remoteIds.size) {
+        const localResultFiles = await readCompletedJobResults(localWorkspacePoolManager.registry?.sharedRoot, localLeases)
+        await saveHistoryCleanupBackup(backups, {
+          delegations: records.filter((item) => ids.has(item.id)), localLeases, remoteLeases, localResultFiles,
+        })
+      }
+      if (ids.size) {
+        await aiDelegationRequestFailures.preserveResolutionsBeforeCleanup(ids, aiDelegations)
+        const nextReceipts = new Map(aiRequestReceipts)
+        for (const record of records) if (ids.has(record.id)) nextReceipts.set(record.id, completedRequestReceipt(record))
+        // 중복 방지 정보를 먼저 저장한다. 중간 종료 시 상세 이력 정리는 다음 실행에서 반복할 수 있다.
+        await writeStoredArray(aiRequestReceiptsFile, [...nextReceipts.values()])
+        const receiptFile = await open(aiRequestReceiptsFile, 'r+')
+        try { await receiptFile.sync() } finally { await receiptFile.close() }
+        for (const [id, receipt] of nextReceipts) aiRequestReceipts.set(id, receipt)
+        for (const id of ids) aiDelegations.delete(id)
+        try { await persistAiDelegations() } catch (error) {
+          for (const record of records) if (ids.has(record.id)) aiDelegations.set(record.id, record)
+          throw error
+        }
+        for (const id of ids) aiDelegationWaitPolls.delete(id)
+      }
+      const local = await localWorkspacePoolManager.pruneCompletedLeases({ protectedLeaseIds,
+        allowedLeaseIds: localIds, expectedLeases: localLeases })
+      const remote = await remoteWorkspacePool.pruneCompletedLeases({ protectedLeaseIds,
+        allowedLeaseIds: remoteIds, expectedLeases: remoteLeases })
+      await pruneHistoryCleanupBackups(backups)
+      if (ids.size || local.removed || remote.removed) console.log('[AI history cleanup]', JSON.stringify({
+        delegations: ids.size, localLeases: local.removed, remoteLeases: remote.removed,
+        resultFilesFailed: local.resultFilesFailed,
+      }))
+      return { delegations: ids.size, local, remote }
+    } finally { release() }
+  })().finally(() => { completedHistoryCleanup = null })
+  return completedHistoryCleanup
+}
+
 function persistGroupDocumentInstructions() {
   const storedInstructions = [...groupDocumentInstructions.values()]
     .sort((first, second) => String(first.createdAt).localeCompare(String(second.createdAt)))
@@ -1762,6 +2000,8 @@ function machineRegistryResponse(user) {
   const now = Date.now()
   return {
     ...registry,
+    remoteWorkspaceCoordinatorId: remoteWorkspacePool.state?.coordinatorId ?? null,
+    remotePools: (remoteWorkspacePool.snapshot().remotePools ?? []).filter((pool) => machineManageableBy(machineRegistry, pool.machineId, machineViewer(user))),
     runner: {
       apiUrl: runnerApiBaseUrl,
       lanReachable: runnerApiLanReachable,
@@ -1895,6 +2135,9 @@ async function recoverAiConversationOrigins() {
 }
 
 async function loadAiDelegations() {
+  for (const receipt of await readStoredArray(aiRequestReceiptsFile)) {
+    if (isValidAiDelegationId(receipt?.id)) aiRequestReceipts.set(receipt.id, receipt)
+  }
   const storedDelegations = await readStoredArray(aiDelegationsFile)
   let rejectedCount = 0
   let repairedCount = 0
@@ -2008,11 +2251,13 @@ async function aionUiCandidateBaseUrls() {
   ].filter(Boolean))]
 }
 
-async function fetchAionUi(pathname, { timeoutMs = 8_000, method = 'GET', body } = {}) {
+async function fetchAionUi(pathname, { timeoutMs = 8_000, method = 'GET', body, strictJson = false, noMutationRetry = false, singleTarget = false } = {}) {
+  runtimeLifecycle.throwIfStopping()
   let lastError = null
   let lastResponseError = null
   const candidates = await aionUiCandidateBaseUrls()
-  for (const baseUrl of candidates) {
+  for (const baseUrl of singleTarget ? candidates.slice(0, 1) : candidates) {
+    runtimeLifecycle.throwIfStopping()
     try {
       const response = await fetch(`${baseUrl}${pathname}`, {
         method,
@@ -2021,9 +2266,13 @@ async function fetchAionUi(pathname, { timeoutMs = 8_000, method = 'GET', body }
           ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
         },
         body: body === undefined ? undefined : JSON.stringify(body),
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: AbortSignal.any([runtimeLifecycle.signal, AbortSignal.timeout(timeoutMs)]),
       })
-      const responseBody = await response.json().catch(() => ({}))
+      const responseBody = await response.json().catch((error) => {
+        throwIfRuntimeStopping(error, runtimeLifecycle.signal)
+        if (strictJson) throw Object.assign(new Error('AionUi JSON 응답을 확인하지 못했습니다.', { cause: error }), { code: 'AIONUI_INVALID_JSON', status: response.status >= 400 ? response.status : 502 })
+        return {}
+      })
       if (!response.ok || responseBody?.success === false) {
         const requestError = new Error(`AIONUI_REQUEST_FAILED:${response.status}`)
         requestError.status = response.status
@@ -2033,6 +2282,10 @@ async function fetchAionUi(pathname, { timeoutMs = 8_000, method = 'GET', body }
       activeAionUiBaseUrl = baseUrl
       return responseBody?.data ?? responseBody
     } catch (error) {
+      throwIfRuntimeStopping(error, runtimeLifecycle.signal)
+      // 자격 증명·query·본문은 포함하지 않고 실제 연결 대상의 origin만 진단에 남긴다.
+      try { error.requestOrigin = new URL(baseUrl).origin } catch { /* 잘못된 주소 원문은 기록하지 않는다. */ }
+      if (noMutationRetry && method !== 'GET') throw error
       lastError = error
       if (Number.isInteger(error?.status)) lastResponseError = error
     }
@@ -2044,6 +2297,7 @@ async function fetchAionUi(pathname, { timeoutMs = 8_000, method = 'GET', body }
 // 메인은 기존과 같이 루프백으로 직접 호출하고, 서브는 Runner가 가져갈 오퍼레이션 큐에 넣는다.
 // 서브 머신의 AionUi는 inbound 주소를 열지 않으므로 메인에서 직접 호출할 수 없다.
 function fetchAionUiOn(machineId, pathname, options = {}) {
+  if (runtimeLifecycle.signal.aborted) return Promise.reject(runtimeLifecycle.signal.reason)
   const targetMachineId = normalizeMachineId(machineId)
   if (!targetMachineId || targetMachineId === machineRegistry.mainMachineId) {
     return fetchAionUi(pathname, options)
@@ -2109,8 +2363,11 @@ function fetchAionCoreDispatchCapabilities(machineId = machineRegistry.mainMachi
 
 async function aionCoreSupportsWorkspaceLease(machineId = machineRegistry.mainMachineId) {
   try {
-    const capabilities = await fetchAionCoreDispatchCapabilities(machineId)
-    return capabilities?.workspaceLeaseVersion >= 2
+    const targetMachineId = normalizeMachineId(machineId) || machineRegistry.mainMachineId
+    const capabilities = await fetchAionCoreDispatchCapabilities(targetMachineId)
+    const remote = targetMachineId !== machineRegistry.mainMachineId
+    return capabilities?.workspaceLeaseVersion >= (remote ? 3 : 2)
+      && (!remote || capabilities?.remoteWorkspaceOwnership === true)
       && capabilities?.atomicWorkspaceRebind === true
       && capabilities?.releasesRuntimeOnTerminal === true
   } catch {
@@ -2266,6 +2523,15 @@ async function delegationCreateSelection(targetCard, requestedSelection, parentA
   selection.agent = { id: resolvedAgent.id, label: resolvedAgent.name }
   selection.model = { id: resolvedModel.id, label: resolvedModel.label }
   selection.providerId = resolvedModel.providerId ?? selection.providerId
+  // Claude 멀티 계정: AI가 만드는 새 대화(위임·그룹 지시)는 '그 외' 용도 정책 계정을 쓰고,
+  // 정책이 없으면 상위 대화의 계정을 물려받는다. 계정이 1개면 값이 비워진다.
+  selection.claudeAccountId = resolveClaudeAccountSelection({
+    accounts: resolvedAgent.claudeAccounts,
+    requested: selection.claudeAccountId,
+    policyAccountId: aiClaudeAccountPolicy.get(machineId).others,
+    enforcePolicy: true,
+  })
+  selection.claudeAccount = findClaudeAccount(resolvedAgent.claudeAccounts, selection.claudeAccountId)
 
   const mcpServers = normalizeAionUiMcpServers(rawMcpServers)
   const requiredMcpIds = mcpServers.filter((server) => server.required).map((server) => server.id)
@@ -2277,7 +2543,7 @@ function issueDelegatedAttribution({ mapId, cardId, conversationId, selection, s
   const token = randomBytes(32).toString('base64url')
   const now = Date.now()
   const attribution = {
-    authorName: `${selection.agent.label}(${selection.model.label})`,
+    authorName: formatAiAuthorName(selection.agent.label, selection.model.label, selection.claudeAccount),
     agentId: selection.agent.id,
     agentName: selection.agent.label,
     modelId: selection.model.id,
@@ -2296,6 +2562,7 @@ function issueDelegatedAttribution({ mapId, cardId, conversationId, selection, s
       skills: selection.enabledSkillIds.map((id) => ({ id, label: id })),
       mcpServers: selection.mcpIds.map((id) => ({ id, label: id })),
       workspace: selection.workspace,
+      ...(selection.claudeAccountId ? { claudeAccountId: selection.claudeAccountId } : {}),
     },
     createdAt: now,
     expiresAt: now + aiAttributionDurationMs,
@@ -2338,8 +2605,9 @@ function buildAiTaskContext({ card, agentLabel, modelLabel, modeLabel, thoughtLe
   })
 }
 
-function buildDelegatedInstruction({ mapId, cardId, editorId, attributionToken, instruction, workspaceLease, targetCard, selection, role }) {
+function buildDelegatedInstruction({ mapId, cardId, editorId, attributionToken, instruction, workspaceLease, targetCard, selection, role, sourceConversation }) {
   const workspaceInstruction = buildWorkspaceInstruction(workspaceLease)
+  const resultInstruction = instruction.includes(AI_DELEGATION_RESULT_INSTRUCTION) ? '' : AI_DELEGATION_RESULT_INSTRUCTION
   const taskContext = buildAiTaskContext({
     card: targetCard,
     agentLabel: selection?.agent?.label ?? '',
@@ -2348,7 +2616,7 @@ function buildDelegatedInstruction({ mapId, cardId, editorId, attributionToken, 
     thoughtLevelLabel: selection?.thoughtLevel?.label ?? null,
     roleLabel: role || '하위 카드 위임 실행',
   })
-  return renderAiDelegationInstruction(aiDelegationInstructionConfig.template, {
+  return prependAiConversationSource(renderAiDelegationInstruction(aiDelegationInstructionConfig.template, {
     requestTitle: 'MindNProgress 하위 카드 위임 작업 요청',
     mapId,
     cardId,
@@ -2356,10 +2624,10 @@ function buildDelegatedInstruction({ mapId, cardId, editorId, attributionToken, 
     attributionToken,
     approvalInstruction: '',
     taskContext,
-    workspaceInstruction,
+    workspaceInstruction: [resultInstruction, workspaceInstruction].filter(Boolean).join('\n\n'),
     instructionHeading: '상위 AI 지시',
-    instruction: `이 요청은 상위 카드의 AI가 현재 하위 카드에 실행을 위임한 것이므로, 일반적인 다음 작업 제안에 그치지 말고 아래 지시를 실제로 수행하세요.\n\n${instruction.trim()}`,
-  })
+    instruction: `이 요청은 상위 카드의 AI가 현재 하위 카드에 실행을 위임한 것이므로, 일반적인 다음 작업 제안에 그치지 말고 아래 지시를 실제로 수행하세요. 실행 결과는 카드 댓글에 기록하세요.\n\n${SHARED_KNOWLEDGE_WRITE_INSTRUCTION}\n\n${instruction.trim()}`,
+  }), 'delegation', sourceConversation)
 }
 
 function sendGroupDocumentInstructionResponse(response, statusCode, reasonCode, message, payload = {}) {
@@ -2431,7 +2699,8 @@ async function targetReadyForGroupDocumentInstruction(instruction, targetCard) {
     try {
       const conversation = await fetchAiConversationRuntime(instruction.requestedConversationId)
       return normalizeAiConversationRuntime(instruction.requestedConversationId, conversation).state === 'idle'
-    } catch {
+    } catch (shutdownError) {
+      throwIfRuntimeStopping(shutdownError, runtimeLifecycle.signal)
       return false
     }
   }
@@ -2482,6 +2751,7 @@ async function linkGroupDocumentInstructionConversation({ instruction, targetMap
     skills: selection.enabledSkillIds.map((skillId) => ({ id: skillId, label: skillId })),
     mcpServers: selection.mcpIds.map((mcpId) => ({ id: mcpId, label: mcpId })),
     workspace: selection.workspace,
+    claudeAccountId: selection.claudeAccountId,
     requestPreview: instruction.instructionPreview,
     startedBy: { id: attribution.startedBy, label: users.find((candidate) => candidate.id === attribution.startedBy)?.name ?? attribution.startedBy },
     startedAt: new Date().toISOString(),
@@ -2511,10 +2781,7 @@ async function linkGroupDocumentInstructionConversation({ instruction, targetMap
   }
 }
 
-async function dispatchGroupDocumentInstruction(instruction, user) {
-  if (groupDocumentInstructionActions.has(instruction.id)) return groupDocumentInstructions.get(instruction.id)
-  groupDocumentInstructionActions.add(instruction.id)
-  try {
+async function runGroupDocumentInstructionDispatch(instruction, user) {
     const validation = await validateQueuedGroupDocumentInstruction(instruction)
     if (!validation.valid) return updateGroupDocumentInstruction(instruction.id, {
       state: 'expired', reasonCode: validation.reasonCode, message: validation.message,
@@ -2526,11 +2793,52 @@ async function dispatchGroupDocumentInstruction(instruction, user) {
         message: '대상 문서 루트 AI가 현재 응답 중이거나 상태를 확인할 수 없어 지시 전문을 대기열에 보관했습니다. 유휴 상태가 되면 자동 전달합니다.',
       })
     }
+    if (instruction.strategy === 'resume') {
+      try {
+        const conversation = await fetchAiConversationRuntime(instruction.requestedConversationId)
+        const contextHealth = await inspectAiConversationContextHealth(
+          instruction.requestedConversationId,
+          conversation,
+          instruction.targetHomeMachineId,
+          { excludeInstructionId: instruction.id },
+          aiConversationLinksFromData(targetCard.data).find((link) => link.conversationId === instruction.requestedConversationId)?.model?.id,
+        )
+        if (contextHealth.assessmentId !== instruction.conversationAssessmentId) {
+          return updateGroupDocumentInstruction(instruction.id, {
+            state: 'expired',
+            reasonCode: 'GROUP_DOCUMENT_INSTRUCTION_CONVERSATION_ASSESSMENT_STALE',
+            message: '대기 중 대상 문서 AI 대화가 변경되어 지시를 전달하지 않았습니다. 최신 대화 후보와 문맥 상태를 다시 확인하세요.',
+            conversationContextHealth: contextHealth,
+          })
+        }
+        if (!contextHealth.resumeAllowed) {
+          return updateGroupDocumentInstruction(instruction.id, {
+            state: 'expired',
+            reasonCode: contextHealth.reasonCodes.includes('CONVERSATION_MODEL_REUSE_BLOCKED')
+              ? 'GROUP_DOCUMENT_INSTRUCTION_CONVERSATION_MODEL_BLOCKED'
+              : 'GROUP_DOCUMENT_INSTRUCTION_CONVERSATION_CONTEXT_UNAVAILABLE',
+            message: contextHealth.message,
+            conversationContextHealth: contextHealth,
+          })
+        }
+      } catch (shutdownError) {
+        throwIfRuntimeStopping(shutdownError, runtimeLifecycle.signal)
+        return updateGroupDocumentInstruction(instruction.id, {
+          state: 'queued',
+          reasonCode: 'GROUP_DOCUMENT_INSTRUCTION_CONVERSATION_ASSESSMENT_UNAVAILABLE',
+          message: '대상 문서 AI 대화의 최신 문맥 상태를 확인하지 못해 지시 전달을 대기합니다.',
+        })
+      }
+    }
 
     const selection = aiDelegationSelectionFromSource(instruction.pendingSelection)
     if (!selection) return updateGroupDocumentInstruction(instruction.id, {
       state: 'failed', reasonCode: 'GROUP_DOCUMENT_INSTRUCTION_SELECTION_INVALID',
       message: '대상 문서 루트 AI의 실행 환경을 복원할 수 없어 지시 전문을 전달하지 못했습니다.',
+    })
+    if (instruction.strategy === 'new' && isAiDelegationModelBlocked(selection.model.id)) return updateGroupDocumentInstruction(instruction.id, {
+      state: 'expired', reasonCode: 'GROUP_DOCUMENT_INSTRUCTION_MODEL_BLOCKED',
+      message: `공통 모델 정책에서 ${selection.model.id} 모델이 제한되어 대기 중인 지시를 전달하지 않았습니다. 허용 모델로 다시 요청하세요.`,
     })
     const { token: attributionToken, attribution } = issueDelegatedAttribution({
       mapId: targetMap.id,
@@ -2555,7 +2863,12 @@ async function dispatchGroupDocumentInstruction(instruction, user) {
       instruction: instruction.pendingInstruction,
       editorId: attribution.startedBy,
       attributionToken,
+      parentConversationId: instruction.parentConversationId,
+      replyTarget: instruction.replyTarget,
       documentCoordinatorInstruction: DOCUMENT_COORDINATOR_INSTRUCTION,
+      sourceConversation: await resolveAiConversationSource(
+        instruction.parentConversationId, instruction.parentHomeMachineId, instruction.targetHomeMachineId,
+      ),
     })
     const operationId = groupDocumentInstructionOperationId(instruction.id)
     let dispatch
@@ -2571,7 +2884,7 @@ async function dispatchGroupDocumentInstruction(instruction, user) {
             ? { targetConversationId: instruction.requestedConversationId }
             : { create: {
                 agentId: selection.agent.id,
-                title: formatAiConversationTitle(targetMap.title, targetCard.data?.label ?? targetCard.id),
+                title: await formatAiCardConversationTitle(targetMap, targetCard),
                 modelId: selection.model.id,
                 mode: selection.mode?.id ?? null,
                 thoughtLevel: selection.thoughtLevel?.id ?? null,
@@ -2579,14 +2892,17 @@ async function dispatchGroupDocumentInstruction(instruction, user) {
                 disabledBuiltinSkillIds: selection.disabledBuiltinSkillIds,
                 mcpIds: selection.mcpIds,
                 workspace: selection.workspace,
+                ...(claudeAccountRequestId(selection.claudeAccountId) ? { claudeAccountId: claudeAccountRequestId(selection.claudeAccountId) } : {}),
               } }),
           instruction: deliveredInstruction,
         },
       })
     } catch (error) {
+      throwIfRuntimeStopping(error, runtimeLifecycle.signal)
       try {
         dispatch = await fetchAionUiOn(instruction.targetHomeMachineId, `/api/internal/external-conversation-dispatches/${encodeURIComponent(operationId)}`)
-      } catch {
+      } catch (shutdownError) {
+        throwIfRuntimeStopping(shutdownError, runtimeLifecycle.signal)
         // 요청이 도착하지 않았거나 대상 대화가 아직 바쁘면 아래에서 대기 또는 실패로 기록합니다.
       }
       if (!dispatch) {
@@ -2615,7 +2931,7 @@ async function dispatchGroupDocumentInstruction(instruction, user) {
     attribution.conversationId = targetConversationId
     if (instruction.strategy === 'new') {
       try {
-        await protectAionUiConversationTitle(targetConversationId, formatAiConversationTitle(targetMap.title, targetCard.data?.label ?? targetCard.id), instruction.targetHomeMachineId)
+        await protectAionUiConversationTitle(targetConversationId, await formatAiCardConversationTitle(targetMap, targetCard), instruction.targetHomeMachineId)
       } catch (error) {
         console.warn('[Group document instruction conversation title protection]', error)
       }
@@ -2642,14 +2958,16 @@ async function dispatchGroupDocumentInstruction(instruction, user) {
       pendingApprovalEvidence: null,
       pendingSelection: null,
     })
-  } finally {
-    groupDocumentInstructionActions.delete(instruction.id)
-  }
+}
+
+function dispatchGroupDocumentInstruction(instruction, user) {
+  return groupDocumentInstructionActions.run(instruction.id, () => runGroupDocumentInstructionDispatch(instruction, user))
 }
 
 async function pollGroupDocumentInstructions() {
   if (groupDocumentInstructionPollRunning) return
   groupDocumentInstructionPollRunning = true
+  const releaseMutation = await acquireDocumentMutation()
   try {
     for (const instruction of [...groupDocumentInstructions.values()]) {
       if (groupDocumentInstructionActions.has(instruction.id)) continue
@@ -2669,7 +2987,10 @@ async function pollGroupDocumentInstructions() {
           continue
         }
         if (status.state === 'completed') {
-          const response = await latestAssistantResult(instruction.targetConversationId)
+          // 서버는 지시를 받은 첫 응답 턴만 캡처하고 총괄 대화를 재개하지 않는다. 이후 턴의
+          // 완료 보고는 문서 AI가 지시 전문의 회신 방법(session-message)으로 직접 보낸다.
+          const capture = await latestAssistantResultCapture(instruction.targetConversationId, { fullPath: 'transcript' })
+          const response = capture?.snapshot ?? ''
           await updateGroupDocumentInstruction(instruction.id, {
             state: 'replied',
             reasonCode: 'GROUP_DOCUMENT_INSTRUCTION_REPLIED',
@@ -2680,6 +3001,7 @@ async function pollGroupDocumentInstructions() {
             turnId: status.turnId ?? instruction.turnId ?? null,
             response,
             responseHash: response ? createHash('sha256').update(response).digest('hex') : null,
+            responseCapture: capture?.capture ?? null,
             repliedAt: new Date().toISOString(),
           })
           continue
@@ -2696,6 +3018,7 @@ async function pollGroupDocumentInstructions() {
           turnId: status.turnId ?? instruction.turnId ?? null,
         })
       } catch (error) {
+        throwIfRuntimeStopping(error, runtimeLifecycle.signal)
         if (error?.status !== 404) continue
         await updateGroupDocumentInstruction(instruction.id, {
           state: 'failed',
@@ -2705,6 +3028,7 @@ async function pollGroupDocumentInstructions() {
       }
     }
   } finally {
+    releaseMutation()
     groupDocumentInstructionPollRunning = false
   }
 }
@@ -2715,11 +3039,19 @@ function delegationRecoveryInstruction(delegation, instruction, recovery = null,
     : '먼저 `.ai-session.json`, 현재 브랜치, Git 변경과 최근 대화·카드 결과를 서로 대조하세요. 다른 작업공간으로 이동하거나 새 lease를 만들지 마세요.'
   const externalLimitRecovery = ['usage-limit', 'rate-limit', 'model-capacity'].includes(recovery?.failureCategory)
   const userStopRecovery = recovery?.failureCategory === 'user-stop'
-  const title = recovery?.failureCategory === 'model-capacity'
+  const resultCorrection = recovery?.failureCategory === 'integration-result-correction'
+  const interruptedRecovery = recovery?.failureCategory === 'upstream-interrupted'
+  const databaseRecovery = recovery?.failureCategory === 'dispatch-database-transient'
+  const title = resultCorrection ? '통합 대기 결과 정정'
+    : databaseRecovery ? '실행 전 DB 접수 오류 후 위임 복구'
+    : interruptedRecovery ? 'AI 연결 중단 후 위임 복구'
+    : recovery?.failureCategory === 'model-capacity'
     ? '모델 실행 용량 확보 후 위임 복구'
     : externalLimitRecovery ? '외부 사용량 제한 해제 후 위임 복구'
       : userStopRecovery ? '사용자 중지 후 위임 재개' : '재시작 후 위임 복구'
-  const reason = externalLimitRecovery
+  const reason = resultCorrection ? '사용자가 기존 담당자에게 통합 대기 결과의 정정을 명시적으로 요청했습니다.'
+    : interruptedRecovery ? '이전 AI 실행은 응답 스트림 연결 중단으로 실패했고, 사용자가 보존된 같은 대화와 작업공간에서 미완료 작업의 재개를 승인했습니다.'
+    : externalLimitRecovery
     ? `이전 실행은 ${recovery.failureCategory === 'rate-limit' ? '요청 한도' : recovery.failureCategory === 'model-capacity' ? '선택 모델의 실행 용량 부족' : '사용량 한도'}로 중단됐고, 사용자가 원인 해소를 확인한 뒤 같은 대화와 작업공간의 재개를 요청했습니다.`
     : userStopRecovery ? '사용자가 중지했던 기존 위임을 같은 대화에서 다시 이어가도록 요청했습니다.'
       : 'AionCore 또는 MindNProgress 재시작으로 이전 실행의 메모리 상태가 끊겼습니다.'
@@ -2755,8 +3087,9 @@ ${inspection}${workspaceRecoveryRule}
 ${instruction.trim()}`
 }
 
-function delegationPublicView(delegation, includeResult = false) {
+function delegationPublicView(delegation, includeResult = false, { includeFullResult = false } = {}) {
   const publicDelegation = { ...delegation }
+  if (publicDelegation.integrationRecoveryRequest) publicDelegation.integrationRecoveryRequest = integrationRecoveryPublicView(publicDelegation.integrationRecoveryRequest)
   delete publicDelegation.instructionHash
   delete publicDelegation.recoveryInstructionHash
   delete publicDelegation.requestSignature
@@ -2764,6 +3097,11 @@ function delegationPublicView(delegation, includeResult = false) {
   delete publicDelegation.pendingSelection
   delete publicDelegation.pendingWorkspaceHint
   delete publicDelegation.childResultSnapshot
+  delete publicDelegation.childResultFull
+  if (publicDelegation.pendingRecovery?.dispatchBody) {
+    const { dispatchBody: _dispatchBody, ...metadata } = publicDelegation.pendingRecovery
+    publicDelegation.pendingRecovery = metadata
+  }
   if (publicDelegation.reportArchive) {
     const { content: _content, ...metadata } = publicDelegation.reportArchive
     publicDelegation.reportArchive = metadata
@@ -2771,6 +3109,13 @@ function delegationPublicView(delegation, includeResult = false) {
   publicDelegation.reportArchived = aiDelegationReportArchived(delegation)
   publicDelegation.reportArchivePending = aiDelegationReportArchivePending(delegation)
   const recovery = aiDelegationRecoveryAvailability(delegation)
+  if (recovery?.recoveryAvailable) {
+    const competing = activeAiDelegationsForConversation(aiDelegations.values(), { mapId: delegation.mapId,
+      targetCardId: delegation.targetCardId, targetConversationId: delegation.targetConversationId, excludeId: delegation.id })
+    if (competing.length) Object.assign(recovery, { recoveryAvailable: false,
+      blockedReasonCode: 'AI_DELEGATION_ALREADY_ACTIVE', blockedByDelegationId: competing[0].id,
+      message: '같은 카드·대화의 다른 위임이 진행 중이므로 기존 작업을 재개하거나 통합할 수 없습니다. 현재 위임의 종료를 기다리거나, 불필요한 과거 작업은 결과를 보존하고 반환하세요.' })
+  }
   if (recovery) publicDelegation.recovery = recovery
   const closure = aiDelegationClosureAvailability(delegation)
   if (closure) publicDelegation.closure = closure
@@ -2782,10 +3127,25 @@ function delegationPublicView(delegation, includeResult = false) {
     && aiDelegationSucceeded(delegation) && publicDelegation.reportStatus !== 'received'
   const result = aiDelegationReportResult(delegation)
   publicDelegation.resultAvailability = result.availability
+  if (result.availability === 'captured') {
+    // resultHash와 acknowledgeResultHash는 result 문자열(절단 표시 포함) 기준이다.
+    publicDelegation.resultHashBasis = AI_DELEGATION_RESULT_HASH_BASIS
+    publicDelegation.resultTruncated = result.capture?.truncated === true
+    publicDelegation.resultOriginalLength = result.capture?.originalLength ?? result.text.length
+    publicDelegation.resultMessageType = result.capture?.messageType ?? null
+    publicDelegation.resultSplitSuspected = result.capture?.splitSuspected === true
+  }
   if (includeResult === true) {
     publicDelegation.result = result.text
     publicDelegation.resultHash = result.hash
     publicDelegation.resultTurnId = result.turnId
+    const full = result.availability === 'captured' ? aiDelegationFullResult(delegation) : null
+    publicDelegation.resultFullAvailable = Boolean(full)
+    if (full && includeFullResult === true) {
+      publicDelegation.resultFull = full.text
+      publicDelegation.resultFullHash = full.hash
+      publicDelegation.resultFullTruncated = full.truncated
+    }
   }
   return publicDelegation
 }
@@ -2811,7 +3171,28 @@ async function loadGroupDocumentInstructions() {
   }
 }
 
-function sendAiDelegationResponse(response, statusCode, reasonCode, message, payload = {}) {
+async function sendAiDelegationResponse(response, statusCode, reasonCode, message, payload = {}) {
+  const context = aiDelegationRequestContexts.get(response)
+  if (statusCode >= 400) message = safeDelegationFailureMessage(message, context?.instruction)
+  if (statusCode >= 400 && context) {
+    console.warn('[AI delegation request failure]', JSON.stringify({ requestId: context.requestId,
+      delegationId: context.delegationId, mapId: context.mapId, parentMapId: context.parentMapId,
+      parentCardId: context.parentCardId, targetCardId: context.targetCardId,
+      parentHomeMachineId: context.parentHomeMachineId, targetHomeMachineId: context.targetHomeMachineId,
+      status: statusCode, reasonCode }))
+  }
+  if (statusCode >= 400 && context && !aiDelegations.has(context.delegationId) && !aiRequestReceipts.has(context.delegationId)) {
+    try {
+      const failure = await aiDelegationRequestFailures.record(context, { status: statusCode, reasonCode, message })
+      if (failure) {
+        payload = { ...payload, requestFailure: failure }
+        broadcastEvent({ type: 'ai-delegation-request-failed', requestFailure: failure })
+      }
+    } catch {
+      console.warn('[AI delegation request failure storage]', JSON.stringify({ requestId: context.requestId, reasonCode: 'REQUEST_FAILURE_STORAGE_FAILED' }))
+      payload = { ...payload, requestFailureRecorded: false }
+    }
+  }
   return sendJson(
     response,
     statusCode,
@@ -2829,10 +3210,10 @@ function delegationParentMachineId(delegation) {
     || conversationHomeMachineId(delegation?.parentConversationId)
 }
 
-async function resolveAiDelegationWorkspacePool({ selection, targetCard, parentAttribution, requested }) {
+async function resolveAiDelegationWorkspacePool({ selection, targetCard, parentAttribution, requested, machineId }) {
   const selectedWorkspace = String(selection?.workspace ?? '').trim()
   if (selectedWorkspace) return { known: true, workspaceHint: selectedWorkspace,
-    expectsWorkspacePool: Boolean(workspacePoolManager.poolForWorkspace(selectedWorkspace)) }
+    expectsWorkspacePool: Boolean(workspacePoolManager.poolForWorkspace(selectedWorkspace, machineId)) }
   const candidates = [
     selection?.workspace,
     requested?.workspace,
@@ -2864,7 +3245,8 @@ async function resolveAiDelegationWorkspacePool({ selection, targetCard, parentA
         if (pool) return { known: true, workspaceHint: liveWorkspace, expectsWorkspacePool: true }
         return { known: true, workspaceHint: null, expectsWorkspacePool: false }
       }
-    } catch {
+    } catch (shutdownError) {
+      throwIfRuntimeStopping(shutdownError, runtimeLifecycle.signal)
       // 명시적으로 저장된 workspace 후보가 있으면 해당 경로를 기준으로 비-pool 여부를 판단합니다.
     }
   }
@@ -2942,6 +3324,9 @@ async function dispatchPreparedAiDelegation({
   targetHomeMachineId = machineRegistry.mainMachineId,
   role = queuedDelegation?.role ?? null,
 }) {
+  if (strategy === 'new' && isAiDelegationModelBlocked(selection?.model?.id)) {
+    throw aiDelegationDispatchError('공통 모델 정책에서 선택한 모델이 제한되어 대기 중인 위임을 전달하지 않았습니다. 허용 모델로 다시 요청하세요.', 409, 'AI_DELEGATION_MODEL_BLOCKED')
+  }
   if (!await aionCoreSupportsExplicitCompletionAfterInterruption(targetHomeMachineId)) {
     throw aiDelegationDispatchError(
       '현재 AionCore가 중단 후 명시적 완료 신호를 지원하지 않습니다. AionCore를 최신 빌드로 재기동해 주세요.',
@@ -2986,9 +3371,10 @@ async function dispatchPreparedAiDelegation({
     targetCard,
     selection,
     role,
+    sourceConversation: await resolveAiConversationSource(parentAttribution.conversationId, parentHomeMachineId, targetHomeMachineId),
   })
   const delegatedConversationTitle = strategy === 'new'
-    ? formatAiConversationTitle(map.title, targetCard.data?.label ?? targetCard.id)
+    ? await formatAiCardConversationTitle(map, targetCard)
     : null
 
   let dispatch
@@ -3013,20 +3399,15 @@ async function dispatchPreparedAiDelegation({
             disabledBuiltinSkillIds: selection.disabledBuiltinSkillIds,
             mcpIds: selection.mcpIds,
             workspace: selection.workspace,
+            ...(claudeAccountRequestId(selection.claudeAccountId) ? { claudeAccountId: claudeAccountRequestId(selection.claudeAccountId) } : {}),
           },
         }),
         instruction: delegatedInstruction,
       },
     })
   } catch (error) {
-    for (let attempt = 0; attempt < 10 && !dispatch; attempt += 1) {
-      if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 500))
-      try {
-        dispatch = await fetchAionUiOn(targetHomeMachineId, `/api/internal/external-conversation-dispatches/${encodeURIComponent(id)}`)
-      } catch {
-        // The POST may have reached AionCore even if its response was lost.
-      }
-    }
+    throwIfRuntimeStopping(error, runtimeLifecycle.signal)
+    dispatch = await retryDispatchStatus(() => fetchAionUiOn(targetHomeMachineId, `/api/internal/external-conversation-dispatches/${encodeURIComponent(id)}`), runtimeLifecycle.signal)
     if (!dispatch) {
       aiAttributions.delete(sessionTokenKey(attributionToken))
       const definitelyRejected = Number.isInteger(error?.status)
@@ -3156,6 +3537,8 @@ async function dispatchPreparedAiDelegation({
         skills: selection.enabledSkillIds.map((skillId) => ({ id: skillId, label: skillId })),
         mcpServers: selection.mcpIds.map((mcpId) => ({ id: mcpId, label: mcpId })),
         workspace: selection.workspace,
+        claudeAccountId: selection.claudeAccountId,
+        workspacePoolId: workspaceLease?.poolId ?? null,
         requestPreview: instruction,
         startedBy: { id: attribution.startedBy, label: users.find((candidate) => candidate.id === attribution.startedBy)?.name ?? attribution.startedBy },
         startedAt: new Date().toISOString(),
@@ -3201,6 +3584,7 @@ async function dispatchPreparedAiDelegation({
     targetHomeMachineId,
     childOperationId: id,
     strategy,
+    conversationAssessmentId: strategy === 'resume' ? queuedDelegation?.conversationAssessmentId ?? null : null,
     decisionReason,
     sourceRevision,
     instructionPreview: instruction.replace(/\s+/g, ' ').slice(0, 240),
@@ -3238,6 +3622,12 @@ async function dispatchPreparedAiDelegation({
 }
 
 async function reconcileAiDelegationWorkspaceLeases() {
+  // 풀 반환은 저장됐지만 위임 저장 전에 중단된 경우의 내구 receipt 대사.
+  // 후속 위임/새 lease는 건드리지 않고 명시적으로 반환된 과거 기록만 종료한다.
+  for (const delegation of aiDelegations.values()) {
+    const closure = preservedIntegrationReleaseClosure(delegation, workspacePoolManager.state?.leases?.[delegation.workspaceLease?.leaseId])
+    if (closure) await updateAiDelegation(delegation.id, closure)
+  }
   const legacyIntegrationDirtyFailures = [...aiDelegations.values()].filter((delegation) =>
     delegation.state === 'failed'
     && delegation.childStatus === 'rejected'
@@ -3289,6 +3679,7 @@ async function reconcileAiDelegationWorkspaceLeases() {
       || delegation.childStatus !== 'completed'
       || delegation.workspaceResult?.status !== 'quarantined'
       || delegation.pendingRecovery
+      || integrationRecoveryPending(delegation)
       || !delegation.workspaceLease?.leaseId) continue
     if (activeAiDelegationsForConversation(aiDelegations.values(), {
       mapId: delegation.mapId, targetCardId: delegation.targetCardId,
@@ -3312,6 +3703,7 @@ async function reconcileAiDelegationWorkspaceLeases() {
         parentResource: null,
         wakeOperationId: null,
         reportReceipt: null, reportWaitReason: null, reportArchive: null,
+        parentWakeRetry: null, parentRuntimeObservation: null,
         reportPayloadHash: null, reportResultAvailability: null, reportResultHash: null,
         reportResultTurnId: null, reportPreparedAt: null,
         attemptHistory: aiDelegationAttemptHistory(delegation, '보존된 체크포인트와 통합 브랜치 검증 후 자동 통합 대기로 복구'),
@@ -3327,7 +3719,11 @@ async function reconcileAiDelegationWorkspaceLeases() {
       }))
     }
   }
+}
 
+// Runner 요청은 이 서버의 claim API가 열린 뒤에야 완료될 수 있다.
+// 시작 전 복구에서 기다리면 원격 위임이 하나만 있어도 API 수신을 영원히 막는다.
+async function reconcileAiDelegationWorkspaceLeasesAfterListen() {
   const delegations = [...aiDelegations.values()]
   if (await aionCoreSupportsWorkspaceLease()) {
     for (const delegation of delegations) {
@@ -3345,6 +3741,7 @@ async function reconcileAiDelegationWorkspaceLeases() {
         )
         await reconcileAiDelegationWorkspaceLeaseStatus(delegation, status, 'startup')
       } catch (error) {
+        throwIfRuntimeStopping(error, runtimeLifecycle.signal)
         console.warn('[AI delegation workspace conversation recovery]', JSON.stringify({
           delegationId: delegation.id,
           leaseId: delegation.workspaceLease?.leaseId ?? null,
@@ -3391,6 +3788,14 @@ async function reconcileAiDelegationWorkspaceLeases() {
 async function reconcileAiDelegationWorkspaceLeaseStatus(delegation, status, source) {
   const actualLease = status?.workspaceLease ?? null
   const expectedLease = delegation.workspaceLease ?? null
+  if (delegation.resultCorrection && (!aiDelegationWorkspaceLeaseMatches(expectedLease, actualLease)
+    || status.conversationId !== delegation.targetConversationId || status.operationId !== delegation.childOperationId)) {
+    const workspaceResult = await workspacePoolManager.quarantine(expectedLease?.leaseId,
+      '결과 정정 operation·원 담당자·lease 불일치로 통합 잠금을 유지합니다.')
+    await updateAiDelegation(delegation.id, { state: 'recovery-required', workspaceResult,
+      resultCorrection: { ...delegation.resultCorrection, phase: 'held' }, childError: workspaceResult?.error })
+    return false
+  }
   if (!actualLease?.leaseId) {
     if (!expectedLease?.leaseId) return true
     await updateAiDelegation(delegation.id, {
@@ -3474,32 +3879,36 @@ async function reconcileAiDelegationWorkspaceLeaseStatus(delegation, status, sou
   return false
 }
 
-async function latestAssistantResult(conversationId) {
+// 마지막 left text/tips 메시지 하나를 결과로 캡처한다. 12,000자를 넘으면 본문 끝에 절단을
+// 명시하고, 위임 결과(fullPath=delegation)는 전체 원문을 별도 보관본으로 남긴다.
+async function latestAssistantResultCapture(conversationId, { fullPath = 'delegation' } = {}) {
   try {
     const messagePage = await fetchAionUiOn(conversationHomeMachineId(conversationId), `/api/conversations/${encodeURIComponent(conversationId)}/messages?limit=100&content_mode=full`, { timeoutMs: 30_000 })
     const messages = Array.isArray(messagePage?.items) ? messagePage.items : Array.isArray(messagePage) ? messagePage : []
-    const message = [...messages].reverse().find((candidate) => candidate?.position === 'left'
-      && (candidate.type === 'text' || candidate.type === 'tips')
-      && readAionUiMessageContent(candidate).trim())
-    return readAionUiMessageContent(message).trim().slice(0, 12_000)
-  } catch {
-    return ''
+    return buildAiDelegationResultCapture(messages, { readContent: readAionUiMessageContent, fullPath })
+  } catch (shutdownError) {
+    throwIfRuntimeStopping(shutdownError, runtimeLifecycle.signal)
+    return null
   }
 }
 
 async function captureAiDelegationChildResult(delegation) {
   if (delegation?.childResultSnapshot) return delegation
+  // 실행 턴이 없는 접수 거절에 수동 작업의 최신 중간 답변을 결과로 붙이지 않는다.
+  if (!delegation?.childTurnId) return delegation
   const lastAttempt = Date.parse(String(delegation?.childResultCaptureAttemptedAt ?? ''))
   if (Number.isFinite(lastAttempt) && Date.now() - lastAttempt < 10_000) return delegation
-  const result = await latestAssistantResult(delegation?.targetConversationId)
+  const result = await latestAssistantResultCapture(delegation?.targetConversationId)
   const attemptedAt = new Date().toISOString()
   return updateAiDelegation(delegation.id, result
     ? {
-        childResultSnapshot: result,
-        childResultHash: createHash('sha256').update(result).digest('hex'),
+        childResultSnapshot: result.snapshot,
+        childResultHash: result.snapshotHash,
         childResultTurnId: delegation?.childTurnId ?? null,
         childResultCapturedAt: attemptedAt,
         childResultCaptureAttemptedAt: attemptedAt,
+        childResultCapture: result.capture,
+        childResultFull: result.full,
       }
     : { childResultCaptureAttemptedAt: attemptedAt })
 }
@@ -3518,7 +3927,12 @@ async function aiWorkspaceCandidates({ map, group, machineId }) {
   return (await Promise.all(unique.map(async (link) => {
     let workspace = link.workspace || aiConversationOrigins.get(link.conversationId)?.workspace
     if (!workspace && lookups++ < 5) {
-      try { workspace = aiConversationLinkFromAionUiConversation(await fetchAionUiOn(machineId, `/api/conversations/${encodeURIComponent(link.conversationId)}`))?.workspace } catch { /* 추천 조회 실패는 기본값으로 대체하지 않는다. */ }
+      try {
+        workspace = aiConversationLinkFromAionUiConversation(await fetchAionUiOn(machineId, `/api/conversations/${encodeURIComponent(link.conversationId)}`))?.workspace
+      } catch (shutdownError) {
+        throwIfRuntimeStopping(shutdownError, runtimeLifecycle.signal)
+        // 추천 조회 실패는 기본값으로 대체하지 않는다.
+      }
     }
     return workspace ? { workspace, reason: link.reason } : null
   }))).filter(Boolean)
@@ -3526,7 +3940,13 @@ async function aiWorkspaceCandidates({ map, group, machineId }) {
 
 function aiDelegationResultSection(reportResult) {
   if (reportResult.availability === 'captured') {
-    return `## 하위 AI의 마지막 응답\n\n${reportResult.text}\n\n`
+    const capture = reportResult.capture ?? {}
+    const notes = [
+      capture.truncated ? `> 결과 절단: 원문 ${Number(capture.originalLength).toLocaleString('en-US')}자 중 앞 ${Number(capture.inlineLimit).toLocaleString('en-US')}자만 위에 포함했고 본문 끝에 절단 표시를 붙였습니다. ${capture.fullTextStored ? '전체 원문은 mindnprogress_list_ai_delegations(includeResult=true, includeFullResult=true)의 resultFull로 확인하세요.' : '전체 원문은 실행 대화 전문(mindnprogress_get_ai_conversation_transcript)에서 확인하세요.'} 잘린 부분을 확인하기 전에는 결과 전체를 검토한 것으로 판단하지 마세요.` : '',
+      capture.splitSuspected ? '> 결과 분할 가능성(추정): 같은 실행 턴의 앞선 텍스트 메시지가 캡처한 마지막 메시지보다 깁니다. 최종 보고가 여러 메시지로 나뉘었을 수 있으므로 실행 대화 전문(mindnprogress_get_ai_conversation_transcript)에서 앞선 응답을 확인하세요.' : '',
+      capture.messageType === 'tips' ? '> 캡처한 마지막 메시지는 일반 답변(text)이 아니라 tips 유형입니다. 실제 완료 보고인지 실행 대화에서 확인하세요.' : '',
+    ].filter(Boolean)
+    return `## 하위 AI의 마지막 응답\n\n${reportResult.text}\n\n${notes.length ? `${notes.join('\n')}\n\n` : ''}`
   }
   if (reportResult.availability === 'integrity-failed') {
     return `## 하위 AI 원문 무결성 오류\n\n저장된 결과의 해시 또는 실행 턴이 위임 기록과 일치하지 않아 원문을 전달하지 않았습니다. 대화의 최신 응답으로 대체하지 말고 위임 기록과 원본 대화를 별도로 검토하세요.\n\n`
@@ -3554,27 +3974,35 @@ async function parentWakeInstruction(delegation, reportResult = aiDelegationRepo
   const workspaceResult = delegation.workspaceResult
     ? `- 작업공간: ${delegation.workspaceResult.workspaceId ?? delegation.workspaceLease?.workspaceId ?? '미확인'}\n- 체크포인트: ${delegation.workspaceResult.headCommit ?? '변경 없음'}\n- 통합 커밋: ${delegation.workspaceResult.integratedCommit ?? '통합되지 않음'}\n- 작업공간 결과: ${delegation.workspaceResult.status ?? '미확인'}\n`
     : ''
-  const conversationDisplay = await resolveAiConversationDisplay(
+  const conversationDisplay = await resolveAiConversationSource(
     delegation.targetConversationId,
     delegationTargetMachineId(delegation),
+    delegationParentMachineId(delegation),
   )
-  return `# MindNProgress 하위 AI 작업 결과
+  return prependAiConversationSource(`# MindNProgress 하위 AI 작업 결과
 
 상위 카드에서 위임한 하위 카드 작업이 ${outcome} 상태가 되었습니다.
 대상 문서: ${delegation.mapId}. 상위 문서: ${delegation.parentMapId ?? delegation.mapId}.
 
 - 위임 ID: ${delegation.id}
+- 상위 카드: ${delegation.parentCardLabel ?? '상위 카드'} (${delegation.parentCardId ?? '미확인'})
 - 하위 카드: ${delegation.targetCardLabel} (${delegation.targetCardId})
 - 실행 대화: ${conversationDisplay.displayLabel}
 - 하위 실행 턴: ${delegation.childTurnId ?? '미확인'}
-- 결과 원문: ${reportResult.availability === 'captured' ? '캡처됨' : reportResult.availability === 'integrity-failed' ? '무결성 오류로 제외됨' : '캡처되지 않음'}
+- 결과 원문: ${reportResult.availability === 'captured' ? `캡처됨${reportResult.capture?.truncated ? ` (${Number(reportResult.capture.inlineLimit).toLocaleString('en-US')}자 초과로 절단됨, 아래 결과 절단 안내 참조)` : ''}` : reportResult.availability === 'integrity-failed' ? '무결성 오류로 제외됨' : '캡처되지 않음'}
 - 선택 방식: ${delegation.strategy === 'resume' ? '기존 대화 이어가기' : '새 대화 시작'}
 - 선택 이유: ${delegation.decisionReason}
 ${workspaceResult}
 
-${approvalInstruction}${aiDelegationResultSection(reportResult)}${AI_DELEGATION_REPORT_INSTRUCTION}
+당신은 이 하위 작업을 위임한 상위 AI입니다. 위 상위 문서·카드의 원래 목표와 맡은 범위를 기준으로 아래 결과를 판단하세요.
 
-${followupInstruction}`
+${approvalInstruction}${followupInstruction}
+
+${aiDelegationResultSection(reportResult)}## 상위 AI의 결과 처리
+
+${AI_DELEGATION_REPORT_INSTRUCTION}
+
+목표 대비 달성 여부와 판정 근거, 남은 필수 작업을 먼저 보고하세요. 보완을 이어가면 미충족 조건과 종료 조건을, 보완을 마치면 완료 근거와 다음 단계를 명시하세요. 선택 개선은 별도 제안으로 구분하세요.`, 'report', conversationDisplay)
 }
 
 function aiDelegationRecoveryKey(delegation) {
@@ -3629,19 +4057,6 @@ async function ensureAiDelegationNotification(delegation, { kind, message, dedup
   })
 }
 
-// 하위 작업 완료 알림은 차단 알림과 다른 타입으로 만들어 화면에서 구분한다.
-// 이미 알린 위임은 dedupeKey로 건너뛰므로 보고 재전달·결과 재확인이 반복돼도 중복 생성되지 않는다.
-async function ensureAiDelegationCompletionNotification(delegation) {
-  const notice = aiDelegationCompletionNotice(delegation)
-  if (!notice) return delegation
-  return ensureAiDelegationNotification(delegation, {
-    kind: 'completed',
-    type: AI_DELEGATION_COMPLETION_NOTIFICATION_TYPE,
-    dedupeKey: notice.dedupeKey,
-    message: notice.message,
-  })
-}
-
 async function ensureCheckpointRequiredNotification(delegation, workspaceResult) {
   const round = Number(workspaceResult?.checkpointRound ?? 0)
   return ensureAiDelegationNotification(delegation, {
@@ -3652,11 +4067,15 @@ async function ensureCheckpointRequiredNotification(delegation, workspaceResult)
 }
 
 async function validateAiDelegationAction(request, delegation, body, approvalRequired = false, { requireConversationLinks = true } = {}) {
+  const human = !hasValidIntegrationBearer(request) && Boolean(getSignedInUser(request))
+  const source = human ? null : delegationSourceForRequest(integrationRequestScope(request), delegation.parentMapId ?? delegation.mapId)
+  return validateAiDelegationScope(delegation, body, { human, source }, approvalRequired, { requireConversationLinks })
+}
+
+async function validateAiDelegationScope(delegation, body, { human, source }, approvalRequired = false, { requireConversationLinks = true } = {}) {
   const fail = (message, status = 409) => { throw Object.assign(new Error(message), { status, groupProjectError: true }) }
   const parentMapId = delegation.parentMapId ?? delegation.mapId
-  const human = !hasValidIntegrationBearer(request) && Boolean(getSignedInUser(request))
   if (!human) {
-    const source = delegationSourceForRequest(integrationRequestScope(request), parentMapId)
     if (!source || source.cardId !== delegation.parentCardId) fail('이 위임을 관리하는 상위 카드에서만 처리할 수 있습니다.', 403)
     const ownerMap = await readMap(parentMapId)
     const owner = ownerMap?.nodes.find((node) => node.id === delegation.parentCardId)
@@ -3679,6 +4098,81 @@ async function validateAiDelegationAction(request, delegation, body, approvalReq
   if (human && (body.expectedUpdatedAt !== delegation.updatedAt || body.sourceRevision !== parent.version || body.targetRevision !== map.version)) fail('문서 또는 위임 상태가 변경됐습니다. 최신 내용을 불러오세요.')
   if (approvalRequired && human && body.confirmApprovedScope !== true) fail('기존 승인 계획과 현재 범위가 같음을 사용자가 확인해야 재개할 수 있습니다.', 400)
   return { human, map, parent, target }
+}
+
+function settledIntegrationRecoveryResult(delegation, recovery) {
+  const lease = workspacePoolManager.state?.leases?.[delegation.workspaceLease?.leaseId]
+  const history = lease?.integrationRecoveryHistory?.at(-1)
+  const expectedType = recovery.failureCategory === 'workspace-local-changes' ? 'local-changes' : recovery.failureCategory
+  const result = lease?.result
+  if (!lease || history?.type !== expectedType || !(Date.parse(history.recoveredAt) >= Date.parse(recovery.requestedAt))
+    || !history.previousResult || !['waiting-integration', 'completed'].includes(result?.status)
+    || !['waiting-integration', 'completed'].includes(lease.status)
+    || lease.mapId !== delegation.mapId || lease.cardId !== delegation.targetCardId || lease.conversationId !== delegation.targetConversationId
+    || lease.jobId !== delegation.workspaceLease.jobId || lease.workspaceId !== delegation.workspaceLease.workspaceId
+    || !Object.entries(delegation.workspaceResult).every(([key, value]) => JSON.stringify(history.previousResult[key]) === JSON.stringify(value))) return null
+  return result
+}
+
+const integrationRecoveryQueue = createIntegrationRecoveryQueue({
+  get: id => aiDelegations.get(id), save: async (id, patch) => {
+    const previous = aiDelegations.get(id)
+    try { return await updateAiDelegation(id, patch) } catch (error) {
+      if (aiDelegations.get(id)?.integrationRecoveryRequest === patch.integrationRecoveryRequest) aiDelegations.set(id, previous)
+      throw error
+    }
+  },
+  isStopping: () => runtimeLifecycle.signal.aborted, failureMessage: error => safeDelegationFailureMessage(error.message),
+  check: async (delegation, recovery) => {
+    // pool 내구 기록은 승인된 같은 요청의 검증 완료 증거다. 응답/위임 기록 저장 유실 후 새 Git 작업을 만들지 않는다.
+    if (settledIntegrationRecoveryResult(delegation, recovery)) return
+    const user = users.find(candidate => candidate.id === recovery.authorization.editorId && candidate.active !== false)
+    if (!canEdit(user)) throw Object.assign(new Error('통합 재시도 요청 계정의 편집 권한을 확인할 수 없습니다.'), { reasonCode: 'AI_DELEGATION_INTEGRATION_RECOVERY_PERMISSION_CHANGED' })
+    const competing = activeAiDelegationsForConversation(aiDelegations.values(), {
+      mapId: delegation.mapId, targetCardId: delegation.targetCardId, targetConversationId: delegation.targetConversationId, excludeId: delegation.id,
+    })
+    if (competing.length) throw Object.assign(new Error('같은 대화에서 다른 위임이 진행 중입니다.'), { code: 'AI_DELEGATION_ALREADY_ACTIVE' })
+    if (aiDelegationReportResult(delegation).availability === 'integrity-failed') throw Object.assign(new Error('기존 완료 결과의 해시 또는 실행 턴이 변경됐습니다.'), { code: 'AI_DELEGATION_RESULT_INTEGRITY_FAILED' })
+    await validateAiDelegationScope(delegation, { ...recovery.scope, expectedUpdatedAt: delegation.updatedAt }, recovery.authorization, true)
+    const conversation = await fetchAiConversationRuntime(delegation.targetConversationId)
+    const runtime = normalizeAiConversationRuntime(delegation.targetConversationId, conversation)
+    if (runtime.state !== 'idle') throw Object.assign(new Error(`대상 대화가 ${runtime.state} 상태이므로 통합을 재시도할 수 없습니다.`), { reasonCode: 'AI_DELEGATION_RECOVERY_CONVERSATION_BUSY' })
+  },
+  recover: (delegation, recovery) => {
+    const settled = settledIntegrationRecoveryResult(delegation, recovery)
+    if (settled) return settled
+    const method = recovery.failureCategory === 'integration-git-lock' ? 'recoverIntegrationGitLockFailure'
+      : recovery.failureCategory === 'integration-head-changed' ? 'recoverIntegrationHeadChangedFailure'
+      : recovery.failureCategory === 'integration-candidate-worktree-dirty' ? 'recoverIntegrationCandidateWorktreeFailure' : 'recoverLocalChangesIntegrationFailure'
+    return workspacePoolManager[method](delegation.workspaceLease.leaseId,
+      { mapId: delegation.mapId, cardId: delegation.targetCardId, conversationId: delegation.targetConversationId },
+      ...(recovery.untrackedMetaRecovery ? [{ untrackedMetaRecovery: recovery.untrackedMetaRecovery }] : []))
+  },
+  successPatch: (delegation, workspaceResult) => ({
+    state: workspaceResult.status === 'completed' ? 'waiting-parent' : 'waiting-integration', childError: workspaceResult.childError ?? null,
+    workspaceResult, workspaceError: null, integrationError: null,
+    parentDispatchState: null, parentTurnId: null, parentError: null, parentResource: null,
+    wakeOperationId: null, reportReceipt: null, reportWaitReason: null, reportArchive: null,
+    parentWakeRetry: null, parentRuntimeObservation: null,
+    reportPayloadHash: null, reportResultAvailability: null, reportResultHash: null,
+    reportResultTurnId: null, reportPreparedAt: null, completedAt: null,
+    integrationRecoveryRequestedAt: delegation.integrationRecoveryRequest.requestedAt,
+    attemptHistory: aiDelegationAttemptHistory(delegation, '사용자가 통합 차단 원인 해소 후 완료 커밋의 통합 재시도 요청'),
+  }),
+})
+
+function startIntegrationRecovery(id) {
+  if (aiDelegationActions.has(id) || runtimeLifecycle.signal.aborted || integrationRecoveryQueue.running.has(id)) return
+  aiDelegationActions.add(id)
+  void runtimeLifecycle.track(() => integrationRecoveryQueue.run(id)).catch(error => {
+    if (!runtimeLifecycle.signal.aborted) console.warn('[AI integration recovery]', { delegationId: id, code: error.code ?? 'RECOVERY_STORAGE_FAILED' })
+  }).finally(() => aiDelegationActions.delete(id))
+}
+
+function integrationRecoveryResponse(response, receipt) {
+  return sendJson(response, 202, { delegation: delegationPublicView(receipt.delegation), repeated: receipt.repeated,
+    recovery: { kind: 'retry-integration', requestId: receipt.delegation.integrationRecoveryRequest.requestId,
+      status: receipt.delegation.integrationRecoveryRequest.status, reusedWorkspace: true, reusedConversation: true, childReexecuted: false } })
 }
 
 async function recoverExpiredAiDelegationDispatch(delegation, machineId) {
@@ -3717,6 +4211,7 @@ async function restoreConfirmedAiDelegationDispatch(delegation, map, parentMap, 
   let dispatch
   try { dispatch = await readAiDelegationDispatchStatus(fetchAionUiOn, { machineId, operationId: delegation.childOperationId }) }
   catch (error) {
+    throwIfRuntimeStopping(error, runtimeLifecycle.signal)
     if (error.code !== 'AI_DELEGATION_STATUS_NOT_FOUND') throw error
     dispatch = await recoverExpiredAiDelegationDispatch(delegation, machineId)
   }
@@ -3773,7 +4268,7 @@ async function restoreConfirmedAiDelegationDispatch(delegation, map, parentMap, 
   return { delegation: updated, map: updatedMap }
 }
 
-async function ensureAiDelegationTerminalResolutionIdle(delegation) {
+async function ensureAiDelegationTerminalResolutionIdle(delegation, { completedIntegration = false } = {}) {
   const operationId = delegation.state === 'parent-wake-failed'
     ? delegation.wakeOperationId
     : delegation.childOperationId
@@ -3785,47 +4280,97 @@ async function ensureAiDelegationTerminalResolutionIdle(delegation) {
   try {
     dispatch = await fetchAionUiOn(machineId, `/api/internal/external-conversation-dispatches/${encodeURIComponent(operationId)}`)
   } catch (error) {
+    throwIfRuntimeStopping(error, runtimeLifecycle.signal)
     if (error?.status === 404) return
     throw Object.assign(new Error('실행 상태를 확인할 수 없어 위임을 종료하지 않았습니다. 연결을 확인한 뒤 다시 시도하세요.'), { status: 409, groupProjectError: true })
   }
   if (['starting', 'running', 'waiting_resource', 'waiting_resume'].includes(dispatch?.state)) {
     throw Object.assign(new Error('AionUi에 아직 실행 또는 재개 대기 중인 작업이 있어 위임을 종료할 수 없습니다. 해당 대화를 먼저 중지하거나 마무리하세요.'), { status: 409, groupProjectError: true })
   }
+  if (completedIntegration && dispatch?.state === 'completed') {
+    if (dispatch.conversationId !== delegation.targetConversationId || dispatch.turnId !== delegation.childTurnId) {
+      throw Object.assign(new Error('종료된 실행의 대화·턴이 기존 위임과 다릅니다.'), { status: 409, groupProjectError: true })
+    }
+    return
+  }
+  if (completedIntegration) throw Object.assign(new Error('기존 통합 대상 실행의 완료 상태를 확인할 수 없어 반환하지 않았습니다.'), { status: 409, groupProjectError: true })
   if (dispatch?.state === 'completed') {
     throw Object.assign(new Error('저장된 기록보다 실행 상태가 앞서 있습니다. 상태 다시 확인 후 처리하세요.'), { status: 409, groupProjectError: true })
   }
 }
 
-async function settlePendingAiRecovery(delegation) {
+async function settlePendingAiRecovery(delegation, { allowDispatch = false } = {}) {
   const pending = delegation.pendingRecovery
   if (!pending) return null
-  const dispatch = await readAiDelegationDispatchStatus(fetchAionUiOn, { machineId: delegationTargetMachineId(delegation), operationId: pending.operationId, phase: 'recovery' })
-  if (dispatch.conversationId !== delegation.targetConversationId || !aiDelegationWorkspaceLeaseMatches(pending.workspaceLease ?? null, dispatch.workspaceLease ?? null)) throw aiDelegationDispatchError('복구 실행의 대화·작업공간이 저장된 요청과 일치하지 않습니다.', 409)
-  if (!['starting', 'running', 'waiting_resource', 'waiting_resume', 'recovery_required', 'completed', 'failed'].includes(dispatch.state)) throw aiDelegationDispatchError('복구 실행 상태를 아직 확인할 수 없습니다.', 409)
+  let dispatch
+  try {
+    dispatch = await readAiDelegationDispatchStatus(fetchAionUiOn, { machineId: delegationTargetMachineId(delegation), operationId: pending.operationId, phase: 'recovery' })
+  } catch (error) {
+    throwIfRuntimeStopping(error, runtimeLifecycle.signal)
+    const missingOperation = error?.status === 404 || (error instanceof AiDelegationStatusLookupError && error.cause?.status === 404)
+    if (!missingOperation || !allowDispatch || !pending.resultCorrection || !pending.dispatchBody) throw error
+    await workspacePoolManager.prepareIntegrationResultCorrection(pending.workspaceLease.leaseId, {
+      mapId: delegation.mapId, cardId: delegation.targetCardId, conversationId: delegation.targetConversationId,
+      expectedLease: pending.workspaceLease, operationId: pending.operationId, instructionHash: delegation.resultCorrection.instructionHash,
+    })
+    // 저장 후 POST 전에 중단되었거나 응답이 유실된 요청은 동일 operation·전문으로만 재전달한다.
+    dispatch = await fetchAionUiOn(delegationTargetMachineId(delegation), '/api/internal/external-conversation-dispatches', {
+      method: 'POST', timeoutMs: 30_000, body: pending.dispatchBody,
+    })
+  }
+  const knownState = ['starting', 'running', 'waiting_resource', 'waiting_resume', 'recovery_required', 'completed', 'failed'].includes(dispatch.state)
+  if (dispatch.conversationId !== delegation.targetConversationId || !aiDelegationWorkspaceLeaseMatches(pending.workspaceLease ?? null, dispatch.workspaceLease ?? null)
+    || (pending.resultCorrection && (dispatch.operationId !== pending.operationId || !knownState))) {
+    if (pending.resultCorrection) {
+      const workspaceResult = await workspacePoolManager.quarantine(pending.workspaceLease.leaseId, '저장된 결과 정정 요청과 실제 dispatch가 일치하지 않습니다.')
+      await updateAiDelegation(delegation.id, { state: 'recovery-required', pendingRecovery: null, workspaceResult,
+        resultCorrection: { ...delegation.resultCorrection, phase: 'held' } })
+    }
+    throw aiDelegationDispatchError('복구 실행의 operation·대화·작업공간·상태가 저장된 요청과 일치하지 않습니다.', 409)
+  }
+  if (!knownState) throw aiDelegationDispatchError('복구 실행 상태를 아직 확인할 수 없습니다.', 409)
+  if (!pending.resultCorrection && aiDelegationBusyDispatchRejected(dispatch, delegation.targetConversationId, pending.operationId)) {
+    return updateAiDelegation(delegation.id, rejectedAiDelegationRecoveryPatch(delegation, pending, dispatch))
+  }
   const now = new Date().toISOString()
   const runtime = pending.integrationRecovery ? { state: integrationDelegationState(dispatch.state), integrationOperationId: pending.operationId, integrationTurnId: dispatch.turnId ?? null } : {
     ...initialAiDelegationRuntime(dispatch, now), childOperationId: pending.operationId,
     // 응답 유실 동안 끝났어도 일반 완료 경로에서 하위 업무와 체크포인트를 검증한다.
     ...(['completed', 'failed'].includes(dispatch.state) ? { state: 'starting' } : {}),
     childStatus: dispatch.state === 'waiting_resume' ? 'interrupted' : null,
+    ...(pending.resultCorrection ? { childCompletedAt: null } : {}),
     childError: dispatch.errorMessage ?? null,
     childResultSnapshot: null, childResultHash: null, childResultTurnId: null,
     childResultCapturedAt: null, childResultCaptureAttemptedAt: null,
     reportReceipt: null, reportWaitReason: null,
+    parentWakeRetry: null, parentRuntimeObservation: null,
     reportPayloadHash: null, reportResultAvailability: null, reportResultHash: null,
     reportResultTurnId: null, reportPreparedAt: null,
     workspaceResult: null, workspaceError: null,
   }
   return updateAiDelegation(delegation.id, {
     ...runtime, pendingRecovery: null, recoveryWorkspaceLease: null, recoveryAttempt: pending.attempt, recoveryOperationId: pending.operationId,
+    ...(pending.resultCorrection ? { resultCorrection: { ...delegation.resultCorrection, phase: 'dispatched' } } : {}),
     recoverySourceState: pending.sourceState, workspaceLease: pending.workspaceLease,
-    recoveryDispatchError: null, parentError: null, parentDispatchState: null, completedAt: null,
+    recoveryDispatchError: null, recoveryDispatchRejection: null, parentError: null, parentDispatchState: null, completedAt: null,
   })
 }
 
 async function refreshSuspendedAiDelegation(delegation) {
   if (delegation.pendingRecovery) return settlePendingAiRecovery(delegation)
   if (['completed', 'superseded', 'closed'].includes(delegation.state)) return delegation
+  const rejectedRecovery = aiDelegationBusyRecoveryOperation(delegation)
+  if (delegation.recoveryDispatchRejection && rejectedRecovery) {
+    const dispatch = await readAiDelegationDispatchStatus(fetchAionUiOn, {
+      machineId: delegationTargetMachineId(delegation), operationId: rejectedRecovery, phase: 'recovery',
+    })
+    if (!aiDelegationBusyDispatchRejected(dispatch, delegation.targetConversationId, rejectedRecovery)
+      || !aiDelegationWorkspaceLeaseMatches(delegation.workspaceLease ?? null, dispatch.workspaceLease ?? null)) {
+      throw aiDelegationDispatchError('거절된 복구 요청의 기존 실행·대화·lease를 확인하지 못했습니다.', 409)
+    }
+    // 원 operation의 과거 실패를 다시 적용하거나 수동 작업의 최신 답변을 캡처하지 않는다.
+    return delegation
+  }
   const delivered = aiDelegationStoredReportDeliveryPatch(delegation)
   if (delivered) return updateAiDelegation(delegation.id, delivered)
   // 하위 실행이 이미 끝난 보고 대기를 과거 child operation 조회 실패로 막지 않는다.
@@ -3841,13 +4386,10 @@ async function refreshSuspendedAiDelegation(delegation) {
   const expectedConversation = reportOnly ? delegation.parentConversationId : delegation.targetConversationId
   if (status.conversationId && status.conversationId !== expectedConversation) throw aiDelegationDispatchError('실행 대화가 위임 기록과 일치하지 않습니다.', 409)
   if (reportOnly) {
-    const received = aiDelegationDeliveredReportPatch(delegation, { ...status, conversationId: status.conversationId ?? expectedConversation })
+    const received = aiDelegationDeliveredReportPatch(delegation, status)
     if (received) return updateAiDelegation(delegation.id, received)
     if (status.state !== 'completed') return delegation
-    return updateAiDelegation(delegation.id, {
-      state: 'completed', parentDispatchState: 'completed', parentError: null,
-      completedAt: new Date().toISOString(), attemptHistory: aiDelegationAttemptHistory(delegation, '기존 결과 전달 완료 확인'),
-    })
+    throw aiDelegationDispatchError('기존 결과 전달의 대화·실행 턴·해시 근거를 확인하지 못했습니다. 수신 완료로 변경하지 않았습니다.', 409, 'REPORT_DELIVERY_UNVERIFIED')
   }
   if (!['waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity', 'parent-wake-failed', 'failed'].includes(delegation.state)) return delegation
   const limitState = aiDelegationLimitState({ ...delegation, childStatus: status.state, childError: status.errorMessage ?? null })
@@ -3871,6 +4413,7 @@ async function refreshSuspendedAiDelegation(delegation) {
       reportPayloadHash: null, reportResultAvailability: null, reportResultHash: null,
       reportResultTurnId: null, reportPreparedAt: null,
       attemptHistory: aiDelegationAttemptHistory(delegation, '같은 실행의 재개 확인'),
+      parentWakeRetry: null, parentRuntimeObservation: null,
     })
   }
   if (status.state === 'completed' && !delegation.workspaceLease?.leaseId) {
@@ -3886,6 +4429,7 @@ async function refreshSuspendedAiDelegation(delegation) {
       reportPayloadHash: null, reportResultAvailability: null, reportResultHash: null,
       reportResultTurnId: null, reportPreparedAt: null,
       attemptHistory: aiDelegationAttemptHistory(delegation, '같은 실행 완료 확인 · 결과 전달은 사용자 요청 대기'),
+      parentWakeRetry: null, parentRuntimeObservation: null,
     })
     return workPending ? updated : captureAiDelegationChildResult(updated)
   }
@@ -3991,6 +4535,7 @@ async function processAiDelegationIntegrationCleanWaitNotice(originalDelegation)
         integrationCleanWakeFailedAt: status.state === 'completed' ? null : new Date().toISOString(),
       })
     } catch (error) {
+      throwIfRuntimeStopping(error, runtimeLifecycle.signal)
       await updateAiDelegation(delegation.id, {
         integrationCleanWakeState: 'unavailable',
         integrationCleanWakeError: error?.message ?? String(error),
@@ -4010,9 +4555,10 @@ async function processAiDelegationIntegrationCleanWaitNotice(originalDelegation)
   const parent = await fetchAiConversationRuntime(delegation.parentConversationId)
   const runtime = normalizeAiConversationRuntime(delegation.parentConversationId, parent)
   if (runtime.state !== 'idle') return
-  const targetConversationDisplay = await resolveAiConversationDisplay(
+  const targetConversationDisplay = await resolveAiConversationSource(
     delegation.targetConversationId,
     delegationTargetMachineId(delegation),
+    delegationParentMachineId(delegation),
   )
 
   const attempt = Number(delegation.integrationCleanWakeAttempt ?? 0) + 1
@@ -4024,7 +4570,9 @@ async function processAiDelegationIntegrationCleanWaitNotice(originalDelegation)
       actorConversationId: delegation.parentConversationId,
       strategy: 'resume',
       targetConversationId: delegation.parentConversationId,
-      instruction: parentIntegrationCleanWaitInstruction(delegation, targetConversationDisplay.displayLabel),
+      instruction: prependAiConversationSource(
+        parentIntegrationCleanWaitInstruction(delegation, targetConversationDisplay.displayLabel), 'report', targetConversationDisplay,
+      ),
     },
   })
   await updateAiDelegation(delegation.id, {
@@ -4074,6 +4622,7 @@ async function processAiDelegationRecoveryNotice(originalDelegation) {
         recoveryWakeFailedAt: status.state === 'completed' ? null : new Date().toISOString(),
       })
     } catch (error) {
+      throwIfRuntimeStopping(error, runtimeLifecycle.signal)
       await updateAiDelegation(delegation.id, {
         recoveryWakeState: 'unavailable',
         recoveryWakeError: error?.message ?? String(error),
@@ -4094,9 +4643,10 @@ async function processAiDelegationRecoveryNotice(originalDelegation) {
   const parent = await fetchAiConversationRuntime(delegation.parentConversationId)
   const runtime = normalizeAiConversationRuntime(delegation.parentConversationId, parent)
   if (runtime.state !== 'idle') return
-  const targetConversationDisplay = await resolveAiConversationDisplay(
+  const targetConversationDisplay = await resolveAiConversationSource(
     delegation.targetConversationId,
     delegationTargetMachineId(delegation),
+    delegationParentMachineId(delegation),
   )
 
   const recoveryWakeAttempt = Number(delegation.recoveryWakeAttempt ?? 0) + 1
@@ -4108,7 +4658,9 @@ async function processAiDelegationRecoveryNotice(originalDelegation) {
       actorConversationId: delegation.parentConversationId,
       strategy: 'resume',
       targetConversationId: delegation.parentConversationId,
-      instruction: parentRecoveryInstruction(delegation, targetConversationDisplay.displayLabel),
+      instruction: prependAiConversationSource(
+        parentRecoveryInstruction(delegation, targetConversationDisplay.displayLabel), 'report', targetConversationDisplay,
+      ),
     },
   })
   await updateAiDelegation(delegation.id, {
@@ -4130,9 +4682,13 @@ async function finalizeDelegationWorkspace(delegation, childStatus, childError) 
     const result = await workspacePoolManager.finalize(delegation.workspaceLease.leaseId, {
       childStatus,
       childError,
+      operationId: delegation.childOperationId,
     })
     return { result, error: null }
   } catch (error) {
+    const remoteLease = remoteWorkspacePool.state?.leases[delegation.workspaceLease.leaseId]
+    if (remoteLease?.status === 'release-pending') return { result: remoteLease.result, error: null }
+    if (remoteLease) return { result: await remoteWorkspacePool.quarantine(remoteLease.leaseId, error.message), error: null }
     if (error instanceof WorkspacePoolIntegrationError) {
       return { result: error.details ?? null, error: error.message }
     }
@@ -4214,7 +4770,7 @@ function workspaceCheckpointInstruction(delegation, workspaceResult) {
 
 ${files}
 
-최신 카드 요구사항과 Git diff를 대조해 의도한 구현 변경과 검증 부산물을 구분하세요. 의도한 파일 변경이 있으면 \`mindnprogress_checkpoint_ai_workspace\`의 \`operation.action=commit-changes\`와 함께 \`paths\` 및 실제 변경을 설명하는 \`commitMessage\`의 \`summary\`·\`background\`·\`cause\`·\`changes\`, 필요한 경우 \`scope\`를 작성하세요. \`summary\`의 \`[김용민]\` prefix와 출처를 나타내는 \`[MnP]\` 및 나머지 본문 섹션은 서버가 추가하므로 직접 넣지 마세요. 자동 변경은 포함하지 마세요. 의도한 파일 변경이 없다면 같은 도구의 \`operation.action=confirm-no-changes\`를 사용하세요. 구현과 자동 변경이 같은 파일에 섞여 있으면 기준 내용으로 되돌린 뒤 의도한 수정만 다시 적용하세요. 체크포인트 후 필수 검증을 다시 수행하고 최종 결과를 보고하세요.`
+최신 카드 요구사항과 Git diff를 대조해 의도한 구현 변경과 검증 부산물을 구분하세요. 의도한 파일 변경이 있으면 \`mindnprogress_checkpoint_ai_workspace\`의 \`operation.action=commit-changes\`와 함께 \`paths\` 및 실제 변경을 설명하는 \`commitMessage\`의 \`summary\`·\`background\`·\`cause\`·\`changes\`, 필요한 경우 \`scope\`를 작성하세요. \`summary\`의 커밋 제목 prefix(사용자 커밋 규칙의 이름 머리말 등)와 출처를 나타내는 \`[MnP]\` 및 나머지 본문 섹션은 서버가 추가하므로 직접 넣지 마세요. 자동 변경은 포함하지 마세요. 의도한 파일 변경이 없다면 같은 도구의 \`operation.action=confirm-no-changes\`를 사용하세요. 구현과 자동 변경이 같은 파일에 섞여 있으면 기준 내용으로 되돌린 뒤 의도한 수정만 다시 적용하세요. 체크포인트 후 필수 검증을 다시 수행하고 최종 결과를 보고하세요.`
 }
 
 async function startWorkspaceCheckpointResolution(delegation, workspaceResult) {
@@ -4230,18 +4786,13 @@ async function startWorkspaceCheckpointResolution(delegation, workspaceResult) {
         strategy: 'resume',
         targetConversationId: delegation.targetConversationId,
         workspaceLease: delegation.workspaceLease,
-        instruction: workspaceCheckpointInstruction(delegation, workspaceResult),
+        instruction: prependAiConversationSource(workspaceCheckpointInstruction(delegation, workspaceResult), 'delegation',
+          await resolveAiConversationSource(delegation.parentConversationId, delegationParentMachineId(delegation), delegationTargetMachineId(delegation))),
       },
     })
   } catch (error) {
-    for (let attempt = 0; attempt < 10 && !dispatch; attempt += 1) {
-      if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 500))
-      try {
-        dispatch = await fetchAionUiOn(delegationTargetMachineId(delegation), `/api/internal/external-conversation-dispatches/${encodeURIComponent(operationId)}`)
-      } catch {
-        // The checkpoint dispatch may have started even when its POST response was lost.
-      }
-    }
+    throwIfRuntimeStopping(error, runtimeLifecycle.signal)
+    dispatch = await retryDispatchStatus(() => fetchAionUiOn(delegationTargetMachineId(delegation), `/api/internal/external-conversation-dispatches/${encodeURIComponent(operationId)}`), runtimeLifecycle.signal)
     if (!dispatch) {
       const reason = `체크포인트 보완 요청을 AionUi에 전달하지 못했습니다: ${error?.message ?? String(error)}`
       return updateAiDelegation(delegation.id, {
@@ -4279,18 +4830,13 @@ async function startWorkspaceConflictResolution(delegation, workspaceResult) {
         strategy: 'resume',
         targetConversationId: delegation.targetConversationId,
         workspaceLease: delegation.workspaceLease,
-        instruction: workspaceConflictInstruction(delegation, workspaceResult),
+        instruction: prependAiConversationSource(workspaceConflictInstruction(delegation, workspaceResult), 'delegation',
+          await resolveAiConversationSource(delegation.parentConversationId, delegationParentMachineId(delegation), delegationTargetMachineId(delegation))),
       },
     })
   } catch (error) {
-    for (let attempt = 0; attempt < 10 && !dispatch; attempt += 1) {
-      if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 500))
-      try {
-        dispatch = await fetchAionUiOn(delegationTargetMachineId(delegation), `/api/internal/external-conversation-dispatches/${encodeURIComponent(operationId)}`)
-      } catch {
-        // The conflict-resolution dispatch may have started even when its POST response was lost.
-      }
-    }
+    throwIfRuntimeStopping(error, runtimeLifecycle.signal)
+    dispatch = await retryDispatchStatus(() => fetchAionUiOn(delegationTargetMachineId(delegation), `/api/internal/external-conversation-dispatches/${encodeURIComponent(operationId)}`), runtimeLifecycle.signal)
     if (!dispatch) {
       const reason = `통합 충돌 해결 요청을 AionUi에 전달하지 못했습니다: ${error?.message ?? String(error)}`
       return updateAiDelegation(delegation.id, {
@@ -4316,6 +4862,17 @@ async function startWorkspaceConflictResolution(delegation, workspaceResult) {
 }
 
 async function advanceWorkspaceIntegration(delegation, workspace) {
+  if (delegation.workspaceLease?.ownership && workspace.result?.status === 'quarantined') {
+    clearAiDelegationWaitPoll(delegation.id)
+    await updateAiDelegation(delegation.id, { state: 'integration-recovery-required', workspaceResult: workspace.result,
+      workspaceError: workspace.result.reason, integrationError: workspace.result.reason, recoveryRequiredAt: new Date().toISOString() })
+    return true
+  }
+  if (workspace.result?.status === 'result-correction-held') {
+    await updateAiDelegation(delegation.id, { state: 'recovery-required', workspaceResult: workspace.result,
+      workspaceError: workspace.result.error, resultCorrection: { ...delegation.resultCorrection, phase: 'held' } })
+    return true
+  }
   if (workspace.result?.status === 'waiting-integration') {
     const waiting = await updateAiDelegation(delegation.id, {
       state: 'waiting-integration',
@@ -4455,7 +5012,7 @@ async function drainWaitingWorkspaceDelegations() {
       resumedDelegation = null
     }
 
-    if (!await aionCoreSupportsWorkspaceLease()) {
+    if (!await aionCoreSupportsWorkspaceLease(queued.targetHomeMachineId)) {
       const workspaceWaitMessage = '현재 AionCore가 작업공간 lease를 지원하지 않아 재기동을 기다리고 있습니다.'
       const blocked = await updateAiDelegation(queued.id, {
         workspaceWaitError: workspaceWaitMessage,
@@ -4490,7 +5047,30 @@ async function drainWaitingWorkspaceDelegations() {
           scheduleAiDelegationWaitPoll(blocked)
           continue
         }
+        if (!queued.resumesDelegationId) {
+          const contextHealth = await inspectAiConversationContextHealth(
+            queued.targetConversationId,
+            conversation,
+            delegationTargetMachineId(queued),
+            { excludeDelegationId: queued.id },
+            aiConversationLinksFromData(targetCard.data).find((link) => link.conversationId === queued.targetConversationId)?.model?.id,
+          )
+          if (contextHealth.assessmentId !== queued.conversationAssessmentId || !contextHealth.resumeAllowed) {
+            await updateAiDelegation(queued.id, {
+              state: 'failed',
+              childStatus: 'rejected',
+              childError: contextHealth.assessmentId !== queued.conversationAssessmentId
+                ? '작업공간 대기 중 대상 대화의 문맥 상태가 변경되었습니다. 최신 후보를 확인해 새 위임을 검토하세요.'
+                : contextHealth.message,
+              conversationContextHealth: contextHealth,
+              resource: null,
+            })
+            clearAiDelegationWaitPoll(queued.id)
+            continue
+          }
+        }
       } catch (error) {
+        throwIfRuntimeStopping(error, runtimeLifecycle.signal)
         const workspaceWaitMessage = `대상 AionUi 대화 상태를 확인하지 못했습니다: ${error?.message ?? String(error)}`
         const blocked = await updateAiDelegation(queued.id, {
           workspaceWaitError: workspaceWaitMessage,
@@ -4503,6 +5083,15 @@ async function drainWaitingWorkspaceDelegations() {
     }
 
     const selection = structuredClone(queued.pendingSelection)
+    if (queued.strategy === 'new' && isAiDelegationModelBlocked(selection?.model?.id)) {
+      await updateAiDelegation(queued.id, {
+        state: 'failed', childStatus: 'rejected', resource: null,
+        workspaceWaitReasonCode: 'AI_DELEGATION_MODEL_BLOCKED',
+        childError: '공통 모델 정책에서 선택한 모델이 제한되어 대기 중인 위임을 전달하지 않았습니다. 허용 모델로 다시 요청하세요.',
+      })
+      clearAiDelegationWaitPoll(queued.id)
+      continue
+    }
     let workspaceLease
     try {
       workspaceLease = resumedDelegation?.workspaceLease?.leaseId
@@ -4512,6 +5101,8 @@ async function drainWaitingWorkspaceDelegations() {
             conversationId: queued.targetConversationId,
           })
         : await workspacePoolManager.acquire({
+            machineId: queued.targetHomeMachineId,
+            requestId: queued.id,
             workspaceHint: queued.pendingWorkspaceHint,
             mapId: map.id,
             cardId: targetCard.id,
@@ -4573,8 +5164,9 @@ async function drainWaitingWorkspaceDelegations() {
         continue
       }
       await updateAiDelegation(queued.id, {
-        state: 'failed',
-        childStatus: 'rejected',
+        state: error.workspaceLease?.ownership ? 'recovery-required' : 'failed',
+        childStatus: error.workspaceLease?.ownership ? 'interrupted' : 'rejected',
+        ...(error.workspaceLease?.ownership ? { workspaceLease: error.workspaceLease, recoveryRequiredAt: new Date().toISOString() } : {}),
         childError: error?.message ?? String(error),
         workspaceWaitError: error?.message ?? String(error),
         failureReasonCode: error?.reasonCode ?? error?.code ?? 'AI_DELEGATION_WORKSPACE_PREPARATION_FAILED',
@@ -4630,6 +5222,7 @@ async function drainWaitingWorkspaceDelegations() {
         targetHomeMachineId: delegationTargetMachineId(queued),
       })
     } catch (error) {
+      throwIfRuntimeStopping(error, runtimeLifecycle.signal)
       const needsRecovery = ['AI_WORKSPACE_LEASE_MISMATCH', 'AI_WORKSPACE_CONVERSATION_CONFLICT'].includes(error?.code)
       await updateAiDelegation(queued.id, {
         state: needsRecovery ? 'recovery-required' : 'failed',
@@ -4648,9 +5241,21 @@ const archiveAiDelegationReport = createAiDelegationReportArchiver({
   parentMachineId: delegationParentMachineId, instruction: parentWakeInstruction,
 })
 
+const processAiParentWake = createAiParentWakeProcessor({
+  get: (id) => aiDelegations.get(id), values: () => aiDelegations.values(), update: updateAiDelegation,
+  archive: archiveAiDelegationReport, coordinationPending: documentCoordinationPending,
+  capabilities: (machineId) => fetchAionUiOn(machineId, '/api/internal/external-conversation-dispatches/capabilities', { timeoutMs: 3_000, strictJson: true, singleTarget: true }),
+  parentMachineId: delegationParentMachineId,
+  runtime: (conversationId, machineId) => fetchAionUiOn(machineId, `/api/conversations/${encodeURIComponent(conversationId)}`, { timeoutMs: 2_500, strictJson: true, singleTarget: true }),
+  normalizeRuntime: normalizeAiConversationRuntime,
+  instruction: parentWakeInstruction, operationId: boundedAionOperationId, fetchOn: fetchAionUiOn,
+  signal: runtimeLifecycle.signal,
+})
+
 async function pollAiDelegations() {
   if (aiDelegationPollRunning) return
   aiDelegationPollRunning = true
+  const releaseMutation = await acquireDocumentMutation()
   try {
     await drainWaitingWorkspaceDelegations()
     const active = [...aiDelegations.values()].filter((delegation) =>
@@ -4662,14 +5267,13 @@ async function pollAiDelegations() {
         'integration-running', 'integration-waiting-resume', 'integration-recovery-required',
         'waiting-parent', 'waking-parent',
       ].includes(delegation.state) || delegation.pendingRecovery || aiDelegationStoredReportDeliveryPatch(delegation)
-        || aiDelegationReportArchivePending(delegation))
+        || aiDelegationReportArchivePending(delegation) || recoverableLegacyParentWake(delegation))
     for (let delegation of active) {
       if (aiDelegationActions.has(delegation.id)) continue
-      try {
-        delegation = await ensureAiDelegationCompletionNotification(delegation)
-      } catch (error) {
-        console.warn('[AI delegation completion notification]', error)
-      }
+      const remoteLease = remoteWorkspacePool.state?.leases[delegation.workspaceLease?.leaseId]
+      if (remoteLease && ['preparing', 'quarantined'].includes(remoteLease.status)
+        && ['recovery-required', 'integration-recovery-required'].includes(delegation.state)) continue
+      if (delegation.resultCorrection?.phase === 'preparing') continue
       const delivered = aiDelegationStoredReportDeliveryPatch(delegation)
       if (delivered) {
         await updateAiDelegation(delegation.id, delivered)
@@ -4681,13 +5285,19 @@ async function pollAiDelegations() {
       }
       if (delegation.pendingRecovery) {
         if (!aiDelegationWaitPollDue(aiDelegationWaitPolls.get(delegation.id), delegation)) continue
-        try { await settlePendingAiRecovery(delegation) } catch { /* 같은 operation의 확인 전에는 새 실행을 만들지 않는다. */ }
+        try { await settlePendingAiRecovery(delegation) } catch (shutdownError) {
+          throwIfRuntimeStopping(shutdownError, runtimeLifecycle.signal)
+          // 같은 operation의 확인 전에는 새 실행을 만들지 않는다.
+        }
         scheduleAiDelegationWaitPoll(delegation)
         continue
       }
       if (['waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity'].includes(delegation.state)) {
         if (!aiDelegationWaitPollDue(aiDelegationWaitPolls.get(delegation.id), delegation)) continue
-        try { await refreshSuspendedAiDelegation(delegation) } catch { /* 확인 실패 시 보존하고 다음 조회를 기다린다. */ }
+        try { await refreshSuspendedAiDelegation(delegation) } catch (shutdownError) {
+          throwIfRuntimeStopping(shutdownError, runtimeLifecycle.signal)
+          // 확인 실패 시 보존하고 다음 조회를 기다린다.
+        }
         try {
           const current = aiDelegations.get(delegation.id)
           if (['waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity'].includes(current?.state)) await ensureAiDelegationNotification(current, {
@@ -4752,6 +5362,11 @@ async function pollAiDelegations() {
           const childStatus = status.state
           const childError = status.errorMessage ?? null
           if (!['completed', 'failed'].includes(childStatus)) continue
+          if (delegation.resultCorrection && childStatus === 'failed') {
+            await updateAiDelegation(delegation.id, { state: 'recovery-required', childStatus, childError,
+              childTurnId: status.turnId ?? delegation.childTurnId, recoveryRequiredAt: new Date().toISOString() })
+            continue
+          }
           const limitState = aiDelegationLimitState({ ...delegation, childStatus, childError })
           if (limitState) {
             const captured = await captureAiDelegationChildResult({
@@ -4781,10 +5396,15 @@ async function pollAiDelegations() {
             childTurnId: status.turnId ?? delegation.childTurnId ?? null,
           })
           const workspace = await finalizeDelegationWorkspace(capturedDelegation, childStatus, childError)
+          if (delegation.resultCorrection && workspace.error && !workspace.result) {
+            await updateAiDelegation(delegation.id, { state: 'recovery-required', childStatus, childError: workspace.error,
+              recoveryRequiredAt: new Date().toISOString() })
+            continue
+          }
           const updated = await updateAiDelegation(capturedDelegation.id, {
             childStatus,
             childTurnId: status.turnId ?? delegation.childTurnId ?? null,
-            childError: workspace.error ?? childError,
+            childError: childStatus === 'completed' ? childError : workspace.error ?? childError,
             childCompletedAt: new Date().toISOString(),
             workspaceResult: workspace.result,
             workspaceError: workspace.error,
@@ -4794,6 +5414,7 @@ async function pollAiDelegations() {
             state: 'waiting-parent',
           })
         } catch (error) {
+          throwIfRuntimeStopping(error, runtimeLifecycle.signal)
           if (error?.status !== 404) continue
           if (delegation.coordinationOnly && delegation.state === 'waiting-document-work') {
             // 이 상태는 같은 child operation의 completed 응답을 이미 관측한 내구 증거다.
@@ -4827,7 +5448,7 @@ async function pollAiDelegations() {
         const updated = await updateAiDelegation(delegation.id, {
           workspaceResult: workspace.result,
           workspaceError: workspace.error,
-          childError: workspace.error ?? delegation.childError ?? null,
+          childError: delegation.childStatus === 'completed' ? workspace.result?.childError ?? null : workspace.error ?? delegation.childError ?? null,
         })
         if (await advanceWorkspaceIntegration(updated, workspace)) continue
         await updateAiDelegation(delegation.id, { state: 'waiting-parent' })
@@ -4875,11 +5496,12 @@ async function pollAiDelegations() {
             integrationCompletedAt: new Date().toISOString(),
             workspaceResult: workspace.result,
             workspaceError: workspace.error,
-            childError: workspace.error ?? delegation.childError ?? null,
+            childError: delegation.childStatus === 'completed' ? workspace.result?.childError ?? null : workspace.error ?? delegation.childError ?? null,
           })
           if (await advanceWorkspaceIntegration(updated, workspace)) continue
           await updateAiDelegation(delegation.id, { state: 'waiting-parent' })
         } catch (error) {
+          throwIfRuntimeStopping(error, runtimeLifecycle.signal)
           if (error?.status !== 404) continue
           await updateAiDelegation(delegation.id, {
             state: 'integration-recovery-required',
@@ -4892,134 +5514,10 @@ async function pollAiDelegations() {
         continue
       }
 
-      if (delegation.state === 'waiting-parent') {
-        const anotherWakeInProgress = [...aiDelegations.values()].some((candidate) =>
-          candidate.id !== delegation.id
-          && candidate.parentConversationId === delegation.parentConversationId
-          && candidate.state === 'waking-parent')
-        if (anotherWakeInProgress) {
-          await updateAiDelegation(delegation.id, { reportWaitReason: 'earlier-report' })
-          continue
-        }
-        try {
-          if (delegation.childStatus === 'completed' && await documentCoordinationPending(delegation)) {
-            await updateAiDelegation(delegation.id, {
-              state: 'waiting-document-work',
-              childResultSnapshot: null, childResultHash: null, childResultTurnId: null,
-              childResultCapturedAt: null, childResultCaptureAttemptedAt: null,
-            })
-            continue
-          }
-          if (delegation.reportApprovalRequired) {
-            await updateAiDelegation(delegation.id, { state: 'parent-wake-failed', parentDispatchState: 'not-sent', parentError: null })
-            continue
-          }
-          delegation = await archiveAiDelegationReport(delegation)
-          if (aiDelegationReportArchivePending(delegation)) {
-            await updateAiDelegation(delegation.id, { reportWaitReason: 'report-history-pending' })
-            continue
-          }
-          if (aiDelegationReportArchived(delegation)
-            && (await fetchAionCoreDispatchCapabilities(delegationParentMachineId(delegation)))?.historyOnlyReports !== true) {
-            await updateAiDelegation(delegation.id, { reportWaitReason: 'report-history-pending' })
-            continue
-          }
-          const parent = await fetchAiConversationRuntime(delegation.parentConversationId)
-          const runtime = normalizeAiConversationRuntime(delegation.parentConversationId, parent)
-          if (runtime.state !== 'idle') {
-            await updateAiDelegation(delegation.id, { reportWaitReason: runtime.state === 'running'
-              ? 'parent-busy' : runtime.state === 'waiting-confirmation' ? 'parent-confirmation' : 'parent-unavailable' })
-            continue
-          }
-          const reportResult = aiDelegationReportResult(delegation)
-          const parentWakeAttempt = Number(delegation.parentWakeAttempt ?? 0) + 1
-          const wakeOperationId = boundedAionOperationId(delegation.id, `wake-${parentWakeAttempt}`)
-          const wakeInstruction = aiDelegationReportArchived(delegation)
-            ? delegation.reportArchive.content : await parentWakeInstruction(delegation, reportResult)
-          const reportPreparedAt = new Date().toISOString()
-          // 전달 의도를 먼저 저장하여 응답 유실·재시작 뒤에도 같은 요청을 조회한다.
-          await updateAiDelegation(delegation.id, {
-            state: 'waking-parent', wakeOperationId, parentWakeAttempt, reportWaitReason: null,
-            parentTurnId: null, parentDispatchState: null, reportReceipt: null,
-            reportPayloadHash: createHash('sha256').update(wakeInstruction).digest('hex'),
-            reportResultAvailability: reportResult.availability,
-            reportResultHash: reportResult.hash,
-            reportResultTurnId: reportResult.turnId,
-            reportPreparedAt,
-          })
-          const response = await fetchAionUiOn(delegationParentMachineId(delegation), '/api/internal/external-conversation-dispatches', {
-            method: 'POST',
-            body: {
-              operationId: wakeOperationId,
-              actorConversationId: delegation.parentConversationId,
-              strategy: 'resume',
-              targetConversationId: delegation.parentConversationId,
-              instruction: wakeInstruction,
-              ...(aiDelegationReportArchived(delegation) ? { historyMessageId: delegation.reportArchive.messageId } : {}),
-            },
-          })
-          const received = aiDelegationDeliveredReportPatch(aiDelegations.get(delegation.id), response)
-          await updateAiDelegation(delegation.id, {
-            state: 'waking-parent',
-            wakeOperationId,
-            parentWakeAttempt,
-            parentTurnId: response.turnId ?? null,
-            ...received,
-          })
-        } catch (error) {
-          await updateAiDelegation(delegation.id, { state: 'parent-wake-failed', parentDispatchState: 'unknown', parentError: error?.message ?? '결과 전달 상태를 확인하지 못했습니다. 상태 확인 후 재시도하세요.' })
-          continue
-        }
-        continue
-      }
-
-      try {
-        const status = await fetchAionUiOn(delegationParentMachineId(delegation), `/api/internal/external-conversation-dispatches/${encodeURIComponent(delegation.wakeOperationId)}`)
-        const received = aiDelegationDeliveredReportPatch(delegation, status)
-        if (received) {
-          await updateAiDelegation(delegation.id, received)
-          continue
-        }
-        if (status.state === 'recovery_required') {
-          await updateAiDelegation(delegation.id, {
-            state: 'parent-wake-failed',
-            parentDispatchState: 'interrupted-by-restart',
-            parentError: 'AionCore 재시작으로 결과 전달이 중단됐습니다. 기존 결과 확인 후 전달 재시도를 요청하세요.',
-          })
-          continue
-        }
-        if (['starting', 'waiting_resource', 'running', 'waiting_resume'].includes(status.state)) {
-          await updateAiDelegation(delegation.id, {
-            parentTurnId: status.turnId ?? delegation.parentTurnId ?? null,
-            parentDispatchState: status.state === 'waiting_resource'
-              ? 'waiting-resource'
-              : status.state === 'waiting_resume' ? 'waiting-resume' : status.state,
-            parentError: status.state === 'waiting_resume'
-              ? status.errorMessage ?? delegation.parentError ?? null
-              : delegation.parentError,
-            parentResource: status.resource ?? delegation.parentResource ?? null,
-          })
-          continue
-        }
-        await updateAiDelegation(delegation.id, {
-          state: aiDelegationStateAfterParentWake(delegation, status.state),
-          parentTurnId: status.turnId ?? delegation.parentTurnId ?? null,
-          parentDispatchState: status.state,
-          parentError: status.errorMessage ?? null,
-          completedAt: new Date().toISOString(),
-        })
-      } catch (error) {
-        if (error?.status === 404) {
-          await updateAiDelegation(delegation.id, {
-            state: 'parent-wake-failed',
-            parentDispatchState: 'interrupted-by-restart',
-            parentError: 'AionUi가 결과 전달 상태를 더 이상 보유하지 않습니다. 중복 실행을 피하려면 기존 결과를 확인한 뒤 전달 재시도를 요청하세요.',
-          })
-        }
-        continue
-      }
+      await processAiParentWake(delegation)
     }
   } finally {
+    releaseMutation()
     aiDelegationPollRunning = false
   }
 }
@@ -5185,6 +5683,91 @@ function fetchAiConversationRuntime(conversationId) {
   return request
 }
 
+function aiConversationDelegationContextStats(conversationId, { excludeDelegationId = null, excludeInstructionId = null } = {}) {
+  const records = [
+    ...[...aiDelegations.values(), ...[...aiRequestReceipts.values()].filter((item) => !aiDelegations.has(item.id))]
+      .filter((delegation) => delegation.id !== excludeDelegationId && delegation.targetConversationId === conversationId)
+      .map((delegation) => ({ strategy: delegation.strategy, createdAt: delegation.createdAt })),
+    ...[...groupDocumentInstructions.values()]
+      .filter((instruction) => instruction.id !== excludeInstructionId
+        && (instruction.targetConversationId ?? instruction.requestedConversationId) === conversationId)
+      .map((instruction) => ({ strategy: instruction.strategy, createdAt: instruction.createdAt })),
+  ].sort((first, second) => String(first.createdAt ?? '').localeCompare(String(second.createdAt ?? '')))
+  let consecutiveResumeCount = 0
+  for (let index = records.length - 1; index >= 0 && records[index].strategy === 'resume'; index -= 1) {
+    consecutiveResumeCount += 1
+  }
+  return { delegationCount: records.length, consecutiveResumeCount }
+}
+
+async function fetchAiConversationMessageStatistics(conversationId, machineId) {
+  const items = []
+  let before = ''
+  let pageCount = 0
+  let historyComplete = false
+  let latestPageHasMoreAfter = false
+  try {
+    for (let pageIndex = 0; pageIndex < 10; pageIndex += 1) {
+      const query = new URLSearchParams({
+        limit: '200',
+        content_mode: 'compact',
+        ...(before ? { before } : {}),
+      })
+      const page = await fetchAionUiOn(
+        machineId,
+        `/api/conversations/${encodeURIComponent(conversationId)}/messages?${query}`,
+        { timeoutMs: 5_000 },
+      )
+      if (!Array.isArray(page?.items)) {
+        if (pageCount === 0) return { conversationTurnCount: null, conversationTurnCountExact: false }
+        break
+      }
+      pageCount += 1
+      items.push(...page.items)
+      if (pageIndex === 0) latestPageHasMoreAfter = page.has_more_after === true
+      if (page.has_more_before !== true) {
+        historyComplete = !latestPageHasMoreAfter
+        break
+      }
+      const nextBefore = String(page.oldest_cursor ?? '').trim()
+      if (!nextBefore || nextBefore === before) break
+      before = nextBefore
+    }
+  } catch (shutdownError) {
+    throwIfRuntimeStopping(shutdownError, runtimeLifecycle.signal)
+    if (pageCount === 0) return { conversationTurnCount: null, conversationTurnCountExact: false }
+  }
+  return summarizeAiConversationMessages(items, { historyComplete, pageCount })
+}
+
+async function inspectAiConversationContextHealth(
+  conversationId,
+  conversation = null,
+  machineId = conversationHomeMachineId(conversationId),
+  exclusions = {},
+  linkedModelId = '',
+) {
+  const resolvedConversation = conversation ?? await fetchAiConversationRuntime(conversationId)
+  const runtime = normalizeAiConversationRuntime(conversationId, resolvedConversation)
+  const [usage, messages] = await Promise.all([
+    fetchAionUiOn(machineId, `/api/conversations/${encodeURIComponent(conversationId)}/usage`, { timeoutMs: 2_500 })
+      .catch(() => null),
+    fetchAiConversationMessageStatistics(conversationId, machineId),
+  ])
+  const contextHealth = assessAiConversationContextHealth({
+    conversationId,
+    modifiedAt: normalizedIsoDate(resolvedConversation?.modified_at, null),
+    runtimeState: runtime.state,
+    usage,
+    ...messages,
+    ...aiConversationDelegationContextStats(conversationId, exclusions),
+  })
+  return applyAiConversationDelegationModelPolicy(contextHealth, {
+    linkedModelId,
+    runtimeModelId: resolvedConversation?.extra?.current_model_id,
+  })
+}
+
 function resolveAiConversationDisplay(conversationId, machineId = conversationHomeMachineId(conversationId)) {
   return resolveConversationDisplay(conversationId, (id) => fetchAionUiOn(
     machineId,
@@ -5193,12 +5776,21 @@ function resolveAiConversationDisplay(conversationId, machineId = conversationHo
   ))
 }
 
+function resolveAiConversationSource(conversationId, sourceMachineId, targetMachineId) {
+  return resolveConversationSource(conversationId, {
+    sourceMachineId,
+    targetMachineId,
+    readConversation: (id) => fetchAionUiOn(sourceMachineId, `/api/conversations/${encodeURIComponent(id)}`, { timeoutMs: 2_500 }),
+    createConversationUrl: (id) => createAionUiConversationWebUrl(aionUiWebBaseUrlForMachine(sourceMachineId), id),
+  })
+}
+
 function refreshAiConversationRuntimeForMap(mapId, suppliedRuntimeSnapshots = null, forceSnapshots = false) {
   const existing = aiConversationRuntimeRefreshes.get(mapId)
   if (existing) return existing
 
   const refresh = (async () => {
-    const map = await readMap(mapId)
+    const map = await readMapProjection(mapId, {}, (value) => value.runtime)
     const targets = map && !map.trashedAt
       ? map.nodes.flatMap((node) => {
           const conversations = aiConversationLinksFromData(node.data).map((link) => ({
@@ -5213,6 +5805,7 @@ function refreshAiConversationRuntimeForMap(mapId, suppliedRuntimeSnapshots = nu
       machineId,
       await fetchAiConversationRuntimeSnapshot(machineId, forceSnapshots),
     ])))
+    if (deletedAiDocumentIds.has(mapId)) return []
     const targetKeys = new Set(targets.map((target) => conversationAttributionKey(mapId, target.nodeId)))
     const prefix = `${mapId}:`
 
@@ -5324,6 +5917,43 @@ function normalizeAionUiOption(option) {
   }
 }
 
+// Claude 멀티 계정: 실행 머신별 계정 목록(30초 캐시). 계정이 1개면 빈 목록이다.
+const claudeAccountCatalogCache = new Map()
+async function claudeAccountCatalog(machineId) {
+  const cached = claudeAccountCatalogCache.get(machineId)
+  if (cached && cached.expiresAt > Date.now()) return cached.value
+  const value = new Map()
+  try {
+    const agents = await fetchAionUiOn(machineId, '/api/agents/management')
+    for (const agent of Array.isArray(agents) ? agents : []) {
+      const accounts = normalizeClaudeAccounts(agent)
+      if (accounts) value.set(String(agent.id), accounts)
+    }
+  } catch (error) {
+    throwIfRuntimeStopping(error, runtimeLifecycle.signal)
+  }
+  claudeAccountCatalogCache.set(machineId, { value, expiresAt: Date.now() + 30_000 })
+  return value
+}
+
+/**
+ * 대화 목록에 계정 번호를 붙인다. 계정이 1개인 머신의 대화는 그대로 둔다.
+ * 연결 목록(view=linked)처럼 머신에 묻지 않는 응답을 늦추지 않도록, 이미 상세 조회에
+ * 성공한 대화의 머신만 조회한다.
+ */
+async function attachClaudeAccounts(conversations) {
+  const machineIds = [...new Set(conversations
+    .filter((conversation) => conversation.liveStatusChecked && conversation.available && conversation.agent?.id)
+    .map((conversation) => conversation.homeMachineId || machineRegistry.mainMachineId))]
+  if (machineIds.length === 0) return conversations
+  const catalogs = new Map(await Promise.all(machineIds.map(async (machineId) => [machineId, await claudeAccountCatalog(machineId)])))
+  return conversations.map((conversation) => {
+    const catalog = catalogs.get(conversation.homeMachineId || machineRegistry.mainMachineId)
+    const account = findClaudeAccount(catalog?.get(conversation.agent?.id), conversation.claudeAccountId)
+    return account ? { ...conversation, claudeAccount: account } : conversation
+  })
+}
+
 function normalizeAionUiAgent(agent, providers) {
   const rawConfigOptions = agent?.config_options
   const configOptions = Array.isArray(rawConfigOptions)
@@ -5353,6 +5983,7 @@ function normalizeAionUiAgent(agent, providers) {
     icon: typeof agent.icon === 'string' ? `${activeAionUiBaseUrl}${agent.icon}` : null,
     backend: String(agent.backend ?? agent.agent_type ?? ''),
     status: String(agent.status ?? 'unknown'),
+    ...(normalizeClaudeAccounts(agent) ? { claudeAccounts: normalizeClaudeAccounts(agent) } : {}),
     models: availableModels.length > 0 ? availableModels : providerModels,
     defaultModelId: String(
       agent?.available_models?.current_model_id
@@ -5549,7 +6180,8 @@ async function resolveConversationAttribution(
   if (!agentId || !modelId || !agentName || !modelName) throw new Error('AIONUI_ATTRIBUTION_NOT_FOUND')
 
   let resolvedStartedBy = startedBy || fallback?.startedBy || null
-  const authorName = `${agentName}(${modelName})`
+  const authorName = formatAiAuthorName(agentName, modelName,
+    findClaudeAccount(agent?.claudeAccounts, cleanAionUiValue(conversation?.extra?.claude_account_id)))
   if (!resolvedStartedBy && inferStartedBy) {
     const comments = await listComments(mapId)
     const previousAuthor = [...comments].reverse().find((comment) => comment.nodeId === cardId
@@ -5615,7 +6247,11 @@ async function recoverLinkedConversationAttributions() {
   let repairedComments = 0
   let repairedNotifications = 0
   for (const target of targets) {
+    const releaseMutation = await acquireDocumentMutation()
     try {
+      const map = await readMap(target.mapId)
+      if (!map || map.trashedAt
+        || cleanAionUiValue(map.nodes.find((node) => node.id === target.cardId)?.data?.aiConversationId) !== target.conversationId) continue
       const result = await refreshConversationAttribution(
         target.mapId,
         target.cardId,
@@ -5628,6 +6264,8 @@ async function recoverLinkedConversationAttributions() {
       repairedNotifications += result.repairedNotifications
     } catch (error) {
       console.warn('[AI conversation attribution recovery]', JSON.stringify({ ...target, error: error?.message ?? String(error) }))
+    } finally {
+      releaseMutation()
     }
   }
   if (targets.length > 0) {
@@ -5970,7 +6608,7 @@ async function listNotifications(userId) {
     notifications = []
   }
   return notifications
-    .filter((notification) => notification?.userId === userId)
+    .filter((notification) => notification?.userId === userId && notification.type !== AI_DELEGATION_COMPLETION_NOTIFICATION_TYPE)
     .sort((first, second) => String(second.createdAt).localeCompare(String(first.createdAt)))
     .slice(0, 200)
 }
@@ -6263,49 +6901,27 @@ async function ensureDailyBackups() {
 }
 
 async function backfillDailyBackupsFromHistory() {
+  const started = performance.now()
   const summaries = await listMaps()
   let created = 0
+  let checkedMaps = 0
+  let historyReadCount = 0
+  let reusedHistoryCount = 0
   for (const summary of summaries) {
     const map = await readMap(summary.id)
     if (!map || map.trashedAt) continue
-    const revisions = await readAllMapRevisions(map.id)
-    const latestByDate = new Map()
-    for (const revision of revisions) {
-      const snapshotAt = new Date(revision.map.updatedAt ?? revision.archivedAt)
-      if (!Number.isFinite(snapshotAt.getTime())) continue
-      const date = seoulDateString(snapshotAt)
-      const previous = latestByDate.get(date)
-      if (!previous || snapshotAt > previous.snapshotAt) latestByDate.set(date, { revision, snapshotAt })
-    }
-    const currentSnapshotAt = new Date(map.updatedAt ?? Date.now())
-    if (Number.isFinite(currentSnapshotAt.getTime())) {
-      const date = seoulDateString(currentSnapshotAt)
-      const previous = latestByDate.get(date)
-      if (!previous || currentSnapshotAt > previous.snapshotAt) latestByDate.set(date, {
-        revision: { map, archivedBy: map.updatedBy ?? systemUser },
-        snapshotAt: currentSnapshotAt,
-      })
-    }
-    for (const [date, { revision }] of latestByDate) {
-      const backup = await writeDailyBackup(revision.map, revision.archivedBy ?? systemUser, 'history-backfill', date, { overwrite: false })
-      if (backup) created += 1
-    }
+    const result = await backfillDailyBackupHistory({
+      dataDirectory, map, isValidMapId, isValidRevisionId, isValidMap, dateString: seoulDateString,
+      writeBackup: (snapshot, user, date) => writeDailyBackup(snapshot, user ?? systemUser, 'history-backfill', date, { overwrite: false }),
+      writeIndex: writeStoredArray,
+    })
+    checkedMaps += 1
+    created += result.created
+    historyReadCount += result.historyReadCount
+    reusedHistoryCount += result.reusedHistoryCount
   }
+  console.log(`[일일 백업 이력 보정] 문서 ${checkedMaps}개, 이력 본문 읽기 ${historyReadCount}회, 인덱스 재사용 ${reusedHistoryCount}개, 백업 생성 ${created}개, ${Math.round(performance.now() - started)}ms`)
   return created
-}
-
-async function readAllMapRevisions(mapId) {
-  const directory = revisionDirectoryForMap(mapId)
-  try {
-    const entries = await readdir(directory, { withFileTypes: true })
-    const revisions = await Promise.all(entries
-      .filter((entry) => entry.isFile() && entry.name.endsWith('.json') && isValidRevisionId(entry.name.slice(0, -5)))
-      .map(async (entry) => JSON.parse(await readFile(path.join(directory, entry.name), 'utf8'))))
-    return revisions.filter((revision) => revision?.mapId === mapId && isValidMap(revision.map))
-  } catch (error) {
-    if (error?.code === 'ENOENT') return []
-    throw error
-  }
 }
 
 function revisionSummary(revision) {
@@ -6412,6 +7028,399 @@ async function saveMap(mapId, map, user, title, color, revisionReason = 'edit', 
   return payload
 }
 
+async function readOptionalFile(filePath) {
+  try {
+    return await readFile(filePath)
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null
+    throw error
+  }
+}
+
+async function restoreOptionalFile(filePath, content) {
+  if (content === null) {
+    await rm(filePath, { force: true })
+    return
+  }
+  await mkdir(path.dirname(filePath), { recursive: true })
+  const temporaryFile = `${filePath}.${randomBytes(5).toString('hex')}.tmp`
+  await writeFile(temporaryFile, content)
+  await replaceFileWithRetry(temporaryFile, filePath)
+}
+
+async function snapshotMapMoveFiles(mapIds, additionalFiles = []) {
+  const paths = new Set(additionalFiles)
+  const revisionFiles = new Map()
+  for (const mapId of mapIds) {
+    paths.add(mapFileForId(mapId))
+    paths.add(commentFileForMap(mapId))
+    paths.add(dailyBackupFileForMap(mapId, seoulDateString()))
+    const directory = revisionDirectoryForMap(mapId)
+    const entries = await readdir(directory, { withFileTypes: true }).catch((error) => {
+      if (error?.code === 'ENOENT') return []
+      throw error
+    })
+    revisionFiles.set(mapId, new Set(entries.filter((entry) => entry.isFile()).map((entry) => entry.name)))
+  }
+  const files = new Map()
+  for (const filePath of paths) files.set(filePath, await readOptionalFile(filePath))
+  return { files, revisionFiles }
+}
+
+async function restoreMapMoveFiles(snapshot) {
+  for (const [filePath, content] of snapshot.files) await restoreOptionalFile(filePath, content)
+  for (const [mapId, previousNames] of snapshot.revisionFiles) {
+    const directory = revisionDirectoryForMap(mapId)
+    const entries = await readdir(directory, { withFileTypes: true }).catch((error) => {
+      if (error?.code === 'ENOENT') return []
+      throw error
+    })
+    await Promise.all(entries
+      .filter((entry) => entry.isFile() && !previousNames.has(entry.name))
+      .map((entry) => rm(path.join(directory, entry.name), { force: true })))
+  }
+}
+
+function cardMoveTouchesDelegation(delegation, sourceMapId, movedCardIds) {
+  const targetSide = delegation.mapId === sourceMapId && movedCardIds.has(delegation.targetCardId)
+  const parentSide = (delegation.parentMapId ?? delegation.mapId) === sourceMapId
+    && movedCardIds.has(delegation.parentCardId)
+  return { targetSide, parentSide, touched: targetSide || parentSide }
+}
+
+function cardMoveTouchesGroupInstruction(instruction, sourceMapId, movedCardIds) {
+  const targetSide = instruction.targetMapId === sourceMapId && movedCardIds.has(instruction.targetCardId)
+  const parentSide = instruction.parentMapId === sourceMapId && movedCardIds.has(instruction.parentCardId)
+  return { targetSide, parentSide, touched: targetSide || parentSide }
+}
+
+async function prepareMovedImageAssets(sourceMapId, targetMapId, targetMap, movedCardIds) {
+  const assetIdChanges = new Map()
+  const assetCopies = []
+  for (const node of targetMap.nodes) {
+    const sourceAssetId = movedCardIds.has(node.id) && node.data?.kind === 'image'
+      ? node.data?.image?.assetId
+      : null
+    if (!sourceAssetId || assetIdChanges.has(sourceAssetId)) continue
+    let content
+    try {
+      content = await readFile(imageAssetFile(sourceMapId, sourceAssetId))
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error
+      throw new CrossDocumentCardMoveError('이동할 이미지 카드의 원본 자산을 찾을 수 없습니다.', 409, 'CARD_MOVE_IMAGE_ASSET_MISSING', {
+        cardId: node.id,
+        assetId: sourceAssetId,
+      })
+    }
+    let targetAssetId = sourceAssetId
+    const existing = await readOptionalFile(imageAssetFile(targetMapId, targetAssetId))
+    if (existing && !existing.equals(content)) {
+      const extension = sourceAssetId.slice(sourceAssetId.lastIndexOf('.'))
+      targetAssetId = `${randomBytes(16).toString('hex')}${extension}`
+    }
+    assetIdChanges.set(sourceAssetId, targetAssetId)
+    if (!existing || targetAssetId !== sourceAssetId) {
+      assetCopies.push({ targetAssetId, content, filePath: imageAssetFile(targetMapId, targetAssetId) })
+    }
+  }
+  if (assetIdChanges.size === 0) return { targetMap, assetCopies }
+  return {
+    targetMap: {
+      ...targetMap,
+      nodes: targetMap.nodes.map((node) => {
+        const sourceAssetId = movedCardIds.has(node.id) && node.data?.kind === 'image'
+          ? node.data?.image?.assetId
+          : null
+        const targetAssetId = sourceAssetId ? assetIdChanges.get(sourceAssetId) : null
+        return targetAssetId && targetAssetId !== sourceAssetId
+          ? { ...node, data: { ...node.data, image: { ...node.data.image, assetId: targetAssetId } } }
+          : node
+      }),
+    },
+    assetCopies,
+  }
+}
+
+async function moveCardAcrossDocuments({
+  sourceMapId,
+  cardId,
+  targetMapId,
+  targetParentCardId,
+  sourceVersion,
+  targetVersion,
+  user,
+}) {
+  const [sourceMap, targetMap] = await Promise.all([readMap(sourceMapId), readMap(targetMapId)])
+  if (!sourceMap || sourceMap.trashedAt || sourceMap.archivedAt) {
+    throw new CrossDocumentCardMoveError('활성 원본 문서를 찾을 수 없습니다.', 404, 'CARD_MOVE_SOURCE_NOT_FOUND')
+  }
+  if (!targetMap || targetMap.trashedAt || targetMap.archivedAt) {
+    throw new CrossDocumentCardMoveError('활성 대상 문서를 찾을 수 없습니다.', 404, 'CARD_MOVE_TARGET_NOT_FOUND')
+  }
+  documentReconstruction.assertWritable(sourceMapId)
+  documentReconstruction.assertWritable(targetMapId)
+  if (!Number.isInteger(sourceVersion) || !Number.isInteger(targetVersion)) {
+    throw new CrossDocumentCardMoveError('원본과 대상 문서의 최신 버전이 필요합니다.', 400, 'CARD_MOVE_VERSION_REQUIRED')
+  }
+  if (sourceMap.version !== sourceVersion || targetMap.version !== targetVersion) {
+    throw new CrossDocumentCardMoveError('원본 또는 대상 문서가 변경되었습니다. 두 문서를 다시 조회하세요.', 409, 'VERSION_CONFLICT', {
+      sourceVersion: sourceMap.version,
+      targetVersion: targetMap.version,
+    })
+  }
+
+  const plan = planCrossDocumentCardMove({ sourceMap, targetMap, cardId, targetParentCardId })
+  const movedCardIds = plan.movedCardIds
+  const orderedMovedCardIds = sourceMap.nodes.filter((node) => movedCardIds.has(node.id)).map((node) => node.id)
+  const activeDelegations = [...aiDelegations.values()].filter((delegation) => {
+    const relation = cardMoveTouchesDelegation(delegation, sourceMapId, movedCardIds)
+    return relation.touched && !aiDelegationIsTerminal(delegation)
+  })
+  if (activeDelegations.length > 0) {
+    throw new CrossDocumentCardMoveError('이동 대상 카드에 완료되지 않은 AI 위임이 있습니다.', 409, 'CARD_MOVE_ACTIVE_DELEGATION', {
+      delegationIds: activeDelegations.map((delegation) => delegation.id),
+    })
+  }
+  const activeInstructions = [...groupDocumentInstructions.values()].filter((instruction) => {
+    const relation = cardMoveTouchesGroupInstruction(instruction, sourceMapId, movedCardIds)
+    return relation.touched && ['queued', 'delivered'].includes(instruction.state)
+  })
+  if (activeInstructions.length > 0) {
+    throw new CrossDocumentCardMoveError('이동 대상 카드에 전달 중인 그룹 문서 지시가 있습니다.', 409, 'CARD_MOVE_ACTIVE_GROUP_INSTRUCTION', {
+      instructionIds: activeInstructions.map((instruction) => instruction.id),
+    })
+  }
+  const workStates = await aiConversationWorkStates(sourceMapId, [...movedCardIds])
+  if (workStates?.activeCardIds?.length > 0) {
+    throw new CrossDocumentCardMoveError('이동 대상 카드의 AI 대화가 현재 작업 중입니다.', 409, 'CARD_MOVE_ACTIVE_AI_CONVERSATION', {
+      cardIds: workStates.activeCardIds,
+    })
+  }
+
+  const preparedImages = await prepareMovedImageAssets(
+    sourceMapId,
+    targetMapId,
+    plan.targetMap,
+    movedCardIds,
+  )
+  const mapCandidates = new Map([
+    [sourceMapId, plan.sourceMap],
+    [targetMapId, preparedImages.targetMap],
+  ])
+  const summaries = await listMaps()
+  for (const summary of summaries) {
+    if (mapCandidates.has(summary.id)) continue
+    const map = await readMap(summary.id)
+    if (map) mapCandidates.set(summary.id, map)
+  }
+  let updatedReferenceCount = 0
+  const referenceMapIds = new Set()
+  const changedMaps = new Map()
+  for (const [mapId, map] of mapCandidates) {
+    const rewritten = rewriteMovedCardReferences(map, sourceMapId, targetMapId, movedCardIds)
+    updatedReferenceCount += rewritten.updatedReferenceCount
+    if (rewritten.updatedReferenceCount > 0) referenceMapIds.add(mapId)
+    if (mapId === sourceMapId || mapId === targetMapId || rewritten.updatedReferenceCount > 0) {
+      documentReconstruction.assertWritable(mapId)
+      if (!isValidMap(rewritten.map)) {
+        throw new CrossDocumentCardMoveError('이동 결과 문서 형식이 올바르지 않습니다.', 409, 'CARD_MOVE_INVALID_RESULT', { mapId })
+      }
+      changedMaps.set(mapId, rewritten.map)
+    }
+  }
+
+  const [sourceComments, targetComments] = await Promise.all([
+    readStoredArray(commentFileForMap(sourceMapId)),
+    readStoredArray(commentFileForMap(targetMapId)),
+  ])
+  const movedComments = sourceComments.filter((comment) => movedCardIds.has(comment.nodeId))
+  const targetCommentIds = new Set(targetComments.map((comment) => comment.id))
+  const collidingCommentIds = movedComments.filter((comment) => targetCommentIds.has(comment.id)).map((comment) => comment.id)
+  if (collidingCommentIds.length > 0) {
+    throw new CrossDocumentCardMoveError('대상 문서에 같은 ID의 댓글이 있어 이동할 수 없습니다.', 409, 'CARD_MOVE_COMMENT_ID_COLLISION', {
+      commentIds: collidingCommentIds,
+    })
+  }
+  const nextSourceComments = sourceComments.filter((comment) => !movedCardIds.has(comment.nodeId))
+  const nextTargetComments = [...targetComments, ...movedComments.map((comment) => ({ ...comment, mapId: targetMapId }))]
+
+  const notificationUpdates = []
+  const notificationEntries = await readdir(notificationsDirectory, { withFileTypes: true }).catch((error) => {
+    if (error?.code === 'ENOENT') return []
+    throw error
+  })
+  let updatedNotificationCount = 0
+  for (const entry of notificationEntries) {
+    if (!entry.isFile() || !entry.name.endsWith('.json')) continue
+    const filePath = path.join(notificationsDirectory, entry.name)
+    const notifications = await readStoredArray(filePath)
+    let count = 0
+    const next = notifications.map((notification) => {
+      if (notification.mapId !== sourceMapId || !movedCardIds.has(notification.nodeId)) return notification
+      count += 1
+      return { ...notification, mapId: targetMapId, mapTitle: targetMap.title }
+    })
+    if (count > 0) {
+      updatedNotificationCount += count
+      notificationUpdates.push({ filePath, next })
+    }
+  }
+
+  const affectedAttributions = [...aiAttributions.entries()]
+    .filter(([, attribution]) => attribution.mapId === sourceMapId && movedCardIds.has(attribution.cardId))
+  const affectedConversationAttributions = [...aiConversationAttributions.entries()]
+    .filter(([, attribution]) => attribution.mapId === sourceMapId && movedCardIds.has(attribution.cardId))
+  for (const [, attribution] of affectedConversationAttributions) {
+    const targetKey = conversationAttributionKey(targetMapId, attribution.cardId)
+    const existing = aiConversationAttributions.get(targetKey)
+    if (existing) {
+      throw new CrossDocumentCardMoveError('대상 문서에 충돌하는 AI 대화 귀속 정보가 있습니다.', 409, 'CARD_MOVE_AI_ATTRIBUTION_COLLISION', {
+        cardId: attribution.cardId,
+      })
+    }
+  }
+  const affectedOrigins = [...aiConversationOrigins.entries()]
+    .filter(([, origin]) => origin.mapId === sourceMapId && movedCardIds.has(origin.cardId))
+  const affectedDelegations = [...aiDelegations.entries()]
+    .filter(([, delegation]) => cardMoveTouchesDelegation(delegation, sourceMapId, movedCardIds).touched)
+  const affectedInstructions = [...groupDocumentInstructions.entries()]
+    .filter(([, instruction]) => cardMoveTouchesGroupInstruction(instruction, sourceMapId, movedCardIds).touched)
+
+  const changedMapIds = [...changedMaps.keys()]
+  const stateFiles = [
+    ...notificationUpdates.map((item) => item.filePath),
+    aiAttributionsFile,
+    aiConversationAttributionsFile,
+    aiConversationOriginsFile,
+    aiDelegationsFile,
+    groupDocumentInstructionsFile,
+    cardMoveOperationsFile,
+  ]
+  const fileSnapshot = await snapshotMapMoveFiles(changedMapIds, stateFiles)
+  const createdAssetFiles = []
+  const operationId = `card-move-${Date.now().toString(36)}-${randomBytes(5).toString('hex')}`
+  const savedMaps = new Map()
+  try {
+    for (const asset of preparedImages.assetCopies) {
+      await mkdir(path.dirname(asset.filePath), { recursive: true })
+      await writeFile(asset.filePath, asset.content, { flag: 'wx', mode: 0o600 })
+      createdAssetFiles.push(asset.filePath)
+    }
+    const saveOrder = [targetMapId, sourceMapId, ...changedMapIds.filter((mapId) => ![sourceMapId, targetMapId].includes(mapId))]
+    for (const mapId of saveOrder) {
+      const current = mapId === sourceMapId ? sourceMap : mapId === targetMapId ? targetMap : mapCandidates.get(mapId)
+      const candidate = changedMaps.get(mapId)
+      const saved = await saveMap(mapId, candidate, user, current.title, current.color, 'cross-document-card-move', {
+        expectedVersion: current.version,
+      })
+      savedMaps.set(mapId, saved)
+    }
+    if (movedComments.length > 0) {
+      await writeStoredArray(commentFileForMap(sourceMapId), nextSourceComments)
+      await writeStoredArray(commentFileForMap(targetMapId), nextTargetComments)
+    }
+    for (const update of notificationUpdates) await writeStoredArray(update.filePath, update.next)
+
+    for (const [key, attribution] of affectedAttributions) {
+      aiAttributions.set(key, { ...attribution, mapId: targetMapId })
+    }
+    for (const [sourceKey, attribution] of affectedConversationAttributions) {
+      aiConversationAttributions.delete(sourceKey)
+      aiConversationAttributions.set(conversationAttributionKey(targetMapId, attribution.cardId), {
+        ...attribution,
+        mapId: targetMapId,
+      })
+    }
+    for (const [conversationId, origin] of affectedOrigins) {
+      aiConversationOrigins.set(conversationId, { ...origin, mapId: targetMapId })
+    }
+    for (const [delegationId, delegation] of affectedDelegations) {
+      const relation = cardMoveTouchesDelegation(delegation, sourceMapId, movedCardIds)
+      const previousParentMapId = delegation.parentMapId ?? delegation.mapId
+      aiDelegations.set(delegationId, {
+        ...delegation,
+        ...(relation.targetSide ? { mapId: targetMapId } : {}),
+        parentMapId: relation.parentSide ? targetMapId : previousParentMapId,
+      })
+    }
+    for (const [instructionId, instruction] of affectedInstructions) {
+      const relation = cardMoveTouchesGroupInstruction(instruction, sourceMapId, movedCardIds)
+      groupDocumentInstructions.set(instructionId, {
+        ...instruction,
+        ...(relation.targetSide ? { targetMapId } : {}),
+        ...(relation.parentSide ? { parentMapId: targetMapId } : {}),
+      })
+    }
+    const persistenceResults = await Promise.allSettled([
+      persistAiAttributions(),
+      persistAiConversationAttributions(),
+      persistAiConversationOrigins(),
+      persistAiDelegations(),
+      persistGroupDocumentInstructions(),
+    ])
+    const persistenceFailure = persistenceResults.find((result) => result.status === 'rejected')
+    if (persistenceFailure) throw persistenceFailure.reason
+
+    const sourceSaved = savedMaps.get(sourceMapId)
+    const targetSaved = savedMaps.get(targetMapId)
+    const operation = {
+      id: operationId,
+      state: 'applied',
+      sourceMapId,
+      targetMapId,
+      movedRootCardId: cardId,
+      movedCardIds: orderedMovedCardIds,
+      previousParentCardId: plan.previousParentCardId,
+      targetParentCardId,
+      sourceVersionBefore: sourceMap.version,
+      sourceVersionAfter: sourceSaved.version,
+      targetVersionBefore: targetMap.version,
+      targetVersionAfter: targetSaved.version,
+      movedCommentCount: movedComments.length,
+      updatedReferenceCount,
+      updatedReferenceMapIds: [...referenceMapIds],
+      updatedConversationCount: new Set([
+        ...affectedOrigins.map(([conversationId]) => conversationId),
+        ...affectedConversationAttributions.map(([, attribution]) => attribution.conversationId),
+      ]).size,
+      updatedAttributionCount: affectedAttributions.length + affectedConversationAttributions.length,
+      updatedDelegationCount: affectedDelegations.length,
+      updatedGroupInstructionCount: affectedInstructions.length,
+      updatedNotificationCount,
+      movedAt: new Date().toISOString(),
+      movedBy: publicUser(user),
+    }
+    const operations = await readStoredArray(cardMoveOperationsFile)
+    await writeStoredArray(cardMoveOperationsFile, [operation, ...operations].slice(0, 500))
+    clearAiConversationRuntimeMap(sourceMapId)
+    clearAiConversationRuntimeMap(targetMapId)
+    return { operation, sourceMap: sourceSaved, targetMap: targetSaved }
+  } catch (error) {
+    for (const [key, attribution] of affectedAttributions) aiAttributions.set(key, attribution)
+    for (const [sourceKey, attribution] of affectedConversationAttributions) {
+      aiConversationAttributions.delete(conversationAttributionKey(targetMapId, attribution.cardId))
+      aiConversationAttributions.set(sourceKey, attribution)
+    }
+    for (const [conversationId, origin] of affectedOrigins) aiConversationOrigins.set(conversationId, origin)
+    for (const [delegationId, delegation] of affectedDelegations) aiDelegations.set(delegationId, delegation)
+    for (const [instructionId, instruction] of affectedInstructions) groupDocumentInstructions.set(instructionId, instruction)
+    let rollbackError = null
+    try {
+      await restoreMapMoveFiles(fileSnapshot)
+    } catch (restoreError) {
+      rollbackError = restoreError
+    } finally {
+      await Promise.allSettled(createdAssetFiles.map((filePath) => rm(filePath, { force: true })))
+    }
+    if (rollbackError) throw new AggregateError([error, rollbackError], '문서 간 카드 이동 실패 후 원본 복구에도 실패했습니다.')
+    throw error
+  }
+}
+
+function sendCardMoveResponse(response, status, body) {
+  return sendJson(response, status, body)
+}
+
 async function trashMap(mapId, user) {
   const map = await readMap(mapId)
   if (!map || map.trashedAt) return null
@@ -6427,6 +7436,13 @@ async function trashMap(mapId, user) {
 async function restoreMap(mapId, user) {
   const map = await readMap(mapId)
   if (!map?.trashedAt) return null
+  if (map.archivedAt && documentReconstruction.metadata(mapId).trashedAt) {
+    const restored = await documentReconstruction.setArchivedTrash(mapId, {
+      baseVersion: map.version, baseLifecycleVersion: map.lifecycleVersion ?? 0, trashed: false,
+    }, publicUser(user))
+    deletedAiDocumentIds.delete(mapId)
+    return restored
+  }
   const payload = {
     ...map,
     updatedAt: new Date().toISOString(),
@@ -6435,6 +7451,7 @@ async function restoreMap(mapId, user) {
   delete payload.trashedAt
   delete payload.trashedBy
   await writeStoredMap(mapId, payload)
+  deletedAiDocumentIds.delete(mapId)
   return payload
 }
 
@@ -6442,6 +7459,33 @@ async function permanentlyDeleteTrashedMaps(mapIds) {
   const uniqueMapIds = [...new Set(mapIds)]
   const maps = await Promise.all(uniqueMapIds.map((mapId) => readMap(mapId)))
   if (maps.some((map) => !map?.trashedAt)) return null
+
+  if (aiDocumentDeletionBusy(uniqueMapIds, {
+    delegations: aiDelegations.values(), instructions: groupDocumentInstructions.values(),
+    leases: [...Object.values(localWorkspacePoolManager.state?.leases ?? {}), ...Object.values(remoteWorkspacePool.state?.leases ?? {})],
+    delegationBusy: (id) => aiDelegationActions.has(id) || integrationRecoveryQueue.running.has(id),
+    instructionBusy: (id) => groupDocumentInstructionActions.has(id),
+  })) throw reconstructionError('AI 실행 또는 작업공간 처리가 진행 중인 문서는 영구 삭제할 수 없습니다. 작업을 종료한 뒤 다시 시도하세요.', 409, 'TRASH_AI_WORK_BUSY')
+
+  const deletedMapIds = new Set(uniqueMapIds)
+  const removedDelegationIds = [...aiDelegations.values()].filter((record) => aiRecordReferencesMaps(record, deletedMapIds)).map((record) => record.id)
+  for (const [key, launch] of aiConversationLaunches) {
+    if (aiRecordReferencesMaps(launch, deletedMapIds)) aiLaunchTracking.remove(key)
+  }
+  removeAiDocumentRecords(uniqueMapIds, deletedAiDocumentIds, [
+    aiAttributions, aiConversationAttributions, aiConversationOrigins, aiDelegations, aiRequestReceipts, groupDocumentInstructions, aiConversationLaunches,
+  ])
+  for (const id of removedDelegationIds) aiDelegationWaitPolls.delete(id)
+  for (const id of uniqueMapIds) clearAiConversationRuntimeMap(id)
+  // 실패하면 문서를 휴지통에 남겨 재시도할 수 있게 한다. 재시도도 모든 저장소를 다시 기록한다.
+  const cleanupResults = await Promise.allSettled([
+    persistAiAttributions(), persistAiConversationAttributions(), persistAiConversationOrigins(),
+    persistAiDelegations(), persistGroupDocumentInstructions(), aiDelegationRequestFailures.purgeMaps(uniqueMapIds),
+    writeStoredArray(aiRequestReceiptsFile, [...aiRequestReceipts.values()]),
+  ])
+  if (cleanupResults.some((result) => result.status === 'rejected')) {
+    throw reconstructionError('AI 기록 정리가 일부 실패했습니다. 문서는 휴지통에 남아 있습니다. 저장소 상태를 확인한 뒤 영구 삭제를 다시 시도하세요.', 500, 'TRASH_AI_RECORD_CLEANUP_FAILED')
+  }
 
   await Promise.all(uniqueMapIds.flatMap((mapId) => [
     rm(mapFileForId(mapId), { force: true }),
@@ -6451,7 +7495,6 @@ async function permanentlyDeleteTrashedMaps(mapIds) {
     rm(imageAssetsDirectoryForMap(mapId), { recursive: true, force: true }),
   ]))
 
-  const deletedMapIds = new Set(uniqueMapIds)
   const notificationEntries = await readdir(notificationsDirectory, { withFileTypes: true }).catch((error) => {
     if (error?.code === 'ENOENT') return []
     throw error
@@ -6514,6 +7557,10 @@ await loadAiConversationAttributions()
 await loadMachineRegistry()
 await loadAiConversationOrigins()
 await loadAiDelegations()
+aiDelegationRequestFailures = await createAiDelegationRequestFailures({
+  filePath: path.join(dataDirectory, '_ai-delegation-request-failures.json'), readJson: readStoredArray, writeJson: writeStoredArray,
+  deletedMapIds: deletedAiDocumentIds,
+})
 await loadGroupDocumentInstructions()
 await loadAiWorkspaceHistories()
 await loadDistributedWorkSettings()
@@ -6596,6 +7643,7 @@ const cardLayoutRequests = await createCardLayoutRequests({
     })
   },
 })
+let workspacePoolStartupRecoveryReady = false
 try {
   const unconfirmedLeaseIds = [...aiDelegations.values()].filter((delegation) => delegation.state === 'recovery-required'
     && !delegation.targetConversationId && delegation.childOperationId && delegation.workspaceLease?.leaseId)
@@ -6603,6 +7651,7 @@ try {
   if (await workspacePoolManager.initialize({ unconfirmedLeaseIds })) {
     console.log(`[Mind & Progress] AI 작업공간 pool registry를 불러왔습니다: ${workspacePoolRegistryFile}`)
     await reconcileAiDelegationWorkspaceLeases()
+    workspacePoolStartupRecoveryReady = true
   }
 } catch (error) {
   console.warn('[AI workspace pool startup]', error)
@@ -6641,7 +7690,7 @@ const groupProjects = createGroupProjects({
   documentInstructions: groupDocumentInstructions, publicDocumentInstruction: groupDocumentInstructionPublicView,
 })
 const readDocumentGroups = createDocumentGroupMetadata({
-  listMaps, readMap, readLayout: readDocumentLayout, readProject: groupProjects.read,
+  listMaps, listMapIds: listActiveMapIds, readMap, readLayout: readDocumentLayout, readProject: groupProjects.read,
 })
 
 const aiDialogPreferences = await createAiDialogPreferences({ dataDirectory, replaceFile: replaceFileWithRetry })
@@ -6653,20 +7702,26 @@ const aiWorkspaceSettings = await createAiWorkspaceSettings({
   candidates: aiWorkspaceCandidates, replaceFile: replaceFileWithRetry,
 })
 
+const doorayResponsePreferences = await createDoorayResponsePreferences({ dataDirectory, replaceFile: replaceFileWithRetry })
+const aiClaudeAccountPolicy = await createAiClaudeAccountPolicy({ dataDirectory, replaceFile: replaceFileWithRetry })
 const doorayResponses = createDoorayResponseIntegration({
   dataDirectory, readStoredRecord, writeStoredRecord, getDoorayApiConfig, listMaps, readMap, readDocumentLayout, groupProjects,
   aionUiCandidateBaseUrls, fetchAionUiOn, resolveTargetMachineForUser, normalizeAionUiAgent, normalizeAiConversationRuntime,
   conversationHomeMachineId, machineAccessibleByUser, listComments, saveMap, broadcastEvent, publicUser,
   rememberAiConversationOrigin, persistAiConversationOrigins, readAionUiMessageContent,
-  mainMachineId: machineRegistry.mainMachineId,
+  mainMachineId: machineRegistry.mainMachineId, responsePreferences: doorayResponsePreferences,
+  claudeAccountPolicy: aiClaudeAccountPolicy,
   user: (id) => users.find((user) => user.id === id && user.active !== false && canEdit(user)),
   activeDelegations: (mapId, cardId) => [...aiDelegations.values()].some((delegation) => delegation.mapId === mapId
     && delegation.targetCardId === cardId && !aiDelegationIsTerminal(delegation)),
 })
 
 const acquireDocumentMutation = createDocumentMutationGate()
+await removeLegacyAiCompletionNotifications().catch((error) => console.warn('[AI completion notification cleanup]', error))
+await cleanupCompletedAiHistory().catch((error) => console.warn('[AI history cleanup deferred]', error))
 
 const server = createServer(runtimeLifecycle.request(async (request, response) => {
+  const requestTiming = startRequestTiming(request, response)
   const loopbackLocation = localLoopbackRedirectLocation(request)
   if (loopbackLocation) {
     response.writeHead(307, {
@@ -6701,16 +7756,22 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
   let releaseDocumentMutation = null
 
   try {
-    if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method) && /^\/api\/(maps|groups|document-reconstructions|card-layouts)(\/|$)/.test(url.pathname)) {
-      const isTransition = /^\/api\/maps\/[^/]+\/archive$/.test(url.pathname)
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method) && /^\/api\/(maps|groups|document-reconstructions|card-layouts|integrations\/aionui)(\/|$)/.test(url.pathname)) {
+      const isTransition = /^\/api\/maps\/[^/]+\/(archive|restore)$/.test(url.pathname)
+        || (request.method === 'DELETE' && url.pathname === '/api/maps/trash')
+        || /^\/api\/maps\/[^/]+\/cards\/[^/]+\/move$/.test(url.pathname)
+        || /^\/api\/maps\/[^/]+\/content-patch$/.test(url.pathname)
         || /^\/api\/document-reconstructions\/(apply|[^/]+\/rollback)$/.test(url.pathname)
         || /^\/api\/card-layouts\/[^/]+\/apply$/.test(url.pathname)
-      releaseDocumentMutation = await acquireDocumentMutation(isTransition)
+      releaseDocumentMutation = await requestTiming.measure('mutationWaitMs', () => acquireDocumentMutation(isTransition))
     }
     const writableMapRoute = url.pathname.match(/^\/api\/maps\/([^/]+)(\/.*)?$/)
     if (writableMapRoute && !['GET', 'HEAD', 'OPTIONS'].includes(request.method) && writableMapRoute[2] !== '/archive') {
       const mapId = decodeURIComponent(writableMapRoute[1])
-      if (isValidMapId(mapId) && documentReconstruction.isUnavailable(mapId)) {
+      const metadata = documentReconstruction.metadata(mapId)
+      const restoringArchivedTrash = request.method === 'POST' && writableMapRoute[2] === '/restore'
+        && metadata.archivedAt && metadata.trashedAt && !metadata.reconstructionPending
+      if (isValidMapId(mapId) && documentReconstruction.isUnavailable(mapId) && !restoringArchivedTrash) {
         if (!requireUser(request, response)) return
         documentReconstruction.assertWritable(mapId)
       }
@@ -6728,6 +7789,18 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       broadcastMapChange(request, map.id, map.archivedAt ? 'archived' : 'archive-restored', user)
       const maps = await listMaps()
       return sendJson(response, 200, { map, maps, documentLayout: await readDocumentLayout(maps.map((m) => m.id)) })
+    }
+    if (archiveRoute && request.method === 'DELETE') {
+      const user = requireUser(request, response)
+      if (!user) return
+      if (!canEdit(user)) return sendJson(response, 403, { error: '편집자만 보관 문서를 휴지통으로 이동할 수 있습니다.' })
+      const body = await readJsonBody(request)
+      return await groupProjects.exclusive(async () => {
+        groupProjects.assertCanTrash(archiveRoute[1])
+        const map = await documentReconstruction.setArchivedTrash(archiveRoute[1], { ...body, trashed: true }, publicUser(user))
+        broadcastMapChange(request, map.id, 'trashed', user)
+        return sendJson(response, 200, { trashedId: map.id, map })
+      })
     }
     if (url.pathname === '/api/card-layouts' || url.pathname.startsWith('/api/card-layouts/')) {
       const user = requireUser(request, response)
@@ -6803,13 +7876,64 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       }
       return sendJson(response, 404, { error: '지원하지 않는 재구성 작업입니다.' })
     }
+    const failureResolutionRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/ai-delegation-request-failures\/([^/]+)\/(resolve|recheck|close)$/)
+    if (failureResolutionRoute && request.method === 'POST') {
+      const user = requireUser(request, response)
+      if (!user) return
+      if (!canEdit(user)) return sendAiDelegationResponse(response, 403, 'AI_DELEGATION_EDITOR_REQUIRED', '편집자만 접수 실패 기록을 처리할 수 있습니다.')
+      const mapId = decodeURIComponent(failureResolutionRoute[1])
+      const failureId = decodeURIComponent(failureResolutionRoute[2])
+      const failure = aiDelegationRequestFailures.get(failureId)
+      if (!failure || failure.parentMapId !== mapId) return sendAiDelegationResponse(response, 404, 'AI_DELEGATION_REQUEST_FAILURE_NOT_FOUND', '접수 실패 기록을 찾을 수 없습니다.')
+      const [parent, target] = await Promise.all([readMap(mapId), readMap(failure.mapId)])
+      if (!parent || !target || parent.trashedAt || target.trashedAt
+        || !parent.nodes.some(node => node.id === failure.parentCardId)
+        || !target.nodes.some(node => node.id === failure.targetCardId)) return sendAiDelegationResponse(response, 404, 'AI_DELEGATION_CARD_NOT_FOUND', '접수 실패의 상위 또는 대상 카드를 찾을 수 없습니다.')
+      const body = await readJsonBody(request)
+      try {
+        if (failureResolutionRoute[3] === 'close') {
+          const result = await aiDelegationRequestFailures.close({ mapId, failureId,
+            expectedUpdatedAt: body.expectedUpdatedAt, reason: body.reason, note: body.note,
+            confirmNotExecuted: body.confirmNotExecuted, actorId: user.id }, aiDelegations)
+          broadcastEvent({ type: 'ai-delegation-request-resolved', mapId, requestFailure: result.requestFailure })
+          return sendAiDelegationResponse(response, 200, 'AI_DELEGATION_REQUEST_FAILURE_CLOSED',
+            result.requestFailure.retryVerification.message, { ...result, executionRequested: false, cardChanged: false })
+        }
+        if (failureResolutionRoute[3] === 'recheck') {
+          const result = await aiDelegationRequestFailures.recheck({ mapId, failureId,
+            expectedUpdatedAt: body.expectedUpdatedAt, actorId: user.id }, aiDelegations)
+          if (result.requestFailure.resolvedByDelegationId) broadcastEvent({ type: 'ai-delegation-request-resolved', mapId, requestFailure: result.requestFailure })
+          return sendAiDelegationResponse(response, 200, 'AI_DELEGATION_REQUEST_FAILURE_CHECKED',
+            result.requestFailure.retryVerification.message, { ...result, executionRequested: false, cardChanged: false })
+        }
+        const result = await aiDelegationRequestFailures.resolve({
+          mapId, failureId, replacementDelegationId: String(body.replacementDelegationId ?? '').trim(),
+          expectedUpdatedAt: body.expectedUpdatedAt, confirmSameWork: body.confirmSameWork,
+          note: body.note, actorId: user.id,
+        }, aiDelegations)
+        broadcastEvent({ type: 'ai-delegation-request-resolved', mapId, requestFailure: result.requestFailure })
+        return sendAiDelegationResponse(response, 200, 'AI_DELEGATION_REQUEST_FAILURE_RESOLVED',
+          '정상 재접수와 연결해 현재 실패 표시를 해제했습니다. 실패 이력·카드·AI 실행은 보존했습니다.',
+          { ...result, executionRequested: false, cardChanged: false })
+      } catch (error) {
+        if (!error?.reasonCode) throw error
+        return sendAiDelegationResponse(response, error.status, error.reasonCode, error.message)
+      }
+    }
     const actionRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/ai-delegations\/([^/]+)\/(recover|refresh|retry-report|finalize-coordination|supersede|close)$/)
     if (actionRoute && request.method === 'POST') {
       const id = decodeURIComponent(actionRoute[2])
-      for (let attempt = 0; aiDelegationPollRunning && attempt < 100; attempt++) await new Promise((resolve) => setTimeout(resolve, 25))
-      if (aiDelegationPollRunning || aiDelegationActions.has(id)) return sendJson(response, 409, { error: '위임 상태를 처리 중입니다. 잠시 후 다시 확인하세요.', code: 'AI_DELEGATION_ACTION_BUSY' })
-      aiDelegationActions.add(id)
-      delegationActionId = id
+      const current = aiDelegations.get(id)
+      const asynchronousRecovery = (actionRoute[3] === 'recover' && (current?.integrationRecoveryRequest
+        || aiDelegationRecoveryAvailability(current)?.recommendedAction === 'retry-integration'))
+        || (actionRoute[3] === 'refresh' && integrationRecoveryPending(current))
+      if (!asynchronousRecovery) for (let attempt = 0; aiDelegationPollRunning && attempt < 100; attempt++) await new Promise((resolve) => setTimeout(resolve, 25))
+      if ((!asynchronousRecovery && aiDelegationPollRunning)
+        || (aiDelegationActions.has(id) && !(asynchronousRecovery && integrationRecoveryPending(current)))) return sendJson(response, 409, { error: '위임 상태를 처리 중입니다. 잠시 후 다시 확인하세요.', code: 'AI_DELEGATION_ACTION_BUSY' })
+      if (!aiDelegationActions.has(id)) {
+        aiDelegationActions.add(id)
+        delegationActionId = id
+      }
       if (actionRoute[3] !== 'recover') {
         const user = requireUser(request, response)
         if (!user) return
@@ -6822,6 +7946,9 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         const supersede = actionRoute[3] === 'supersede'
         const close = actionRoute[3] === 'close'
         const validated = await validateAiDelegationAction(request, delegation, body, retryReport || finalizeCoordination, { requireConversationLinks: !supersede && !close })
+        if (actionRoute[3] === 'refresh' && integrationRecoveryPending(delegation)) return sendJson(response, 200, {
+          delegation: delegationPublicView(delegation), executionRequested: false, cardChanged: false,
+        })
         if (!retryReport && !finalizeCoordination && !supersede && !close) {
           if (body.acknowledgeResultHash !== undefined) {
             const source = delegationSourceForRequest(integrationRequestScope(request), delegation.parentMapId ?? delegation.mapId)
@@ -6849,16 +7976,38 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
               ? '작업공간에 보존할 변경이 있어 위임을 종료할 수 없습니다. 기존 작업을 복구하거나 작업공간을 먼저 안전하게 정리하세요.'
               : '실행 또는 복구 가능성이 남은 위임은 사용자 종료할 수 없습니다. 상태를 다시 확인하세요.' })
           }
-          await ensureAiDelegationTerminalResolutionIdle(delegation)
+          const releasePreserved = closure.workspaceReleaseRequired === true
+          if (!releasePreserved && body.trackedEolRecovery !== undefined) return sendJson(response, 400, {
+            error: '줄바꿈 복구는 명시적인 결과 보존 반환에만 지정할 수 있습니다.' })
+          if (releasePreserved && body.confirmPreserveWorkspaceResult !== true) return sendJson(response, 400, {
+            error: '미통합 결과와 부분 후보를 보존하고 작업공간만 반환할지 명시적으로 확인해야 합니다.' })
+          if (releasePreserved && [...aiDelegations.values()].some(other => other.id !== id
+            && other.workspaceLease?.leaseId === delegation.workspaceLease.leaseId && !aiDelegationIsTerminal(other))) {
+            return sendJson(response, 409, { error: '같은 lease를 사용 중인 다른 위임이 있어 반환할 수 없습니다.' })
+          }
+          await ensureAiDelegationTerminalResolutionIdle(delegation, { completedIntegration: releasePreserved })
+          let workspaceResult = delegation.workspaceResult
+          if (releasePreserved) {
+            try {
+              workspaceResult = await workspacePoolManager.releasePreservedIntegrationFailure(delegation.workspaceLease.leaseId,
+                { mapId: delegation.mapId, cardId: delegation.targetCardId, conversationId: delegation.targetConversationId, userId: user.id },
+                { reason: note, trackedEolRecovery: body.trackedEolRecovery })
+            } catch (error) {
+              const reasonCode = typeof error.reasonCode === 'string' ? error.reasonCode
+                : typeof error.code === 'string' ? error.code : 'INTEGRATION_RECOVERY_UNSAFE'
+              return sendJson(response, 409, { error: error.message, message: error.message, reasonCode })
+            }
+          }
           const closedAt = new Date().toISOString()
           const updated = await updateAiDelegation(id, {
             state: 'closed', closedAt, closedByUserId: user.id,
             closureSourceState: delegation.state, closureReason: reason, closureNote: note,
             reportApprovalRequired: false, reportCancelledAt: closedAt,
+            ...(releasePreserved ? { workspaceResult, workspaceReleasedAt: closedAt } : {}),
           })
           return sendJson(response, 200, {
             delegation: delegationPublicView(updated), childExecutionRequested: false,
-            resultReported: false, cardChanged: false, workspaceChanged: false,
+            resultReported: false, cardChanged: false, workspaceChanged: releasePreserved,
           })
         }
         if (supersede) {
@@ -6866,7 +8015,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           const replacementId = String(body.replacementDelegationId ?? '').trim()
           const replacement = aiDelegations.get(replacementId)
           if (!aiDelegationCanBeSupersededBy(delegation, replacement)) {
-            return sendJson(response, 409, { error: '같은 상위 카드와 대상 카드에서 나중에 성공한 위임이며, 기존 실행이 결과 보고 실패 또는 변경 없는 한도 중단인 경우에만 후속 위임으로 종료할 수 있습니다.' })
+            return sendJson(response, 409, { error: '같은 상위 카드와 대상 카드에서 나중에 성공한 위임이며, 기존 실행이 결과 보고 실패·변경 없는 한도 중단·실행 전 무변경 DB 접수 실패인 경우에만 후속 위임으로 종료할 수 있습니다.' })
           }
           await ensureAiDelegationTerminalResolutionIdle(delegation)
           const supersededAt = new Date().toISOString()
@@ -6929,7 +8078,10 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         if (delegation.wakeOperationId) {
           let previous
           try { previous = await fetchAionUiOn(delegationParentMachineId(delegation), `/api/internal/external-conversation-dispatches/${encodeURIComponent(delegation.wakeOperationId)}`) }
-          catch (error) { if (error?.status !== 404) throw error }
+          catch (error) {
+            throwIfRuntimeStopping(error, runtimeLifecycle.signal)
+            if (error?.status !== 404) throw error
+          }
           if (previous?.conversationId && previous.conversationId !== delegation.parentConversationId) return sendJson(response, 409, { error: '기존 결과 전달 대화가 일치하지 않습니다.' })
           if (previous?.state === 'completed') return sendJson(response, 200, { delegation: delegationPublicView(await refreshSuspendedAiDelegation(delegation)), repeated: true })
           if (['starting', 'running', 'waiting_resource', 'waiting_resume'].includes(previous?.state)) {
@@ -6946,6 +8098,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           reportReceipt: null, reportWaitReason: null,
           reportPayloadHash: null, reportResultAvailability: null, reportResultHash: null,
           reportResultTurnId: null, reportPreparedAt: null,
+          parentWakeRetry: null, parentRuntimeObservation: null,
         })
         return sendJson(response, 202, { delegation: delegationPublicView(updated), childExecutionRequested: false })
       }
@@ -6955,7 +8108,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       const user = requireUser(request, response)
       if (!user) return
       const groupId = decodeURIComponent(groupRoute[1])
-      if (request.method === 'GET' && !groupRoute[2]) return sendJson(response, 200, await groupProjects.context(groupId))
+      if (request.method === 'GET' && !groupRoute[2]) return sendJson(response, 200, await groupProjects.context(groupId, url.searchParams.get('mapId') ?? ''))
       if (!canEdit(user)) return sendJson(response, 403, { error: '편집자만 그룹 개발 정보를 변경할 수 있습니다.' })
       if ((request.method === 'PATCH' && !groupRoute[2]) || (request.method === 'POST' && groupRoute[2])) {
         const body = await readJsonBody(request)
@@ -7333,9 +8486,29 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       } catch (error) { return sendJson(response, error.status ?? 500, { error: error.message }) }
     }
 
-    const doorayResponseRoute = url.pathname.match(/^\/api\/integrations\/dooray\/mentions\/responses(?:\/([a-zA-Z0-9_-]+)\/(retry|refine|complete|handoff|execution-handoff|approve))?$/)
-    if (doorayResponseRoute) {
+    if (url.pathname === '/api/integrations/dooray/mentions/response-settings') {
       const user = requireSignedInUser(request, response)
+      if (!user) return
+      if (!canEdit(user) || isPublicViewer(user)) return sendJson(response, 403, { error: '편집자만 제안 AI를 설정할 수 있습니다.' })
+      try {
+        if (request.method === 'GET') return sendJson(response, 200, { userId: user.id, settings: doorayResponses.settings(user) })
+        if (request.method === 'PUT') {
+          const body = await readJsonBody(request)
+          if (!body || typeof body !== 'object' || Array.isArray(body)
+            || Object.keys(body).some((key) => !['expectedUserId', 'settings', 'onlyIfUnset'].includes(key))
+            || (body.onlyIfUnset != null && typeof body.onlyIfUnset !== 'boolean')) return sendJson(response, 400, { error: '제안 AI 설정 요청의 형식을 확인해 주세요.' })
+          if (body.expectedUserId !== user.id) return sendJson(response, 409, { error: '로그인 계정이 변경되었습니다. 다시 열어 설정해 주세요.' })
+          const settings = await doorayResponses.saveSettings(user, body.settings, { onlyIfUnset: body.onlyIfUnset === true })
+          return sendJson(response, 200, { userId: user.id, settings })
+        }
+        return sendJson(response, 405, { error: '지원하지 않는 요청입니다.' })
+      } catch (error) { return sendJson(response, error.status ?? 502, { error: error.message ?? '제안 AI 설정을 저장하지 못했습니다.' }) }
+    }
+
+    const doorayResponseRoute = url.pathname.match(/^\/api\/integrations\/dooray\/mentions\/responses(?:\/([a-zA-Z0-9_-]+)\/(retry|refine|complete|handoff|execution-handoff|approve|recover-result))?$/)
+    if (doorayResponseRoute) {
+      // 복구는 기존 완료 답변의 재검증만 허용한다. 실행·승인 API의 로그인 조건은 그대로 유지한다.
+      const user = doorayResponseRoute[2] === 'recover-result' ? requireUser(request, response) : requireSignedInUser(request, response)
       if (!user) return
       if (!canEdit(user) || isPublicViewer(user)) return sendJson(response, 403, { error: '편집자만 AI 대응을 요청할 수 있습니다.' })
       try {
@@ -7356,6 +8529,10 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           return sendJson(response, 200, { jobs: await doorayResponses.list(user.id) })
         }
         if (request.method === 'POST' && doorayResponseRoute[1]) {
+          if (doorayResponseRoute[2] === 'recover-result') {
+            const body = await readJsonBody(request)
+            return sendJson(response, 200, { job: await doorayResponses.recoverResult(user.id, doorayResponseRoute[1], body.expectedUpdatedAt) })
+          }
           if (doorayResponseRoute[2] === 'approve') {
             const body = await readJsonBody(request)
             return sendJson(response, 200, { job: await doorayResponses.approve(user.id, doorayResponseRoute[1], body.proposalRevision) })
@@ -7629,10 +8806,21 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         const model = agent?.models.find((candidate) => candidate.id === modelId
           && (!providerId || !candidate.providerId || candidate.providerId === providerId))
         if (!agent || !model) return sendJson(response, 400, { error: '선택한 AI 종류 또는 모델을 AionUi에서 확인할 수 없습니다.' })
+        // Claude 멀티 계정: 사람의 선택이 정책 기본값보다 우선한다.
+        const claudeAccountRole = claudeAccountRoleForPurpose(purpose)
+        const claudeAccountId = resolveClaudeAccountSelection({
+          accounts: agent.claudeAccounts,
+          requested: body.claudeAccountId,
+          policyAccountId: aiClaudeAccountPolicy.get(homeMachineId)[claudeAccountRole],
+        })
+        if (claudeAccountId && body.saveClaudeAccountDefault === true) {
+          await aiClaudeAccountPolicy.set(homeMachineId, claudeAccountRole, claudeAccountId)
+        }
+        const claudeAccount = findClaudeAccount(agent.claudeAccounts, claudeAccountId)
 
         const agentName = agent.name.replace(/\s+/g, ' ').trim().slice(0, 80) || agent.id
         const modelName = model.label.replace(/\s+/g, ' ').trim().slice(0, 120) || model.id
-        const authorName = `${agentName}(${modelName})`
+        const authorName = formatAiAuthorName(agentName, modelName, claudeAccount)
         const attributionToken = randomBytes(32).toString('base64url')
         const completionToken = randomBytes(32).toString('base64url')
         const expiresAt = Date.now() + aiAttributionDurationMs
@@ -7672,7 +8860,10 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           cardId,
           homeMachineId,
           startedBy: user.id,
-          selection: selectionSnapshot,
+          selection: {
+            ...selectionSnapshot,
+            ...(claudeAccountId ? { claudeAccountId } : {}),
+          },
           createdAt: Date.now(),
           expiresAt,
         })
@@ -7696,6 +8887,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         }
         const completionUrl = `${completionBaseUrl}/api/integrations/aionui/launches/${completionToken}/conversation`
         aiConversationLaunches.get(sessionTokenKey(completionToken)).completionUrl = completionUrl
+        aiLaunchTracking.register(sessionTokenKey(completionToken), user.id, expiresAt)
         await persistAiAttributions()
         console.log('[AI attribution]', JSON.stringify({
           source: 'created', mapId, cardId, actorId: user.id, authorName,
@@ -7705,6 +8897,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           attributionToken,
           completionUrl,
           prompt,
+          statusUrl: `/api/integrations/aionui/launches/${completionToken}/status`,
           authorName,
           editorId: user.id,
           homeMachineId,
@@ -7714,6 +8907,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           expiresAt,
         })
       } catch (error) {
+        throwIfRuntimeStopping(error, runtimeLifecycle.signal)
         if (error instanceof SubMachinePayloadError) return sendJson(response, 400, { error: error.message })
         console.error('[AionUi attribution]', error)
         return sendJson(response, 503, { error: 'AionUi에서 선택한 AI 정보를 확인할 수 없습니다.' })
@@ -7764,19 +8958,28 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           if (!payload.prompt.includes(context.launch.initialRequest)) return sendJson(response, 409, { error: '승인 전문이 변경되거나 누락되었습니다. 다시 확인해 주세요.' })
         }
         if (!sameExecutionWorkspace(attribution.selection?.workspace, payload.workspace)) return sendJson(response, 409, { error: '확인한 작업공간과 실행 경로가 다릅니다. 다시 시작해 주세요.' })
-        const ticket = await fetchAionUiOn(launch.homeMachineId, '/api/internal/external-conversation-launches', {
-          method: 'POST',
-          body: payload,
+        const claudeAccountId = claudeAccountRequestId(attribution.selection?.claudeAccountId)
+        if (claudeAccountId) payload.claudeAccountId = claudeAccountId
+        const ticket = await aiLaunchTracking.issue(sessionTokenKey(completionToken), payload, async () => {
+          const result = await fetchAionUiOn(launch.homeMachineId, '/api/internal/external-conversation-launches', {
+            method: 'POST',
+            body: payload,
+          })
+          const launchUrl = createAionUiWebLaunchUrl(aionUiWebBaseUrlForMachine(launch.homeMachineId), result?.launchId)
+          const desktopLaunchUrl = createAionUiDesktopLaunchUrl(result?.launchId)
+          console.log('[AionUi launch ticket issued]', JSON.stringify({ mapId: launch.mapId, cardId: launch.cardId, homeMachineId: launch.homeMachineId }))
+          return {
+            launchId: result.launchId,
+            expiresAt: result.expiresAt ?? null,
+            launchUrl,
+            desktopLaunchUrl,
+            homeMachineId: launch.homeMachineId,
+            homeMachineLabel: machineLabel(launch.homeMachineId),
+          }
         })
-        const launchUrl = createAionUiWebLaunchUrl(aionUiWebBaseUrlForMachine(launch.homeMachineId), ticket?.launchId)
-        return sendJson(response, 201, {
-          launchId: ticket.launchId,
-          expiresAt: ticket.expiresAt ?? null,
-          launchUrl,
-          homeMachineId: launch.homeMachineId,
-          homeMachineLabel: machineLabel(launch.homeMachineId),
-        })
+        return sendJson(response, 201, ticket)
       } catch (error) {
+        throwIfRuntimeStopping(error, runtimeLifecycle.signal)
         if (error instanceof AionUiExternalLaunchPayloadError) {
           return sendJson(response, 400, { error: error.message })
         }
@@ -7786,7 +8989,20 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         // 완료·변경된 승인으로 시작하려는 요청은 외부 서버 장애가 아닌 승인 충돌이다.
         if (error.status === 409) return sendJson(response, 409, { error: error.message })
         console.error('[AionUi external conversation launch]', error)
-        return sendJson(response, 503, { error: 'AionUi WebUI 대화 시작 정보를 발급하지 못했습니다.' })
+        return sendJson(response, 503, { error: 'AionUi 대화 시작 정보를 발급하지 못했습니다. 상태 확인 후 기존 시작 정보를 사용해 주세요.' })
+      }
+    }
+
+    const aionUiLaunchStatusRoute = url.pathname.match(/^\/api\/integrations\/aionui\/launches\/([^/]+)\/status$/)
+    if (aionUiLaunchStatusRoute && request.method === 'GET') {
+      const user = requireUser(request, response)
+      if (!user) return
+      if (!canEdit(user)) return sendJson(response, 403, { error: '편집자만 대화 시작 상태를 확인할 수 있습니다.' })
+      response.setHeader('Cache-Control', 'no-store')
+      try {
+        return sendJson(response, 200, aiLaunchTracking.read(sessionTokenKey(decodeURIComponent(aionUiLaunchStatusRoute[1])), user.id))
+      } catch (error) {
+        return sendJson(response, error.status ?? 503, { error: error.message })
       }
     }
 
@@ -7798,10 +9014,15 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         aiConversationLaunches.delete(tokenKey)
         return sendJson(response, 404, { error: 'AI 대화 시작 정보를 찾을 수 없습니다.' })
       }
+      const sendLaunchResult = (status, result) => {
+        aiLaunchTracking.finish(tokenKey, status, result)
+        console.log('[AionUi launch confirmation]', JSON.stringify({ status, mapId: launch.mapId, cardId: launch.cardId, conversationId: result.conversationId ?? null }))
+        return sendJson(response, status, result)
+      }
       const body = await readJsonBody(request)
       const conversationId = String(body.conversationId ?? '').trim()
       if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$/.test(conversationId)) {
-        return sendJson(response, 400, { error: '올바르지 않은 AionUi 대화 ID입니다.' })
+        return sendLaunchResult(400, { error: '올바르지 않은 AionUi 대화 ID입니다.' })
       }
 
       try {
@@ -7810,15 +9031,15 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           `/api/conversations/${encodeURIComponent(conversationId)}`,
         )
         if (!conversation || conversation.id !== conversationId) {
-          return sendJson(response, 409, { error: '생성된 AionUi 대화를 확인할 수 없습니다.' })
+          return sendLaunchResult(409, { error: '생성된 AionUi 대화를 확인할 수 없습니다.' })
         }
         if (launch.purpose === 'dooray-response') {
           const actualWorkspace = aiConversationLinkFromAionUiConversation(conversation)?.workspace
           assertDoorayExecutionWorkspace(actualWorkspace)
-          if (!sameExecutionWorkspace(aiAttributions.get(launch.attributionKey)?.selection?.workspace, actualWorkspace)) return sendJson(response, 409, { error: '생성된 대화의 작업공간이 시작 요청과 다릅니다.' })
+          if (!sameExecutionWorkspace(aiAttributions.get(launch.attributionKey)?.selection?.workspace, actualWorkspace)) return sendLaunchResult(409, { error: '생성된 대화의 작업공간이 시작 요청과 다릅니다.' })
           const approvalOptions = { handoffId: launch.doorayApproval.handoffId }
           const context = await doorayResponses.approvalContext(launch.startedBy, launch.doorayApproval.responseId, launch.doorayApproval.proposalRevision, approvalOptions)
-          if (context.linkedConversation && context.linkedConversation.conversationId !== conversationId) return sendJson(response, 409, { error: '이미 연결된 승인 대화가 있습니다.' })
+          if (context.linkedConversation && context.linkedConversation.conversationId !== conversationId) return sendLaunchResult(409, { error: '이미 연결된 승인 대화가 있습니다.' })
           // 담당이 없을 때만 구성용 대화로 연결한다. 담당이 있으면 아래 공통 카드
           // 연결·시작 카드 저장을 모두 마친 뒤 승인 실행을 허용한다.
           if (!launch.mapId && !launch.cardId) {
@@ -7826,18 +9047,18 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
               { conversationId, homeMachineId: launch.homeMachineId, homeMachineRole: launch.homeMachineId === machineRegistry.mainMachineId ? 'main' : 'sub', linkedAt: new Date().toISOString() }, approvalOptions)
             const attribution = aiAttributions.get(launch.attributionKey)
             if (attribution) { attribution.conversationId = conversationId; await persistAiAttributions() }
-            return sendJson(response, 200, { conversationId, linked: true, purpose: launch.purpose })
+            return sendLaunchResult(200, { conversationId, linked: true, purpose: launch.purpose })
           }
         }
         const map = await readMap(launch.mapId)
         const targetNode = map?.nodes.find((node) => node.id === launch.cardId)
         if (!map || map.trashedAt || !targetNode) {
           aiConversationLaunches.delete(tokenKey)
-          return sendJson(response, 404, { error: 'AI 대화를 연결할 문서 또는 카드를 찾을 수 없습니다.' })
+          return sendLaunchResult(404, { error: 'AI 대화를 연결할 문서 또는 카드를 찾을 수 없습니다.' })
         }
         const attribution = aiAttributions.get(launch.attributionKey)
         const origin = aiConversationOrigins.get(conversationId)
-        if (origin && (origin.mapId !== launch.mapId || origin.cardId !== launch.cardId)) return sendJson(response, 409, { error: '다른 카드에서 시작한 대화의 소속을 변경할 수 없습니다.' })
+        if (origin && (origin.mapId !== launch.mapId || origin.cardId !== launch.cardId)) return sendLaunchResult(409, { error: '다른 카드에서 시작한 대화의 소속을 변경할 수 없습니다.' })
         if (attribution) {
           attribution.conversationId = conversationId
           await persistAiAttributions()
@@ -7859,7 +9080,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           })
           await persistAiConversationOrigins()
           aiConversationLaunches.delete(tokenKey)
-          return sendJson(response, 200, {
+          return sendLaunchResult(200, {
             conversationId,
             linked: false,
             purpose: launch.purpose,
@@ -7878,6 +9099,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           conversationId,
           homeMachineId: launch.homeMachineId,
           ...selection,
+          workspacePoolId: workspacePoolManager.poolForWorkspace(selection.workspace)?.poolId ?? null,
           startedBy: { id: actor.id, label: actor.name },
           startedAt: normalizedIsoDate(conversation.created_at),
           linkedAt: new Date().toISOString(),
@@ -7949,10 +9171,11 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         void runtimeLifecycle.track(() => refreshAiConversationRuntimeForMap(launch.mapId)).catch((error) => {
           console.warn('[AI conversation runtime link refresh]', error)
         })
-        return sendJson(response, 200, { conversationId, homeMachineId: launch.homeMachineId })
+        return sendLaunchResult(200, { conversationId, homeMachineId: launch.homeMachineId })
       } catch (error) {
+        throwIfRuntimeStopping(error, runtimeLifecycle.signal)
         console.error('[AionUi conversation completion]', error)
-        return sendJson(response, error.status ?? 503, { error: error.status ? error.message : '생성된 AionUi 대화를 확인하지 못했습니다.' })
+        return sendLaunchResult(error.status ?? 503, { error: error.status ? error.message : '생성된 AionUi 대화를 확인하지 못했습니다.' })
       }
     }
 
@@ -7998,9 +9221,13 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       if (!user) return
       if (!canEdit(user)) return sendJson(response, 403, { error: '편집자만 AI 작업공간 풀을 조회할 수 있습니다.' })
       const scope = integrationRequestScope(request)
-      return sendJson(response, 200, workspacePoolManager.publicSnapshot({
+      const machineId = scope.conversationId ? conversationHomeMachineId(scope.conversationId) : machineRegistry.mainMachineId
+      if (!machineAccessibleByUser(user, machineId)) return sendJson(response, 403, { error: '대화가 속한 머신의 작업공간을 조회할 권한이 없습니다.' })
+      const snapshot = workspacePoolManager.publicSnapshot({
         conversationId: scope.conversationId,
-      }))
+        machineId,
+      })
+      return sendJson(response, 200, { ...snapshot, remotePools: snapshot.remotePools.filter((pool) => machineAccessibleByUser(user, pool.machineId)) })
     }
 
     if (aiWorkspaceCheckpointRoute && request.method === 'POST') {
@@ -8071,6 +9298,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       const card = map?.nodes.find((node) => node.id === checkpointCardId)
       try {
         const result = await workspacePoolManager.checkpoint(leaseId, {
+          requestId: body.requestId,
           jobId: String(body.jobId),
           mapId: scope.mapId,
           cardId: checkpointCardId,
@@ -8078,6 +9306,12 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           paths,
           confirmNoChanges,
           commitMessage: body.commitMessage,
+          commitAuthorName: await aiWorkspaceCommitAuthorName({
+            conversationId: source?.conversationId ?? scope.conversationId,
+            mapId: scope.mapId,
+            cardId: checkpointCardId,
+            user,
+          }),
           mnpContext: {
             mapId: scope.mapId,
             cardId: checkpointCardId,
@@ -8087,7 +9321,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         })
         return sendJson(response, result.noChanges ? 200 : 201, result)
       } catch (error) {
-        if (error instanceof WorkspacePoolUnavailableError) {
+        if (error instanceof WorkspacePoolUnavailableError || error.status === 409 && error.reasonCode) {
           return sendJson(response, 409, {
             error: error.message,
             code: error.reasonCode ?? error.code,
@@ -8212,6 +9446,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           instruction: '현재 턴의 최종 답변을 마치면 AionCore가 위임 완료를 확정하고 상위 AI 재개 절차를 진행합니다.',
         })
       } catch (error) {
+        throwIfRuntimeStopping(error, runtimeLifecycle.signal)
         const code = error?.code ?? 'AI_DELEGATION_EXPLICIT_COMPLETION_FAILED'
         const turnNotActive = code === 'EXTERNAL_DISPATCH_COMPLETION_TURN_NOT_ACTIVE'
         return sendJson(response, error?.status === 404 ? 404 : 409, {
@@ -8241,24 +9476,41 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         return sendJson(response, 404, { error: '복구할 AI 위임을 찾을 수 없습니다.' })
       }
       const mapId = delegation.mapId
-      if (!await aionCoreSupportsExplicitCompletionAfterInterruption(delegationTargetMachineId(delegation))) {
-        return sendJson(response, 503, {
-          error: '현재 실행 중인 AionCore가 중단 후 명시적 완료 신호를 지원하지 않습니다. AionCore를 최신 빌드로 재기동해 주세요.',
-          code: 'AIONCORE_EXPLICIT_COMPLETION_UNAVAILABLE',
-        })
-      }
+      const recoveryAvailability = aiDelegationRecoveryAvailability(delegation)
+      const busyRecoveryOperation = aiDelegationBusyRecoveryOperation(delegation)
+      const retryIntegration = recoveryAvailability?.recoveryAvailable === true
+        && recoveryAvailability.recommendedAction === 'retry-integration'
+      const correctionAvailable = recoveryAvailability?.recommendedAction === 'correct-integration-result'
       if (!humanAction && delegation.parentCardId !== source.cardId) {
         return sendJson(response, 403, {
           error: '이 위임을 관리하는 상위 카드에서만 복구할 수 있습니다.',
           code: 'AI_DELEGATION_RECOVERY_ORIGIN_MISMATCH',
         })
       }
-      const recoveryAvailability = aiDelegationRecoveryAvailability(delegation)
+      const body = await readJsonBody(request)
+      const recoveryAuthorization = { editorId: user.id, human: humanAction,
+        source: humanAction ? null : { mapId: parentMapId, cardId: source.cardId, conversationId: source.conversationId ?? null } }
+      try {
+        const repeated = integrationRecoveryQueue.repeat(delegation.id, body, recoveryAuthorization)
+        if (repeated) return integrationRecoveryResponse(response, repeated)
+      } catch (error) {
+        return sendJson(response, error.status ?? 409, { error: error.message, code: error.code })
+      }
+      if (delegation.resultCorrection && (['completed', 'superseded', 'closed'].includes(delegation.state)
+        || aiDelegationSucceeded(delegation))) {
+        return sendJson(response, 409, {
+          error: '이미 종료되었거나 통합이 완료된 결과 정정 위임은 다시 실행할 수 없습니다.',
+          code: 'AI_DELEGATION_RECOVERY_NOT_REQUIRED',
+          delegation: delegationPublicView(delegation),
+        })
+      }
       const retryableParentWakeFailure = ['parent-wake-failed', 'failed', 'waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity'].includes(delegation.state)
         && recoveryAvailability?.recoveryAvailable === true
         && recoveryAvailability.recommendedAction === 'resume-existing'
+      const retryableChildRecovery = retryableParentWakeFailure || recoveryAvailability?.failureCategory === 'recovery-dispatch-busy'
       if (!['recovery-required', 'integration-recovery-required', 'waiting-child-resume'].includes(delegation.state)
-        && !retryableParentWakeFailure && !delegation.pendingRecovery) {
+        && !retryableParentWakeFailure && !retryIntegration && !correctionAvailable && !delegation.pendingRecovery
+        && !delegation.resultCorrection) {
         return sendJson(response, 409, {
           error: `현재 위임 상태(${delegation.state})는 명시적인 재시작 복구 대상이 아닙니다.`,
           code: 'AI_DELEGATION_RECOVERY_NOT_REQUIRED',
@@ -8266,8 +9518,28 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         })
       }
 
-      const body = await readJsonBody(request)
+      if (!retryIntegration && !await aionCoreSupportsExplicitCompletionAfterInterruption(delegationTargetMachineId(delegation))) {
+        return sendJson(response, 503, {
+          error: '현재 실행 중인 AionCore가 중단 후 명시적 완료 신호를 지원하지 않습니다. AionCore를 최신 빌드로 재기동해 주세요.',
+          code: 'AIONCORE_EXPLICIT_COMPLETION_UNAVAILABLE',
+        })
+      }
+
       const instruction = String(body.instruction ?? '').trim()
+      const resultCorrection = body.recoveryMode === 'correct-integration-result'
+      let untrackedMetaRecovery
+      if (body.untrackedMetaRecovery !== undefined) {
+        if (!retryIntegration || recoveryAvailability.failureCategory !== 'integration-git-lock' || resultCorrection) {
+          return sendJson(response, 400, { error: '메타 보존 승인은 완료된 통합 Git 잠금 실패의 재시도에만 사용할 수 있습니다.' })
+        }
+        try { untrackedMetaRecovery = normalizeUntrackedMetaRecovery(body.untrackedMetaRecovery) }
+        catch (error) { return sendJson(response, 400, { error: error.message, reasonCode: error.reasonCode }) }
+      }
+      if (delegation.resultCorrection?.phase === 'held') return sendJson(response, 409, { error: '결과 정정 실행 또는 Git 상태를 확인할 수 없어 통합 잠금을 유지하고 있습니다. 수동 증거 검토가 필요합니다.', code: 'AI_DELEGATION_RESULT_CORRECTION_HELD' })
+      if (body.recoveryMode !== undefined && !resultCorrection) return sendJson(response, 400, { error: '지원하지 않는 복구 모드입니다.' })
+      if (delegation.resultCorrection && !resultCorrection) return sendJson(response, 409, { error: '진행 중인 결과 정정에는 같은 복구 모드를 명시해야 합니다.' })
+      if (correctionAvailable && !resultCorrection) return sendJson(response, 409, { error: '통합 대기 결과 정정은 recoveryMode=correct-integration-result를 명시해야 합니다.', code: 'AI_DELEGATION_RESULT_CORRECTION_OPT_IN_REQUIRED' })
+      if (resultCorrection && !correctionAvailable && !delegation.pendingRecovery && !delegation.resultCorrection) return sendJson(response, 409, { error: '현재 위임은 통합 대기 결과 정정 대상이 아닙니다.' })
       const sourceRevision = Number(body.sourceRevision)
       if (!instruction || instruction.length > 100_000
         || !Number.isInteger(sourceRevision) || sourceRevision < 1) {
@@ -8276,11 +9548,20 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       const missingDispatchLink = delegation.state === 'recovery-required' && !delegation.targetConversationId
         && delegation.strategy === 'new' && Boolean(delegation.workspaceLease && delegation.pendingSelection && delegation.childOperationId)
       await validateAiDelegationAction(request, delegation, body, true, { requireConversationLinks: !missingDispatchLink })
+      if (resultCorrection && delegation.resultCorrection?.instructionHash
+        && delegation.resultCorrection.instructionHash !== createHash('sha256').update(instruction).digest('hex')) {
+        return sendJson(response, 409, { error: '기존 결과 정정 요청과 지시가 다릅니다. 기존 요청을 확인하세요.', code: 'AI_DELEGATION_RESULT_CORRECTION_REQUEST_MISMATCH' })
+      }
       if (delegation.pendingRecovery) {
         try {
-          const updated = await settlePendingAiRecovery(delegation)
+          const updated = await settlePendingAiRecovery(delegation, { allowDispatch: resultCorrection })
+          if (updated.recoveryDispatchRejection?.operationId === updated.recoveryOperationId) return sendJson(response, 409, {
+            error: '대상 대화가 사용 중이어서 복구 실행을 시작하지 않았습니다. 기존 작업과 작업공간을 보존했습니다.',
+            code: 'AI_DELEGATION_RECOVERY_CONVERSATION_BUSY', delegation: delegationPublicView(updated), executionRequested: false,
+          })
           return sendJson(response, 202, { delegation: delegationPublicView(updated), repeated: true, recovery: { operationId: updated.recoveryOperationId, attempt: updated.recoveryAttempt, reusedConversation: true, reusedWorkspace: Boolean(updated.workspaceLease) } })
-        } catch {
+        } catch (shutdownError) {
+          throwIfRuntimeStopping(shutdownError, runtimeLifecycle.signal)
           return sendJson(response, 409, { error: '이전 복구 요청의 전달 여부를 확인하지 못했습니다. 중복 실행을 막기 위해 새 요청을 만들지 않았습니다. 상태 다시 확인이 필요합니다.', code: 'AI_DELEGATION_RECOVERY_DISPATCH_UNCERTAIN' })
         }
       }
@@ -8315,6 +9596,32 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       if (!isAiConversationLinked(restoredTargetCard.data, delegation.targetConversationId)) {
         return sendJson(response, 409, { error: '위임 대상 카드와 기존 AI 대화의 연결을 확인할 수 없습니다.' })
       }
+      if (resultCorrection && delegation.resultCorrection?.phase === 'dispatched'
+        && ['starting', 'running', 'waiting-resource', 'waiting-integration'].includes(delegation.state)) {
+        return sendJson(response, 202, { delegation: delegationPublicView(delegation), repeated: true,
+          recovery: { operationId: delegation.resultCorrection.operationId, reusedConversation: true, reusedWorkspace: true } })
+      }
+
+      if (retryIntegration) {
+        try {
+          if (aiDelegationReportResult(delegation).availability === 'integrity-failed') {
+            return sendJson(response, 409, { error: '기존 완료 결과의 해시 또는 실행 턴이 변경되어 통합 재시도를 거부합니다.', code: 'AI_DELEGATION_RESULT_INTEGRITY_FAILED' })
+          }
+          const receipt = await integrationRecoveryQueue.accept(delegation.id,
+            body, recoveryAuthorization, recoveryAvailability.failureCategory, { untrackedMetaRecovery })
+          // 승인·요청 ID를 영속 저장한 뒤 응답한다. 긴 Git 검증은 HTTP 수명과 분리한다.
+          setImmediate(() => startIntegrationRecovery(delegation.id))
+          return integrationRecoveryResponse(response, receipt)
+        } catch (error) {
+          throwIfRuntimeStopping(error, runtimeLifecycle.signal)
+          const message = `통합을 재시도하지 못했습니다: ${error?.message ?? String(error)}`
+          return sendJson(response, error.status ?? 409, {
+            error: message, message,
+            code: error?.code ?? 'AI_DELEGATION_INTEGRATION_RECOVERY_FAILED',
+            ...(error?.reasonCode ? { reasonCode: error.reasonCode } : {}),
+          })
+        }
+      }
 
       const linked = aiConversationLinksFromData(restoredTargetCard.data)
         .find((candidate) => candidate.conversationId === delegation.targetConversationId)
@@ -8329,6 +9636,10 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           })
         }
         const recovered = aiConversationLinkFromAionUiConversation(conversation)
+        if (resultCorrection && (!recovered?.workspace || !aiDelegationWorkspaceLeaseMatches(delegation.workspaceLease,
+          { ...delegation.workspaceLease, projectRoot: recovered.workspace }))) {
+          return sendJson(response, 409, { error: '원 담당 대화의 실제 작업공간이 기존 lease와 일치하지 않습니다.' })
+        }
             selection = aiDelegationSelectionFromSource({
           ...recovered,
           ...linked,
@@ -8341,6 +9652,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           workspace: delegation.workspaceLease?.projectRoot ?? linked?.workspace ?? recovered?.workspace,
         })
       } catch (error) {
+        throwIfRuntimeStopping(error, runtimeLifecycle.signal)
         return sendJson(response, 503, { error: `이어갈 AionUi 대화 상태를 확인하지 못했습니다: ${error?.message ?? String(error)}` })
       }
       if (!selection) return sendJson(response, 409, { error: '복구할 AI 대화의 실행 환경을 확인하지 못했습니다.' })
@@ -8348,10 +9660,132 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       let workspaceLease = delegation.recoveryWorkspaceLease ?? delegation.workspaceLease ?? null
       let reactivatedWorkspaceLease = false
       let replacedWorkspaceLease = Boolean(delegation.recoveryWorkspaceLease && delegation.recoveryWorkspaceLease.leaseId !== delegation.workspaceLease?.leaseId)
+      const continuingCorrection = resultCorrection && delegation.resultCorrection?.phase === 'dispatched'
+      const recoveryAttempt = delegation.resultCorrection?.phase === 'preparing'
+        ? delegation.resultCorrection.attempt : Number(delegation.recoveryAttempt ?? 0) + 1
+      const integrationRecovery = delegation.state === 'integration-recovery-required'
+      const operationId = resultCorrection
+        ? continuingCorrection ? boundedAionOperationId(delegation.id, `correct-${recoveryAttempt}`)
+          : delegation.resultCorrection?.operationId ?? boundedAionOperationId(delegation.id, `correct-${recoveryAttempt}`)
+        : boundedAionOperationId(delegation.id, `${integrationRecovery ? 'integrate-' : ''}recover-${recoveryAttempt}`)
+      let rejectedDispatch
+      let interruptedProof
+      if (retryableChildRecovery && recoveryAvailability.failureCategory === 'dispatch-database-transient') {
+        try {
+          rejectedDispatch = await readAiDelegationDispatchStatus(fetchAionUiOn, {
+            machineId: delegationTargetMachineId(delegation), operationId: delegation.childOperationId, phase: 'recovery',
+          })
+          const storedLease = workspacePoolManager.state?.leases?.[workspaceLease?.leaseId]
+          assertAiDelegationDatabaseRejection(delegation, rejectedDispatch, storedLease)
+          await validateAiDelegationAction(request, aiDelegations.get(delegation.id), body, true)
+        } catch (error) {
+          throwIfRuntimeStopping(error, runtimeLifecycle.signal)
+          return sendJson(response, 409, { error: error.message, code: 'AI_DELEGATION_DATABASE_REJECTION_UNCONFIRMED', executionRequested: false, storedStatePreserved: true })
+        }
+      }
+      if (retryableChildRecovery && recoveryAvailability.failureCategory === 'upstream-interrupted' && delegation.workspaceLease?.leaseId) {
+        try {
+          interruptedProof = await readAiDelegationInterruptedProof(fetchAionUiOn, {
+            machineId: delegationTargetMachineId(delegation), delegation,
+            origin: aiConversationOrigins.get(delegation.targetConversationId),
+          })
+          await validateAiDelegationAction(request, aiDelegations.get(delegation.id), body, true)
+        } catch (error) {
+          throwIfRuntimeStopping(error, runtimeLifecycle.signal)
+          return sendJson(response, error.status ?? 409, { error: error.message,
+            code: error.code ?? 'AI_DELEGATION_INTERRUPTED_SOURCE_UNCONFIRMED',
+            ...(error.proofHoldReason ? { proofHoldReason: error.proofHoldReason } : {}),
+            executionRequested: false, storedStatePreserved: true })
+        }
+      }
+      if (busyRecoveryOperation) {
+        try {
+          rejectedDispatch = await readAiDelegationDispatchStatus(fetchAionUiOn, {
+            machineId: delegationTargetMachineId(delegation), operationId: busyRecoveryOperation, phase: 'recovery',
+          })
+          if (!aiDelegationBusyDispatchRejected(rejectedDispatch, delegation.targetConversationId, busyRecoveryOperation)
+            || !aiDelegationWorkspaceLeaseMatches(workspaceLease ?? null, rejectedDispatch.workspaceLease ?? null)) {
+            throw new Error('복구 접수 거절의 원 실행·대화·lease를 확인하지 못했습니다.')
+          }
+          await validateAiDelegationAction(request, aiDelegations.get(delegation.id), body, true)
+        } catch (error) {
+          throwIfRuntimeStopping(error, runtimeLifecycle.signal)
+          return sendJson(response, 409, { error: error.message, code: 'AI_DELEGATION_RECOVERY_REJECTION_UNCONFIRMED', executionRequested: false })
+        }
+      }
       if (workspaceLease?.leaseId) {
+        let correctionIntentSaved = false
         try {
           const scope = { mapId, cardId: targetCard.id, conversationId: delegation.targetConversationId }
-          if (retryableParentWakeFailure && delegation.workspaceResult?.status === 'failed-clean' && !delegation.recoveryWorkspaceLease) {
+          if (resultCorrection) {
+            const previousOperationId = delegation.childOperationId
+            const resumingCorrection = continuingCorrection || Boolean(delegation.resultCorrection?.previousOperationId)
+            let previousDispatch, completionProof = null
+            const verifyHistoricalCompletion = async () => {
+              if (resumingCorrection) throw new AiDelegationSourceCompletionError('first-completed-source-required')
+              try {
+                return await readAiDelegationSourceCompletionProof(fetchAionUiOn, {
+                  machineId: delegationTargetMachineId(delegation), delegation,
+                  origin: aiConversationOrigins.get(delegation.targetConversationId),
+                })
+              } catch (error) {
+                throwIfRuntimeStopping(error, runtimeLifecycle.signal)
+                if (error instanceof AiDelegationSourceCompletionError) throw error
+                throw new AiDelegationSourceCompletionError(`history-read-unavailable-${Number.isInteger(error?.status) ? error.status : 'unknown'}`)
+              }
+            }
+            try {
+              previousDispatch = await readAiDelegationDispatchStatus(fetchAionUiOn, {
+                machineId: delegationTargetMachineId(delegation), operationId: previousOperationId, phase: 'child',
+              })
+            } catch (error) {
+              throwIfRuntimeStopping(error, runtimeLifecycle.signal)
+              if (error.code !== 'AI_DELEGATION_STATUS_NOT_FOUND' || resumingCorrection) throw error
+              completionProof = await verifyHistoricalCompletion()
+            }
+            // 첫 prepare 중단의 재요청도 원문 증거를 다시 대사한다. pending POST 재전달은 기존 경로다.
+            if (!resumingCorrection && delegation.resultCorrection?.phase === 'preparing'
+              && delegation.resultCorrection.originalCompletionProof) {
+              completionProof ??= await verifyHistoricalCompletion()
+              if (JSON.stringify(completionProof) !== JSON.stringify(delegation.resultCorrection.originalCompletionProof)) {
+                throw new AiDelegationSourceCompletionError('historical-proof-changed')
+              }
+            }
+            const terminalStates = resumingCorrection ? ['completed', 'failed', 'recovery_required', 'waiting_resume'] : ['completed']
+            if (!previousDispatch && !completionProof) throw new AiDelegationSourceCompletionError('original-completion-missing')
+            if (completionProof) assertAiDelegationSourceCompletionLease(workspacePoolManager.state?.leases?.[workspaceLease.leaseId], completionProof, scope)
+            if (previousDispatch && (!terminalStates.includes(previousDispatch.state) || previousDispatch.operationId !== previousOperationId || previousDispatch.conversationId !== delegation.targetConversationId
+              || !aiDelegationWorkspaceLeaseMatches(workspaceLease, previousDispatch.workspaceLease)
+              || (!resumingCorrection && previousDispatch.turnId !== delegation.childTurnId)
+              || aiDelegationReportResult(delegation).availability === 'integrity-failed')) throw new Error('기존 실행 종료·담당자·lease·캡처 무결성을 확인하지 못했습니다.')
+            if (!delegation.resultCorrection) {
+              const attemptHistory = aiDelegationAttemptHistory(delegation, '승인된 통합 대기 결과 정정의 원문과 후보 보존')
+              if (completionProof) attemptHistory.at(-1).originalCompletionProof = structuredClone(completionProof)
+              delegation = await updateAiDelegation(delegation.id, {
+                resultCorrection: { operationId, attempt: recoveryAttempt, phase: 'preparing',
+                  ...(completionProof ? { originalCompletionProof: completionProof } : {}),
+                  instructionHash: createHash('sha256').update(instruction).digest('hex'), requestedAt: new Date().toISOString() },
+                attemptHistory,
+              })
+              correctionIntentSaved = true
+            }
+            if (continuingCorrection) {
+              delegation = await updateAiDelegation(delegation.id, {
+                resultCorrection: { ...delegation.resultCorrection, phase: 'preparing', operationId, attempt: recoveryAttempt,
+                  previousOperationId },
+                attemptHistory: aiDelegationAttemptHistory(delegation, '중단된 결과 정정 실행 종료 확인 후 같은 lease 재개'),
+              })
+            }
+            workspaceLease = await (delegation.resultCorrection.previousOperationId
+              ? workspacePoolManager.resumeIntegrationResultCorrection(workspaceLease.leaseId, {
+                  ...scope, expectedLease: workspaceLease, previousOperationId: delegation.resultCorrection.previousOperationId,
+                  operationId, instructionHash: delegation.resultCorrection.instructionHash,
+                })
+              : workspacePoolManager.prepareIntegrationResultCorrection(workspaceLease.leaseId, {
+                  ...scope, expectedLease: workspaceLease, operationId, instructionHash: delegation.resultCorrection.instructionHash,
+                  ...(completionProof ? { expectedCompletionProof: completionProof } : {}),
+                }))
+          } else if (retryableChildRecovery && delegation.workspaceResult?.status === 'failed-clean' && !delegation.recoveryWorkspaceLease) {
             const replacement = await workspacePoolManager.acquire({
               ...scope, cardLabel: targetCard.data.label, workspaceHint: workspaceLease.projectRoot,
               replacesLeaseId: workspaceLease.leaseId,
@@ -8359,25 +9793,30 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
             if (!replacement) throw new Error('복구할 작업공간 풀이 등록되어 있지 않습니다.')
             workspaceLease = await workspacePoolManager.reuseLease(replacement.leaseId, scope)
             replacedWorkspaceLease = true
-          } else workspaceLease = await (retryableParentWakeFailure
+          } else workspaceLease = await (retryableChildRecovery
             ? workspacePoolManager.reactivateQuarantinedLease(workspaceLease.leaseId, {
                 mapId,
                 cardId: targetCard.id,
                 conversationId: delegation.targetConversationId,
                 failureCategory: recoveryAvailability.failureCategory,
+                ...(rejectedDispatch ? { rejectedDispatch } : {}),
+                ...(interruptedProof ? { interruptedProof } : {}),
               })
             : workspacePoolManager.reuseLease(workspaceLease.leaseId, {
                 mapId,
                 cardId: targetCard.id,
                 conversationId: delegation.targetConversationId,
               }))
-          reactivatedWorkspaceLease = retryableParentWakeFailure && !replacedWorkspaceLease
+          reactivatedWorkspaceLease = retryableChildRecovery && !replacedWorkspaceLease
           selection.workspace = workspaceLease.projectRoot
           await updateAiDelegation(delegation.id, { recoveryWorkspaceLease: workspaceLease })
         } catch (error) {
+          throwIfRuntimeStopping(error, runtimeLifecycle.signal)
           return sendJson(response, 409, {
             error: `기존 작업공간 lease를 복구하지 못했습니다: ${error?.message ?? String(error)}`,
             code: error?.code ?? 'AI_DELEGATION_WORKSPACE_RECOVERY_FAILED',
+            ...(error instanceof AiDelegationSourceCompletionError ? { proofHoldReason: error.proofHoldReason, executionRequested: false,
+              storedStatePreserved: !correctionIntentSaved, ...(correctionIntentSaved ? { preparationIntentPreserved: true } : {}) } : {}),
           })
         }
       }
@@ -8407,12 +9846,6 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         })
       }
 
-      const recoveryAttempt = Number(delegation.recoveryAttempt ?? 0) + 1
-      const integrationRecovery = delegation.state === 'integration-recovery-required'
-      const operationId = boundedAionOperationId(
-        delegation.id,
-        `${integrationRecovery ? 'integrate-' : ''}recover-${recoveryAttempt}`,
-      )
       const recoveryContext = { ...delegation, workspaceLease }
       const recoveryConversationDisplay = await resolveAiConversationDisplay(
         delegation.targetConversationId,
@@ -8421,11 +9854,13 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       const replacementNotice = replacedWorkspaceLease
         ? '이전 작업공간은 변경 없이 반납되어 MindNProgress가 복구용 작업공간을 새로 배정했습니다. 과거 대화에 남은 경로·브랜치·lease 대신 이번 전문의 할당된 작업공간과 .ai-session.json을 사용하세요.\n\n'
         : ''
-      const requestedInstruction = replacementNotice + (integrationRecovery
+      const correctionNotice = resultCorrection ? `# 통합 대기 결과 정정\n\n기존 후보와 원문은 감사 자료로 보존했습니다. 현재 배정된 source 브랜치에서 원 요구사항과 checkpoints를 대사하고 본인이 우발적으로 추가한 파일만 원복하세요. integration 사용자 파일은 삭제·이동·덮어쓰지 마세요. Git reset/rebase/직접 커밋으로 이력을 바꾸지 말고 mindnprogress_checkpoint_ai_workspace로 새 변경 체크포인트를 만드세요. 정정 중 자동 통합은 중지되며 명시적 완료 후 새 후보를 구성합니다.\n\n` : ''
+      const requestedInstruction = correctionNotice + replacementNotice + (integrationRecovery
         ? `${delegation.workspaceResult?.status === 'checkpoint-required'
             ? workspaceCheckpointInstruction(delegation, delegation.workspaceResult)
             : workspaceConflictInstruction(delegation, delegation.workspaceResult)}\n\n${delegationRecoveryInstruction(recoveryContext, instruction, recoveryAvailability, recoveryConversationDisplay.displayLabel)}`
-        : delegationRecoveryInstruction(recoveryContext, instruction, recoveryAvailability, recoveryConversationDisplay.displayLabel))
+        : delegationRecoveryInstruction(recoveryContext, instruction, resultCorrection
+          ? { failureCategory: 'integration-result-correction' } : recoveryAvailability, recoveryConversationDisplay.displayLabel))
       const delegatedInstruction = buildDelegatedInstruction({
         mapId,
         cardId: targetCard.id,
@@ -8436,36 +9871,28 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         targetCard,
         selection,
         role: delegation.role,
+        sourceConversation: await resolveAiConversationSource(delegation.parentConversationId, delegationParentMachineId(delegation), delegationTargetMachineId(delegation)),
       })
 
+      const dispatchBody = { operationId, actorConversationId: delegation.parentConversationId, strategy: 'resume',
+        explicitCompletionAfterInterruption: true, targetConversationId: delegation.targetConversationId,
+        ...(workspaceLease ? { workspaceLease } : {}), instruction: delegatedInstruction }
       let dispatch
       await updateAiDelegation(delegation.id, {
-        pendingRecovery: { operationId, attempt: recoveryAttempt, sourceState: delegation.state, integrationRecovery, workspaceLease, requestedAt: new Date().toISOString() },
+        pendingRecovery: { operationId, attempt: recoveryAttempt, sourceState: delegation.state, integrationRecovery, resultCorrection, workspaceLease,
+          ...(resultCorrection ? { dispatchBody } : {}), requestedAt: new Date().toISOString() },
         attemptHistory: aiDelegationAttemptHistory(delegation, '사용자가 승인 범위의 기존 작업 재개 요청'),
+        ...(interruptedProof ? { interruptedRecoveryProof: interruptedProof } : {}),
       })
       try {
         dispatch = await fetchAionUiOn(delegationTargetMachineId(delegation), '/api/internal/external-conversation-dispatches', {
           method: 'POST',
           timeoutMs: 30_000,
-          body: {
-            operationId,
-            actorConversationId: delegation.parentConversationId,
-            strategy: 'resume',
-            explicitCompletionAfterInterruption: true,
-            targetConversationId: delegation.targetConversationId,
-            ...(workspaceLease ? { workspaceLease } : {}),
-            instruction: delegatedInstruction,
-          },
+          body: dispatchBody,
         })
       } catch (error) {
-        for (let attempt = 0; attempt < 10 && !dispatch; attempt += 1) {
-          if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 500))
-          try {
-            dispatch = await fetchAionUiOn(delegationTargetMachineId(delegation), `/api/internal/external-conversation-dispatches/${encodeURIComponent(operationId)}`)
-          } catch {
-            // The recovery dispatch may have started even when its POST response was lost.
-          }
-        }
+        throwIfRuntimeStopping(error, runtimeLifecycle.signal)
+        dispatch = await retryDispatchStatus(() => fetchAionUiOn(delegationTargetMachineId(delegation), `/api/internal/external-conversation-dispatches/${encodeURIComponent(operationId)}`), runtimeLifecycle.signal)
         if (!dispatch) {
           // 접수 여부가 불명확하면 대화 귀속과 lease를 보존한다. 토큰 삭제나 새 실행으로
           // 진행 중일 수 있는 작업을 손상시키지 않고, 저장된 operation의 조회만 허용한다.
@@ -8477,7 +9904,9 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       }
 
       if (!aiDelegationWorkspaceLeaseMatches(workspaceLease, dispatch?.workspaceLease ?? null)
-          || String(dispatch?.conversationId ?? '').trim() !== delegation.targetConversationId) {
+          || String(dispatch?.conversationId ?? '').trim() !== delegation.targetConversationId
+          || (resultCorrection && (dispatch?.operationId !== operationId
+            || !['starting', 'running', 'waiting_resource', 'waiting_resume', 'recovery_required', 'completed', 'failed'].includes(dispatch?.state)))) {
         aiAttributions.delete(sessionTokenKey(attributionToken))
         await persistAiAttributions()
         try {
@@ -8488,9 +9917,26 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         } catch {
           // The response below remains the primary recovery failure.
         }
+        if (resultCorrection) await updateAiDelegation(delegation.id, { state: 'recovery-required',
+          pendingRecovery: null,
+          resultCorrectionDispatchEvidence: { operationId, conversationId: dispatch.conversationId, workspaceLease: dispatch.workspaceLease, state: dispatch.state },
+          resultCorrection: { ...delegation.resultCorrection, phase: 'held' },
+          recoveryDispatchError: '결과 정정 실행의 대화 또는 lease가 불일치하여 통합 잠금을 유지합니다.' })
         return sendJson(response, 409, {
           error: 'AionCore가 사용량 제한 복구에 사용한 대화 또는 작업공간 lease가 기존 위임과 일치하지 않습니다.',
           code: 'AI_DELEGATION_RECOVERY_EXECUTION_MISMATCH',
+        })
+      }
+
+      if (!resultCorrection && aiDelegationBusyDispatchRejected(dispatch, delegation.targetConversationId, operationId)) {
+        aiAttributions.delete(sessionTokenKey(attributionToken))
+        await persistAiAttributions()
+        const current = aiDelegations.get(delegation.id)
+        const updated = await updateAiDelegation(delegation.id, rejectedAiDelegationRecoveryPatch(current,
+          current.pendingRecovery, dispatch))
+        return sendJson(response, 409, {
+          error: '대상 대화가 사용 중이어서 복구 실행을 시작하지 않았습니다. 기존 작업과 작업공간을 보존했습니다.',
+          code: 'AI_DELEGATION_RECOVERY_CONVERSATION_BUSY', delegation: delegationPublicView(updated), executionRequested: false,
         })
       }
 
@@ -8503,9 +9949,11 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
             : dispatch.state === 'waiting_resume' ? 'waiting-child-resume' : 'starting')
       const updated = await updateAiDelegation(delegation.id, {
         state: nextState,
+        ...(resultCorrection ? { resultCorrection: { ...delegation.resultCorrection, phase: 'dispatched' } } : {}),
         pendingRecovery: null,
         recoveryWorkspaceLease: null,
         recoveryDispatchError: null,
+        recoveryDispatchRejection: null,
         childOperationId: integrationRecovery ? delegation.childOperationId : operationId,
         integrationOperationId: integrationRecovery ? operationId : delegation.integrationOperationId,
         recoveryAttempt,
@@ -8515,14 +9963,15 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         recoveryRequestedAt: now,
         recoveryRequiredAt: null,
         recoverySourceState: delegation.state,
-        recoveryFailureCategory: retryableParentWakeFailure
+        recoveryFailureCategory: retryableChildRecovery
           ? recoveryAvailability.failureCategory
           : delegation.recoveryFailureCategory,
         childError: integrationRecovery ? delegation.childError : null,
+        ...(resultCorrection ? { childStatus: null, workspaceResult: null, workspaceError: null, childCompletedAt: null } : {}),
         integrationError: integrationRecovery ? null : delegation.integrationError,
         childTurnId: integrationRecovery ? delegation.childTurnId : (dispatch.turnId ?? null),
         integrationTurnId: integrationRecovery ? (dispatch.turnId ?? null) : delegation.integrationTurnId,
-        ...(retryableParentWakeFailure ? {
+        ...(retryableChildRecovery ? {
           childStatus: null,
           parentError: null,
           parentDispatchState: null,
@@ -8597,6 +10046,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       const targetMapId = String(body.targetMapId ?? '').trim()
       const strategy = String(body.strategy ?? '').trim()
       const requestedConversationId = String(body.conversationId ?? '').trim()
+      const conversationAssessmentId = String(body.conversationAssessmentId ?? '').trim()
       const instructionType = String(body.instructionType ?? '').trim()
       const approvalScope = String(body.approvalScope ?? '').trim()
       const approvalEvidence = String(body.approvalEvidence ?? '').trim()
@@ -8605,10 +10055,12 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       const sourceRevision = Number(body.sourceRevision)
       const targetRevision = Number(body.targetRevision)
       const groupProjectVersion = Number(body.groupProjectVersion)
+      const requestedReplyTarget = normalizeGroupDocumentReplyTarget(body.replyTarget)
       if (!isValidGroupDocumentInstructionId(id)
         || !isValidMapId(targetMapId) || targetMapId === parentMapId
         || !['resume', 'new'].includes(strategy)
         || (strategy === 'resume' && !validAiConversationId(requestedConversationId))
+        || (conversationAssessmentId && !/^[a-f0-9]{64}$/.test(conversationAssessmentId))
         || !GROUP_DOCUMENT_INSTRUCTION_TYPES.includes(instructionType)
         || !GROUP_DOCUMENT_INSTRUCTION_SCOPES.includes(approvalScope)
         || !approvalEvidence || approvalEvidence.length > 10_000
@@ -8616,7 +10068,8 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         || !decisionReason || decisionReason.length > 1_000
         || !Number.isInteger(sourceRevision) || sourceRevision < 1
         || !Number.isInteger(targetRevision) || targetRevision < 1
-        || !Number.isInteger(groupProjectVersion) || groupProjectVersion < 1) {
+        || !Number.isInteger(groupProjectVersion) || groupProjectVersion < 1
+        || !requestedReplyTarget) {
         return sendGroupDocumentInstructionResponse(
           response, 400, 'GROUP_DOCUMENT_INSTRUCTION_REQUEST_INVALID', '그룹 문서 지시 값이 올바르지 않습니다.',
         )
@@ -8629,7 +10082,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           '승인 근거 전문이 실행 지시에 중복되어 있습니다. approvalEvidence에는 승인 발언·출처·승인 범위만, instruction에는 실행 계획·제외 범위·완료 및 회신 조건만 작성해 다시 요청하세요.',
         )
       }
-      return groupProjects.exclusive(async () => {
+      return await groupProjects.exclusive(async () => {
         const [parentMap, targetMap] = await Promise.all([readMap(parentMapId), readMap(targetMapId)])
         const parentCard = parentMap?.nodes.find((node) => node.id === source.cardId)
         const targetCard = documentRoot(targetMap)
@@ -8658,6 +10111,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           approvalEvidence,
           instruction: instructionText,
           decisionReason,
+          replyTarget: requestedReplyTarget,
           newConversation: body.newConversation,
         })
         const existing = groupDocumentInstructions.get(id)
@@ -8722,6 +10176,24 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           )
           try {
             const conversation = await fetchAiConversationRuntime(requestedConversationId)
+            const contextHealth = await inspectAiConversationContextHealth(requestedConversationId, conversation, targetHomeMachineId, {}, linked.model?.id)
+            if (!conversationAssessmentId) return sendGroupDocumentInstructionResponse(
+              response, 409, 'GROUP_DOCUMENT_INSTRUCTION_CONVERSATION_ASSESSMENT_REQUIRED',
+              '기존 문서 AI 대화 이어가기는 최신 문맥 상태 평가가 필요합니다. 대상 루트 카드의 대화 후보를 다시 조회하세요.',
+              { contextHealth },
+            )
+            if (conversationAssessmentId !== contextHealth.assessmentId) return sendGroupDocumentInstructionResponse(
+              response, 409, 'GROUP_DOCUMENT_INSTRUCTION_CONVERSATION_ASSESSMENT_STALE',
+              '대상 문서 AI 대화가 후보 조회 이후 변경되었습니다. 최신 문맥 상태를 다시 확인하세요.',
+              { contextHealth },
+            )
+            if (!contextHealth.resumeAllowed) return sendGroupDocumentInstructionResponse(
+              response, 409, contextHealth.reasonCodes.includes('CONVERSATION_MODEL_REUSE_BLOCKED')
+                ? 'GROUP_DOCUMENT_INSTRUCTION_CONVERSATION_MODEL_BLOCKED'
+                : 'GROUP_DOCUMENT_INSTRUCTION_CONVERSATION_CONTEXT_UNAVAILABLE',
+              contextHealth.message,
+              { contextHealth },
+            )
             const recovered = aiConversationLinkFromAionUiConversation(conversation)
             selection = aiDelegationSelectionFromSource({
               ...recovered,
@@ -8734,7 +10206,8 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
               skills: linked.skills?.length ? linked.skills : recovered?.skills,
               workspace: recovered?.workspace ?? linked.workspace,
             })
-          } catch {
+          } catch (shutdownError) {
+            throwIfRuntimeStopping(shutdownError, runtimeLifecycle.signal)
             return sendGroupDocumentInstructionResponse(
               response, 503, 'GROUP_DOCUMENT_INSTRUCTION_CONVERSATION_UNAVAILABLE',
               '이어갈 대상 문서 AI 대화의 실행 환경을 확인하지 못했습니다.',
@@ -8753,8 +10226,19 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           response, 409, 'GROUP_DOCUMENT_INSTRUCTION_SELECTION_UNRESOLVED',
           '대상 문서 루트 AI의 종류와 모델 정보를 확인하지 못했습니다.',
         )
+        if (strategy === 'new' && isAiDelegationModelBlocked(selection.model.id)) return sendGroupDocumentInstructionResponse(
+          response, 409, 'GROUP_DOCUMENT_INSTRUCTION_MODEL_BLOCKED',
+          `${blockedAiModelLabels()} 모델로 새 위임 대화를 만들지 않습니다. 사용 가능한 다른 모델을 newConversation에 명시하세요.`,
+        )
 
         const now = new Date().toISOString()
+        const replyTarget = {
+          mode: requestedReplyTarget.mode,
+          defaultConversationId: parentAttribution.conversationId,
+          explicitConversationId: requestedReplyTarget.conversationId,
+          effectiveConversationId: requestedReplyTarget.conversationId ?? parentAttribution.conversationId,
+          evidence: requestedReplyTarget.evidence,
+        }
         const storedInstruction = {
           id,
           requestSignature,
@@ -8772,6 +10256,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           sourceRevision,
           targetHomeMachineId,
           requestedConversationId: strategy === 'resume' ? requestedConversationId : null,
+          conversationAssessmentId: strategy === 'resume' ? conversationAssessmentId : null,
           strategy,
           instructionType,
           approvalScope,
@@ -8780,6 +10265,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           approvalEvidencePreview: approvalEvidence.replace(/\s+/g, ' ').slice(0, 240),
           approvalEvidenceHash: createHash('sha256').update(approvalEvidence).digest('hex'),
           decisionReason,
+          replyTarget,
           state: 'queued',
           reasonCode: 'GROUP_DOCUMENT_INSTRUCTION_QUEUED',
           message: '그룹 문서 지시 전문을 내구 대기열에 저장했으며 대상 문서 루트 AI에 전달을 시도합니다.',
@@ -8812,13 +10298,23 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       if (!isValidMapId(mapId)) return sendJson(response, 400, { error: '문서 ID가 올바르지 않습니다.' })
       const parentCardId = String(url.searchParams.get('parentCardId') ?? '').trim()
       const targetCardId = String(url.searchParams.get('targetCardId') ?? '').trim()
-      const delegations = [...aiDelegations.values()]
+      const listed = [...aiDelegations.values()]
         .filter((delegation) => (delegation.mapId === mapId || delegation.parentMapId === mapId)
           && (!parentCardId || delegation.parentCardId === parentCardId)
           && (!targetCardId || delegation.targetCardId === targetCardId))
         .sort((first, second) => String(second.createdAt).localeCompare(String(first.createdAt)))
-        .map((delegation) => delegationPublicView(delegation, url.searchParams.get('includeResult') === 'true'))
-      return sendJson(response, 200, { mapId, delegations })
+      const maps = new Map(await Promise.all([...new Set(listed.map(item => item.mapId))]
+        .map(async id => [id, await readMap(id)])))
+      const delegations = listed.map(item => withDelegationTaskCompletion(
+        delegationPublicView(item, url.searchParams.get('includeResult') === 'true', {
+          includeFullResult: url.searchParams.get('includeFullResult') === 'true',
+        }), maps.get(item.mapId)))
+      const requestFailures = aiDelegationRequestFailures.list({ mapId, parentCardId, targetCardId, delegations: aiDelegations }).map(item => {
+        const targetCardLabel = maps.get(item.mapId)?.nodes.find(node => node.id === item.targetCardId)?.data?.label ?? item.targetCardLabel
+        return { ...item, targetCardLabel, retryVerification: { ...item.retryVerification,
+          replacement: item.retryVerification.replacement ? { ...item.retryVerification.replacement, targetCardLabel } : null } }
+      })
+      return sendJson(response, 200, { mapId, delegations, requestFailures })
     }
 
     if (aiDelegationsRoute && request.method === 'POST') {
@@ -8863,15 +10359,19 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       const targetCardId = String(body.targetCardId ?? '').trim()
       const strategy = String(body.strategy ?? '').trim()
       const conversationId = String(body.conversationId ?? '').trim()
+      const conversationAssessmentId = String(body.conversationAssessmentId ?? '').trim()
       const instruction = String(body.instruction ?? '').trim()
       const decisionReason = String(body.decisionReason ?? '').trim()
+      const taskSummary = body.taskSummary === undefined ? '' : body.taskSummary
       const sourceRevision = Number(body.sourceRevision)
       const role = typeof body.role === 'string' ? body.role.trim().slice(0, 200) : ''
       if (!isValidAiDelegationId(id)
         || !targetCardId || targetCardId.length > 120
         || !['resume', 'new'].includes(strategy)
+        || (conversationAssessmentId && !/^[a-f0-9]{64}$/.test(conversationAssessmentId))
         || !instruction || instruction.length > 100_000
         || !decisionReason || decisionReason.length > 1_000
+        || typeof taskSummary !== 'string' || taskSummary.length > 240
         || !Number.isInteger(sourceRevision) || sourceRevision < 1) {
         return sendAiDelegationResponse(
           response, 400, 'AI_DELEGATION_REQUEST_INVALID', 'AI 작업 위임 값이 올바르지 않습니다.',
@@ -8879,6 +10379,10 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       }
 
       const parentHomeMachineId = conversationHomeMachineId(source.conversationId, source)
+      const requestContext = { requestId: `request-${randomUUID()}`, delegationId: id, mapId, parentMapId,
+        parentCardId: source.cardId, parentConversationId: source.conversationId,
+        targetCardId, parentHomeMachineId, strategy, instruction, taskSummary, requestedConversationId: conversationId, dispatchStarted: false }
+      aiDelegationRequestContexts.set(response, requestContext)
       let targetHomeMachineId
       try {
         if (strategy === 'resume') {
@@ -8905,6 +10409,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         )
         throw error
       }
+      requestContext.targetHomeMachineId = targetHomeMachineId
       if (!await aionCoreSupportsExplicitCompletionAfterInterruption(targetHomeMachineId)) {
         const message = `${machineLabel(targetHomeMachineId)}의 AionCore가 중단 후 명시적 완료 신호를 지원하지 않습니다. AionCore를 최신 빌드로 재기동해 주세요.`
         return sendAiDelegationResponse(response, 503, 'AIONCORE_EXPLICIT_COMPLETION_UNAVAILABLE', message, {
@@ -8927,6 +10432,27 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         role,
       })
       const existingDelegation = aiDelegations.get(id)
+      const completedReceipt = aiRequestReceipts.get(id)
+      if (!existingDelegation && completedReceipt) {
+        if (completedReceipt.requestSignature !== requestSignature) return sendAiDelegationResponse(response, 409,
+          'AI_DELEGATION_IDEMPOTENCY_CONFLICT', '완료된 요청 ID를 다른 위임에 사용할 수 없습니다.')
+        return sendAiDelegationResponse(response, 200, 'AI_DELEGATION_REPEATED',
+          '이미 완료된 위임입니다. 유예기간이 지난 상세 이력은 삭제됐으며 작업을 다시 실행하지 않았습니다.', {
+            delegation: { id, mapId: completedReceipt.mapId, state: 'completed', displayState: 'completed',
+              workCompleted: true, reportStatus: 'received', reportPending: false, historyDeleted: true },
+            repeated: true, executionRequested: false,
+          })
+      }
+      requestContext.requestSignature = requestSignature
+      try {
+        requestContext.retryOfRequestId = aiDelegationRequestFailures.validateRetry(requestContext, body.retryOfRequestId, aiDelegations)
+      } catch (error) {
+        if (error.reasonCode === 'AI_DELEGATION_RETRY_ALREADY_ACCEPTED' && aiDelegations.has(error.delegationId)) {
+          return sendAiDelegationResponse(response, 200, 'AI_DELEGATION_REPEATED', error.message,
+            { delegation: delegationPublicView(aiDelegations.get(error.delegationId)), repeated: true })
+        }
+        return sendAiDelegationResponse(response, error.status, error.reasonCode, error.message)
+      }
       if (existingDelegation) {
         if (existingDelegation.requestSignature !== requestSignature) {
           return sendAiDelegationResponse(response, 409, 'AI_DELEGATION_IDEMPOTENCY_CONFLICT',
@@ -8947,6 +10473,8 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           '상위 카드 또는 위임 대상 카드를 찾을 수 없습니다.')
       }
       const parentAttribution = delegationParentAttribution(request, source, parentCard, user)
+      requestContext.parentCardLabel = parentCard.data?.label ?? parentCard.id
+      requestContext.targetCardLabel = targetCard.data?.label ?? targetCard.id
       if (!parentAttribution?.conversationId
         || (source.conversationId && !isAiConversationLinked(parentCard.data, source.conversationId))) {
         return sendAiDelegationResponse(response, 409, 'AI_DELEGATION_ORIGIN_LINK_MISSING',
@@ -8982,7 +10510,8 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           if (linkedToTarget && (strategy === 'new' || recoveredConversationId === conversationId)) {
             recoveredDispatch = candidate
           }
-        } catch {
+        } catch (shutdownError) {
+          throwIfRuntimeStopping(shutdownError, runtimeLifecycle.signal)
           // AionCore에도 실행 기록이 없으면 일반적인 문서 버전 충돌로 처리합니다.
         }
         if (recoveredDispatch) {
@@ -9008,6 +10537,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           const delegation = {
             id,
             requestSignature,
+            ...(requestContext.retryOfRequestId ? { retryOfRequestId: requestContext.retryOfRequestId } : {}),
             mapId,
             ...groupScope,
             parentCardId: parentCard.id,
@@ -9068,6 +10598,12 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           return sendAiDelegationResponse(response, 400, 'AI_DELEGATION_RESUME_CONVERSATION_INVALID',
             '이어갈 대화는 대상 카드에 연결된 conversationId여야 합니다.')
         }
+        const resumesInterruptedDelegation = activeAiDelegationsForConversation(aiDelegations.values(), {
+          mapId,
+          targetCardId: targetCard.id,
+          targetConversationId,
+          excludeId: id,
+        }).some((delegation) => delegation.state === 'waiting-child-resume')
         const linked = aiConversationLinksFromData(targetCard.data)
           .find((candidate) => candidate.conversationId === targetConversationId)
         try {
@@ -9076,6 +10612,29 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           if (runtime.state !== 'idle') {
             return sendAiDelegationResponse(response, 409, 'AI_DELEGATION_CONVERSATION_BUSY',
               `대화가 ${runtime.state} 상태이므로 지금 이어갈 수 없습니다.`, { runtime })
+          }
+          if (!resumesInterruptedDelegation) {
+            const contextHealth = await inspectAiConversationContextHealth(targetConversationId, conversation, targetHomeMachineId, {}, linked?.model?.id)
+            if (!conversationAssessmentId) {
+              return sendAiDelegationResponse(response, 409, 'AI_DELEGATION_CONVERSATION_ASSESSMENT_REQUIRED',
+                '일반적인 기존 대화 이어가기는 최신 문맥 상태 평가가 필요합니다. 대화 후보를 다시 조회해 assessmentId를 전달하세요.', {
+                contextHealth,
+              })
+            }
+            if (conversationAssessmentId !== contextHealth.assessmentId) {
+              return sendAiDelegationResponse(response, 409, 'AI_DELEGATION_CONVERSATION_ASSESSMENT_STALE',
+                '대화 내용이나 문맥 상태가 후보 조회 이후 변경되었습니다. 최신 후보 평가를 다시 확인하세요.', {
+                contextHealth,
+              })
+            }
+            if (!contextHealth.resumeAllowed) {
+              const reasonCode = contextHealth.reasonCodes.includes('CONVERSATION_MODEL_REUSE_BLOCKED')
+                ? 'AI_DELEGATION_CONVERSATION_MODEL_BLOCKED'
+                : contextHealth.state === 'saturated'
+                  ? 'AI_DELEGATION_CONVERSATION_CONTEXT_SATURATED'
+                  : 'AI_DELEGATION_CONVERSATION_CONTEXT_UNKNOWN'
+              return sendAiDelegationResponse(response, 409, reasonCode, contextHealth.message, { contextHealth })
+            }
           }
           const recovered = aiConversationLinkFromAionUiConversation(conversation)
           selection = aiDelegationSelectionFromSource({
@@ -9089,7 +10648,8 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
             mcpServers: linked?.mcpServers?.length ? linked.mcpServers : recovered?.mcpServers,
             workspace: recovered?.workspace ?? linked?.workspace,
           })
-        } catch {
+        } catch (shutdownError) {
+          throwIfRuntimeStopping(shutdownError, runtimeLifecycle.signal)
           return sendAiDelegationResponse(response, 503, 'AI_DELEGATION_CONVERSATION_RUNTIME_UNAVAILABLE',
             '이어갈 AionUi 대화 상태를 확인하지 못했습니다.')
         }
@@ -9102,6 +10662,10 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       }
       if (!selection) return sendAiDelegationResponse(response, 409, 'AI_DELEGATION_SELECTION_UNRESOLVED',
         '위임 대화의 AI 종류와 모델 정보를 확인하지 못했습니다.')
+      if (strategy === 'new' && isAiDelegationModelBlocked(selection.model.id)) return sendAiDelegationResponse(
+        response, 409, 'AI_DELEGATION_MODEL_BLOCKED',
+        `${blockedAiModelLabels()} 모델로 새 위임 대화를 만들지 않습니다. 사용 가능한 다른 모델을 newConversation에 명시하세요.`,
+      )
 
       let resumedDelegation = null
       if (crossDocument && strategy === 'new') {
@@ -9129,7 +10693,8 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
             const parentConversation = await fetchAiConversationRuntime(parentAttribution.conversationId)
             const parentRuntime = normalizeAiConversationRuntime(parentAttribution.conversationId, parentConversation)
             if (parentRuntime.state === 'running') parentTurnId = parentRuntime.turnId
-          } catch {
+          } catch (shutdownError) {
+            throwIfRuntimeStopping(shutdownError, runtimeLifecycle.signal)
             // 상위 대화의 현재 turn을 확증하지 못하면 기존 위임을 그대로 활성 상태로 취급합니다.
           }
         }
@@ -9160,6 +10725,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         targetCard,
         parentAttribution,
         requested: body.newConversation,
+        machineId: targetHomeMachineId,
       })
       if (!workspacePoolResolution.known && !resumedDelegation?.workspaceLease?.leaseId) {
         return sendAiDelegationResponse(response, 503, 'AI_DELEGATION_WORKSPACE_SCOPE_UNKNOWN',
@@ -9173,11 +10739,13 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       const expectsWorkspacePool = !crossDocument && Boolean(workspacePoolResolution.expectsWorkspacePool
         || resumedDelegation?.workspaceLease?.leaseId)
       if (expectsWorkspacePool && targetHomeMachineId !== machineRegistry.mainMachineId) {
-        return sendAiDelegationResponse(response, 409, 'AI_WORKSPACE_REMOTE_ROUTING_NOT_SUPPORTED',
-          '등록된 Unity 작업공간 풀 위임의 서브 머신 라우팅은 Tier 2에서 지원합니다. 이번 위임은 메인 머신을 선택해 주세요.', {
-          code: 'AI_WORKSPACE_REMOTE_ROUTING_NOT_SUPPORTED',
-          targetHomeMachineId,
-        })
+        try {
+          remoteWorkspacePool.pool(targetHomeMachineId)
+          const capabilities = await fetchAionCoreDispatchCapabilities(targetHomeMachineId)
+          if (!(capabilities?.workspaceLeaseVersion >= 3) || capabilities?.remoteWorkspaceOwnership !== true) throw Object.assign(new Error('AionCore 원격 작업공간 소유권 지원이 필요합니다.'), { reasonCode: 'AIONCORE_REMOTE_WORKSPACE_UNAVAILABLE' })
+        } catch (error) {
+          return sendAiDelegationResponse(response, error.status ?? 409, error.reasonCode ?? 'REMOTE_WORKSPACE_UNAVAILABLE', error.message, { targetHomeMachineId })
+        }
       }
       if (expectsWorkspacePool) {
         const now = new Date().toISOString()
@@ -9188,7 +10756,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           console.warn('[AI delegation integration workspace preflight]', error)
         }
         const waitingForIntegrationClean = integrationChanges.dirty === true
-        const workspacePoolSnapshot = workspacePoolManager.publicSnapshot()
+        const workspacePoolSnapshot = workspacePoolManager.publicSnapshot({ machineId: targetHomeMachineId })
         const workerCounts = workspacePoolSnapshot.workspaces
           .filter((workspace) => workspace.role === 'worker')
           .reduce((counts, workspace) => {
@@ -9207,6 +10775,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         const waitingDelegation = {
           id,
           requestSignature,
+          ...(requestContext.retryOfRequestId ? { retryOfRequestId: requestContext.retryOfRequestId } : {}),
           mapId,
           parentCardId: parentCard.id,
           parentCardLabel: parentCard.data?.label ?? parentCard.id,
@@ -9218,6 +10787,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           targetHomeMachineId,
           childOperationId: id,
           strategy,
+          conversationAssessmentId: strategy === 'resume' ? conversationAssessmentId : null,
           decisionReason,
           sourceRevision,
           instructionPreview: instruction.replace(/\s+/g, ' ').slice(0, 240),
@@ -9269,13 +10839,15 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         })
       }
       try {
-        workspaceLease = crossDocument ? null : resumedDelegation?.workspaceLease?.leaseId
+        workspaceLease = crossDocument || !expectsWorkspacePool ? null : resumedDelegation?.workspaceLease?.leaseId
           ? await workspacePoolManager.reuseLease(resumedDelegation.workspaceLease.leaseId, {
               mapId,
               cardId: targetCard.id,
               conversationId: targetConversationId,
             })
           : await workspacePoolManager.acquire({
+              machineId: targetHomeMachineId,
+              requestId: id,
               workspaceHint: workspacePoolHint ?? selection.workspace,
               mapId,
               cardId: targetCard.id,
@@ -9298,6 +10870,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
             const waitingDelegation = {
               id,
               requestSignature,
+              ...(requestContext.retryOfRequestId ? { retryOfRequestId: requestContext.retryOfRequestId } : {}),
               mapId,
               parentCardId: parentCard.id,
               parentCardLabel: parentCard.data?.label ?? parentCard.id,
@@ -9309,6 +10882,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
               targetHomeMachineId,
               childOperationId: id,
               strategy,
+              conversationAssessmentId: strategy === 'resume' ? conversationAssessmentId : null,
               decisionReason,
               sourceRevision,
               instructionPreview: instruction.replace(/\s+/g, ' ').slice(0, 240),
@@ -9375,13 +10949,15 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         targetCard,
         selection,
         role,
+        sourceConversation: await resolveAiConversationSource(parentAttribution.conversationId, parentHomeMachineId, targetHomeMachineId),
       })
 
       const delegatedConversationTitle = strategy === 'new'
-        ? formatAiConversationTitle(map.title, targetCard.data?.label ?? targetCard.id)
+        ? await formatAiCardConversationTitle(map, targetCard)
         : null
       let dispatch
       try {
+        requestContext.dispatchStarted = true
         dispatch = await fetchAionUiOn(targetHomeMachineId, '/api/internal/external-conversation-dispatches', {
           method: 'POST',
           timeoutMs: 30_000,
@@ -9402,24 +10978,20 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
                 disabledBuiltinSkillIds: selection.disabledBuiltinSkillIds,
                 mcpIds: selection.mcpIds,
                 workspace: selection.workspace,
+                ...(claudeAccountRequestId(selection.claudeAccountId) ? { claudeAccountId: claudeAccountRequestId(selection.claudeAccountId) } : {}),
               },
             }),
             instruction: delegatedInstruction,
           },
         })
       } catch (error) {
-        for (let attempt = 0; attempt < 10 && !dispatch; attempt += 1) {
-          if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 500))
-          try {
-            dispatch = await fetchAionUiOn(targetHomeMachineId, `/api/internal/external-conversation-dispatches/${encodeURIComponent(id)}`)
-          } catch {
-            // The POST may have reached AionCore even if its response was lost.
-          }
-        }
+        throwIfRuntimeStopping(error, runtimeLifecycle.signal)
+        dispatch = await retryDispatchStatus(() => fetchAionUiOn(targetHomeMachineId, `/api/internal/external-conversation-dispatches/${encodeURIComponent(id)}`), runtimeLifecycle.signal)
         if (!dispatch) {
           aiAttributions.delete(sessionTokenKey(attributionToken))
           const definitelyRejected = Number.isInteger(error?.status)
             && error.status >= 400 && error.status < 500 && error.status !== 409 && error.status !== 429
+          requestContext.definitelyRejected = definitelyRejected
           await restoreAiDelegationResumeReservation(resumedDelegation, error)
           await Promise.all([
             persistAiAttributions(),
@@ -9484,6 +11056,8 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         cardId: targetCard.id,
         startedBy: attribution.startedBy,
         linkedAt: new Date().toISOString(),
+        workspace: selection.workspace,
+        workspacePoolId: workspaceLease?.poolId ?? null,
         homeMachineId: targetHomeMachineId,
       })
       aiConversationAttributions.set(conversationAttributionKey(mapId, targetCard.id), {
@@ -9522,6 +11096,8 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
             skills: selection.enabledSkillIds.map((skillId) => ({ id: skillId, label: skillId })),
             mcpServers: selection.mcpIds.map((mcpId) => ({ id: mcpId, label: mcpId })),
             workspace: selection.workspace,
+            claudeAccountId: selection.claudeAccountId,
+            workspacePoolId: workspaceLease?.poolId ?? null,
             requestPreview: instruction,
             startedBy: { id: attribution.startedBy, label: users.find((candidate) => candidate.id === attribution.startedBy)?.name ?? attribution.startedBy },
             startedAt: new Date().toISOString(),
@@ -9555,6 +11131,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       const delegation = {
         id,
         requestSignature,
+        ...(requestContext.retryOfRequestId ? { retryOfRequestId: requestContext.retryOfRequestId } : {}),
         mapId,
         ...groupScope,
         parentCardId: parentCard.id,
@@ -9567,6 +11144,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         targetHomeMachineId,
         childOperationId: id,
         strategy,
+        conversationAssessmentId: strategy === 'resume' ? conversationAssessmentId : null,
         decisionReason,
         sourceRevision,
         instructionPreview: instruction.replace(/\s+/g, ' ').slice(0, 240),
@@ -9607,7 +11185,15 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         repeated: false,
       })
       }
-      return await (crossDocument ? groupProjects.exclusive(runDelegation) : runDelegation())
+      try {
+        return await (crossDocument ? groupProjects.exclusive(runDelegation) : runDelegation())
+      } catch (error) {
+        throwIfRuntimeStopping(error, runtimeLifecycle.signal)
+        const expected = Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599
+        return sendAiDelegationResponse(response, expected ? error.status : 500,
+          error.reasonCode ?? error.code ?? 'AI_DELEGATION_REQUEST_FAILED',
+          expected ? error.message : 'AI 위임 요청 처리 중 서버 오류가 발생했습니다.')
+      }
     }
 
     const cardAiConversationOpenRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/cards\/([^/]+)\/ai-conversations\/([^/]+)\/open-url$/)
@@ -9717,8 +11303,11 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       const map = await readMap(mapId)
       const card = map?.nodes.find((node) => node.id === cardId)
       if (!map || map.trashedAt || !card) return sendJson(response, 404, { error: '카드를 찾을 수 없습니다.' })
+      // 대화 선택 화면은 연결 기록을 먼저 보여준다. 원격 머신 조회는 별도 요청에서 수행한다.
+      const linkedOnly = url.searchParams.get('view') === 'linked'
       const currentAttribution = aiConversationAttributions.get(conversationAttributionKey(mapId, cardId))
-      const links = aiConversationLinksFromData(card.data).map((link) => {
+      const cardLinks = aiConversationLinksFromData(card.data)
+      const links = cardLinks.map((link) => {
         const homeMachineId = conversationHomeMachineId(link.conversationId, link)
         if (link.conversationId !== currentAttribution?.conversationId) {
           return normalizeAiConversationLink({ ...link, homeMachineId })
@@ -9745,55 +11334,110 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       }).filter(Boolean)
       const observedAt = new Date().toISOString()
       const conversations = await Promise.all(links.map(async (link) => {
-        if (!machineAccessibleByUser(user, link.homeMachineId)) {
+        const origin = aiConversationOrigins.get(link.conversationId)
+        const recordedWorkspace = origin?.workspace ?? link.workspace
+        const recordedWorkspacePool = workspacePoolManager.poolForWorkspace(recordedWorkspace)
+        const recordedWorkspacePoolId = recordedWorkspacePool?.poolId
+          ?? origin?.workspacePoolId
+          ?? link.workspacePoolId
+          ?? null
+        const recordedLink = normalizeAiConversationLink({
+          ...link,
+          workspace: recordedWorkspace,
+          workspacePoolId: recordedWorkspacePoolId,
+        }) ?? link
+        const workspaceBinding = recordedWorkspacePool ? 'pool-rebindable' : 'fixed'
+        const accessible = machineAccessibleByUser(user, recordedLink.homeMachineId)
+        const homeMachine = findMachine(machineRegistry, recordedLink.homeMachineId)
+        const machineOnline = recordedLink.homeMachineId === machineRegistry.mainMachineId
+          || Boolean(homeMachine?.lastSeenAt
+            && Date.now() - Date.parse(homeMachine.lastSeenAt) <= runnerOnlineWithinMs)
+        // Runner가 끊긴 머신은 상세 조회 요청을 큐에 넣어 목록 전체를 지연시키지 않는다.
+        if (linkedOnly || !accessible || !machineOnline) {
           return {
-            ...link,
-            homeMachineLabel: machineLabel(link.homeMachineId),
-            homeMachineRole: link.homeMachineId === machineRegistry.mainMachineId ? 'main' : 'sub',
-            accessible: false,
+            ...recordedLink,
+            workspaceBinding,
+            homeMachineLabel: machineLabel(recordedLink.homeMachineId),
+            homeMachineRole: recordedLink.homeMachineId === machineRegistry.mainMachineId ? 'main' : 'sub',
+            accessible,
+            machineOnline,
+            liveStatusChecked: false,
+            linkMissing: false,
             available: false,
             name: '',
             modifiedAt: null,
-            runtime: normalizeAiConversationRuntime(link.conversationId, null, observedAt),
+            runtime: normalizeAiConversationRuntime(recordedLink.conversationId, null, observedAt),
+            contextHealth: assessAiConversationContextHealth({
+              conversationId: recordedLink.conversationId,
+              runtimeState: 'unknown',
+              conversationTurnCount: null,
+              conversationTurnCountExact: false,
+              ...aiConversationDelegationContextStats(recordedLink.conversationId),
+            }, observedAt),
           }
         }
         try {
-          const conversation = await fetchAiConversationRuntime(link.conversationId)
-          if (!conversation || String(conversation.id) !== link.conversationId) throw new Error('AIONUI_CONVERSATION_NOT_FOUND')
+          const conversation = await fetchAiConversationRuntime(recordedLink.conversationId)
+          if (!conversation || String(conversation.id) !== recordedLink.conversationId) throw new Error('AIONUI_CONVERSATION_NOT_FOUND')
           const recoveredLink = aiConversationLinkFromAionUiConversation(conversation)
+          const currentWorkspace = recoveredLink?.workspace ?? recordedWorkspace
+          const currentWorkspacePool = workspacePoolManager.poolForWorkspace(currentWorkspace)
+          const currentWorkspacePoolId = currentWorkspacePool?.poolId
+            ?? recordedWorkspacePoolId
           const enrichedLink = normalizeAiConversationLink({
-            ...link,
-            agent: link.agent ?? recoveredLink?.agent,
-            model: link.model ?? recoveredLink?.model,
-            providerId: link.providerId ?? recoveredLink?.providerId,
-            mode: link.mode ?? recoveredLink?.mode,
-            thoughtLevel: link.thoughtLevel ?? recoveredLink?.thoughtLevel,
-            skills: link.skills.length > 0 ? link.skills : recoveredLink?.skills,
-            mcpServers: link.mcpServers.length > 0 ? link.mcpServers : recoveredLink?.mcpServers,
-            workspace: link.workspace ?? recoveredLink?.workspace,
-            startedAt: link.startedAt ?? recoveredLink?.startedAt,
-          }) ?? link
+            ...recordedLink,
+            agent: recordedLink.agent ?? recoveredLink?.agent,
+            model: recordedLink.model ?? recoveredLink?.model,
+            providerId: recordedLink.providerId ?? recoveredLink?.providerId,
+            mode: recordedLink.mode ?? recoveredLink?.mode,
+            thoughtLevel: recordedLink.thoughtLevel ?? recoveredLink?.thoughtLevel,
+            skills: recordedLink.skills.length > 0 ? recordedLink.skills : recoveredLink?.skills,
+            mcpServers: recordedLink.mcpServers.length > 0 ? recordedLink.mcpServers : recoveredLink?.mcpServers,
+            workspace: currentWorkspace,
+            workspacePoolId: currentWorkspacePoolId,
+            claudeAccountId: recordedLink.claudeAccountId ?? recoveredLink?.claudeAccountId,
+            startedAt: recordedLink.startedAt ?? recoveredLink?.startedAt,
+          }) ?? recordedLink
+          const linkedModelId = cardLinks.find((link) => link.conversationId === recordedLink.conversationId)?.model?.id
+          const contextHealth = await inspectAiConversationContextHealth(recordedLink.conversationId, conversation, enrichedLink.homeMachineId, {}, linkedModelId)
           return {
             ...enrichedLink,
+            workspaceBinding: currentWorkspacePool ? 'pool-rebindable' : 'fixed',
             homeMachineLabel: machineLabel(enrichedLink.homeMachineId),
             homeMachineRole: enrichedLink.homeMachineId === machineRegistry.mainMachineId ? 'main' : 'sub',
             accessible: true,
+            machineOnline: true,
+            liveStatusChecked: true,
+            linkMissing: false,
             available: true,
             name: String(conversation.name ?? ''),
             startedAt: enrichedLink.startedAt ?? normalizedIsoDate(conversation.created_at),
             modifiedAt: normalizedIsoDate(conversation.modified_at, enrichedLink.linkedAt ?? null),
-            runtime: normalizeAiConversationRuntime(link.conversationId, conversation, observedAt),
+            runtime: normalizeAiConversationRuntime(recordedLink.conversationId, conversation, observedAt),
+            contextHealth,
           }
-        } catch {
+        } catch (shutdownError) {
+          throwIfRuntimeStopping(shutdownError, runtimeLifecycle.signal)
           return {
-            ...link,
-            homeMachineLabel: machineLabel(link.homeMachineId),
-            homeMachineRole: link.homeMachineId === machineRegistry.mainMachineId ? 'main' : 'sub',
+            ...recordedLink,
+            workspaceBinding,
+            homeMachineLabel: machineLabel(recordedLink.homeMachineId),
+            homeMachineRole: recordedLink.homeMachineId === machineRegistry.mainMachineId ? 'main' : 'sub',
             accessible: true,
+            machineOnline,
+            liveStatusChecked: true,
+            linkMissing: shutdownError?.status === 404 || shutdownError?.message === 'AIONUI_CONVERSATION_NOT_FOUND',
             available: false,
             name: '',
             modifiedAt: null,
-            runtime: normalizeAiConversationRuntime(link.conversationId, null, observedAt),
+            runtime: normalizeAiConversationRuntime(recordedLink.conversationId, null, observedAt),
+            contextHealth: assessAiConversationContextHealth({
+              conversationId: recordedLink.conversationId,
+              runtimeState: 'unknown',
+              conversationTurnCount: null,
+              conversationTurnCountExact: false,
+              ...aiConversationDelegationContextStats(recordedLink.conversationId),
+            }, observedAt),
           }
         }
       }))
@@ -9803,7 +11447,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         mapId,
         cardId,
         latestConversationId: card.data?.aiConversationId ?? null,
-        conversations,
+        conversations: await attachClaudeAccounts(conversations),
       })
     }
 
@@ -9830,10 +11474,17 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       if (!machineAccessibleByUser(user, homeMachineId)) {
         return sendJson(response, 403, { error: '이 대화가 저장된 서브 머신을 사용할 권한이 없습니다.' })
       }
+      const requestedLimit = Number(url.searchParams.get('limit') ?? 50)
+      const before = String(url.searchParams.get('before') ?? '').trim()
+      if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 200 || before.length > 1_000) {
+        return sendJson(response, 400, { error: '대화 전문 페이지의 limit 또는 before 값이 올바르지 않습니다.' })
+      }
       try {
+        const messageQuery = new URLSearchParams({ limit: String(requestedLimit), content_mode: 'full' })
+        if (before) messageQuery.set('before', before)
         const [conversation, messagePage] = await Promise.all([
           fetchAionUiOn(homeMachineId, `/api/conversations/${encodeURIComponent(conversationId)}`),
-          fetchAionUiOn(homeMachineId, `/api/conversations/${encodeURIComponent(conversationId)}/messages?limit=10000&content_mode=full`, { timeoutMs: 30_000 }),
+          fetchAionUiOn(homeMachineId, `/api/conversations/${encodeURIComponent(conversationId)}/messages?${messageQuery}`, { timeoutMs: 30_000 }),
         ])
         if (!conversation || conversation.id !== conversationId) {
           return sendJson(response, 404, { error: 'AionUi 대화를 찾을 수 없습니다.' })
@@ -9856,9 +11507,27 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           messageCount: messages.length,
           exportedMessageCount: exported.exportedMessageCount,
           truncated: messagePage?.has_more_before === true || messagePage?.has_more_after === true,
+          page: {
+            limit: requestedLimit,
+            before: before || null,
+            oldestCursor: messagePage?.oldest_cursor ?? null,
+            newestCursor: messagePage?.newest_cursor ?? null,
+            hasMoreBefore: messagePage?.has_more_before === true,
+            hasMoreAfter: messagePage?.has_more_after === true,
+            nextBefore: messagePage?.has_more_before === true ? messagePage?.oldest_cursor ?? null : null,
+          },
+          coverage: {
+            complete: messagePage?.has_more_before !== true && messagePage?.has_more_after !== true,
+            message: messagePage?.has_more_before === true
+              ? '더 오래된 메시지가 있습니다. page.nextBefore를 before로 전달해 이어서 조회하세요.'
+              : messagePage?.has_more_after === true
+                ? '이 페이지보다 최신 메시지가 있어 현재 응답은 전체 전문이 아닙니다.'
+                : '이 페이지에 대화의 전체 메시지 범위가 포함되었습니다.',
+          },
           transcript: exported.transcript,
         })
       } catch (error) {
+        throwIfRuntimeStopping(error, runtimeLifecycle.signal)
         console.error('[AionUi conversation transcript]', error)
         return sendJson(response, 503, { error: 'AionUi 대화 전체 내용을 가져오지 못했습니다.' })
       }
@@ -9973,6 +11642,51 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       })
     }
 
+    const remotePoolRoute = url.pathname.match(/^\/api\/machines\/([^/]+)\/workspace-pool$/)
+    const remoteRecoveryRoute = url.pathname.match(/^\/api\/machines\/([^/]+)\/workspace-pool\/leases\/([^/]+)\/(retry-integration|retry-preparation)$/)
+    if (remotePoolRoute || remoteRecoveryRoute) {
+      const user = requireSignedInUser(request, response)
+      if (!user) return
+      const machineId = normalizeMachineId((remotePoolRoute ?? remoteRecoveryRoute)[1])
+      if (!canEdit(user) || !machineManageableBy(machineRegistry, machineId, machineViewer(user))) return sendJson(response, 403, { error: '본인 소유 머신의 풀만 관리할 수 있습니다.' })
+      try {
+        if (remotePoolRoute && request.method === 'GET') return sendJson(response, 200, remoteWorkspacePool.snapshot(machineId))
+        if (remotePoolRoute && request.method === 'PUT') return sendJson(response, 200, await remoteWorkspacePool.approve(machineId, await readJsonBody(request)))
+        if (remoteRecoveryRoute && request.method === 'POST') {
+          const lease = remoteWorkspacePool.scoped(remoteRecoveryRoute[2])
+          if (lease.ownership.machineId !== machineId) return sendJson(response, 403, { error: 'lease 머신 귀속이 다릅니다.' })
+          if (remoteRecoveryRoute[3] === 'retry-preparation') {
+            const delegation = aiDelegations.get(lease.requestId)
+            if (!delegation || delegation.targetHomeMachineId !== machineId || delegation.mapId !== lease.mapId
+              || delegation.targetCardId !== lease.cardId || !['waiting-workspace', 'recovery-required'].includes(delegation.state)) return sendJson(response, 409, { error: '보존된 준비 대기 위임을 확인할 수 없습니다.' })
+            const workspaceLease = await remoteWorkspacePool.retryPreparation(lease.leaseId, await readJsonBody(request))
+            await updateAiDelegation(delegation.id, { state: 'waiting-workspace', workspaceLease, childStatus: null, childError: null })
+            return sendJson(response, 200, { workspaceLease, state: 'waiting-workspace' })
+          }
+          const result = await remoteWorkspacePool.retryIntegration(lease.leaseId, await readJsonBody(request))
+          const delegation = aiDelegations.get(lease.requestId)
+          if (delegation && ['integration-recovery-required', 'waiting-integration'].includes(delegation.state)
+            && ['completed', 'waiting-integration'].includes(result?.status)) {
+            await updateAiDelegation(delegation.id, { state: result.status === 'completed' ? 'waiting-parent' : 'waiting-integration',
+              workspaceResult: result, workspaceError: null, childStatus: 'completed', childError: null, integrationError: null })
+          }
+          return sendJson(response, 200, result)
+        }
+        return sendJson(response, 405, { error: '지원하지 않는 요청입니다.' })
+      } catch (error) { return sendJson(response, 409, { error: error.message, reasonCode: error.reasonCode ?? error.code }) }
+    }
+
+    const remoteArtifactRoute = url.pathname.match(/^\/api\/machines\/([^/]+)\/runner\/workspace-artifacts\/([^/]+)\/(baseline|result|release)\/(manifest|complete|chunks\/\d+)$/)
+    if (remoteArtifactRoute) {
+      const machine = requireRunnerMachine(request, response, remoteArtifactRoute[1])
+      if (!machine) return
+      await noteMachineSeen(machine.machineId)
+      try {
+        const body = request.method === 'POST' ? await readJsonBody(request) : undefined
+        return sendJson(response, 200, await remoteWorkspacePool.artifactRequest(machine.machineId, remoteArtifactRoute[2], remoteArtifactRoute[3], remoteArtifactRoute[4], request.method, body))
+      } catch (error) { return sendJson(response, 409, { error: error.message, reasonCode: error.reasonCode ?? error.code }) }
+    }
+
     // Runner는 사용자 세션이 아니라 머신 토큰으로 인증한다.
     const machineRunnerClaimRoute = url.pathname.match(/^\/api\/machines\/([^/]+)\/runner\/operations\/claim$/)
     if (request.method === 'POST' && machineRunnerClaimRoute) {
@@ -10044,12 +11758,16 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       noteRunnerCallbackBaseUrl(machine.machineId, body?.callbackBaseUrl)
       noteRunnerObservedAddress(machine.machineId, request)
       await noteMachineSeen(machine.machineId)
+      try { await remoteWorkspacePool.observe(machine.machineId, body?.workspacePool) } catch (error) {
+        return sendJson(response, 409, { error: error.message, reasonCode: error.reasonCode ?? error.code })
+      }
       return sendJson(response, 200, {
         machineId: machine.machineId,
         label: machine.label,
         longPollMs: machineOperationLongPollMs,
         queue: machineOperationQueue.snapshot(machine.machineId),
         serverStartedAt,
+        coordinatorId: remoteWorkspacePool.state.coordinatorId,
       })
     }
 
@@ -10078,6 +11796,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           conversationCount: Array.isArray(snapshot?.items) ? snapshot.items.length : null,
         })
       } catch (error) {
+        throwIfRuntimeStopping(error, runtimeLifecycle.signal)
         return sendJson(response, 200, {
           machineId,
           reachable: false,
@@ -10389,11 +12108,14 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           protocol: 'aionui://conversation/new',
           ...workspaceOptions,
           workspaceBrowseAvailable: machine.role === 'main' && isLocalLoopbackRequest(request),
-          agents: normalizedAgents,
+          agents: url.searchParams.get('purpose') === 'dooray-response' ? filterAutomatedAiAgents(normalizedAgents) : normalizedAgents,
           skills: normalizedSkills,
           mcpServers: normalizedMcpServers,
+          ...(normalizedAgents.some((agent) => agent.claudeAccounts)
+            ? { claudeAccountPolicy: aiClaudeAccountPolicy.get(machineId) } : {}),
         })
       } catch (error) {
+        throwIfRuntimeStopping(error, runtimeLifecycle.signal)
         if (error instanceof SubMachinePayloadError) return sendJson(response, 400, { error: error.message })
         console.error('[AionUi integration]', error)
         return sendJson(response, error.status ?? 503, {
@@ -10666,10 +12388,26 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       return sendJson(response, 200, { documentGroups: await readDocumentGroups(mapIds) })
     }
 
+    if (request.method === 'GET' && url.pathname === '/api/search') {
+      const user = requireUser(request, response)
+      if (!user) return
+      try {
+        return sendJson(response, 200, await globalSearchResponse(url))
+      } catch (error) {
+        if (error instanceof GlobalSearchInputError) {
+          return sendJson(response, error.status, { error: error.message, code: error.code })
+        }
+        throw error
+      }
+    }
+
     if (request.method === 'GET' && url.pathname === '/api/maps') {
       const user = requireUser(request, response)
       if (!user) return
-      const maps = await listMaps()
+      const allMaps = await listMaps({ includeArchived: true, includeTrashed: true })
+      const maps = allMaps.filter((map) => !map.archivedAt && !map.trashedAt)
+      const lifecycleCounts = { archived: allMaps.filter((map) => map.archivedAt && !map.trashedAt).length,
+        trashed: allMaps.filter((map) => map.trashedAt).length }
       const documentLayout = await readDocumentLayout(maps.map((map) => map.id))
       let payload
       try {
@@ -10684,7 +12422,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
         payload = { maps, documentLayout, documentGroupsStatus: 'unavailable',
           documentGroupsWarning: '문서 목록은 확인했지만 그룹 부가 정보를 확인하지 못했습니다. 소속 없음으로 판단하지 말고 그룹 정보를 다시 조회하세요.' }
       }
-      return sendJson(response, 200, payload)
+      return sendJson(response, 200, { ...payload, lifecycleCounts })
     }
 
     if (request.method === 'GET' && url.pathname === '/api/shared-knowledge/audit') {
@@ -11423,6 +13161,117 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       return sendJson(response, 200, result)
     }
 
+    const crossDocumentCardMoveRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/cards\/([^/]+)\/move$/)
+    if (crossDocumentCardMoveRoute && request.method === 'POST') {
+      const sourceMapId = decodeURIComponent(crossDocumentCardMoveRoute[1])
+      const cardId = decodeURIComponent(crossDocumentCardMoveRoute[2])
+      const user = requireUser(request, response)
+      if (!user) return
+      if (!canEdit(user)) return sendCardMoveResponse(response, 403, { error: '뷰어는 카드를 다른 문서로 이동할 수 없습니다.' })
+      const body = await readJsonBody(request)
+      const targetMapId = String(body.targetMapId ?? '').trim()
+      const targetParentCardId = String(body.targetParentCardId ?? body.newParentCardId ?? '').trim()
+      if (!isValidMapId(sourceMapId) || !isValidMapId(targetMapId)
+        || !cardId || cardId.length > 120 || !targetParentCardId || targetParentCardId.length > 120) {
+        return sendCardMoveResponse(response, 400, {
+          error: '원본·대상 문서 ID와 이동할 카드·새 상위 카드 ID를 확인하세요.',
+          code: 'CARD_MOVE_INVALID_REQUEST',
+        })
+      }
+      const result = await moveCardAcrossDocuments({
+        sourceMapId,
+        cardId,
+        targetMapId,
+        targetParentCardId,
+        sourceVersion: Number(body.sourceVersion),
+        targetVersion: Number(body.targetVersion),
+        user,
+      })
+      const changedMapIds = [...new Set([
+        sourceMapId,
+        targetMapId,
+        ...result.operation.updatedReferenceMapIds,
+      ])]
+      for (const mapId of changedMapIds) broadcastMapChange(request, mapId, 'cross-document-card-move', user)
+      const movedCard = result.targetMap.nodes.find((node) => node.id === cardId)
+      const responseMode = body.responseMode === 'full' ? 'full' : 'affected'
+      return sendCardMoveResponse(response, 200, {
+        responseMode,
+        atomic: true,
+        operation: result.operation,
+        sourceDocument: mapSummary(result.sourceMap),
+        targetDocument: mapSummary(result.targetMap),
+        sourceMapId,
+        targetMapId,
+        movedCardId: cardId,
+        movedCardIds: result.operation.movedCardIds,
+        card: movedCard,
+        accessUrl: `${publicBaseUrl}/mindmap/${encodeURIComponent(targetMapId)}/${encodeURIComponent(cardId)}`,
+        hierarchy: {
+          previousParentCardId: result.operation.previousParentCardId,
+          newParentCardId: targetParentCardId,
+        },
+        ...(responseMode === 'full' ? { sourceMap: result.sourceMap, targetMap: result.targetMap } : {}),
+      })
+    }
+
+    const mapContentPatchRoute = url.pathname.match(/^\/api\/maps\/([^/]+)\/content-patch$/)
+    if (mapContentPatchRoute && request.method === 'PATCH') {
+      const mapId = decodeURIComponent(mapContentPatchRoute[1])
+      if (!isValidMapId(mapId)) return sendJson(response, 400, { error: '올바르지 않은 문서 ID입니다.' })
+      const user = requireUser(request, response)
+      if (!user) return
+      if (!canEdit(user)) return sendJson(response, 403, { error: '뷰어는 마인드맵을 변경할 수 없습니다.' })
+      const existing = await readMap(mapId)
+      if (!existing || existing.trashedAt || existing.archivedAt) {
+        return sendJson(response, 404, { error: '활성 마인드맵을 찾을 수 없습니다.' })
+      }
+      const body = await readJsonBody(request)
+      const baseVersion = Number(body.baseVersion)
+      if (!Number.isInteger(baseVersion) || baseVersion < 1) {
+        return sendJson(response, 400, { error: '현재 문서 버전을 입력해 주세요.' })
+      }
+      if (baseVersion !== existing.version) {
+        return sendJson(response, 409, {
+          error: '다른 사용자가 먼저 문서를 변경했습니다.', code: 'VERSION_CONFLICT',
+          map: existing, summary: mapSummary(existing),
+        })
+      }
+      let patchedMap
+      try {
+        patchedMap = applyMapContentPatch(existing, body.patch)
+      } catch (error) {
+        if (error instanceof MapContentPatchError) return sendJson(response, 400, { error: error.message, code: error.code })
+        throw error
+      }
+      if (!isValidMap(patchedMap)) {
+        return sendJson(response, 400, { error: '올바르지 않은 마인드맵 데이터입니다.' })
+      }
+      const normalizedIncomingMap = reconcileSharedKnowledgeReviews(existing, normalizeMapForPersistence(patchedMap))
+      const contentChanged = JSON.stringify({ nodes: existing.nodes, edges: existing.edges }) !== JSON.stringify(normalizedIncomingMap)
+      if (!contentChanged) return sendJson(response, 200, { map: existing, summary: mapSummary(existing) })
+      const suppressedWorkNotificationNodeIds = new Set(
+        (Array.isArray(body.suppressWorkNotificationNodeIds) ? body.suppressWorkNotificationNodeIds : [])
+          .filter((nodeId) => typeof nodeId === 'string' && normalizedIncomingMap.nodes.some((node) => node.id === nodeId))
+          .slice(0, 100),
+      )
+      let map
+      try {
+        map = await saveMap(mapId, normalizedIncomingMap, user, undefined, undefined, 'content', { expectedVersion: baseVersion })
+      } catch (error) {
+        if (error?.code !== 'VERSION_CONFLICT') throw error
+        const latest = await readMap(mapId)
+        return sendJson(response, 409, {
+          error: '다른 사용자가 먼저 문서를 변경했습니다.', code: 'VERSION_CONFLICT',
+          map: latest, summary: mapSummary(latest),
+        })
+      }
+      await createWorkChangeNotifications(existing, map, user, suppressedWorkNotificationNodeIds)
+      await createWaitingReleaseNotifications(existing, map, user, { includeActor: hasValidIntegrationBearer(request) })
+      broadcastMapChange(request, mapId, 'content', user)
+      return sendJson(response, 200, { map, summary: mapSummary(map) })
+    }
+
     const mapRoute = url.pathname.match(/^\/api\/maps\/([^/]+)$/)
     if (mapRoute) {
       const mapId = decodeURIComponent(mapRoute[1])
@@ -11431,11 +13280,11 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       if (!user) return
 
       if (request.method === 'GET') {
-        const map = await readMap(mapId)
+        const map = await requestTiming.measure('readMapMs', () => readMap(mapId))
         if (!map || map.trashedAt) return sendJson(response, 404, { error: '마인드맵을 찾을 수 없습니다.' })
-        const resolved = await resolveReferencesForMap(map)
+        const resolved = await requestTiming.measure('referencesMs', () => resolveReferencesForMap(map))
         const delegationOrigin = await resolveOrRememberDelegationSource(integrationRequestScope(request), mapId, map)
-        const documentGroups = await readDocumentGroups([mapId])
+        const documentGroups = await requestTiming.measure('groupsMs', () => readDocumentGroups([mapId]))
         return sendJson(response, 200, {
           map: resolved.map,
           ...documentGroupFields(documentGroups[0]),
@@ -11543,7 +13392,13 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
 
     return sendJson(response, 404, { error: '요청한 경로를 찾을 수 없습니다.' })
   } catch (error) {
+    throwIfRuntimeStopping(error, runtimeLifecycle.signal)
     if (error instanceof AiDelegationStatusLookupError) return sendJson(response, error.status, error.responseBody())
+    if (error instanceof CrossDocumentCardMoveError) return sendJson(response, error.status, {
+      error: error.message,
+      code: error.code,
+      ...(error.details ? { details: error.details } : {}),
+    })
     if (error?.reconstructionError) return sendJson(response, error.status, { error: error.message, code: error.code, ...(error.details ? { details: error.details } : {}) })
     if (error?.groupProjectError) return sendJson(response, error.status, { error: error.message })
     if (error?.message === 'PAYLOAD_TOO_LARGE') return sendJson(response, 413, { error: '요청 데이터가 너무 큽니다.' })
@@ -11563,6 +13418,11 @@ runtimeLifecycle.interval(() => {
 runtimeLifecycle.interval(() => refreshVisibleAiConversationRuntimes(), aiConversationRuntimePollIntervalMs, 'AI conversation runtime poll')
 
 runtimeLifecycle.interval(() => pollAiDelegations(), aiDelegationPollIntervalMs, 'AI delegation poll')
+runtimeLifecycle.interval(() => cleanupCompletedAiHistory(), 15 * 60_000, 'Completed AI history cleanup')
+
+runtimeLifecycle.interval(() => {
+  for (const delegation of aiDelegations.values()) if (integrationRecoveryPending(delegation)) startIntegrationRecovery(delegation.id)
+}, aiDelegationPollIntervalMs, 'AI integration recovery queue')
 
 runtimeLifecycle.interval(() => pollGroupDocumentInstructions(), aiDelegationPollIntervalMs, 'Group document instruction poll')
 
@@ -11580,6 +13440,11 @@ server.listen(port, host, () => {
   resolveRuntimeReady()
   console.log(`[Mind & Progress API] http://${host}:${port}`)
   console.log(`[Mind & Progress Public] ${publicBaseUrl}`)
+  if (workspacePoolStartupRecoveryReady) {
+    void runtimeLifecycle.track(() => reconcileAiDelegationWorkspaceLeasesAfterListen()).catch((error) => {
+      console.warn('[AI workspace pool post-listen recovery]', error)
+    })
+  }
   void runtimeLifecycle.track(() => recoverLinkedConversationAttributions()).catch((error) => {
     console.warn('[AI conversation attribution startup recovery]', error)
   })

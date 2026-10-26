@@ -37,6 +37,43 @@
   font-size: 9px;
 }
 
+.ai-delegation-completed-history {
+  margin-top: 12px;
+  border-top: 1px solid var(--theme-border, #eeecf1);
+}
+
+.ai-delegation-completed-history > summary {
+  padding: 9px 0;
+  color: var(--theme-text-secondary, #5e5865);
+  cursor: pointer;
+}
+
+.ai-delegation-completed-history > summary:focus-visible {
+  outline: 2px solid var(--theme-accent, #6657d9);
+  outline-offset: 2px;
+}
+
+.ai-delegation-history-item .ai-delegation-recovery-item-heading > span {
+  color: var(--theme-text-muted, #8e8895);
+  background: var(--theme-surface, #f3f1f6);
+}
+
+.ai-delegation-history-date {
+  display: block;
+  margin-top: 5px;
+  color: var(--theme-text-muted, #8e8895);
+}
+
+.ai-delegation-history-instruction {
+  margin-top: 5px !important;
+}
+
+.ai-delegation-history-item .ai-delegation-recovery-error-detail {
+  color: var(--theme-text-secondary, #5e5865);
+  border-color: var(--theme-border, #eeecf1);
+  background: var(--theme-surface, #f3f1f6);
+}
+
 .ai-delegation-recovery-item {
   position: relative;
   margin-top: 10px;
@@ -53,9 +90,13 @@
   pointer-events: none;
 }
 
-.ai-delegation-recovery-item :is(button, a, input, select, textarea, label, [contenteditable="true"]) {
+.ai-delegation-recovery-item :is(button, a, input, select, textarea, label, summary, [contenteditable="true"]) {
   pointer-events: auto;
 }
+
+.ai-delegation-technical { margin-top: 8px; overflow-wrap: anywhere; }
+.ai-delegation-technical > summary { cursor: pointer; }
+.ai-delegation-technical > p { user-select: text; pointer-events: auto; }
 
 .ai-delegation-recovery-item-select {
   position: absolute;
@@ -139,6 +180,18 @@
   flex-wrap: wrap;
   margin-top: 9px;
 }
+
+.ai-delegation-action-feedback {
+  margin: 8px 0;
+  padding: 8px;
+  border: 1px solid var(--theme-border, #e8e5ed);
+  border-radius: 6px;
+  color: var(--theme-text);
+  background: var(--theme-surface-raised, #faf9fc);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ai-delegation-action-feedback[role="alert"] { color: var(--theme-danger, #b42332); }
 
 .ai-delegation-recovery-actions button {
   min-height: 27px;

@@ -14,8 +14,8 @@ async function waitFor(action) {
   throw lastError ?? new Error('브라우저 검증 대기 시간 초과')
 }
 
-export async function checkDoorayResponseBrowser({ directory, baseUrl, password, deleteConversation, complete = false, approvalFlow }) {
-  const profile = path.join(directory, approvalFlow ? 'browser-profile-approval' : complete ? 'browser-profile-completion' : 'browser-profile')
+export async function checkDoorayResponseBrowser({ directory, baseUrl, password, deleteConversation, complete = false, approvalFlow, recoveryFlow = false }) {
+  const profile = path.join(directory, recoveryFlow ? 'browser-profile-recovery' : approvalFlow ? 'browser-profile-approval' : complete ? 'browser-profile-completion' : 'browser-profile')
   await mkdir(profile, { recursive: true })
   const child = spawn(process.env.MNP_TEST_BROWSER_EXE ?? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', [
     '--headless=new', '--no-first-run', '--no-default-browser-check', '--disable-gpu', '--remote-debugging-port=0',
@@ -57,6 +57,7 @@ export async function checkDoorayResponseBrowser({ directory, baseUrl, password,
     await send('Page.navigate', { url: baseUrl })
     await waitFor(() => evaluate('document.readyState === "complete"'))
     assert.equal(await evaluate(`fetch('/api/auth/login', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({email:'admin@mind.local',password:${JSON.stringify(password)}}) }).then(r => r.status)`), 200)
+    await evaluate(`localStorage.setItem('mindnprogress-dooray-response-ai:user-admin', JSON.stringify({agentId:'test-agent',modelId:'gpt-5.6-sol'}))`)
     await send('Page.reload')
     await waitFor(() => evaluate(`Boolean(document.querySelector('button[aria-label="Dooray 참조"]'))`))
     await evaluate('document.querySelector(\'button[aria-label="Dooray 참조"]\').click()')
@@ -72,6 +73,17 @@ export async function checkDoorayResponseBrowser({ directory, baseUrl, password,
       document.querySelector('.dooray-response-request').click();
       document.querySelector('.dooray-response-request').click();
     })()`)
+    if (recoveryFlow) {
+      await waitFor(() => evaluate(`Array.from(document.querySelectorAll('.dooray-response-actions button')).some(b => b.textContent === '완료 답변 복구')`))
+      assert.equal(await evaluate(`Array.from(document.querySelectorAll('.dooray-response-actions button')).some(b => b.textContent === '상태 다시 확인')`), false)
+      await evaluate(`Array.from(document.querySelectorAll('.dooray-response-actions button')).find(b => b.textContent === '완료 답변 복구').click()`)
+      await waitFor(() => evaluate('document.querySelector(".dooray-response-proposal")?.textContent.includes("경계값")'))
+      assert.ok(await evaluate(`document.querySelector('.dooray-response-detail').textContent.includes('접수 AI가 작성한 제안입니다.')`))
+      assert.ok(await evaluate(`document.querySelector('.dooray-response-detail').textContent.includes('참고 대화가 현재 담당 카드에 연결되어 있지 않아 제외')`))
+      assert.ok(await evaluate(`Array.from(document.querySelectorAll('.dooray-response-detail button')).some(b => b.textContent.includes('제안 승인'))`))
+      assert.equal(await evaluate('window.doorayResponseStarts'), 0)
+      return
+    }
     await waitFor(() => evaluate('document.querySelector(".dooray-response-proposal")?.textContent.includes("경계값")'))
     assert.equal(await evaluate('window.doorayResponseStarts'), 0, '제안 도착·승인 대기 버튼의 반복 클릭은 접수 API를 호출하지 않는다')
     const existingJobId = await evaluate('document.querySelector(".dooray-response-picker select").value')
@@ -110,7 +122,7 @@ export async function checkDoorayResponseBrowser({ directory, baseUrl, password,
       })()`))
       assert.equal(initialWorkspace.value, '', '미지정 담당의 기본값을 MnP로 넣지 않는다')
       assert.equal(initialWorkspace.readOnly, false, '사용자 작업공간 변경을 허용한다')
-      const request = await evaluate('document.querySelector(".ai-auto-request textarea").value')
+      const request = await waitFor(() => evaluate('document.querySelector(".ai-auto-request textarea")?.value'))
       assert.ok(request.length > 4000)
       for (const text of ['승인에서 제외한 작업', '#comment-comment1', '마지막 검증 조건', '담당 경로: 미지정', 'mindnprogress_get_dooray_response_approval']) assert.ok(request.includes(text), text)
       assert.equal(await evaluate('document.querySelector(".dooray-mentions-panel") === window.approvalDoorayPanel'), true)
@@ -129,9 +141,18 @@ export async function checkDoorayResponseBrowser({ directory, baseUrl, password,
       })()`)
       assert.equal(await evaluate('document.querySelector(".ai-workspace-input input").value'), approvalFlow.executionWorkspace)
       await evaluate('document.querySelector(".ai-dialog footer button.primary").click()', true)
-      await waitFor(() => evaluate('!document.querySelector(".ai-dialog") || Boolean(document.querySelector(".ai-launch-error"))'))
+      await waitFor(() => evaluate('Boolean(document.querySelector(".ai-launch-confirmation")) && !document.querySelector(\'button[aria-label="AI 대화 옵션 닫기"]\').disabled'))
+      assert.equal(await evaluate('Boolean(document.querySelector(".ai-dialog"))'), true, '시작 링크를 열어도 생성 확인 전에는 팝업을 닫지 않는다')
+      assert.equal(await evaluate('document.querySelector(".ai-dialog footer button.primary").disabled'), true)
+      await evaluate('document.querySelector(".ai-dialog footer button.primary").click()')
       assert.equal(await evaluate('document.querySelector(".ai-launch-error")?.textContent ?? ""'), '', '승인된 새 대화 시작은 오류 없이 완료되어야 한다')
+      await evaluate('document.querySelector(\'button[aria-label="AI 대화 옵션 닫기"]\').click()')
+      await waitFor(() => evaluate('!document.querySelector(".ai-dialog")'))
+      await evaluate('Array.from(document.querySelectorAll(".dooray-response-decision button")).find(b => b.textContent === "승인한 제안으로 AI 대화 시작").click()')
+      await waitFor(() => evaluate('Boolean(document.querySelector(".ai-launch-confirmation"))'))
+      assert.equal(await evaluate('document.querySelector(".ai-dialog footer button.primary").disabled'), true, '다시 연 팝업도 기존 시작 요청의 결과를 기다린다')
       await approvalFlow.completeLaunch(request)
+      await waitFor(() => evaluate('!document.querySelector(".ai-dialog")'))
       await waitFor(() => evaluate('Array.from(document.querySelectorAll(".dooray-response-actions button")).some(b => b.textContent === "승인 대화 보기")'))
       await checkConversationViews()
       assert.equal(await evaluate('document.querySelector(".dooray-mentions-panel") === window.approvalDoorayPanel'), true)
@@ -237,8 +258,36 @@ export async function checkDoorayResponseBrowser({ directory, baseUrl, password,
       assert.deepEqual(await evaluate(`({ scrollTop: document.querySelector('.dooray-mentions-content').scrollTop,
         conversation: document.querySelector('.dooray-response-handoff select').value })`), handoffState, '스크롤 위치와 담당 대화 선택을 유지한다')
     }
-    await evaluate('Array.from(document.querySelectorAll(".dooray-response-toolbar button")).find(b => b.textContent === "AI 설정").click()')
+    assert.equal(await evaluate('document.querySelector(".dooray-mentions-panel").textContent.includes("저장된 모델")'), false, '보정 안내 문구는 기존 제안 기록에서도 노출하지 않는다')
+    await evaluate('document.querySelector(".dooray-mentions-header .dooray-mentions-ai-settings").click()')
     await waitFor(() => evaluate('document.querySelector(".dooray-response-settings")?.textContent.includes("검증 모델")'))
+    assert.deepEqual(await evaluate('Array.from(document.querySelectorAll(".dooray-response-settings label")).map(label => label.firstChild.textContent.trim())'), ['AI 종류', 'AI 모델', '사고 레벨'])
+    const selectSetting = async (label, value) => evaluate(`(() => {
+      const select = Array.from(document.querySelectorAll('.dooray-response-settings label')).find(label => label.firstChild.textContent.trim() === ${JSON.stringify(label)}).querySelector('select');
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(select, ${JSON.stringify(value)});
+      select.dispatchEvent(new Event('change', {bubbles:true}));
+    })()`)
+    await selectSetting('AI 종류', 'other-agent')
+    await waitFor(() => evaluate('document.querySelector(".dooray-response-settings")?.textContent.includes("다른 모델")'))
+    assert.equal(await evaluate('Array.from(document.querySelectorAll(".dooray-response-settings label")).find(label => label.firstChild.textContent.trim() === "사고 레벨").querySelector("select").disabled'), true)
+    await selectSetting('AI 종류', 'test-agent')
+    await selectSetting('AI 모델', 'test-model')
+    await selectSetting('AI 모델', 'gpt-6.1-sol')
+    await selectSetting('사고 레벨', 'high')
+    await evaluate('document.querySelector(".dooray-response-settings button[type=submit]").click()')
+    await waitFor(() => evaluate('!document.querySelector(".dooray-response-settings")'))
+    const savedSettings = await evaluate('fetch("/api/integrations/dooray/mentions/response-settings").then(r => r.json()).then(body => body.settings)')
+    assert.equal(savedSettings.agentId, 'test-agent')
+    assert.equal(savedSettings.modelId, 'gpt-6.1-sol')
+    assert.equal(savedSettings.thoughtLevel, 'high')
+    await evaluate('document.querySelector(".dooray-mentions-header .dooray-mentions-ai-settings").click()')
+    await waitFor(() => evaluate('document.querySelector(".dooray-response-settings")?.textContent.includes("검증 모델")'))
+    const modelSelection = await evaluate(`(() => {
+      const select = Array.from(document.querySelectorAll('.dooray-response-settings label')).find(label => label.firstChild.textContent.trim() === 'AI 모델').querySelector('select');
+      const thought = Array.from(document.querySelectorAll('.dooray-response-settings label')).find(label => label.firstChild.textContent.trim() === '사고 레벨').querySelector('select');
+      return {model:select.value,models:Array.from(select.options).map(option => option.value),thought:thought.value,stored:JSON.parse(localStorage.getItem('mindnprogress-dooray-response-ai:user-admin')).modelId};
+    })()`)
+    assert.deepEqual(modelSelection, { model: 'gpt-6.1-sol', models: ['test-model', 'gpt-6.1-sol'], thought: 'high', stored: 'gpt-6.1-sol' })
     const screenshot = await send('Page.captureScreenshot', { format: 'png' })
     const screenshotPath = path.join(tmpdir(), `mnp-dooray-response-ui-${Date.now()}.png`)
     await writeFile(screenshotPath, Buffer.from(screenshot.data, 'base64'))

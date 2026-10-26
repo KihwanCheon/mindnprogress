@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { MNP_CONTEXT_BOOTSTRAP_INSTRUCTION } from '../../src/utils/aiContextInstructions.mjs'
+import { prependAiConversationSource } from './aiConversationDisplay.mjs'
 
 export const GROUP_DOCUMENT_INSTRUCTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_:-]{0,95}$/
 export const GROUP_DOCUMENT_INSTRUCTION_TYPES = Object.freeze([
@@ -15,6 +16,7 @@ export const GROUP_DOCUMENT_INSTRUCTION_SCOPES = Object.freeze([
   'implementation',
   'validation',
 ])
+const GROUP_DOCUMENT_REPLY_CONVERSATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$/
 
 export function isValidGroupDocumentInstructionId(value) {
   return GROUP_DOCUMENT_INSTRUCTION_ID_PATTERN.test(String(value ?? ''))
@@ -22,6 +24,21 @@ export function isValidGroupDocumentInstructionId(value) {
 
 export function legacyGroupDelegationCreationAllowed(value) {
   return String(value ?? '').trim() === '1'
+}
+
+export function normalizeGroupDocumentReplyTarget(value) {
+  if (value === undefined || value === null) return { mode: 'origin', conversationId: null, evidence: null }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const mode = String(value.mode ?? '').trim()
+  const conversationId = String(value.conversationId ?? '').trim()
+  const evidence = String(value.evidence ?? '').trim()
+  if (mode === 'origin') {
+    if (conversationId || evidence) return null
+    return { mode, conversationId: null, evidence: null }
+  }
+  if (mode !== 'explicit' || !GROUP_DOCUMENT_REPLY_CONVERSATION_ID_PATTERN.test(conversationId)
+    || !evidence || evidence.length > 1_000) return null
+  return { mode, conversationId, evidence }
 }
 
 function normalizeInstructionBlock(value) {
@@ -36,6 +53,25 @@ export function containsApprovalEvidenceDuplicate({ approvalEvidence, instructio
 
 export function groupDocumentInstructionOperationId(id) {
   return `gdi:${id}`
+}
+
+export function createGroupDocumentInstructionDispatchCoordinator() {
+  const actions = new Map()
+  return {
+    has(id) {
+      return actions.has(id)
+    },
+    run(id, action) {
+      const active = actions.get(id)
+      if (active) return active
+      const current = Promise.resolve().then(action)
+      actions.set(id, current)
+      void current.finally(() => {
+        if (actions.get(id) === current) actions.delete(id)
+      }).catch(() => {})
+      return current
+    },
+  }
 }
 
 export function createGroupDocumentInstructionSignature({
@@ -53,6 +89,7 @@ export function createGroupDocumentInstructionSignature({
   approvalEvidence,
   instruction,
   decisionReason,
+  replyTarget,
   newConversation,
 }) {
   const requestedConversation = newConversation && typeof newConversation === 'object'
@@ -67,6 +104,7 @@ export function createGroupDocumentInstructionSignature({
         workspace: String(newConversation.workspace ?? '').trim() || null,
       }
     : null
+  const normalizedReplyTarget = normalizeGroupDocumentReplyTarget(replyTarget)
   return createHash('sha256').update(JSON.stringify({
     parentMapId,
     parentCardId,
@@ -82,6 +120,7 @@ export function createGroupDocumentInstructionSignature({
     approvalEvidence,
     instruction,
     decisionReason,
+    ...(normalizedReplyTarget?.mode === 'explicit' ? { replyTarget: normalizedReplyTarget } : {}),
     newConversation: strategy === 'new' ? requestedConversation : null,
   })).digest('hex')
 }
@@ -94,6 +133,8 @@ export function buildGroupDocumentInstruction({
   targetRevision,
   groupProjectVersion,
   instructionId,
+  parentConversationId,
+  replyTarget,
   instructionType,
   approvalScope,
   approvalEvidence,
@@ -101,7 +142,16 @@ export function buildGroupDocumentInstruction({
   editorId,
   attributionToken,
   documentCoordinatorInstruction,
+  sourceConversation,
 }) {
+  const defaultReplyConversationId = String(parentConversationId ?? '').trim()
+  const explicitReplyConversationId = replyTarget?.mode === 'explicit'
+    ? String(replyTarget.explicitConversationId ?? replyTarget.conversationId ?? '').trim()
+    : ''
+  const effectiveReplyConversationId = explicitReplyConversationId || defaultReplyConversationId
+  const explicitReplyEvidence = replyTarget?.mode === 'explicit'
+    ? String(replyTarget.evidence ?? '').trim()
+    : ''
   const scopeInstruction = approvalScope === 'analysis-only'
     ? '이 지시는 읽기 전용 분석·제안 범위입니다. 카드·관계·코드·Prefab을 변경하거나 하위 AI에 구현을 위임하지 마세요.'
     : approvalScope === 'card-maintenance'
@@ -109,7 +159,7 @@ export function buildGroupDocumentInstruction({
       : approvalScope === 'implementation'
         ? '승인된 구현 범위는 문서 내부의 실제 하위 업무 카드에 AI 위임하고, 문서 루트 AI가 코드·Prefab을 직접 수정하지 마세요.'
         : '승인된 검증 범위만 수행하고 새로운 구현이나 범위 확대가 필요하면 총괄 AI에 수정안을 반환하세요.'
-  return `# MindNProgress 그룹 문서 지시
+  return prependAiConversationSource(`# MindNProgress 그룹 문서 지시
 
 이 전문은 그룹 총괄 문서 AI가 소속 문서의 루트 카드 AI에 전달한 지시입니다. AI 작업 위임이나 worker 작업공간 배정이 아닙니다. 지시 수신 자체를 업무 완료로 처리하지 말고, 실제 카드와 문서 내부 위임 결과를 기준으로 진행·완료를 판단하세요.
 
@@ -129,6 +179,18 @@ ${MNP_CONTEXT_BOOTSTRAP_INSTRUCTION}
 - 지시 유형: \`${instructionType}\`
 - 승인 범위: \`${approvalScope}\`
 
+## 완료 보고 라우팅
+
+- 기본 회신 대상: \`${defaultReplyConversationId}\`
+- 현재 지시의 명시적 대체 대상: ${explicitReplyConversationId ? `\`${explicitReplyConversationId}\`` : '없음'}
+${explicitReplyEvidence ? `- 대체 근거: ${explicitReplyEvidence}\n` : ''}- 전달 시점의 유효 회신 대상: \`${effectiveReplyConversationId}\`
+
+회신 대상을 대화 이력에서 추정하지 마세요. 과거 그룹 지시, 과거 \`AION_SESSION_MESSAGE\`, 이전 \`reply_to\`와 AI의 기억은 이번 \`instructionId\`의 회신 근거가 아닙니다.
+완료 보고 대상은 ① 이 지시 이후 사용자가 이 \`instructionId\`에 대해 명시한 대상, ② 위 명시적 대체 대상, ③ 기본 회신 대상 순서로 결정하세요. 사용자가 다른 세션을 말했지만 정확한 대상을 확인할 수 없으면 임의로 선택하지 말고 확인을 요청하세요.
+최종 보고 직전에 현재 \`instructionId\`, 결정 근거와 유효 회신 대상을 다시 확인하고, 완료 보고에 \`instructionId\`를 포함하세요. \`waiting-workspace\` 같은 접수·대기 응답은 최종 완료 보고가 아닙니다. 하위 위임 완료 후 자동 재개된 턴에서도 이 확인을 다시 수행하세요.
+
+회신 방법: MindNProgress는 이 지시를 받은 첫 응답 턴의 마지막 메시지만 지시 상태(\`replied\`)와 \`response\`로 기록하며, 총괄 대화를 자동으로 재개하거나 이후 턴의 보고를 전달하지 않습니다. 이 지시 범위의 최종 완료 보고는 첫 턴에서 끝난 경우를 포함해 \`session-message\` 스킬로 유효 회신 대상 대화 ID에 직접 전송하세요. 이 전송은 사용자가 승인한 이번 그룹 문서 지시에 포함된 회신 요청이므로 \`session-message\`의 명시적 요청에 해당합니다. 접수·대기·중간 진행 보고는 전송하지 말고, 같은 \`instructionId\`의 최종 보고는 한 번만 보내며 본문 첫 줄에 \`instructionId\`를 적으세요. 전송이 실패하거나 \`queued\`로 반환되면 그 결과를 이 대화의 응답에 그대로 적고 상대가 받았거나 읽었다고 주장하지 마세요. 회신 대상 대화가 다른 머신의 AionUi에 있어 \`target_not_found\` 등으로 전송이 실패하면 재시도하거나 다른 대화를 고르지 말고, \`instructionId\`를 포함한 최종 보고를 이 문서 루트 카드의 \`[결과]\` 댓글로 남긴 뒤 실패 사실과 함께 이 대화의 응답으로 사용자에게 알리세요.
+
 ${documentCoordinatorInstruction}
 
 ## 실행 권한 경계
@@ -140,7 +202,7 @@ ${approvalEvidence.trim()}
 
 ## 총괄 AI 지시
 
-${instruction.trim()}`
+${instruction.trim()}`, 'delegation', sourceConversation ?? { conversationId: defaultReplyConversationId })
 }
 
 export function groupDocumentInstructionPublicView(instruction, { includeContent = false } = {}) {

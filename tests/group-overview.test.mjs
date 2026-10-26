@@ -54,6 +54,19 @@ test('통합 정리 대기를 실패로 표시하지 않고 충돌 파일과 재
   } }).label, '통합 대기')
 })
 
+test('격리된 통합 실패는 자동 재개 불가여도 복구 필요와 수동 확인 안내를 표시한다', () => {
+  const item = { state: 'failed', childStatus: 'completed', workspaceResult: { status: 'quarantined' }, recovery: { recoveryAvailable: false } }
+  assert.deepEqual(groupDelegationPresentation(item), { label: '통합 복구 필요', tone: 'danger', attention: true })
+  assert.match(groupDelegationReportHint(item), /격리/)
+  assert.match(groupDelegationReportHint(item), /수동/)
+  assert.equal(groupDelegationPresentation({ ...item, childStatus: 'failed' }).label, '작업공간 복구 필요')
+  assert.deepEqual(groupDelegationPresentation({ ...item, state: 'waiting-parent' }), { label: '통합 복구 필요', tone: 'warning', attention: true })
+  for (const state of ['completed', 'superseded', 'closed']) {
+    assert.equal(groupDelegationPresentation({ ...item, state }).attention, false)
+    assert.equal(groupDelegationReportHint({ ...item, state }), '')
+  }
+})
+
 test('보고 전달 대기·전달 중·수신 완료와 상위 실행 상태를 분리해 표시한다', () => {
   assert.equal(groupDelegationPresentation({ state: 'waiting-parent', workCompleted: true, reportPending: true }).label, '작업 완료 · 총괄에 결과 전달 대기')
   assert.equal(groupDelegationPresentation({ state: 'waking-parent', workCompleted: true, reportPending: true }).label, '작업 완료 · 총괄에 결과 전달 중')
@@ -65,6 +78,35 @@ test('보고 전달 대기·전달 중·수신 완료와 상위 실행 상태를
   assert.match(groupDelegationReportHint({ state: 'waiting-parent', reportWaitReason: 'report-history-pending' }), /완료 전문 저장/)
   assert.equal(groupDelegationReportHint({ state: 'running' }), '')
   assert.equal(groupDelegationPresentation({ state: 'parent-wake-failed', displayState: 'recovery-dispatch-pending', workCompleted: true, reportPending: true }).label, '복구 요청 전달 확인 대기')
+})
+
+test('Git 잠금 통합 실패는 하위 재실행이 아닌 통합 재시도로 안내한다', () => {
+  const item = { state: 'failed', childStatus: 'completed', workspaceResult: { status: 'quarantined' },
+    recovery: { recoveryAvailable: true, recommendedAction: 'retry-integration', failureCategory: 'integration-git-lock' } }
+  assert.equal(groupDelegationPresentation(item).label, '통합 복구 필요')
+  assert.match(groupDelegationReportHint(item), /Git 잠금/)
+  assert.match(groupDelegationReportHint(item), /완료된 하위 AI 작업과 커밋을 그대로 사용/)
+})
+
+test('상위 보고 대기·전달 중·실패여도 통합 재시도가 허용되면 화면에서 복구하도록 안내한다', () => {
+  const item = { childStatus: 'completed', parentDispatchState: 'waiting-resume', workspaceResult: { status: 'quarantined' },
+    recovery: { recoveryAvailable: true, recommendedAction: 'retry-integration', failureCategory: 'integration-git-lock' } }
+  for (const state of ['waiting-parent', 'waking-parent', 'parent-wake-failed']) {
+    assert.equal(groupDelegationPresentation({ ...item, state }).label, '통합 복구 필요')
+    assert.match(groupDelegationReportHint({ ...item, state }), /상위 보고 완료를 기다리지 않고 이 화면에서 통합 재시도/)
+  }
+  assert.doesNotMatch(groupDelegationReportHint({ ...item, state: 'waking-parent', recovery: { ...item.recovery, recoveryAvailable: false } }), /이 화면에서 통합 재시도를 요청할 수 있습니다/)
+})
+
+test('Fork 통합 후보의 변경은 main 정리 자동 대기와 구분해 명시적 재시도로 안내한다', () => {
+  const item = { state: 'failed', childStatus: 'completed', workspaceResult: { status: 'quarantined' },
+    recovery: { recoveryAvailable: true, failureCategory: 'integration-candidate-worktree-dirty', recommendedAction: 'retry-integration' } }
+  assert.equal(groupDelegationPresentation(item).label, '통합 복구 필요')
+  assert.match(groupDelegationReportHint(item), /main이 아니라 Fork/)
+  assert.match(groupDelegationReportHint(item), /현재 파일을 확인/)
+  assert.match(groupDelegationReportHint(item), /원본 보존·정리 후 통합 재시도/)
+  assert.match(groupDelegationReportHint(item), /하위 AI는 다시 실행하지 않습니다/)
+  assert.doesNotMatch(groupDelegationReportHint(item), /자동으로 통합/)
 })
 
 test('업무 대기와 AI 확인 대기는 위임 완료 집계와 별도로 필터링한다', () => {

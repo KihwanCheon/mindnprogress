@@ -111,6 +111,148 @@ test('응답 검증으로 격리된 미연결 실행은 네 필드와 실제 Git
   assert.equal(await git(worker, 'status', '--porcelain'), '')
 })
 
+test('busy 격리 복구도 서버 거절 증거와 원 세션·Git 검사를 유지하며 변경을 보존한다', async t => {
+  const { manager, scope, lease, worker } = await fixture(t)
+  const errorMessage = `Conversation is busy: conversation ${scope.conversationId} is already running`
+  await writeFile(path.join(worker, 'work.txt'), '보존할 미커밋 변경\n')
+  await assert.rejects(manager.finalize(lease.leaseId, { childStatus: 'failed', childError: errorMessage }))
+  const rejectedDispatch = { operationId: 'job-recover-1', state: 'failed', conversationId: scope.conversationId, errorMessage, workspaceLease: lease }
+  const options = { ...scope, failureCategory: 'recovery-dispatch-busy', rejectedDispatch }
+  for (const patch of [{ turnId: 'started-turn' }, { conversationId: 'foreign-chat' },
+    { workspaceLease: { ...lease, jobId: 'foreign-job' } }]) {
+    await assert.rejects(manager.reactivateQuarantinedLease(lease.leaseId, { ...options, rejectedDispatch: { ...rejectedDispatch, ...patch } }))
+    assert.equal(manager.state.leases[lease.leaseId].status, 'quarantined')
+  }
+  await git(worker, 'switch', '-c', 'foreign-branch')
+  await assert.rejects(manager.reactivateQuarantinedLease(lease.leaseId, options), /브랜치/)
+  await git(worker, 'switch', lease.branch)
+  const recovered = await manager.reactivateQuarantinedLease(lease.leaseId, options)
+  assert.equal(recovered.leaseId, lease.leaseId)
+  assert.equal(await readFile(path.join(worker, 'work.txt'), 'utf8'), '보존할 미커밋 변경\n')
+  assert.equal(manager.state.leases[lease.leaseId].recoveryHistory.at(-1).type, 'rejected-recovery-dispatch')
+})
+
+for (const pending of [false, true]) test(`복구 API의 ${pending ? '응답 유실 후 조회' : '구버전 busy 격리'}는 거절을 작업 실패로 바꾸지 않고 같은 lease에서 다시 복구한다`,
+  { concurrency: true, timeout: Number(process.env.MNP_REAL_GIT_TEST_TIMEOUT_MS) || 120_000 }, async t => {
+    const { manager, scope, lease, worker, root, registryFile } = await fixture(t)
+    const directory = path.join(root, 'server-data')
+    await mkdir(directory)
+    const errorMessage = `Conversation is busy: conversation ${scope.conversationId} is already running`
+    await writeFile(path.join(worker, 'work.txt'), '보존할 작업 변경\n')
+    await assert.rejects(manager.finalize(lease.leaseId, { childStatus: 'failed', childError: errorMessage }))
+    const previousResult = structuredClone(manager.state.leases[lease.leaseId].result)
+    if (pending) await manager.reactivateQuarantinedLease(lease.leaseId, { ...scope, failureCategory: 'model-capacity' })
+    await writeFile(path.join(directory, '_workspace-pool.json'), JSON.stringify(manager.state))
+    const now = new Date().toISOString()
+    const wireLease = { workspaceId: lease.workspaceId, jobId: lease.jobId, leaseId: lease.leaseId, projectRoot: lease.projectRoot }
+    const seed = { id: 'busy-recovery-test', mapId: 'map-a', parentCardId: 'parent-card', targetCardId: 'card-a',
+      parentConversationId: 'parent-conversation', targetConversationId: scope.conversationId,
+      childOperationId: 'busy-recovery-test-recover-1', childTurnId: null, childStatus: 'failed', childError: '통합하지 않았습니다.',
+      strategy: 'resume', state: 'failed', workspaceLease: lease, workspaceResult: previousResult, startedBy: 'user-admin',
+      createdAt: now, updatedAt: now, recoveryOperationId: 'busy-recovery-test-recover-1', recoveryAttempt: 1,
+      attemptHistory: [{ operationId: 'original-task', childTurnId: 'original-turn', childError: '모델 용량 부족', result: '보존할 원 결과' }] }
+    if (pending) Object.assign(seed, { state: 'waiting-model-capacity', childOperationId: 'original-task', childTurnId: 'original-turn',
+      pendingRecovery: { operationId: seed.recoveryOperationId, attempt: 1, sourceState: 'waiting-model-capacity', workspaceLease: lease } })
+    await writeFile(path.join(directory, '_ai-delegations.json'), JSON.stringify([seed]))
+    const mapFile = path.join(directory, 'map-a.json')
+    await writeFile(mapFile, JSON.stringify({ id: 'map-a', title: '복구 검증', version: 1, nodes: [
+      { id: 'parent-card', position: { x: 0, y: 0 }, data: { kind: 'root', label: '상위', aiConversationId: 'parent-conversation' } },
+      { id: 'card-a', position: { x: 300, y: 0 }, data: { kind: 'task', label: '기존 작업', status: 'planned', progress: 0, isWork: true,
+        description: '사용자 요구사항 원문', sharedKnowledge: '기존 결과 보존', aiConversationId: scope.conversationId } },
+    ], edges: [{ id: 'edge', source: 'parent-card', target: 'card-a' }] }))
+    const originalMap = await readFile(mapFile, 'utf8')
+    let mismatch = !pending, busy = true
+    const posted = [], receipts = new Map()
+    const upstream = createServer(async (request, response) => {
+      const chunks = []; for await (const chunk of request) chunks.push(chunk)
+      const body = chunks.length ? JSON.parse(Buffer.concat(chunks)) : null
+      const url = new URL(request.url, 'http://localhost')
+      const send = (data, status = 200) => { response.writeHead(status, { 'Content-Type': 'application/json' }); response.end(JSON.stringify({ success: status < 400, data })) }
+      if (url.pathname.endsWith('/capabilities')) return send({ schemaVersion: 3, workspaceLeaseVersion: 2, explicitCompletionAfterInterruption: true })
+      const operation = url.pathname.match(/^\/api\/internal\/external-conversation-dispatches\/([^/]+)$/)
+      if (operation) return send(receipts.get(operation[1]) ?? { operationId: seed.recoveryOperationId, conversationId: scope.conversationId,
+        state: 'failed', errorMessage, workspaceLease: { ...wireLease, ...(mismatch ? { jobId: 'foreign-job' } : {}) } })
+      if (url.pathname === '/api/internal/external-conversation-dispatches' && request.method === 'POST') {
+        posted.push(body)
+        const receipt = { operationId: body.operationId, conversationId: body.targetConversationId, workspaceLease: wireLease,
+          state: busy ? 'failed' : 'running', ...(busy ? { errorMessage } : { turnId: 'actual-recovery-turn' }) }
+        receipts.set(body.operationId, receipt)
+        return send(receipt, 202)
+      }
+      const conversation = url.pathname.match(/^\/api\/conversations\/([^/]+)$/)
+      if (conversation) return send({ id: conversation[1], name: '복구 검증 대화', runtime: { state: 'idle', is_processing: false, pending_confirmations: 0 },
+        extra: { agent_id: 'test-agent', current_model_id: 'test-model', workspace: worker } })
+      if (url.pathname.endsWith('/messages')) return send({ items: [{ position: 'left', type: 'text', content: { content: '다른 수동 턴의 중간 답변' } }] })
+      if (url.pathname === '/api/internal/conversation-runtimes/active') return send({ schema_version: 1, generated_at: Date.now(), items: [] })
+      return send({}, 404)
+    })
+    await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve))
+    const probe = createServer(); await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve))
+    const port = probe.address().port; await new Promise(resolve => probe.close(resolve))
+    const baseUrl = `http://127.0.0.1:${port}`
+    const server = spawn(process.execPath, ['server/index.mjs'], { cwd: path.resolve(import.meta.dirname, '..'), windowsHide: true,
+      stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, MNP_DATA_DIR: directory, MNP_API_HOST: '127.0.0.1', MNP_API_PORT: String(port), MNP_WEB_PORT: String(port),
+        MNP_WORKSPACE_POOL_REGISTRY: registryFile, MNP_AIONUI_URL: `http://127.0.0.1:${upstream.address().port}`, MNP_AI_DELEGATION_POLL_INTERVAL_MS: '3600000',
+        MNP_ADMIN_PASSWORD: 'test-busy-password' } })
+    let errors = ''; server.stderr.on('data', chunk => { errors += chunk })
+    try {
+      let ready = false
+      for (let attempt = 0; attempt < 200; attempt++) {
+        try { if ((await fetch(baseUrl + '/api/health')).ok) { ready = true; break } } catch { /* 준비 대기 */ }
+        await new Promise(resolve => setTimeout(resolve, 100))
+      }
+      assert.ok(ready, errors)
+      const login = await fetch(baseUrl + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'admin@mind.local', password: 'test-busy-password' }) })
+      assert.equal(login.status, 200)
+      const headers = { Cookie: login.headers.get('set-cookie').split(';')[0], 'Content-Type': 'application/json' }
+      const file = path.join(directory, '_ai-delegations.json')
+      const saved = async () => JSON.parse(await readFile(file, 'utf8')).find(entry => entry.id === seed.id)
+      const recover = async () => { const current = await saved(); return fetch(`${baseUrl}/api/maps/map-a/ai-delegations/${seed.id}/recover`, {
+        method: 'POST', headers, body: JSON.stringify({ instruction: '완료된 검수는 반복하지 말고 마지막 체크포인트와 보고만 마무리하세요.',
+          sourceRevision: 1, targetRevision: 1, expectedUpdatedAt: current.updatedAt, confirmApprovedScope: true }),
+      }) }
+      if (!pending) {
+        const rejected = await recover()
+        assert.equal(rejected.status, 409)
+        assert.equal((await rejected.json()).code, 'AI_DELEGATION_RECOVERY_REJECTION_UNCONFIRMED')
+        assert.equal(posted.length, 0)
+        assert.equal((await saved()).state, 'failed')
+        mismatch = false
+      }
+      const refused = await recover(), refusedBody = await refused.json()
+      assert.equal(refused.status, 409, JSON.stringify({ refusedBody, errors }))
+      assert.equal(refusedBody.code, 'AI_DELEGATION_RECOVERY_CONVERSATION_BUSY')
+      const preserved = await saved()
+      assert.equal(preserved.state, 'recovery-required')
+      assert.equal(preserved.childOperationId, seed.childOperationId)
+      assert.equal(preserved.childTurnId, seed.childTurnId)
+      assert.equal(preserved.childResultSnapshot, undefined)
+      assert.equal(preserved.recoveryDispatchRejection.executionStarted, false)
+      assert.equal(posted.length, pending ? 0 : 1)
+      assert.deepEqual(preserved.attemptHistory.slice(0, seed.attemptHistory.length), seed.attemptHistory)
+      assert.equal(await readFile(path.join(worker, 'work.txt'), 'utf8'), '보존할 작업 변경\n')
+      const beforeRefresh = await readFile(file, 'utf8')
+      const refreshed = await fetch(`${baseUrl}/api/maps/map-a/ai-delegations/${seed.id}/refresh`, { method: 'POST', headers,
+        body: JSON.stringify({ expectedUpdatedAt: preserved.updatedAt }) })
+      assert.equal(refreshed.status, 200, JSON.stringify(await refreshed.json()))
+      assert.equal(await readFile(file, 'utf8'), beforeRefresh, '상태 조회가 과거 오류·다른 수동 턴을 현재 실행으로 적용하지 않는다.')
+      assert.equal(posted.length, pending ? 0 : 1)
+      busy = false
+      const resumed = await recover(), result = await resumed.json()
+      assert.equal(resumed.status, 202, JSON.stringify({ result, errors }))
+      assert.equal(result.delegation.childTurnId, 'actual-recovery-turn')
+      assert.equal(result.delegation.workspaceLease.leaseId, lease.leaseId)
+      assert.equal(result.delegation.targetConversationId, scope.conversationId)
+      assert.equal((await saved()).recoveryDispatchRejection, null)
+      assert.equal(await readFile(mapFile, 'utf8'), originalMap)
+      assert.equal(await readFile(path.join(worker, 'work.txt'), 'utf8'), '보존할 작업 변경\n')
+    } finally {
+      if (server.exitCode === null) { const stopped = new Promise(resolve => server.once('exit', resolve)); server.kill(); await stopped }
+      upstream.closeAllConnections(); await new Promise(resolve => upstream.close(resolve))
+    }
+  })
+
 // Git 프로세스 실행이 느린 검증 환경에서만 예산을 늘린다. 기본 제한과 기능 검증은 유지한다.
 for (const expired of [false, true]) test(`복구 API는 ${expired ? '실행 기록 만료 뒤 최초 전문으로' : '원본 실행 기록으로'} 기존 대화·lease를 찾아 미완료 확인만 전달한다`, { timeout: Number(process.env.MNP_REAL_GIT_TEST_TIMEOUT_MS) || 80_000 }, async (t) => {
   const { manager, scope, lease, worker, root, registryFile } = await fixture(t)
@@ -230,11 +372,11 @@ for (const expired of [false, true]) test(`복구 API는 ${expired ? '실행 기
     assert.equal(posted[0].targetConversationId, scope.conversationId)
     assert.equal(posted[0].workspaceLease.leaseId, lease.leaseId)
     assert.ok(posted[0].instruction.includes(input.instruction))
-    assert.ok(posted[0].instruction.includes(`- 현재 workspaceId: \`${lease.workspaceId}\``))
-    assert.ok(posted[0].instruction.includes(`- 현재 jobId: \`${lease.jobId}\``))
-    assert.ok(posted[0].instruction.includes(`- 현재 leaseId: \`${lease.leaseId}\``))
-    assert.match(posted[0].instruction, /이번 전문의 `# 할당된 작업공간`에 기재된 현재 배정만 사용하세요/)
-    assert.match(posted[0].instruction, /대화 기록에 남은 이전 경로·브랜치·lease를 복구 후보로 사용하지 마세요/)
+    assert.ok(posted[0].instruction.includes(`- workspaceId: \`${lease.workspaceId}\``))
+    assert.ok(posted[0].instruction.includes(`- jobId: \`${lease.jobId}\``))
+    assert.ok(posted[0].instruction.includes(`- leaseId: \`${lease.leaseId}\``))
+    assert.equal([...posted[0].instruction.matchAll(/^# 할당된 작업공간$/gm)].length, 1)
+    assert.match(posted[0].instruction, /이번 전문의 `# 할당된 작업공간`에 기재된 현재 배정만 사용.*이전 경로·브랜치·lease를 복구 후보로 사용하지 마세요/s)
     assert.equal(result.delegation.targetConversationId, scope.conversationId)
     assert.equal(result.delegation.dispatchRecoveryProof.kind, expired ? 'original-message-after-operation-expiry' : 'original-operation')
     if (expired) assert.equal(result.delegation.dispatchRecoveryProof.messageId, originalMessage.id)

@@ -54,7 +54,7 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
       for await (const chunk of req) chunks.push(chunk)
       body = JSON.parse(Buffer.concat(chunks).toString() || '{}')
     }
-    if (url.pathname === '/api/agents/management') return send([{ id: 'claude', name: 'Claude', agent_type: 'acp', backend: 'claude', installed: true, enabled: true, available_models: { current_model_id: 'opus', available_models: [{ value: 'opus', name: 'Opus' }] } }])
+    if (url.pathname === '/api/agents/management') return send([{ id: 'claude', name: 'Claude', agent_type: 'acp', backend: 'claude', installed: true, enabled: true, available_models: { current_model_id: 'opus', available_models: [{ value: 'opus', name: 'Opus' }, { value: 'gpt-5.6-sol', name: 'GPT-5.6-Sol' }, { value: 'gpt-6-sol', name: 'GPT-6-Sol' }] } }])
     if (['/api/providers', '/api/skills', '/api/mcp/servers'].includes(url.pathname)) return send([])
     if (url.pathname === '/api/internal/conversation-runtimes/active') return send({ conversations: [] })
     if (url.pathname.endsWith('/capabilities')) return send({ schemaVersion: 3, explicitCompletionAfterInterruption: true, historyOnlyReports: true })
@@ -92,6 +92,7 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
       }
       return send({ ...saved, runtime: { state: 'idle', is_processing: false, can_send_message: true, pending_confirmations: 0 } })
     }
+    if (/^\/api\/conversations\/[^/]+\/usage$/.test(url.pathname)) return send({ used: 8_000, size: 200_000 })
     if (url.pathname.endsWith('/messages')) return send({ items: [{ type: 'text', position: 'left', content: assistantResult }] })
     return send({}, 404)
   })
@@ -190,7 +191,7 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
     assert.equal(delegated.body.delegation.coordinationOnly, true)
     assert.equal(delegated.body.delegation.workspaceLease, null)
     const documentConversationId = delegated.body.delegation.targetConversationId
-    assert.match(calls[0].instruction, /코드·Prefab은 직접 수정하지 마세요/)
+    assert.match(calls[0].instruction, /이 작업은 그룹 문서 최상위 카드의 분석·조정 업무.*mindnprogress_get_group_context/s)
     assert.ok(!calls[0].instruction.includes(AI_EXECUTION_APPROVAL_INSTRUCTION))
     assert.ok(!calls[0].instruction.includes(GROUP_APPROVAL_INSTRUCTION))
     assert.ok(calls[0].instruction.includes(DOCUMENT_COORDINATOR_INSTRUCTION))
@@ -220,16 +221,44 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
     const operationId = recovery.body.delegation.childOperationId
     assert.ok(dispatches.has(operationId))
     const recoveryCall = calls.find((call) => call.operationId === operationId)
-    assert.match(recoveryCall.instruction, /코드·Prefab은 직접 수정하지 마세요/)
-    assert.match(recoveryCall.instruction, /worker 배정 없음/)
+    assert.match(recoveryCall.instruction, /이 작업은 그룹 문서 최상위 카드의 분석·조정 업무.*mindnprogress_get_group_context/s)
+    assert.match(recoveryCall.instruction, /작업공간을 임의로 점유하거나 새 lease를 만들지/)
     assert.ok(!recoveryCall.instruction.includes(AI_EXECUTION_APPROVAL_INSTRUCTION))
     assert.ok(!recoveryCall.instruction.includes(GROUP_APPROVAL_INSTRUCTION))
     assert.ok(recoveryCall.instruction.includes(DOCUMENT_COORDINATOR_INSTRUCTION))
-    assert.match(recoveryCall.instruction, /원래 맡긴 범위의 미완료 작업만/)
+    assert.match(recoveryCall.instruction, /원래 지시를 처음부터 반복하지 말고.*미완료 부분만/s)
     assert.match(recoveryCall.instruction, /분석·제안 위임의 복구는 계속 분석·제안만 허용/)
     assert.doesNotMatch(recoveryCall.instruction, /먼저 `\.ai-session\.json`/)
     assert.ok(recoveryCall.instruction.includes(`- 대상 대화: ${documentConversationNameBeforeRecovery} (${documentConversationId})`))
     const childHeaders = { 'X-MNP-AI-Map-Id': target.id, 'X-MNP-AI-Card-Id': targetRoot, 'X-MNP-AI-Conversation-Id': documentConversationId, 'X-MNP-AI-Editor-Id': attribution.body.editorId }
+    const assessmentIdFor = async (mapId, cardId, conversationId) => {
+      const listed = await api(`/api/maps/${mapId}/cards/${cardId}/ai-conversations`)
+      assert.equal(listed.status, 200, JSON.stringify(listed.body))
+      const linked = listed.body.conversations.find((item) => item.conversationId === conversationId)
+      assert.ok(linked, `대화 문맥 평가 대상을 찾지 못했습니다: ${conversationId}`)
+      assert.equal(linked.contextHealth.resumeAllowed, true, JSON.stringify(linked.contextHealth))
+      return linked.contextHealth.assessmentId
+    }
+    for (const blockedModelId of ['gpt-5.6-sol', 'gpt-6-sol']) {
+      const blockedSuffix = blockedModelId.replaceAll('.', '_')
+      const blockedResumeId = `blocked-model-resume-${blockedSuffix}`
+      conversations.get(documentConversationId).extra.current_model_id = blockedModelId
+      const blockedCandidates = await api(`/api/maps/${target.id}/cards/${targetRoot}/ai-conversations`)
+      const blockedCandidate = blockedCandidates.body.conversations.find((item) => item.conversationId === documentConversationId)
+      assert.equal(blockedCandidate.contextHealth.resumeAllowed, false)
+      assert.equal(blockedCandidate.contextHealth.recommendation, 'new')
+      assert.ok(blockedCandidate.contextHealth.reasonCodes.includes('CONVERSATION_MODEL_REUSE_BLOCKED'))
+      const blockedResume = await api(delegateUrl, 'POST', {
+        ...args, targetRevision: (await api(`/api/maps/${target.id}`)).body.map.version,
+        strategy: 'resume', conversationId: documentConversationId,
+        conversationAssessmentId: blockedCandidate.contextHealth.assessmentId,
+        idempotencyKey: blockedResumeId,
+      }, sourceHeaders)
+      assert.equal(blockedResume.status, 409)
+      assert.equal(blockedResume.body.reasonCode, 'AI_DELEGATION_CONVERSATION_MODEL_BLOCKED')
+      assert.equal(calls.some((call) => call.operationId === blockedResumeId), false)
+    }
+    conversations.get(documentConversationId).extra.current_model_id = 'opus'
     const beforeLeaf = (await api(`/api/maps/${target.id}`, 'GET', undefined, childHeaders)).body.map
     const leafId = 'implementation-leaf'
     const withLeaf = await api(`/api/maps/${target.id}`, 'PUT', {
@@ -240,6 +269,17 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
       },
     }, childHeaders)
     assert.equal(withLeaf.status, 200)
+    for (const blockedModelId of ['gpt-5.6-sol', 'gpt-6-sol']) {
+      const blockedNewId = `blocked-model-new-${blockedModelId.replaceAll('.', '_')}`
+      const blockedNew = await api(`/api/maps/${target.id}/ai-delegations`, 'POST', {
+        targetCardId: leafId, sourceRevision: withLeaf.body.map.version, strategy: 'new',
+        instruction: '하위 구현을 검증하세요.', decisionReason: '새 대화 모델 정책 검사',
+        idempotencyKey: blockedNewId, newConversation: { agentId: 'claude', modelId: blockedModelId, workspace: projectDirectory },
+      }, childHeaders)
+      assert.equal(blockedNew.status, 409)
+      assert.equal(blockedNew.body.reasonCode, 'AI_DELEGATION_MODEL_BLOCKED')
+      assert.equal(calls.some((call) => call.operationId === blockedNewId), false)
+    }
     const leaf = await api(`/api/maps/${target.id}/ai-delegations`, 'POST', {
       targetCardId: leafId, sourceRevision: withLeaf.body.map.version, strategy: 'new', instruction: '하위 구현을 검증하세요.', decisionReason: '독립 하위 업무입니다.', idempotencyKey: 'nested-leaf', newConversation: { agentId: 'claude', modelId: 'opus', workspace: projectDirectory },
     }, childHeaders)
@@ -274,8 +314,9 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
     assert.equal(wake.targetConversationId, 'group-parent')
     assert.ok(wake.instruction.includes(target.id))
     assert.ok(wake.instruction.includes(coordinatorId))
-    assert.ok(wake.instruction.includes(AI_EXECUTION_APPROVAL_INSTRUCTION))
+    assert.match(wake.instruction, /# 사용자 승인과 실행 범위.*# 그룹의 두 단계 사용자 승인/s)
     assert.ok(wake.instruction.includes(GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION))
+    assert.ok(wake.instruction.includes(AI_EXECUTION_APPROVAL_INSTRUCTION))
     assert.ok(wake.instruction.includes(GROUP_APPROVAL_INSTRUCTION))
     const documentWake = calls.find((call) => /^nested-leaf-wake-/.test(call.operationId)).instruction
     assert.ok(documentWake.includes(`- 실행 대화: ${leafConversationNameBeforeWake} (${leafConversationId})`))
@@ -285,7 +326,15 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
 
     // 사용량 제한은 완료 보고를 만들지 않고 보존한다. UI는 실행 재개와 보고 재시도를 구분한다.
     const currentVersion = (await api(`/api/maps/${target.id}`)).body.map.version
-    const limited = await api(delegateUrl, 'POST', { ...args, targetRevision: currentVersion, strategy: 'resume', conversationId: documentConversationId, idempotencyKey: 'usage-run' }, sourceHeaders)
+    const latestConversationAssessmentId = await assessmentIdFor(target.id, targetRoot, documentConversationId)
+    const missingAssessment = await api(delegateUrl, 'POST', { ...args, targetRevision: currentVersion, strategy: 'resume', conversationId: documentConversationId, idempotencyKey: 'missing-assessment' }, sourceHeaders)
+    assert.equal(missingAssessment.status, 409)
+    assert.equal(missingAssessment.body.reasonCode, 'AI_DELEGATION_CONVERSATION_ASSESSMENT_REQUIRED')
+    const staleAssessment = await api(delegateUrl, 'POST', { ...args, targetRevision: currentVersion, strategy: 'resume', conversationId: documentConversationId, conversationAssessmentId: '0'.repeat(64), idempotencyKey: 'stale-assessment' }, sourceHeaders)
+    assert.equal(staleAssessment.status, 409)
+    assert.equal(staleAssessment.body.reasonCode, 'AI_DELEGATION_CONVERSATION_ASSESSMENT_STALE')
+    assert.equal(calls.some((call) => ['missing-assessment', 'stale-assessment'].includes(call.operationId)), false)
+    const limited = await api(delegateUrl, 'POST', { ...args, targetRevision: currentVersion, strategy: 'resume', conversationId: documentConversationId, conversationAssessmentId: latestConversationAssessmentId, idempotencyKey: 'usage-run' }, sourceHeaders)
     assert.equal(limited.status, 202, JSON.stringify(limited.body))
     Object.assign(dispatches.get('usage-run'), { state: 'failed', errorMessage: "You've hit your usage limit" })
     const latestUsage = async () => (await api(`/api/groups/${groupId}`)).body.delegations.find((item) => item.id === 'usage-run')
@@ -431,15 +480,14 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
     assert.equal((await latestUsage()).childOperationId, secondRecoveryId)
     const retriedWake = calls.find((call) => call.operationId === 'usage-run-wake-2')
     assert.ok(retriedWake)
-    assert.match(retriedWake.instruction, /하위 AI 원문 미캡처/)
-    assert.match(retriedWake.instruction, /대화의 최신 응답으로 대체하지 않았/)
+    assert.match(retriedWake.instruction, /결과 원문: 캡처되지 않음/)
     assert.doesNotMatch(retriedWake.instruction, /나중에 실행된 다른 위임의 결과/)
     const retriedReport = await latestUsage()
     assert.equal(retriedReport.reportResultAvailability, 'unavailable')
     assert.match(retriedReport.reportPayloadHash, /^[a-f0-9]{64}$/)
 
     // 같은 실행이 실제로 완료된 경우만 조회로 갱신하고, 상위 재개는 별도 요청을 기다린다.
-    const passive = await api(delegateUrl, 'POST', { ...args, targetRevision: (await api(`/api/maps/${target.id}`)).body.map.version, strategy: 'resume', conversationId: documentConversationId, idempotencyKey: 'passive-run' }, sourceHeaders)
+    const passive = await api(delegateUrl, 'POST', { ...args, targetRevision: (await api(`/api/maps/${target.id}`)).body.map.version, strategy: 'resume', conversationId: documentConversationId, conversationAssessmentId: await assessmentIdFor(target.id, targetRoot, documentConversationId), idempotencyKey: 'passive-run' }, sourceHeaders)
     assert.equal(passive.status, 202)
     const latestPassive = async () => (await api(delegateUrl)).body.delegations.find((item) => item.id === 'passive-run')
     Object.assign(dispatches.get('passive-run'), { state: 'failed', errorMessage: 'usage limit' })
@@ -482,6 +530,11 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
       approvalEvidence: '사용자가 이 문서의 실행 전문을 승인했습니다. 테스트 대화 turn-1.',
       strategy: 'new',
       instruction: '담당 범위를 정비하고 승인된 구현을 문서 내부 하위 카드에 위임하세요.',
+      replyTarget: {
+        mode: 'explicit',
+        conversationId: 'group-review-target',
+        evidence: '사용자가 이번 지시의 완료 보고를 검수 대화로 보내 달라고 요청했습니다.',
+      },
       decisionReason: '문서 담당 대화가 아직 없습니다.',
       sourceRevision: currentCoordinator.version,
       idempotencyKey: 'group-instruction-first',
@@ -497,18 +550,38 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
     assert.equal(duplicateApprovalEvidence.body.reasonCode, 'GROUP_DOCUMENT_INSTRUCTION_DUPLICATE_APPROVAL_EVIDENCE')
     assert.match(duplicateApprovalEvidence.body.message, /approvalEvidence에는 승인 발언·출처·승인 범위만/)
     assert.equal(calls.some((call) => call.operationId === 'gdi:group-instruction-duplicate-evidence'), false)
+    const invalidReplyTarget = await api(instructionUrl, 'POST', {
+      ...instructionArgs,
+      idempotencyKey: 'group-instruction-invalid-reply-target',
+      replyTarget: { mode: 'explicit', conversationId: 'group-review-target' },
+    }, sourceHeaders)
+    assert.equal(invalidReplyTarget.status, 400)
+    assert.equal(invalidReplyTarget.body.reasonCode, 'GROUP_DOCUMENT_INSTRUCTION_REQUEST_INVALID')
+    assert.equal(calls.some((call) => call.operationId === 'gdi:group-instruction-invalid-reply-target'), false)
     const instructed = await api(instructionUrl, 'POST', instructionArgs, sourceHeaders)
     assert.equal(instructed.status, 202, JSON.stringify(instructed.body))
     assert.equal(instructed.body.reasonCode, 'GROUP_DOCUMENT_INSTRUCTION_DELIVERED', JSON.stringify(instructed.body))
     assert.match(instructed.body.message, /업무 완료를 의미하지 않습니다/)
     assert.equal(instructed.body.instruction.targetCardId, instructionDocument.nodes[0].id)
+    assert.deepEqual(instructed.body.instruction.replyTarget, {
+      mode: 'explicit',
+      defaultConversationId: 'group-parent',
+      explicitConversationId: 'group-review-target',
+      effectiveConversationId: 'group-review-target',
+      evidence: '사용자가 이번 지시의 완료 보고를 검수 대화로 보내 달라고 요청했습니다.',
+    })
     assert.equal(instructed.body.instruction.workspaceLease, undefined)
     assert.equal(instructed.body.instruction.coordinationOnly, undefined)
     const instructionCall = calls.find((call) => call.operationId === 'gdi:group-instruction-first')
     assert.ok(instructionCall)
+    assert.equal(instructionCall.create.title, `[상위] ${instructionDocument.title}: ${instructionDocument.nodes[0].data.label}`)
     assert.match(instructionCall.instruction, /^# MindNProgress 그룹 문서 지시/m)
     assert.match(instructionCall.instruction, /AI 작업 위임이나 worker 작업공간 배정이 아닙니다/)
     assert.match(instructionCall.instruction, /문서 내부의 실제 하위 업무 카드에 AI 위임/)
+    assert.match(instructionCall.instruction, /기본 회신 대상: `group-parent`/)
+    assert.match(instructionCall.instruction, /현재 지시의 명시적 대체 대상: `group-review-target`/)
+    assert.match(instructionCall.instruction, /전달 시점의 유효 회신 대상: `group-review-target`/)
+    assert.match(instructionCall.instruction, /과거 그룹 지시.*AION_SESSION_MESSAGE.*reply_to.*기억/s)
     assert.doesNotMatch(instructionCall.instruction, /# MindNProgress 하위 카드 위임 작업 요청/)
     const repeatedInstruction = await api(instructionUrl, 'POST', instructionArgs, sourceHeaders)
     assert.equal(repeatedInstruction.status, 200)
@@ -531,11 +604,37 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
       targetRevision: latestInstructionTarget.version,
       strategy: 'resume',
       conversationId: instructed.body.instruction.targetConversationId,
+      conversationAssessmentId: await assessmentIdFor(instructionDocument.id, instructionDocument.nodes[0].id, instructed.body.instruction.targetConversationId),
       decisionReason: '같은 문서 담당 대화의 후속 지시입니다.',
       instruction: '같은 승인 범위에서 문서 내부 진행 상태를 다시 확인하세요.',
       idempotencyKey: 'group-instruction-queued',
       newConversation: undefined,
     }
+    const instructedConversationId = instructed.body.instruction.targetConversationId
+    for (const blockedModelId of ['gpt-5.6-sol', 'gpt-6-sol']) {
+      const blockedSuffix = blockedModelId.replaceAll('.', '_')
+      const blockedGroupNew = await api(instructionUrl, 'POST', {
+        ...instructionArgs, targetRevision: latestInstructionTarget.version,
+        idempotencyKey: `group-instruction-blocked-model-new-${blockedSuffix}`,
+        newConversation: { agentId: 'claude', modelId: blockedModelId, workspace: projectDirectory },
+      }, sourceHeaders)
+      assert.equal(blockedGroupNew.status, 409)
+      assert.equal(blockedGroupNew.body.reasonCode, 'GROUP_DOCUMENT_INSTRUCTION_MODEL_BLOCKED')
+      conversations.get(instructedConversationId).extra.current_model_id = blockedModelId
+      const blockedGroupCandidates = await api(`/api/maps/${instructionDocument.id}/cards/${instructionDocument.nodes[0].id}/ai-conversations`)
+      const blockedGroupCandidate = blockedGroupCandidates.body.conversations.find((item) => item.conversationId === instructedConversationId)
+      assert.equal(blockedGroupCandidate.contextHealth.resumeAllowed, false)
+      const blockedGroupResumeId = `group-instruction-blocked-model-resume-${blockedSuffix}`
+      const blockedGroupResume = await api(instructionUrl, 'POST', {
+        ...queuedInstructionArgs,
+        conversationAssessmentId: blockedGroupCandidate.contextHealth.assessmentId,
+        idempotencyKey: blockedGroupResumeId,
+      }, sourceHeaders)
+      assert.equal(blockedGroupResume.status, 409)
+      assert.equal(blockedGroupResume.body.reasonCode, 'GROUP_DOCUMENT_INSTRUCTION_CONVERSATION_MODEL_BLOCKED')
+      assert.equal(calls.some((call) => call.operationId === `gdi:${blockedGroupResumeId}`), false)
+    }
+    conversations.get(instructedConversationId).extra.current_model_id = 'opus'
     busyGroupInstructionConversationReads = 2
     const queuedInstruction = await api(instructionUrl, 'POST', queuedInstructionArgs, sourceHeaders)
     assert.equal(queuedInstruction.status, 202, JSON.stringify(queuedInstruction.body))
@@ -557,7 +656,7 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
     assert.equal((await api('/api/maps/layout', 'PATCH', { documentLayout: movedLayout })).status, 200)
     assert.equal((await api(`/api/maps/${target.id}`)).body.groupProject, null)
     assert.equal((await api('/api/maps/layout', 'PATCH', { documentLayout: library.documentLayout })).status, 200)
-    const newLimited = await api(delegateUrl, 'POST', { ...args, targetRevision: (await api(`/api/maps/${target.id}`)).body.map.version, strategy: 'resume', conversationId: documentConversationId, idempotencyKey: 'changed-plan' }, sourceHeaders)
+    const newLimited = await api(delegateUrl, 'POST', { ...args, targetRevision: (await api(`/api/maps/${target.id}`)).body.map.version, strategy: 'resume', conversationId: documentConversationId, conversationAssessmentId: await assessmentIdFor(target.id, targetRoot, documentConversationId), idempotencyKey: 'changed-plan' }, sourceHeaders)
     assert.equal(newLimited.status, 202)
     Object.assign(dispatches.get('changed-plan'), { state: 'failed', errorMessage: "You've hit your usage limit" })
     await until(async () => (await api(delegateUrl)).body.delegations.find((item) => item.id === 'changed-plan').state === 'waiting-usage-limit', '기준 변경 검사 전 대기에 들어가지 못했습니다.')

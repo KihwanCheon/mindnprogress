@@ -7,8 +7,9 @@
 // 가져간 오퍼레이션이 제한 시간을 넘기면 재시도 없이 실패로 확정한다.
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
+import { RuntimeStoppingError } from './runtimeStopping.mjs'
 
-export const MACHINE_OPERATION_STATES = Object.freeze(['pending', 'dispatched', 'succeeded', 'failed'])
+export const MACHINE_OPERATION_STATES = Object.freeze(['pending', 'dispatched', 'succeeded', 'failed', 'interrupted'])
 
 export const MACHINE_OPERATION_METHODS = Object.freeze(['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
 
@@ -20,6 +21,21 @@ export class MachineOperationError extends Error {
     this.code = code
     this.reasonCode = reasonCode
   }
+}
+
+export function sanitizeMachineOperationErrorMessage(value, omittedContents = []) {
+  if (typeof value !== 'string') return null
+  let message = value
+  for (const content of omittedContents) {
+    if (typeof content !== 'string' || !content) continue
+    message = message.replaceAll(content, '[본문 생략]')
+      .replaceAll(JSON.stringify(content).slice(1, -1), '[본문 생략]')
+  }
+  return message
+    .replace(/\b(?:mnprn|mnprl|mnop|mnpat|mnpai)_[A-Za-z0-9_-]+/g, '[비공개]')
+    .replace(/Bearer\s+[^\s"']+/gi, 'Bearer [비공개]')
+    .replace(/((?:AIONUI_RUNTIME_TOKEN|attributionToken|api[_-]?key|token)["'\s]*[:=]["'\s]*)[A-Za-z0-9._-]+/gi, '$1[비공개]')
+    .replace(/\s+/g, ' ').trim().slice(0, 1000) || null
 }
 
 function isRecord(value) {
@@ -81,6 +97,7 @@ export class MachineOperationQueue {
     this.completedOperations = new Map()
     this.waiters = new Map()
     this.closed = false
+    this.shutdownStarted = false
   }
 
   // 실행 대기 중인 오퍼레이션을 기다리는 Runner를 깨운다.
@@ -101,6 +118,7 @@ export class MachineOperationQueue {
   }
 
   enqueue(machineId, request) {
+    if (this.shutdownStarted) throw new RuntimeStoppingError({ machineId, deliveryState: 'pending' })
     if (this.closed) throw new MachineOperationError('오퍼레이션 큐가 종료되었습니다.', { reasonCode: 'QUEUE_CLOSED' })
 
     const normalizedRequest = normalizeMachineOperationRequest(request)
@@ -166,6 +184,7 @@ export class MachineOperationQueue {
     clearTimer = clearTimeout,
     shouldClaim = () => true,
   } = {}) {
+    if (this.shutdownStarted) throw new RuntimeStoppingError({ machineId })
     const immediate = shouldClaim() ? this.claim(machineId, limit) : []
     if (immediate.length > 0 || waitMs <= 0 || this.closed) return immediate
 
@@ -188,6 +207,7 @@ export class MachineOperationQueue {
       if (typeof timer?.unref === 'function') timer.unref()
     })
 
+    if (this.shutdownStarted) throw new RuntimeStoppingError({ machineId })
     return shouldClaim() ? this.claim(machineId, limit) : []
   }
 
@@ -233,7 +253,8 @@ export class MachineOperationQueue {
       const status = Number.isInteger(result?.status) ? result.status : null
       operation.state = 'failed'
       this.finish(operation, new MachineOperationError(
-        `AIONUI_REQUEST_FAILED${status === null ? '' : `:${status}`}`,
+        sanitizeMachineOperationErrorMessage(result?.message, [operation.request.body?.content])
+          ?? `AIONUI_REQUEST_FAILED${status === null ? '' : `:${status}`}`,
         { status, code: result?.code ?? null, reasonCode: 'REMOTE_REQUEST_FAILED' },
       ))
     }
@@ -335,5 +356,22 @@ export class MachineOperationQueue {
       this.finish(operation, new MachineOperationError(reason, { reasonCode: 'QUEUE_CLOSED' }))
     }
     for (const machineId of [...this.waiters.keys()]) this.wake(machineId)
+  }
+
+  // 종료에 의한 대기 중단이다. 이미 전달한 원격 실행은 취소하지 않는다.
+  shutdown() {
+    if (this.shutdownStarted) return []
+    this.shutdownStarted = true
+    this.closed = true
+    const interrupted = []
+    for (const operation of [...this.operations.values()]) {
+      const deliveryState = operation.state
+      interrupted.push({ machineId: operation.machineId, operationId: operation.operationId, deliveryState })
+      operation.state = 'interrupted'
+      operation.settledAt = this.now()
+      this.finish(operation, new RuntimeStoppingError({ machineId: operation.machineId, operationId: operation.operationId, deliveryState }))
+    }
+    for (const machineId of [...this.waiters.keys()]) this.wake(machineId)
+    return interrupted
   }
 }

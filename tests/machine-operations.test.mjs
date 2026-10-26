@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { isRuntimeStoppingError } from '../server/lib/runtimeStopping.mjs'
 import {
   MachineOperationError,
   MachineOperationQueue,
@@ -77,6 +78,42 @@ test('원격 실패는 기존 AionUi 호출과 같은 오류 형태로 전달한
   assert.equal(result.error.message, 'AIONUI_REQUEST_FAILED:404')
   assert.equal(result.error.status, 404)
   assert.equal(result.error.code, 'NOT_FOUND')
+})
+
+test('Runner 요청 거절의 실제 오류 설명과 코드를 요청자에게 전달한다', async () => {
+  const { queue } = createQueue()
+  const queued = queue.enqueue('macbook', { pathname: '/api/conversations/parent/external-reports', method: 'POST' })
+  queue.claim('macbook')
+  queue.settle('macbook', queued.operationId, { ok: false, status: null,
+    code: 'RUNNER_OPERATION_REJECTED', message: 'Runner operation is not allowed.' })
+  const result = await settledState(queued.completion)
+  assert.equal(result.error.code, 'RUNNER_OPERATION_REJECTED')
+  assert.equal(result.error.message, 'Runner operation is not allowed.')
+  assert.equal(result.error.reasonCode, 'REMOTE_REQUEST_FAILED')
+})
+
+test('원격 오류 설명의 토큰을 가리고 길이를 제한하며 비문자열은 기존 메시지로 대체한다', async () => {
+  for (const message of [`Bearer secret-value mnprn_secret-value mnop_secret-value ${'x'.repeat(2000)}`, { message: 'object' }]) {
+    const { queue } = createQueue()
+    const queued = queue.enqueue('macbook', { pathname: '/api/test' })
+    queue.claim('macbook')
+    queue.settle('macbook', queued.operationId, { ok: false, status: 503, message })
+    const result = await settledState(queued.completion)
+    assert.doesNotMatch(result.error.message, /secret-value/)
+    assert.ok(result.error.message.length <= 1000)
+    if (typeof message === 'string') assert.match(result.error.message, /^Bearer \[비공개\]/)
+    if (typeof message !== 'string') assert.equal(result.error.message, 'AIONUI_REQUEST_FAILED:503')
+  }
+})
+
+test('원격 오류가 긴 보고 본문을 반사해도 길이 제한 전에 본문을 제거한다', async () => {
+  const { queue } = createQueue()
+  const content = '비공개 완료 결과 '.repeat(200)
+  const queued = queue.enqueue('macbook', { pathname: '/api/conversations/parent/external-reports', method: 'POST', body: { content } })
+  queue.claim('macbook')
+  queue.settle('macbook', queued.operationId, { ok: false, message: `저장 실패: ${content}` })
+  const result = await settledState(queued.completion)
+  assert.equal(result.error.message, '저장 실패: [본문 생략]')
 })
 
 test('가져가지 않았거나 이미 끝난 오퍼레이션은 결과를 받지 않는다', async () => {
@@ -372,4 +409,28 @@ test('큐를 닫으면 남은 요청을 모두 실패로 확정하고 새 요청
   assert.equal(result.ok, false)
   assert.equal(result.error.reasonCode, 'QUEUE_CLOSED')
   assert.throws(() => queue.enqueue('macbook', { pathname: '/api/2' }), MachineOperationError)
+})
+
+test('종료는 미전달·전달된 요청의 대기를 구분해 중단하고 롱폴과 새 요청을 해제한다', async () => {
+  const queue = new MachineOperationQueue()
+  const dispatched = queue.enqueue('busy', { pathname: '/dispatch', method: 'POST' })
+  queue.claim('busy')
+  const pending = queue.enqueue('offline', { pathname: '/query' })
+  const polling = queue.waitForClaim('idle', { waitMs: 25_000 })
+  const checks = [
+    assert.rejects(dispatched.completion, error => isRuntimeStoppingError(error) && error.deliveryState === 'dispatched' && error.operationId === dispatched.operationId),
+    assert.rejects(pending.completion, error => isRuntimeStoppingError(error) && error.deliveryState === 'pending'),
+    assert.rejects(polling, isRuntimeStoppingError),
+  ]
+  assert.deepEqual(queue.shutdown(), [
+    { machineId: 'busy', operationId: dispatched.operationId, deliveryState: 'dispatched' },
+    { machineId: 'offline', operationId: pending.operationId, deliveryState: 'pending' },
+  ])
+  assert.deepEqual(queue.shutdown(), [])
+  await Promise.all(checks)
+  assert.equal(queue.operations.size, 0)
+  assert.equal(queue.waiters.size, 0)
+  assert.equal(queue.completedOperations.get(dispatched.operationId).state, 'interrupted')
+  assert.throws(() => queue.enqueue('new', { pathname: '/query' }), isRuntimeStoppingError)
+  await assert.rejects(queue.waitForClaim('new'), isRuntimeStoppingError)
 })

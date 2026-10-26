@@ -1,10 +1,17 @@
 import { execFile } from 'node:child_process'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { copyFile, lstat, mkdir, readFile, readlink, rename, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { promisify } from 'node:util'
-import { aiDelegationWorkspaceLeaseMatches, retryableExternalLimitCategory } from './aiDelegations.mjs'
+import { aiDelegationBusyDispatchRejected, aiDelegationWorkspaceLeaseMatches, integrationGitLockFailure, integrationHeadChangedFailure, integrationCandidateWorktreeFailure, integrationCandidateDirtyReasonCode, localChangesIntegrationCommits, retryableExternalLimitCategory } from './aiDelegations.mjs'
+import { replaceFileWithRetry } from './replaceFileWithRetry.mjs'
+import { completedWorkspaceLeaseIds, latestHistoryTime } from './completedAiHistory.mjs'
+import { assertAiDelegationSourceCompletionLease } from './aiDelegationSourceCompletion.mjs'
+import { assertAiDelegationInterruptedLease } from './aiDelegationInterruptedRecovery.mjs'
+import { acquireWorkspaceLock, git as ownershipGit, jsonFile, saveJson } from './remoteWorkspaceProtocol.mjs'
+import { normalizeUntrackedMetaRecovery, preserveUntrackedMeta, consumePreservedMeta } from './workspaceMetaRecovery.mjs'
+import { recoverTrackedCheckoutEol } from './workspaceEolRecovery.mjs'
 
 const execFileAsync = promisify(execFile)
 const idleDriftReason = '작업공간에 소유자를 확정할 수 없는 변경이 있습니다.'
@@ -18,7 +25,8 @@ export const integrationWorktreeDirtyReasonCode = 'integration-worktree-dirty'
 export const integrationUntrackedCollisionReasonCode = 'integration-untracked-collision'
 export const integrationUntrackedCollisionMessage = '통합 작업공간의 미추적 파일이 반영할 경로와 충돌합니다. 충돌 파일을 정리하면 자동으로 통합됩니다. 재위임하지 마세요.'
 export const integrationStatusRetryReasonCode = 'INTEGRATION_STATUS_RETRY'
-const conversationBindableLeaseStatuses = new Set(['leased', 'checkpoint-required'])
+const checkpointIntegrationRecoveryTypes = new Set(['integration-git-lock', 'integration-head-changed', integrationCandidateDirtyReasonCode])
+const conversationBindableLeaseStatuses = new Set(['leased', 'checkpoint-required', 'correcting-result'])
 const conversationReusableLeaseStatuses = new Set(['leased', 'checkpoint-required', 'finalizing'])
 const conversationRebindOnlyLeaseStatuses = new Set([
   'finalizing',
@@ -69,6 +77,65 @@ export const checkpointCommitMessageExample = {
   scope: 'JAPAN_SERVICE 로그인 흐름에만 적용됩니다.',
 }
 
+const checkpointCommitPrefixMaxLength = 40
+
+function inlineCommitPrefixText(value) {
+  return [...String(value)]
+    .map((character) => {
+      const code = character.codePointAt(0)
+      return code === 127 || code < 32 ? ' ' : character
+    })
+    .join('')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/**
+ * Normalizes the explicit `commitPrefix` of a workspace pool registry.
+ * Returns null when the registry does not configure it; an empty string means "no prefix".
+ */
+export function normalizeConfiguredCommitPrefix(value) {
+  if (typeof value !== 'string') return null
+  return inlineCommitPrefixText(value).slice(0, checkpointCommitPrefixMaxLength).trim()
+}
+
+/**
+ * Resolves the checkpoint commit title prefix.
+ * Priority: explicit registry `commitPrefix` → `[account name]` of the MnP editor who owns the work → no prefix.
+ */
+export function resolveCheckpointCommitPrefix(options = {}) {
+  return resolveCheckpointCommitPrefixDetails(options).prefix
+}
+
+/**
+ * Same as `resolveCheckpointCommitPrefix`, but also reports where the prefix came from:
+ * `configured` (registry), `account` (MnP account name) or `none`.
+ */
+export function resolveCheckpointCommitPrefixDetails({ configuredPrefix, authorName } = {}) {
+  const configured = normalizeConfiguredCommitPrefix(configuredPrefix)
+  if (configured !== null) return { prefix: configured, source: 'configured' }
+  const name = typeof authorName === 'string'
+    ? inlineCommitPrefixText(authorName).replace(/[[\]]/g, '').trim().slice(0, checkpointCommitPrefixMaxLength).trim()
+    : ''
+  return name ? { prefix: `[${name}]`, source: 'account' } : { prefix: '', source: 'none' }
+}
+
+/**
+ * Picks the first candidate user id that maps to a human MnP account with a name.
+ * Candidates are ordered by priority; system-managed accounts and unknown ids (e.g. integration users) are skipped.
+ */
+export function resolveCommitAuthorAccount({ candidates = [], users = [] } = {}) {
+  for (const candidate of Array.isArray(candidates) ? candidates : []) {
+    const id = String(candidate?.id ?? '').trim()
+    if (!id) continue
+    const account = (Array.isArray(users) ? users : [])
+      .find((user) => user?.id === id && user.systemManaged !== true)
+    const name = String(account?.name ?? '').trim()
+    if (name) return { name, userId: id, source: String(candidate.source ?? '') || null }
+  }
+  return null
+}
+
 function checkpointCommitMessageError(message) {
   return new WorkspacePoolUnavailableError(
     message,
@@ -96,7 +163,7 @@ function normalizedCheckpointMessageField(value, name, maxLength, { inline = fal
   return normalized
 }
 
-export function normalizeCheckpointCommitMessage(value) {
+export function normalizeCheckpointCommitMessage(value, { commitPrefix = '' } = {}) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw checkpointCommitMessageError('변경 체크포인트에는 실제 변경을 설명하는 commitMessage가 필요합니다.')
   }
@@ -106,8 +173,8 @@ export function normalizeCheckpointCommitMessage(value) {
     throw checkpointCommitMessageError(`commitMessage에 지원하지 않는 필드가 있습니다: ${unknownFields.join(', ')}`)
   }
   const summary = normalizedCheckpointMessageField(value.summary, 'summary', 80, { inline: true })
-  if (summary.startsWith('[김용민]')) {
-    throw checkpointCommitMessageError('commitMessage.summary에는 [김용민] prefix를 넣지 마세요. 서버가 자동으로 추가합니다.')
+  if (commitPrefix && summary.startsWith(commitPrefix)) {
+    throw checkpointCommitMessageError(`commitMessage.summary에는 ${commitPrefix} prefix를 넣지 마세요. 서버가 자동으로 추가합니다.`)
   }
   const scope = value.scope === undefined || value.scope === null || value.scope === ''
     ? null
@@ -142,6 +209,28 @@ function isProtectedWorkspacePath(relative) {
   return protectedWorkspaceEntries.has(String(relative ?? '').replaceAll('\\', '/').split('/')[0])
 }
 
+const knowledgeInboxEntry = 'knowledge-inbox'
+
+/**
+ * Returns non-deletion paths under the retired project-root `knowledge-inbox/` folder
+ * from `git status --porcelain=v1 -z` output. Such proposal files must not be checkpointed.
+ */
+export function knowledgeInboxCheckpointPaths(porcelainStatus) {
+  const records = String(porcelainStatus ?? '').split('\0')
+  const rejected = []
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index]
+    if (record.length < 4) continue
+    const status = record.slice(0, 2)
+    // Rename and copy records are followed by their source path.
+    if (/[RC]/.test(status)) index += 1
+    const file = record.slice(3).replaceAll('\\', '/')
+    if (file.split('/')[0].toLowerCase() !== knowledgeInboxEntry || status.includes('D')) continue
+    rejected.push(file)
+  }
+  return rejected
+}
+
 function pathInside(root, relative) {
   const resolvedRoot = path.resolve(root)
   const resolved = path.resolve(resolvedRoot, relative)
@@ -154,12 +243,12 @@ function driftFolderName(now = new Date()) {
   return now.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z')
 }
 
-function atomicJson(file, value) {
+function atomicJson(file, value, replaceFile = rename) {
   return (async () => {
     await mkdir(path.dirname(file), { recursive: true })
     const temporary = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
     await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
-    await rename(temporary, file)
+    await replaceFile(temporary, file)
   })()
 }
 
@@ -182,9 +271,16 @@ async function exists(file) {
   }
 }
 
-async function defaultGitRunner(cwd, args, { timeoutMs = 0 } = {}) {
+async function defaultGitRunner(cwd, args, { timeoutMs = 0, lfCheckout = false } = {}) {
   try {
-    const result = await execFileAsync('git', args, {
+    let command = args
+    if (lfCheckout) {
+      let autoCrlf = ''
+      try { autoCrlf = (await execFileAsync('git', ['config', '--get', 'core.autocrlf'], { cwd, windowsHide: true })).stdout.trim() }
+      catch (error) { if (error?.code !== 1) throw error }
+      if (autoCrlf.toLowerCase() === 'true') command = ['-c', 'core.autocrlf=input', ...args]
+    }
+    const result = await execFileAsync('git', command, {
       cwd,
       windowsHide: true,
       maxBuffer: 256 * 1024 * 1024,
@@ -264,6 +360,7 @@ function normalizeRegistry(raw, registryFile) {
     poolId: String(raw?.poolId ?? path.basename(String(raw?.sharedRoot ?? 'workspace-pool'))).trim() || 'workspace-pool',
     sharedRoot: path.resolve(String(raw?.sharedRoot ?? path.dirname(registryFile))),
     originUrl: String(raw?.originUrl ?? '').trim(),
+    commitPrefix: normalizeConfiguredCommitPrefix(raw?.commitPrefix),
     integration,
     workers: workspaces.filter((workspace) => workspace.role === 'worker' && workspace.id !== integration?.id),
     workspaces,
@@ -297,21 +394,25 @@ function checkpointMnpSection(mnpContext) {
   return `[MnP]\n문서: ${document}\n카드: ${card}\n경로: ${relativePath}`
 }
 
-function checkpointMessage(commitMessage, mnpContext) {
-  const normalized = normalizeCheckpointCommitMessage(commitMessage)
+function checkpointMessage(commitMessage, mnpContext, commitPrefix = '') {
+  const normalized = normalizeCheckpointCommitMessage(commitMessage, { commitPrefix })
   const normalizedMnpContext = normalizeCheckpointMnpContext(mnpContext)
   return {
-    title: `[김용민] ${normalized.summary}`,
+    title: commitPrefix ? `${commitPrefix} ${normalized.summary}` : normalized.summary,
     body: `${checkpointMnpSection(normalizedMnpContext)}\n\n[배경]\n${normalized.background}\n\n[원인]\n${normalized.cause}\n\n[수정]\n${normalized.changes}${normalized.scope ? `\n\n[적용 범위]\n${normalized.scope}` : ''}`,
     normalized,
     mnpContext: normalizedMnpContext,
   }
 }
 
-function integrationConflictCheckpointMessage(lease) {
-  const checkpoint = [...(Array.isArray(lease?.checkpoints) ? lease.checkpoints : [])]
+function latestMessageCheckpoint(lease) {
+  return [...(Array.isArray(lease?.checkpoints) ? lease.checkpoints : [])]
     .reverse()
     .find((candidate) => candidate?.commitMessage)
+}
+
+function integrationConflictCheckpointMessage(lease, legacyCommitPrefix = '') {
+  const checkpoint = latestMessageCheckpoint(lease)
   const source = checkpoint?.commitMessage
   if (!source) {
     throw new WorkspacePoolIntegrationError(
@@ -329,13 +430,14 @@ function integrationConflictCheckpointMessage(lease) {
     mapId: lease?.mapId,
     cardId: lease?.cardId,
     cardTitle: lease?.cardLabel,
-  })
+  }, typeof checkpoint.commitPrefix === 'string' ? checkpoint.commitPrefix : legacyCommitPrefix)
 }
 
 export function buildWorkspaceInstruction(lease) {
   if (!lease) return ''
   const sharedRoot = String(lease.sharedRoot ?? '').trim()
-  return `# 할당된 작업공간
+  const ownershipInstruction = lease.ownership ? `\n원격 풀 소유권: coordinatorId=${lease.ownership.coordinatorId}, machineId=${lease.ownership.machineId}, poolId=${lease.ownership.poolId}, generation=${lease.ownership.generation}. 이 값도 .ai-session.json과 일치해야 합니다. 원격 체크포인트 도구 호출에는 requestId를 반드시 전달하세요. 새 체크포인트마다 새 ID를 만들고 동일 요청의 재시도에만 같은 ID를 사용합니다. 결과 통합은 메인 staging에서 수행하며 그 경로로 직접 이동하지 마세요.\n` : ''
+  return `# 할당된 작업공간${ownershipInstruction}
 
 이 전문이 현재 작업공간 배정의 최신본입니다. 이 대화에 앞서 전달된 모든 작업공간 배정 전문은 더 이상 배정 근거로 사용하지 마세요. 이번 전문에 기재된 \`workspaceId\`, \`jobId\`, \`leaseId\`, \`projectRoot\`, \`branch\`, \`baseCommit\` 조합만 현재 유효합니다. 이전 전문과 값이 다르면 이전 배정은 만료된 것입니다.
 
@@ -350,16 +452,22 @@ ${sharedRoot ? `- sharedRoot: \`${sharedRoot}\`\n` : ''}- branch: \`${lease.bran
 
 작업 전에 \`.ai-session.json\`의 \`workspaceId\`, \`jobId\`, \`leaseId\`, \`projectRoot\`, \`branch\`, \`baseCommit\`이 이번 전문과 일치하는지 확인하세요. 하나라도 일치하지 않으면 파일 수정, 브랜치 전환, 새 작업공간 탐색 또는 기존 변경 정리를 하지 말고 \`MNP_WORKSPACE_ASSIGNMENT_MISMATCH\`와 불일치 필드만 보고하세요.
 
-이 작업에서는 위 \`projectRoot\`만 수정하세요. 다른 등록 작업공간으로 이동하거나 브랜치를 바꾸거나 lease를 직접 해제하지 마세요. \`.ai-session.json\`의 값이 위 정보와 일치하는지 먼저 확인하세요.${sharedRoot ? ` 공통 규칙과 지식은 \`sharedRoot\`에서 읽기 전용으로 사용하고, 제안은 \`knowledge-inbox/${lease.jobId}.md\`에 기록하세요.` : ''}
+이 작업에서는 위 \`projectRoot\`만 수정하세요. 다른 등록 작업공간으로 이동하거나 브랜치를 바꾸거나 lease를 직접 해제하지 마세요. \`.ai-session.json\`의 값이 위 정보와 일치하는지 먼저 확인하세요.${sharedRoot ? ' 공통 규칙과 지식은 `sharedRoot`에서 읽기 전용으로 사용하세요.' : ''}
 
-Unity Play Mode, 재임포트, 동적 폰트·Atlas 생성 등의 검증은 어떤 tracked 파일이든 자동으로 바꿀 수 있습니다. 구현 수정을 마친 뒤 각 검증을 시작하기 전에 \`mindnprogress_checkpoint_ai_workspace\`를 호출하세요. 의도한 변경이 있으면 \`operation.action=commit-changes\`에 변경 경로와 실제 변경을 설명하는 \`commitMessage\`를 함께 전달합니다. \`summary\`에는 \`[김용민]\` prefix나 \`[MnP]\` 출처를 넣지 말고, \`background\`·\`cause\`·\`changes\`에는 이번 체크포인트의 실제 변경을 작성하며 \`scope\`는 필요한 경우에만 작성하세요. MindNProgress가 현재 문서·카드 제목과 안정적인 ID를 조회해 커밋 본문의 \`[MnP]\` 섹션을 자동으로 추가합니다. 파일 변경이 전혀 없는 조사·검증 작업은 같은 도구의 \`operation.action=confirm-no-changes\`로 확인하세요. 검증 후 보완했다면 새 변경에 맞는 메시지로 다시 체크포인트를 만들고 검증하세요. Git으로 직접 커밋하지 마세요. 완료 시 MindNProgress는 명시적 체크포인트만 main에 통합하고 그 이후의 자동 변경은 복구 자료로 보존한 뒤 worker에서 제거합니다.`
+Unity Play Mode, 재임포트, 동적 폰트·Atlas 생성 등의 검증은 어떤 tracked 파일이든 자동으로 바꿀 수 있습니다. 구현 수정을 마친 뒤 각 검증을 시작하기 전에 \`mindnprogress_checkpoint_ai_workspace\`를 호출하세요. 의도한 변경이 있으면 \`operation.action=commit-changes\`에 변경 경로와 실제 변경을 설명하는 \`commitMessage\`를 함께 전달합니다. \`summary\`에는 커밋 제목 prefix(사용자 커밋 규칙의 이름 머리말 등)나 \`[MnP]\` 출처를 넣지 말고, \`background\`·\`cause\`·\`changes\`에는 이번 체크포인트의 실제 변경을 작성하며 \`scope\`는 필요한 경우에만 작성하세요. MindNProgress가 현재 문서·카드 제목과 안정적인 ID를 조회해 커밋 본문의 \`[MnP]\` 섹션을 자동으로 추가합니다. 파일 변경이 전혀 없는 조사·검증 작업은 같은 도구의 \`operation.action=confirm-no-changes\`로 확인하세요. 검증 후 보완했다면 새 변경에 맞는 메시지로 다시 체크포인트를 만들고 검증하세요. Git으로 직접 커밋하지 마세요. 완료 시 MindNProgress는 명시적 체크포인트만 main에 통합하고 그 이후의 자동 변경은 복구 자료로 보존한 뒤 worker에서 제거합니다.`
 }
 
 export class WorkspacePoolManager {
-  constructor({ registryFile, stateFile, gitRunner = defaultGitRunner } = {}) {
+  constructor({
+    registryFile, stateFile, gitRunner = defaultGitRunner, replaceStateFile = replaceFileWithRetry,
+    commitAuthorNameForLease = () => null,
+  } = {}) {
     this.registryFile = path.resolve(String(registryFile ?? '').trim())
     this.stateFile = path.resolve(String(stateFile ?? '').trim())
     this.git = gitRunner
+    this.replaceStateFile = replaceStateFile
+    // Resolves (sync or async) the MnP account name for leases whose checkpoints predate the stored commit prefix.
+    this.commitAuthorNameForLease = commitAuthorNameForLease
     this.registry = null
     this.state = null
     this.queue = Promise.resolve()
@@ -371,7 +479,7 @@ export class WorkspacePoolManager {
     return result
   }
 
-  async initialize({ unconfirmedLeaseIds = [] } = {}) {
+  async initialize({ unconfirmedLeaseIds = [], recoverWorkspaces = true } = {}) {
     return this.runExclusive(async () => {
       const rawRegistry = await readJson(this.registryFile, null)
       if (!rawRegistry) return false
@@ -387,6 +495,8 @@ export class WorkspacePoolManager {
       }
       this.state.workspaces ??= {}
       this.state.leases ??= {}
+      // 서버가 중지된 유지보수에서는 대상 lease만 명시적으로 처리한다.
+      if (!recoverWorkspaces) return true
       for (const leaseId of unconfirmedLeaseIds) {
         const lease = this.state.leases[leaseId]
         if (lease?.status === 'quarantined') lease.executionUnconfirmed = true
@@ -400,6 +510,7 @@ export class WorkspacePoolManager {
         }
       }
       for (const workspace of this.registry.workers) {
+        if (await this.isRemotelyOwned(workspace)) continue
         const current = this.state.workspaces[workspace.id]
         if (this.recoverablePreparationFailureState(current)) {
           try {
@@ -455,6 +566,9 @@ export class WorkspacePoolManager {
       'integrating',
       'awaiting-conflict-resolution',
       'resolving-integration-conflict',
+      'result-correction-preparing',
+      'correcting-result',
+      'result-correction-held',
     ])
     const assignedWorkspaceIds = new Set(
       requestedConversationId
@@ -572,18 +686,25 @@ export class WorkspacePoolManager {
       if (lease?.workspaceId !== workspaceId) return latest
       const timestamp = Date.parse(String(lease.startedAt ?? ''))
       return Number.isFinite(timestamp) ? Math.max(latest, timestamp) : latest
-    }, 0)
+    }, Date.parse(this.state?.lastAssignedAt?.[workspaceId] ?? '') || 0)
   }
 
-  orderedRecoverableWorkers() {
+  orderedRecoverableWorkers(preferredWorkspace = null) {
+    const preferredRoot = String(preferredWorkspace ?? '').trim()
+    const preferredWorkerId = preferredRoot
+      ? this.registry.workers.find((workspace) => normalizedPath(workspace.root) === normalizedPath(preferredRoot))?.id ?? null
+      : null
     return this.registry.workers
       .map((workspace, index) => ({
         workspace,
         index,
+        preferred: workspace.id === preferredWorkerId,
         lastAssignedAt: this.workerLastAssignedAt(workspace.id),
       }))
       .filter(({ workspace }) => this.recoverableIdleWorkspaceState(workspace.id))
-      .sort((left, right) => left.lastAssignedAt - right.lastAssignedAt || left.index - right.index)
+      .sort((left, right) => Number(right.preferred) - Number(left.preferred)
+        || left.lastAssignedAt - right.lastAssignedAt
+        || left.index - right.index)
       .map(({ workspace }) => workspace)
   }
 
@@ -631,6 +752,8 @@ export class WorkspacePoolManager {
 
   async synchronizeIdleWorkersToIntegration({ workspaceIds } = {}) {
     return this.runExclusive(async () => {
+      const releases = []
+      try {
       if (!this.registry || !this.state) {
         throw new WorkspacePoolUnavailableError(
           'AI 작업공간 풀이 준비되지 않았습니다.',
@@ -695,6 +818,9 @@ export class WorkspacePoolManager {
       const preflight = []
       for (const id of requestedIds) {
         const workspace = workersById.get(id)
+        const release = await this.claimLocalWorkspace(workspace)
+        if (!release) throw new WorkspacePoolUnavailableError('원격 coordinator 소유 worker는 로컬 풀에서 동기화할 수 없습니다.', [{ workspaceId: id }], 'REMOTE_WORKSPACE_OWNER_MISMATCH')
+        releases.push(release)
         const current = this.state.workspaces[workspace.id]
         if (current?.status !== 'idle') {
           throw new WorkspacePoolUnavailableError(
@@ -793,6 +919,7 @@ export class WorkspacePoolManager {
         baseTree,
         workspaces: synchronized,
       }
+      } finally { for (const release of releases.reverse()) await release() }
     })
   }
 
@@ -987,6 +1114,7 @@ export class WorkspacePoolManager {
     confirmNoChanges = false,
     commitMessage,
     mnpContext,
+    commitAuthorName = null,
   } = {}) {
     return this.runExclusive(async () => {
       const lease = this.state?.leases?.[String(leaseId ?? '').trim()]
@@ -1006,6 +1134,9 @@ export class WorkspacePoolManager {
       if (currentBranch !== lease.branch) {
         throw new WorkspacePoolUnavailableError(`체크포인트 브랜치가 ${lease.branch}가 아닙니다.`)
       }
+      if (lease.resultCorrection?.phase === 'correcting') {
+        await this.validateResultCorrectionWorkspace(lease, workspace, { allowDirty: true })
+      }
       const intendedPaths = [...new Set((Array.isArray(paths) ? paths : []).map(safeRelativePath).filter(Boolean))]
       if (intendedPaths.length === 0) {
         if (!confirmNoChanges) {
@@ -1022,10 +1153,10 @@ export class WorkspacePoolManager {
         }
         lease.checkpoints ??= []
         lease.checkpoints.push(checkpoint)
-        lease.status = 'leased'
+        lease.status = lease.resultCorrection?.phase === 'correcting' ? 'correcting-result' : 'leased'
         lease.updatedAt = checkpoint.createdAt
         this.state.workspaces[workspace.id] = {
-          status: 'leased',
+          status: lease.status,
           jobId: lease.jobId,
           leaseId: lease.leaseId,
           updatedAt: checkpoint.createdAt,
@@ -1040,7 +1171,11 @@ export class WorkspacePoolManager {
           'AI_WORKSPACE_CHECKPOINT_INPUT_INVALID',
         )
       }
-      const normalizedCommitMessage = normalizeCheckpointCommitMessage(commitMessage)
+      const { prefix: commitPrefix, source: commitPrefixSource } = resolveCheckpointCommitPrefixDetails({
+        configuredPrefix: this.registry.commitPrefix,
+        authorName: commitAuthorName,
+      })
+      const normalizedCommitMessage = normalizeCheckpointCommitMessage(commitMessage, { commitPrefix })
       const scopedStatus = await this.git(workspace.root, [
         'status', '--porcelain=v1', '-z', '--untracked-files=all', '--', ...intendedPaths,
       ])
@@ -1051,6 +1186,14 @@ export class WorkspacePoolManager {
           noChanges: true,
           paths: intendedPaths,
         }
+      }
+      const inboxPaths = knowledgeInboxCheckpointPaths(scopedStatus)
+      if (inboxPaths.length > 0) {
+        throw new WorkspacePoolUnavailableError(
+          `knowledge-inbox 경로는 폐기되어 체크포인트에 포함해 커밋할 수 없습니다. 이 경로를 변경 경로에서 빼고 다시 체크포인트하세요: ${inboxPaths.join(', ')}`,
+          inboxPaths,
+          'AI_WORKSPACE_CHECKPOINT_PATH_REJECTED',
+        )
       }
       await this.git(workspace.root, ['add', '--', ...intendedPaths])
       const stagedPaths = nullSeparated(await this.git(workspace.root, ['diff', '--cached', '--name-only', '-z']))
@@ -1063,22 +1206,31 @@ export class WorkspacePoolManager {
         mapId: lease.mapId,
         cardId: lease.cardId,
         cardTitle: lease.cardLabel,
-      }))
+      }), commitPrefix)
+      if (commitPrefixSource === 'none') {
+        console.warn('[AI workspace checkpoint] commit prefix unresolved; committing without prefix', JSON.stringify({
+          leaseId: lease.leaseId,
+          conversationId: lease.conversationId ?? null,
+        }))
+      }
       await this.git(workspace.root, ['commit', '-m', message.title, '-m', message.body])
       const commit = await this.git(workspace.root, ['rev-parse', 'HEAD'])
       const checkpoint = {
         commit,
         paths: intendedPaths,
         commitMessage: message.normalized,
+        commitPrefix,
+        commitPrefixSource,
         mnpContext: message.mnpContext,
         createdAt: new Date().toISOString(),
       }
       lease.checkpoints ??= []
       lease.checkpoints.push(checkpoint)
-      lease.status = 'leased'
+      if (lease.resultCorrection?.phase === 'correcting') lease.resultCorrection.checkpointCommit = commit
+      lease.status = lease.resultCorrection?.phase === 'correcting' ? 'correcting-result' : 'leased'
       lease.updatedAt = checkpoint.createdAt
       this.state.workspaces[workspace.id] = {
-        status: 'leased',
+        status: lease.status,
         jobId: lease.jobId,
         leaseId: lease.leaseId,
         updatedAt: checkpoint.createdAt,
@@ -1086,6 +1238,24 @@ export class WorkspacePoolManager {
       await this.persist()
       return { lease: publicLease(lease), checkpoint, noChanges: false }
     })
+  }
+
+  async isRemotelyOwned(workspace) {
+    try {
+      const file = path.resolve(workspace.root, await ownershipGit(workspace.root, ['rev-parse', '--git-path', 'mnp-remote-owner.json']))
+      return Boolean(await jsonFile(file))
+    } catch { return true }
+  }
+
+  async claimLocalWorkspace(workspace) {
+    const release = await acquireWorkspaceLock(workspace.root)
+    try {
+      const owner = path.resolve(workspace.root, await ownershipGit(workspace.root, ['rev-parse', '--git-path', 'mnp-remote-owner.json']))
+      if (await jsonFile(owner)) { await release(); return null }
+      const localOwner = path.resolve(workspace.root, await ownershipGit(workspace.root, ['rev-parse', '--git-path', 'mnp-local-owner.json']))
+      await saveJson(localOwner, { poolId: this.registry.poolId })
+      return release
+    } catch (error) { await release(); throw error }
   }
 
   async acquire({ workspaceHint, mapId, cardId, conversationId, cardLabel, replacesLeaseId } = {}) {
@@ -1132,7 +1302,14 @@ export class WorkspacePoolManager {
       const leaseId = `lease-${randomBytes(16).toString('hex')}`
       const branch = `mnp/${jobId}`
       const failures = []
-      for (const workspace of this.orderedRecoverableWorkers()) {
+      for (const workspace of this.orderedRecoverableWorkers(workspaceHint)) {
+        // A physical Fork cannot belong to a local pool and a remote coordinator.
+        let releaseLock
+        try { releaseLock = await this.claimLocalWorkspace(workspace) } catch (error) {
+          failures.push({ workspaceId: workspace.id, reason: error.message }); continue
+        }
+        if (!releaseLock) continue
+        try {
         let current = this.state.workspaces[workspace.id] ?? { status: 'idle' }
         if (this.recoverablePreparationFailureState(current)) {
           try {
@@ -1229,6 +1406,8 @@ export class WorkspacePoolManager {
             startedAt,
           })
           this.state.leases[leaseId] = lease
+          this.state.lastAssignedAt ??= {}
+          this.state.lastAssignedAt[workspace.id] = startedAt
           this.state.workspaces[workspace.id] = {
             status: 'leased',
             jobId,
@@ -1256,6 +1435,7 @@ export class WorkspacePoolManager {
           }
           await this.persist()
         }
+        } finally { await releaseLock() }
       }
       throw new WorkspacePoolUnavailableError(
         '사용 가능한 AI 작업공간이 없습니다.',
@@ -1271,10 +1451,19 @@ export class WorkspacePoolManager {
     conversationId,
     failureCategory,
     confirmedDispatchLease,
+    rejectedDispatch,
+    interruptedProof,
   } = {}) {
     // 서버가 원본 operation 또는 만료 후 최초 위임 전문을 직접 검증한 경우에만 사용한다.
     // 요청 본문이나 AI가 주장한 대화 ID만으로 격리를 해제하지 않는다.
     const dispatchRecovery = failureCategory === 'confirmed-dispatch'
+    const busyRecovery = failureCategory === 'recovery-dispatch-busy'
+    const interruptedRecovery = failureCategory === 'upstream-interrupted'
+    if (interruptedRecovery) assertAiDelegationInterruptedLease(this.state?.leases?.[leaseId], interruptedProof, { mapId, cardId, conversationId })
+    if (busyRecovery && (!aiDelegationBusyDispatchRejected(rejectedDispatch, conversationId, rejectedDispatch?.operationId)
+      || !aiDelegationWorkspaceLeaseMatches(this.state?.leases?.[leaseId], rejectedDispatch.workspaceLease))) {
+      throw new WorkspacePoolUnavailableError('복구 접수 거절의 대화·작업공간 소유권을 확인하지 못했습니다.')
+    }
     if (dispatchRecovery && !aiDelegationWorkspaceLeaseMatches(this.state?.leases?.[leaseId], confirmedDispatchLease)) {
       throw new WorkspacePoolUnavailableError('기존 실행의 작업공간 소유권을 확인하지 못했습니다.')
     }
@@ -1285,7 +1474,7 @@ export class WorkspacePoolManager {
     return this.runExclusive(async () => {
       const normalizedLeaseId = String(leaseId ?? '').trim()
       const normalizedConversationId = String(conversationId ?? '').trim()
-      if (!dispatchRecovery && !['usage-limit', 'rate-limit', 'model-capacity'].includes(String(failureCategory ?? '').trim())) {
+      if (!dispatchRecovery && !busyRecovery && !interruptedRecovery && !['usage-limit', 'rate-limit', 'model-capacity'].includes(String(failureCategory ?? '').trim())) {
         throw new WorkspacePoolUnavailableError(
           '외부 사용량·요청 한도 또는 모델 용량 부족으로 확인된 격리 lease만 재활성화할 수 있습니다.',
           [],
@@ -1293,6 +1482,7 @@ export class WorkspacePoolManager {
         )
       }
       const lease = this.state?.leases?.[normalizedLeaseId]
+      if (interruptedRecovery) assertAiDelegationInterruptedLease(lease, interruptedProof, { mapId, cardId, conversationId })
       if (!lease || lease.status !== 'quarantined' || lease.result?.status !== 'quarantined'
         || (!dispatchRecovery && lease.result?.childStatus !== 'failed')) {
         throw new WorkspacePoolUnavailableError(
@@ -1418,7 +1608,9 @@ export class WorkspacePoolManager {
       const recoveredAt = new Date().toISOString()
       lease.recoveryHistory ??= []
       lease.recoveryHistory.push({
-        type: dispatchRecovery ? 'confirmed-dispatch' : 'retryable-child-failure',
+        type: dispatchRecovery ? 'confirmed-dispatch' : busyRecovery ? 'rejected-recovery-dispatch' : 'retryable-child-failure',
+        ...(busyRecovery ? { rejectedOperationId: rejectedDispatch.operationId } : {}),
+        ...(interruptedRecovery ? { interruptedProof } : {}),
         previousStatus: lease.status,
         previousResult: lease.result,
         uncommittedChangesPreserved: Boolean(dirty),
@@ -1443,7 +1635,7 @@ export class WorkspacePoolManager {
         ...session,
         conversationId: normalizedConversationId,
         recovery: {
-          type: dispatchRecovery ? 'confirmed-dispatch' : 'retryable-child-failure',
+          type: dispatchRecovery ? 'confirmed-dispatch' : busyRecovery ? 'rejected-recovery-dispatch' : 'retryable-child-failure',
           recoveredAt,
         },
         updatedAt: recoveredAt,
@@ -1653,6 +1845,310 @@ export class WorkspacePoolManager {
     return [...blocked].sort()
   }
 
+  async releasePreservedIntegrationFailure(leaseId, scope, { reason, trackedEolRecovery } = {}) {
+    if (typeof reason !== 'string' || reason.trim().length < 3 || reason.length > 1000) {
+      throw new WorkspacePoolUnavailableError('결과 보존 반환에는 명시적인 사용자 종료 사유가 필요합니다.', [], 'INTEGRATION_RECOVERY_UNSAFE')
+    }
+    return this.recoverLocalChangesIntegrationFailure(leaseId, scope, { releaseReason: reason.trim(), trackedEolRecovery })
+  }
+
+  async recoverLocalChangesIntegrationFailure(leaseId, scope, { releaseReason, trackedEolRecovery } = {}) {
+    return this.runExclusive(async () => {
+      const lease = this.state?.leases?.[leaseId]
+      const workspace = this.registry?.workers.find((item) => item.id === lease?.workspaceId)
+      const current = this.state?.workspaces?.[lease?.workspaceId]
+      const integration = this.registry?.integration
+      const reject = (message) => { throw new WorkspacePoolUnavailableError(message, [], 'INTEGRATION_RECOVERY_UNSAFE') }
+      if (!lease || !scope || lease.mapId !== scope.mapId || lease.cardId !== scope.cardId
+        || lease.conversationId !== scope.conversationId) reject('복구할 위임과 작업공간 lease의 소유권이 일치하지 않습니다.')
+      if (releaseReason && lease.status === 'cancelled' && lease.result?.status === 'released-preserved') return lease.result
+      if (!releaseReason && (trackedEolRecovery || lease.trackedEolRecovery)) reject('승인된 줄바꿈 정리는 결과 보존 반환에서만 수행할 수 있습니다.')
+      if (lease.preservedRelease && !releaseReason) reject('결과 보존 반환을 시작한 위임은 통합 재시도 대신 반환을 마무리해야 합니다.')
+      if (lease.status === 'waiting-integration' && current?.status === 'waiting-integration'
+        && current.leaseId === leaseId && lease.result?.recoveredFromQuarantine
+        && lease.integrationRecoveryHistory?.at(-1)?.type === 'local-changes') return lease.result
+      const result = lease.result
+      const expectedCommits = localChangesIntegrationCommits(result)
+      if (!expectedCommits || !workspace || !integration || lease.status !== 'quarantined'
+        || lease.executionUnconfirmed || current?.status !== 'quarantined'
+        || current.leaseId !== leaseId || current.jobId !== lease.jobId
+        || lease.integrationBranch !== result.integrationBranch
+        || lease.integrationBranch !== `mnp/integrate/${lease.jobId}`
+        || lease.integrationBaseCommit !== result.integrationBaseCommit
+        || normalizedPath(lease.projectRoot) !== normalizedPath(workspace.root)
+        || lease.integrationWorkspaceId !== integration.id) reject('로컬 변경으로 중단된 통합과 현재 작업공간 배정을 확인할 수 없습니다.')
+      if (releaseReason && (lease.resultCorrection || await this.isRemotelyOwned(workspace))) reject('결과 정정 또는 원격 소유 작업공간은 이 반환 경로로 처리할 수 없습니다.')
+      const [metadata, session] = await Promise.all([
+        readJson(path.join(workspace.root, '.ai-workspace.json'), null),
+        readJson(path.join(workspace.root, '.ai-session.json'), null),
+      ])
+      const resumedRelease = releaseReason && lease.preservedRelease?.phase === 'prepared' && session === null
+      if (metadata?.workspaceId !== workspace.id || normalizedPath(metadata?.projectRoot) !== normalizedPath(workspace.root)
+        || (!resumedRelease && (session?.workspaceId !== lease.workspaceId || session?.jobId !== lease.jobId
+        || session?.leaseId !== leaseId || session?.conversationId !== lease.conversationId
+        || session?.branch !== lease.branch || session?.baseCommit !== lease.baseCommit
+        || normalizedPath(session?.projectRoot) !== normalizedPath(workspace.root)))) reject('작업공간 메타데이터 또는 AI 세션이 변경되었습니다. 기존 배정을 먼저 확인하세요.')
+      const [dirty, branch, head, workHead, mainBranch, unmerged] = await Promise.all([
+        this.git(workspace.root, ['status', '--porcelain', '--untracked-files=all']),
+        this.git(workspace.root, ['branch', '--show-current']),
+        this.git(workspace.root, ['rev-parse', 'HEAD']),
+        this.git(workspace.root, ['rev-parse', `refs/heads/${lease.branch}`]),
+        this.git(integration.root, ['branch', '--show-current']),
+        this.git(workspace.root, ['diff', '--name-only', '--diff-filter=U']),
+      ])
+      if (dirty && !trackedEolRecovery && !lease.trackedEolRecovery) reject('fork 작업공간에 로컬 변경이 남아 있습니다. 추적 파일 변경과 미추적 파일을 보존·정리한 뒤 통합 재시도를 요청하세요.')
+      if (branch !== lease.integrationBranch || workHead !== lease.headCommit
+        || result.headCommit !== lease.headCommit || mainBranch !== lease.baseBranch
+        || (result.integrationFailureHeadCommit && result.integrationFailureHeadCommit !== head)) reject('보존된 작업 브랜치 또는 중단된 통합 HEAD가 변경되었습니다.')
+      if (unmerged || await this.gitPathExists(workspace.root, 'CHERRY_PICK_HEAD')
+        || await this.gitPathExists(workspace.root, 'MERGE_HEAD')
+        || await this.gitPathExists(workspace.root, 'REBASE_HEAD')
+        || await this.gitPathExists(workspace.root, 'rebase-merge')
+        || await this.gitPathExists(workspace.root, 'rebase-apply')) reject('진행 중인 충돌·병합·리베이스를 먼저 해결하세요.')
+      const commits = (await this.git(workspace.root, ['rev-list', '--reverse', `${lease.baseCommit}..${lease.headCommit}`])).split(/\r?\n/).filter(Boolean)
+      const checkpoints = new Set((lease.checkpoints ?? []).map((item) => item.commit))
+      if (JSON.stringify(commits) !== JSON.stringify(expectedCommits)
+        || JSON.stringify(commits) !== JSON.stringify(lease.commits)
+        || lease.checkpoints?.at(-1)?.commit !== lease.headCommit
+        || commits.some((commit) => !checkpoints.has(commit))) reject('완료 커밋과 명시적 체크포인트가 일치하지 않습니다.')
+      await this.git(workspace.root, ['merge-base', '--is-ancestor', lease.baseCommit, lease.headCommit])
+      await this.git(workspace.root, ['merge-base', '--is-ancestor', lease.integrationBaseCommit, head])
+      const applied = (await this.git(workspace.root, ['rev-list', '--reverse', `${lease.integrationBaseCommit}..${head}`])).split(/\r?\n/).filter(Boolean)
+      if (applied.length > commits.length) reject('중단된 통합 브랜치에 확인되지 않은 커밋이 있습니다.')
+      const sourceHead = applied.length ? commits[applied.length - 1] : lease.baseCommit
+      const [sourceDiff, appliedDiff] = await Promise.all([
+        this.git(workspace.root, ['diff', '--binary', '--full-index', '--no-ext-diff', '--no-textconv', lease.baseCommit, sourceHead, '--']),
+        this.git(workspace.root, ['diff', '--binary', '--full-index', '--no-ext-diff', '--no-textconv', lease.integrationBaseCommit, head, '--']),
+      ])
+      if (sourceDiff !== appliedDiff) reject('중단된 통합 브랜치의 변경이 완료 커밋의 적용 결과와 다릅니다.')
+      const sequencer = await this.gitPathExists(workspace.root, 'sequencer')
+      if (sequencer) {
+        const sequencerPath = path.resolve(workspace.root, await this.git(workspace.root, ['rev-parse', '--git-path', 'sequencer']))
+        const [start, todo] = await Promise.all([
+          readFile(path.join(sequencerPath, 'head'), 'utf8'), readFile(path.join(sequencerPath, 'todo'), 'utf8'),
+        ])
+        const pending = todo.trim().split(/\r?\n/)
+        const remaining = commits.slice(applied.length)
+        if (start.trim() !== lease.integrationBaseCommit || pending.length !== remaining.length
+          || pending.some((line, index) => {
+            const match = line.match(/^pick ([a-f0-9]+) /)
+            return !match || !remaining[index].startsWith(match[1])
+          })) reject('진행 중인 Git 작업이 원래 통합 요청과 일치하지 않습니다.')
+      }
+      if (trackedEolRecovery || lease.trackedEolRecovery) {
+        await recoverTrackedCheckoutEol({ workerRoot: workspace.root, sharedRoot: this.registry.sharedRoot,
+          lease, request: trackedEolRecovery, actor: { userId: scope.userId ?? null, operator: scope.operator ?? null },
+          persist: () => this.persist() })
+      }
+      // 재구성 전에 부분 적용 결과도 참조로 보존한다. 사용자 변경은 삭제하거나 되돌리지 않는다.
+      const backupRef = `refs/mnp/integration-recovery/${lease.jobId}/${Number(lease.integrationAttempt ?? 1)}`
+      await this.git(workspace.root, ['update-ref', backupRef, head])
+      if (releaseReason) {
+        // 반환은 성공/통합이 아니다. 소스와 부분 후보, 실패 원문을 모두 보존하고
+        // 현재 checkout도 바꾸지 않는다. 다음 배정이 정상 준비 절차로 최신 main을 가져온다.
+        const sourceRef = `refs/mnp/preserved-results/${lease.jobId}/source`
+        await this.git(workspace.root, ['update-ref', sourceRef, lease.headCommit])
+        lease.preservedRelease ??= { phase: 'prepared', reason: releaseReason, preparedAt: new Date().toISOString(),
+          sourceRef, sourceHead: lease.headCommit, backupRef, preservedHead: head,
+          ...(lease.trackedEolRecovery ? { trackedEolRecovery: lease.trackedEolRecovery } : {}),
+          approvedByUserId: scope.userId ?? null, approvedByOperator: scope.operator ?? null }
+        await this.persist()
+        if (sequencer) await this.git(workspace.root, ['cherry-pick', '--quit'])
+        if (await this.git(workspace.root, ['status', '--porcelain', '--untracked-files=all'])
+          || await this.git(workspace.root, ['rev-parse', 'HEAD']) !== head) reject('반환 직전 작업공간이 변경되어 격리를 유지합니다.')
+        const latestSession = await readJson(path.join(workspace.root, '.ai-session.json'), null)
+        if (latestSession && JSON.stringify(latestSession) !== JSON.stringify(session)) reject('반환 직전 AI 세션이 변경되었습니다.')
+        await rm(path.join(workspace.root, '.ai-session.json'), { force: true })
+        const releasedAt = new Date().toISOString()
+        const released = await this.writeResult(lease, { status: 'released-preserved', childStatus: 'completed',
+          integratedCommit: null, previousResult: result, preservedRelease: { ...lease.preservedRelease, phase: 'released', releasedAt }, completedAt: releasedAt })
+        lease.status = 'cancelled'
+        lease.result = released
+        lease.preservedRelease = released.preservedRelease
+        const priorIntegrationLeaseId = this.state.integrationLeaseId
+        if (this.state.integrationLeaseId === leaseId) this.state.integrationLeaseId = null
+        this.state.workspaces[workspace.id] = { status: 'idle', idleCommit: head, idleBranch: branch,
+          lastJobId: lease.jobId, lastLeaseId: leaseId, updatedAt: releasedAt }
+        try { await this.persist() } catch (error) {
+          // 최종 상태 저장 실패 시 같은 프로세스에서도 준비 단계부터 재검증한다.
+          lease.status = 'quarantined'
+          lease.result = result
+          lease.preservedRelease = { ...lease.preservedRelease, phase: 'prepared' }
+          this.state.integrationLeaseId = priorIntegrationLeaseId
+          this.state.workspaces[workspace.id] = current
+          throw error
+        }
+        return released
+      }
+      if (sequencer) await this.git(workspace.root, ['cherry-pick', '--quit'])
+      lease.integrationHeadCommit = null
+      lease.integrationRecoveryHistory = [...(lease.integrationRecoveryHistory ?? []), {
+        type: 'local-changes', recoveredAt: new Date().toISOString(), previousResult: result,
+        preservedHead: head, backupRef,
+      }]
+      return this.waitForIntegration(lease, workspace, {
+        childStatus: 'completed', childError: result.childError, headCommit: lease.headCommit,
+        recoveredFromQuarantine: true,
+      })
+    })
+  }
+
+  async validateIntegrationCheckpointCandidate(lease, workspace, head) {
+    const reject = (message) => { throw new WorkspacePoolUnavailableError(message, [], 'INTEGRATION_RECOVERY_UNSAFE') }
+    const workHead = await this.git(workspace.root, ['rev-parse', `refs/heads/${lease.branch}`])
+    if (workHead !== lease.headCommit) reject('보존된 작업 브랜치 HEAD가 변경되었습니다.')
+    const commits = (await this.git(workspace.root, ['rev-list', '--reverse', `${lease.baseCommit}..${lease.headCommit}`])).split(/\r?\n/).filter(Boolean)
+    const checkpoints = new Set((lease.checkpoints ?? []).map(item => item.commit))
+    if (!commits.length || JSON.stringify(commits) !== JSON.stringify(lease.commits)
+      || lease.checkpoints?.at(-1)?.commit !== lease.headCommit
+      || commits.some(commit => !checkpoints.has(commit))) reject('완료 커밋과 명시적 체크포인트가 일치하지 않습니다.')
+    await this.git(workspace.root, ['merge-base', '--is-ancestor', lease.integrationBaseCommit, head])
+    const applied = (await this.git(workspace.root, ['rev-list', '--reverse', `${lease.integrationBaseCommit}..${head}`])).split(/\r?\n/).filter(Boolean)
+    if (applied.length !== commits.length || applied.at(-1) !== head) reject('통합 후보의 HEAD 또는 커밋 수가 완료 체크포인트와 다릅니다.')
+    // 원래 main의 다른 변경은 허용하되, 각 후보 tree는 완료 커밋의 정확한 적용 결과여야 한다.
+    // worktree/index를 변경하지 않는 Git tree 병합으로 바이너리·공백·수동 변경도 검증한다.
+    for (let index = 0; index < commits.length; index++) {
+      const sourceParent = index ? commits[index - 1] : lease.baseCommit
+      const candidateParent = index ? applied[index - 1] : lease.integrationBaseCommit
+      const [sourceParents, candidateParents, expectedTree, candidateTree] = await Promise.all([
+        this.git(workspace.root, ['rev-parse', `${commits[index]}^@`]),
+        this.git(workspace.root, ['rev-parse', `${applied[index]}^@`]),
+        this.git(workspace.root, ['merge-tree', '--write-tree', `--merge-base=${sourceParent}`, candidateParent, commits[index]]),
+        this.git(workspace.root, ['rev-parse', `${applied[index]}^{tree}`]),
+      ])
+      if (sourceParents !== sourceParent || candidateParents !== candidateParent || expectedTree !== candidateTree) reject('통합 후보의 변경이 완료 체크포인트의 적용 결과와 다릅니다.')
+    }
+  }
+
+  async integrationCommitApplied(integration, candidate, mainHead) {
+    // 검증된 후보가 worker에만 존재할 수 있다. main에 없는 객체를 ancestor 검사에 넣으면
+    // 미반영(false)이 아니라 Git 오류(128)가 된다. 객체 부재와 실제 Git 오류를 구분한다.
+    let resolved
+    try { resolved = await this.git(integration.root, ['rev-parse', '--verify', '--quiet', `${candidate}^{commit}`]) }
+    catch (error) { if (error?.code === 1) return false; throw error }
+    if (resolved !== candidate) throw new WorkspacePoolUnavailableError('main에서 확인한 후보 커밋이 보존된 후보와 다릅니다.', [], 'INTEGRATION_RECOVERY_UNSAFE')
+    try {
+      await this.git(integration.root, ['merge-base', '--is-ancestor', candidate, mainHead])
+      return true
+    } catch (error) { if (error?.code === 1) return false; throw error }
+  }
+
+  async recoverIntegrationGitLockFailure(leaseId, scope, { untrackedMetaRecovery } = {}) {
+    return this.recoverCheckpointIntegrationFailure(leaseId, scope, { failureType: 'integration-git-lock', untrackedMetaRecovery })
+  }
+
+  async recoverIntegrationHeadChangedFailure(leaseId, scope) {
+    return this.recoverCheckpointIntegrationFailure(leaseId, scope, { failureType: 'integration-head-changed' })
+  }
+
+  async recoverIntegrationCandidateWorktreeFailure(leaseId, scope) {
+    return this.recoverCheckpointIntegrationFailure(leaseId, scope, { failureType: integrationCandidateDirtyReasonCode })
+  }
+
+  async recoverCheckpointIntegrationFailure(leaseId, scope, { failureType, untrackedMetaRecovery } = {}) {
+    if (!checkpointIntegrationRecoveryTypes.has(failureType)) throw new WorkspacePoolUnavailableError('지원하지 않는 통합 복구 유형입니다.', [], 'INTEGRATION_RECOVERY_UNSAFE')
+    return this.runExclusive(async () => {
+      const lease = this.state?.leases?.[leaseId]
+      const workspace = this.registry?.workers.find((item) => item.id === lease?.workspaceId)
+      const current = this.state?.workspaces?.[lease?.workspaceId]
+      const integration = this.registry?.integration
+      const reject = (message) => { throw new WorkspacePoolUnavailableError(message, [], 'INTEGRATION_RECOVERY_UNSAFE') }
+      if (!lease || !scope || lease.mapId !== scope.mapId || lease.cardId !== scope.cardId
+        || lease.conversationId !== scope.conversationId) reject('복구할 위임과 작업공간 lease의 소유권이 일치하지 않습니다.')
+      if (lease.status === 'waiting-integration' && current?.status === 'waiting-integration'
+        && current.leaseId === leaseId && lease.result?.recoveredFromQuarantine
+        && lease.integrationRecoveryHistory?.at(-1)?.type === failureType) return lease.result
+      const result = lease.result
+      const failure = failureType === 'integration-git-lock' ? integrationGitLockFailure(result)
+        : failureType === integrationCandidateDirtyReasonCode ? integrationCandidateWorktreeFailure(result) : integrationHeadChangedFailure(result)
+      const previousRetry = lease.integrationRecoveryHistory?.at(-1)
+      if (!failure || !workspace || !integration || lease.status !== 'quarantined' || lease.executionUnconfirmed
+        || current?.status !== 'quarantined' || current.leaseId !== leaseId || current.jobId !== lease.jobId
+        || lease.integrationBranch !== result.integrationBranch
+        || (lease.integrationBranch !== `mnp/integrate/${lease.jobId}`
+          && lease.integrationBranch !== previousRetry?.retryBranch)
+        || lease.integrationBaseCommit !== result.integrationBaseCommit
+        || lease.integrationWorkspaceId !== integration.id
+        || lease.poolId !== this.registry.poolId
+        || normalizedPath(lease.projectRoot) !== normalizedPath(workspace.root)
+        || result.leaseId !== leaseId || result.jobId !== lease.jobId || result.workspaceId !== lease.workspaceId
+        || result.poolId !== lease.poolId || result.branch !== lease.branch || result.baseCommit !== lease.baseCommit
+        || result.baseBranch !== lease.baseBranch
+        || result.mapId !== lease.mapId || result.cardId !== lease.cardId
+        || result.conversationId !== lease.conversationId
+        || (lease.integrationHeadCommit && lease.integrationHeadCommit !== failure.candidateCommit)) {
+        reject('완료된 통합 실패와 현재 작업공간 배정을 확인할 수 없습니다.')
+      }
+      if (this.state.integrationLeaseId && this.state.integrationLeaseId !== leaseId) reject('다른 위임이 통합 작업공간을 사용 중입니다. 해당 통합 종료 후 재시도하세요.')
+      if (failureType === 'integration-git-lock') {
+        const lockPath = path.resolve(integration.root, await this.git(integration.root, ['rev-parse', '--git-path', 'index.lock']))
+        if (normalizedPath(failure.lockPath) !== normalizedPath(lockPath)) reject('오류의 Git 잠금 경로가 통합 작업공간과 일치하지 않습니다.')
+      }
+      const operations = ['index.lock', 'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'REBASE_HEAD', 'rebase-merge', 'rebase-apply', 'sequencer']
+      for (const root of [integration.root, workspace.root]) {
+        if ((await Promise.all(operations.map(entry => this.gitPathExists(root, entry)))).some(Boolean)) {
+          reject('작업공간에 Git 잠금 또는 진행 중인 병합·cherry-pick·리베이스가 남아 있습니다. 자동 삭제하지 않습니다.')
+        }
+      }
+      const [metadata, session] = await Promise.all([
+        readJson(path.join(workspace.root, '.ai-workspace.json'), null),
+        readJson(path.join(workspace.root, '.ai-session.json'), null),
+      ])
+      if (metadata?.workspaceId !== workspace.id || normalizedPath(metadata?.projectRoot) !== normalizedPath(workspace.root)
+        || session?.workspaceId !== lease.workspaceId || session?.jobId !== lease.jobId
+        || session?.leaseId !== leaseId || session?.conversationId !== lease.conversationId
+        || session?.branch !== lease.branch || session?.baseCommit !== lease.baseCommit
+        || normalizedPath(session?.projectRoot) !== normalizedPath(workspace.root)) reject('작업공간 메타데이터 또는 AI 세션이 변경되었습니다.')
+      const [dirty, branch, head, workHead, mainBranch, mainHead, mainChanges] = await Promise.all([
+        this.git(workspace.root, ['status', '--porcelain', '--untracked-files=all']),
+        this.git(workspace.root, ['branch', '--show-current']),
+        this.git(workspace.root, ['rev-parse', 'HEAD']),
+        this.git(workspace.root, ['rev-parse', `refs/heads/${lease.branch}`]),
+        this.git(integration.root, ['branch', '--show-current']),
+        this.git(integration.root, ['rev-parse', 'HEAD']),
+        this.integrationTrackedChanges(integration),
+      ])
+      if (mainChanges.dirty) reject('통합 작업공간에 로컬 변경이 남아 있습니다. 변경 원본을 보존·정리한 뒤 통합 재시도를 요청하세요.')
+      const metaPlan = untrackedMetaRecovery === undefined ? null : normalizeUntrackedMetaRecovery(untrackedMetaRecovery)
+      if (dirty && !metaPlan) reject('fork 작업공간에 로컬 변경이 남아 있습니다. 변경 원본을 보존·정리한 뒤 통합 재시도를 요청하세요.')
+      if (branch !== lease.integrationBranch || (failure.candidateCommit && head !== failure.candidateCommit) || workHead !== lease.headCommit
+        || result.headCommit !== lease.headCommit || mainBranch !== lease.baseBranch) reject('보존된 작업 브랜치 또는 통합 후보 HEAD가 변경되었습니다.')
+      await this.validateIntegrationCheckpointCandidate(lease, workspace, head)
+      await this.git(integration.root, ['merge-base', '--is-ancestor', lease.integrationBaseCommit, mainHead])
+      const alreadyIntegrated = await this.integrationCommitApplied(integration, head, mainHead)
+      const recoveryNumber = (lease.integrationRecoveryHistory?.length ?? 0) + 1
+      const backupRef = `refs/mnp/integration-recovery/${lease.jobId}/${failureType.replace(/^integration-/u, '')}-${recoveryNumber}`
+      const retryBranch = alreadyIntegrated || mainHead === lease.integrationBaseCommit
+        ? lease.integrationBranch : `mnp/integrate/${lease.jobId}-retry-${recoveryNumber}`
+      if (retryBranch !== lease.integrationBranch) {
+        let existing = null
+        try { existing = await this.git(workspace.root, ['rev-parse', '--verify', '--quiet', `refs/heads/${retryBranch}`]) } catch (error) { if (error?.code !== 1) throw error }
+        if (existing) reject('새 통합 후보 브랜치가 이미 존재합니다. 기존 자료를 덮어쓰지 않습니다.')
+      }
+      let preserved = null
+      try { preserved = await this.git(workspace.root, ['rev-parse', '--verify', '--quiet', backupRef]) } catch (error) { if (error?.code !== 1) throw error }
+      if (preserved && preserved !== head) reject('통합 복구 보존 참조가 기존 후보와 다릅니다.')
+      // 승인된 단일 메타는 원문을 검증·백업만 한다. 실제 정리는 내구 기록 저장 후 finalize에서 수행한다.
+      if (metaPlan) {
+        lease.untrackedMetaRecovery = await preserveUntrackedMeta({ git: this.git, workerRoot: workspace.root,
+          mainRoot: integration.root, sharedRoot: this.registry.sharedRoot, lease, plan: metaPlan, mainHead, candidate: head })
+      }
+      if (!preserved) await this.git(workspace.root, ['update-ref', backupRef, head, '0'.repeat(40)])
+      lease.integrationRecoveryHistory = [...(lease.integrationRecoveryHistory ?? []), {
+        type: failureType, recoveredAt: new Date().toISOString(), previousResult: result,
+        preservedHead: head, preservedBranch: lease.integrationBranch, backupRef, retryBranch,
+        mainHeadAtRecovery: mainHead, alreadyIntegrated,
+        ...(metaPlan ? { untrackedMetaRecovery: lease.untrackedMetaRecovery } : {}),
+      }]
+      lease.integrationBranch = retryBranch
+      lease.integrationHeadCommit = retryBranch === branch ? head : null
+      return this.waitForIntegration(lease, workspace, {
+        childStatus: 'completed', childError: result.childError, headCommit: lease.headCommit,
+        recoveredFromQuarantine: true,
+      })
+    })
+  }
+
   async recoverUntrackedIntegrationFailure(leaseId) {
     return this.runExclusive(async () => {
       const lease = this.state?.leases?.[leaseId]
@@ -1759,7 +2255,8 @@ export class WorkspacePoolManager {
     })
     lease.status = 'waiting-integration'
     lease.result = result
-    if (!keepIntegrationLock && this.state.integrationLeaseId === lease.leaseId) {
+    if (!keepIntegrationLock && !(lease.resultCorrection && lease.resultCorrection.phase !== 'completed')
+      && this.state.integrationLeaseId === lease.leaseId) {
       this.state.integrationLeaseId = null
     }
     this.state.workspaces[workspace.id] = {
@@ -1889,11 +2386,199 @@ export class WorkspacePoolManager {
     })
   }
 
-  async finalize(leaseId, { childStatus, childError } = {}) {
+  async validateResultCorrectionWorkspace(lease, workspace, { allowDirty = false, preparing = false } = {}) {
+    const reject = (message) => { throw new WorkspacePoolUnavailableError(message, [], 'RESULT_CORRECTION_UNSAFE') }
+    const metadata = await readJson(path.join(workspace.root, '.ai-workspace.json'), null)
+    const session = await readJson(path.join(workspace.root, '.ai-session.json'), null)
+    if (!metadata || metadata.workspaceId !== workspace.id
+      || normalizedPath(metadata.projectRoot) !== normalizedPath(workspace.root)
+      || !session || session.workspaceId !== lease.workspaceId || session.jobId !== lease.jobId
+      || session.leaseId !== lease.leaseId || session.conversationId !== lease.conversationId
+      || session.branch !== lease.branch || session.baseCommit !== lease.baseCommit
+      || normalizedPath(session.projectRoot) !== normalizedPath(workspace.root)) reject('결과 정정 작업공간 메타데이터 또는 세션이 소유권과 일치하지 않습니다.')
+    const [dirty, branch, head, source] = await Promise.all([
+      this.git(workspace.root, ['status', '--porcelain=v1', '-z', '--untracked-files=all']),
+      this.git(workspace.root, ['branch', '--show-current']),
+      this.git(workspace.root, ['rev-parse', 'HEAD']),
+      this.git(workspace.root, ['rev-parse', `refs/heads/${lease.branch}`]),
+    ])
+    const operations = ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-apply', 'rebase-merge', 'sequencer', 'index.lock']
+    if ((await Promise.all(operations.map(entry => this.gitPathExists(workspace.root, entry)))).some(Boolean)) reject('결과 정정 작업공간에 진행 중인 Git 작업이 있습니다.')
+    if (!allowDirty && dirty) reject('결과 정정 작업공간에 커밋되지 않은 변경이 있습니다.')
+    const correction = lease.resultCorrection
+    if (await this.git(workspace.root, ['rev-parse', `refs/heads/${correction.candidateBranch}`]) !== correction.candidateHead) reject('보존된 통합 후보 HEAD가 변경되었습니다.')
+    const expectedSource = preparing ? correction.sourceHead : lease.checkpoints?.at(-1)?.commit
+    if (source !== expectedSource) reject('결과 정정 source HEAD가 기록된 체크포인트와 일치하지 않습니다.')
+    if (preparing) {
+      const candidate = await this.git(workspace.root, ['rev-parse', `refs/heads/${correction.candidateBranch}`])
+      if (candidate !== correction.candidateHead
+        || !((branch === correction.candidateBranch && head === correction.candidateHead)
+          || (branch === lease.branch && head === correction.sourceHead))) reject('보존된 source 또는 통합 후보 HEAD가 변경되었습니다.')
+    } else if (branch !== lease.branch || head !== source
+      || ![correction.operationId, correction.resumeIntent?.operationId].filter(Boolean).includes(session.resultCorrection?.operationId)) reject('결과 정정 브랜치 또는 세션 operation이 일치하지 않습니다.')
+    return { session, head, source }
+  }
+
+  async prepareIntegrationResultCorrection(leaseId, { mapId, cardId, conversationId, expectedLease,
+    operationId, instructionHash, expectedCompletionProof } = {}) {
+    return this.runExclusive(async () => {
+      const reject = (message) => { throw new WorkspacePoolUnavailableError(message, [], 'RESULT_CORRECTION_UNSAFE') }
+      const lease = this.state?.leases?.[leaseId]
+      const workspace = this.registry?.workers.find((item) => item.id === lease?.workspaceId && item.enabled !== false)
+      const integration = this.registry?.integration
+      const current = this.state?.workspaces?.[lease?.workspaceId]
+      if (expectedCompletionProof) assertAiDelegationSourceCompletionLease(lease, expectedCompletionProof, { mapId, cardId, conversationId })
+      if (!lease || !workspace || !integration || !operationId || !instructionHash
+        || !aiDelegationWorkspaceLeaseMatches(lease, expectedLease)
+        || lease.mapId !== mapId || lease.cardId !== cardId || !conversationId || lease.conversationId !== conversationId
+        || normalizedPath(lease.projectRoot) !== normalizedPath(workspace.root)
+        || lease.integrationWorkspaceId !== integration.id || current?.leaseId !== leaseId || current.jobId !== lease.jobId
+        || this.state.integrationLeaseId !== leaseId || lease.executionUnconfirmed) reject('결과 정정 요청의 소유권 또는 통합 잠금이 일치하지 않습니다.')
+      const existing = lease.resultCorrection
+      if (existing && existing.phase !== 'completed') {
+        if (existing.operationId !== operationId || existing.instructionHash !== instructionHash
+          || !['result-correction-preparing', 'correcting-result'].includes(lease.status)
+          || current.status !== lease.status) reject('다른 결과 정정 요청이 진행 중입니다.')
+      } else {
+        const result = lease.result
+        if (lease.status !== 'waiting-integration' || current.status !== 'waiting-integration'
+          || result?.status !== 'waiting-integration' || result.childStatus !== 'completed'
+          || result.reasonCode !== integrationUntrackedCollisionReasonCode || result.integratedCommit
+          || !lease.integrationHeadCommit || result.integrationHeadCommit !== lease.integrationHeadCommit
+          || result.headCommit !== lease.headCommit || result.integrationBranch !== lease.integrationBranch
+          || result.integrationBaseCommit !== lease.integrationBaseCommit || result.unmergedFiles?.length || lease.conflictRound
+          || lease.checkpoints?.at(-1)?.commit !== lease.headCommit) reject('검증 가능한 미추적 파일 충돌 통합 대기만 결과를 정정할 수 있습니다.')
+        const commits = (await this.git(workspace.root, ['rev-list', '--reverse', `${lease.baseCommit}..${lease.headCommit}`])).split(/\r?\n/).filter(Boolean)
+        if (!commits.length || JSON.stringify(commits) !== JSON.stringify(lease.commits)) reject('source 커밋 이력이 기록과 일치하지 않습니다.')
+        lease.resultCorrection = { operationId, instructionHash, phase: 'preparing', requestedAt: new Date().toISOString(),
+          sourceHead: lease.headCommit, candidateBranch: lease.integrationBranch, candidateHead: lease.integrationHeadCommit,
+          candidateBase: lease.integrationBaseCommit, previousResult: structuredClone(result),
+          refKey: createHash('sha256').update(operationId).digest('hex').slice(0, 24),
+          sourceBackupRef: `refs/mnp/result-correction/${createHash('sha256').update(operationId).digest('hex').slice(0, 24)}/source`,
+          candidateBackupRef: `refs/mnp/result-correction/${createHash('sha256').update(operationId).digest('hex').slice(0, 24)}/candidate` }
+        // 검증 실패 시 상태나 Git을 바꾸지 않는다. 아래 검증에 필요한 기록만 임시로 사용한다.
+      }
+      try {
+        await this.validateResultCorrectionWorkspace(lease, workspace, { preparing: true })
+        if (await this.git(integration.root, ['branch', '--show-current']) !== lease.baseBranch) reject('통합 작업공간 브랜치가 변경되었습니다.')
+        const operations = ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-apply', 'rebase-merge', 'sequencer', 'index.lock']
+        if ((await Promise.all(operations.map(entry => this.gitPathExists(integration.root, entry)))).some(Boolean)) reject('통합 작업공간에 진행 중인 Git 작업이 있습니다.')
+        if ((await this.integrationTrackedChanges(integration)).dirty) reject('통합 작업공간에 추적 파일 변경이 있습니다.')
+        const mainHead = await this.git(integration.root, ['rev-parse', 'HEAD'])
+        await this.git(integration.root, ['fetch', '--no-tags', workspace.root, `refs/heads/${lease.resultCorrection.candidateBranch}`])
+        let integrated = false
+        try { await this.git(integration.root, ['merge-base', '--is-ancestor', lease.resultCorrection.candidateHead, mainHead]); integrated = true } catch (error) { if (error?.code !== 1) throw error }
+        if (integrated) reject('기존 후보가 이미 통합되어 결과 정정을 시작하지 않았습니다.')
+        if (mainHead !== lease.resultCorrection.candidateBase) reject('기록된 통합 기준 HEAD가 변경되었습니다.')
+      } catch (error) {
+        if (existing) lease.resultCorrection = existing
+        else delete lease.resultCorrection
+        throw error
+      }
+      const correction = lease.resultCorrection
+      if (lease.status === 'correcting-result') {
+        await this.persist()
+        return publicLease(lease)
+      }
+      lease.status = 'result-correction-preparing'
+      this.state.workspaces[workspace.id] = { ...current, status: lease.status }
+      // Git 전환 전에 내구 intent와 lock을 저장한다. 재시작은 동일 요청만 이어갈 수 있다.
+      await this.persist()
+      for (const [ref, commit] of [[correction.sourceBackupRef, correction.sourceHead], [correction.candidateBackupRef, correction.candidateHead]]) {
+        let existingRef = null
+        try { existingRef = await this.git(workspace.root, ['rev-parse', '--verify', ref]) } catch (error) { if (error?.code !== 128) throw error }
+        if (existingRef && existingRef !== commit) reject('결과 정정 보존 ref가 기존 기록과 일치하지 않습니다.')
+        if (!existingRef) await this.git(workspace.root, ['update-ref', ref, commit, '0000000000000000000000000000000000000000'])
+      }
+      await this.git(workspace.root, ['switch', lease.branch])
+      const sessionFile = path.join(workspace.root, '.ai-session.json')
+      const session = await readJson(sessionFile, null)
+      await atomicJson(sessionFile, { ...session, phase: 'integration-result-correction',
+        resultCorrection: { operationId, sourceHead: correction.sourceHead, candidateHead: correction.candidateHead,
+          sourceBackupRef: correction.sourceBackupRef, candidateBackupRef: correction.candidateBackupRef }, updatedAt: new Date().toISOString() })
+      correction.phase = 'correcting'
+      lease.status = 'correcting-result'
+      this.state.workspaces[workspace.id] = { ...current, status: lease.status, updatedAt: new Date().toISOString() }
+      await this.persist()
+      return publicLease(lease)
+    })
+  }
+
+  async resumeIntegrationResultCorrection(leaseId, { mapId, cardId, conversationId, expectedLease,
+    previousOperationId, operationId, instructionHash } = {}) {
+    return this.runExclusive(async () => {
+      const lease = this.state?.leases?.[leaseId]
+      const correction = lease?.resultCorrection
+      const workspace = this.registry?.workers.find((item) => item.id === lease?.workspaceId)
+      if (!lease || !workspace || lease.status !== 'correcting-result' || correction?.phase !== 'correcting'
+        || this.state.integrationLeaseId !== leaseId || this.state.workspaces[workspace.id]?.leaseId !== leaseId
+        || this.state.workspaces[workspace.id]?.status !== lease.status || lease.mapId !== mapId || lease.cardId !== cardId
+        || lease.conversationId !== conversationId || !aiDelegationWorkspaceLeaseMatches(lease, expectedLease)
+        || !operationId || (correction.operationId !== previousOperationId && correction.operationId !== operationId)
+        || correction.instructionHash !== instructionHash) throw new WorkspacePoolUnavailableError('재개할 결과 정정 소유권이 일치하지 않습니다.')
+      const { session } = await this.validateResultCorrectionWorkspace(lease, workspace)
+      if (correction.operationId !== operationId) {
+        if (correction.resumeIntent && correction.resumeIntent.operationId !== operationId) throw new WorkspacePoolUnavailableError('다른 결과 정정 재개 요청을 처리 중입니다.')
+        correction.resumeIntent = { previousOperationId, operationId }
+        await this.persist()
+      }
+      // 내구 intent 뒤 세션 전환을 수행한다. 어느 저장 경계에서 중단돼도 같은 요청만 이어간다.
+      await atomicJson(path.join(workspace.root, '.ai-session.json'), { ...session,
+        resultCorrection: { ...session.resultCorrection, operationId }, updatedAt: new Date().toISOString() })
+      if (correction.operationId !== operationId) {
+        correction.operationHistory ??= []
+        correction.operationHistory.push(previousOperationId)
+        correction.operationId = operationId
+      }
+      delete correction.resumeIntent
+      await this.persist()
+      return publicLease(lease)
+    })
+  }
+
+  async finalize(leaseId, { childStatus, childError, operationId } = {}) {
     return this.runExclusive(async () => {
       const lease = this.state?.leases?.[leaseId]
       if (!lease) return null
+      if (lease.status === 'cancelled' && lease.result?.status === 'released-preserved') return lease.result
+      if (lease.status === 'result-correction-held') return lease.result ?? null
       if (['completed', 'quarantined'].includes(lease.status)) return lease.result ?? null
+      if (lease.resultCorrection && lease.resultCorrection.phase !== 'completed') {
+        const correction = lease.resultCorrection
+        // 원 operation의 오래된 완료·폴링과 준비 중 재시작은 정정 결과를 통합하지 않는다.
+        if (operationId !== correction.operationId || lease.status === 'result-correction-preparing') return lease.result ?? null
+        if (correction.phase === 'correcting') {
+          if (childStatus !== 'completed') return lease.result ?? null
+          if (this.state.integrationLeaseId !== leaseId || this.state.workspaces[lease.workspaceId]?.leaseId !== leaseId
+            || this.state.workspaces[lease.workspaceId]?.status !== 'correcting-result') throw new WorkspacePoolUnavailableError('결과 정정 완료의 점유 상태 또는 통합 잠금이 일치하지 않습니다.')
+          const workspace = this.registry.workers.find((item) => item.id === lease.workspaceId)
+          const { head } = await this.validateResultCorrectionWorkspace(lease, workspace)
+          if (!correction.checkpointCommit || head !== correction.checkpointCommit || head === correction.sourceHead) {
+            throw new WorkspacePoolUnavailableError('결과 정정 완료에는 새 변경 체크포인트가 필요합니다.', [], 'RESULT_CORRECTION_CHECKPOINT_REQUIRED')
+          }
+          await this.git(workspace.root, ['merge-base', '--is-ancestor', correction.sourceHead, head])
+          const integration = this.registry.integration
+          const operations = ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-apply', 'rebase-merge', 'sequencer', 'index.lock']
+          if ((await Promise.all(operations.map(entry => this.gitPathExists(integration.root, entry)))).some(Boolean)) throw new WorkspacePoolUnavailableError('통합 작업공간에 진행 중인 Git 작업이 있습니다.')
+          await this.git(workspace.root, ['fetch', '--no-tags', integration.root, `refs/heads/${lease.baseBranch}`])
+          let integrated = false
+          try { await this.git(workspace.root, ['merge-base', '--is-ancestor', correction.candidateHead, 'FETCH_HEAD']); integrated = true } catch (error) { if (error?.code !== 1) throw error }
+          if (integrated) throw new WorkspacePoolUnavailableError('기존 후보가 이미 통합되어 정정 결과를 반영하지 않았습니다.')
+          // 이전 후보와 원문은 보존하고 별도 이름의 후보를 fresh main 기준으로 재구성한다.
+          lease.resultCorrectionHistory ??= []
+          lease.resultCorrectionHistory.push(structuredClone(correction))
+          correction.phase = 'reintegrating'
+          correction.correctedHead = head
+          lease.headCommit = head
+          delete lease.commits
+          delete lease.integrationBranch
+          delete lease.integrationHeadCommit
+          delete lease.integrationBaseCommit
+          lease.result = null
+          lease.status = 'leased'
+          await this.persist()
+        }
+      }
       if (lease.status === 'awaiting-conflict-resolution') return lease.result ?? null
       if (lease.status === 'waiting-integration'
         && this.state.integrationLeaseId
@@ -1964,12 +2649,21 @@ export class WorkspacePoolManager {
       let headCommit = null
       let integratedCommit = null
       try {
+        const metaRecovery = lease.untrackedMetaRecovery
+        if (metaRecovery && (await this.git(workspace.root, ['branch', '--show-current'])) === metaRecovery.preservedBranch) {
+          // 복구 대기 중 재생성도 같은 승인 해시에 정확히 일치할 때만 보존한다.
+          await consumePreservedMeta({ git: this.git, workerRoot: workspace.root, mainRoot: integration.root,
+            sharedRoot: this.registry.sharedRoot, lease })
+          await this.persist()
+        }
         const currentBranch = await this.git(workspace.root, ['branch', '--show-current'])
         if (!lease.integrationBranch && currentBranch !== lease.branch) {
           throw new Error(`예상 브랜치 ${lease.branch}가 아닌 ${currentBranch}입니다.`)
         }
         const dirty = await this.git(workspace.root, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])
         const currentHead = await this.git(workspace.root, ['rev-parse', 'HEAD'])
+        if (lease.resultCorrection?.phase === 'reintegrating' && !lease.integrationBranch
+          && (dirty || currentHead !== lease.resultCorrection.correctedHead)) throw new Error('정정 체크포인트 이후 worker HEAD 또는 변경이 달라 통합을 중단했습니다.')
         const hasCheckpoint = currentHead !== lease.baseCommit
           || (Array.isArray(lease.checkpoints) && lease.checkpoints.length > 0)
         if (!completed && !dirty && !lease.integrationBranch && !hasCheckpoint
@@ -2023,6 +2717,30 @@ export class WorkspacePoolManager {
           })
         }
 
+        const recovery = lease.integrationRecoveryHistory?.at(-1)
+        if (checkpointIntegrationRecoveryTypes.has(recovery?.type) && currentBranch !== lease.integrationBranch
+          && (currentBranch !== recovery.preservedBranch || currentHead !== recovery.preservedHead || dirty)) {
+          throw new Error('통합 재시도 대기 중 보존된 후보 브랜치 또는 변경이 달라졌습니다.')
+        }
+        if (checkpointIntegrationRecoveryTypes.has(recovery?.type) && lease.integrationHeadCommit === recovery.preservedHead
+          && currentBranch === lease.integrationBranch) {
+          const mainBranch = await this.git(integration.root, ['branch', '--show-current'])
+          const mainHead = await this.git(integration.root, ['rev-parse', 'HEAD'])
+          if (mainBranch !== lease.baseBranch) throw new Error('통합 재시도 대기 중 main 브랜치가 변경되었습니다.')
+          const alreadyIntegrated = await this.integrationCommitApplied(integration, recovery.preservedHead, mainHead)
+          if (mainHead !== lease.integrationBaseCommit && !alreadyIntegrated) {
+            await this.git(integration.root, ['merge-base', '--is-ancestor', lease.integrationBaseCommit, mainHead])
+            const retryBranch = `mnp/integrate/${lease.jobId}-retry-${lease.integrationRecoveryHistory.length}`
+            let existing = null
+            try { existing = await this.git(workspace.root, ['rev-parse', '--verify', '--quiet', `refs/heads/${retryBranch}`]) } catch (error) { if (error?.code !== 1) throw error }
+            if (existing) throw new Error('새 통합 후보 브랜치가 이미 존재하여 덮어쓰지 않았습니다.')
+            recovery.retryBranch = retryBranch
+            recovery.mainHeadBeforeRebuild = mainHead
+            lease.integrationBranch = retryBranch
+            lease.integrationHeadCommit = null
+            await this.persist()
+          }
+        }
         if (lease.integrationHeadCommit && currentBranch !== lease.integrationBranch) {
           throw new Error('보존된 통합 브랜치가 변경되어 자동 통합을 중단했습니다.')
         }
@@ -2082,7 +2800,8 @@ export class WorkspacePoolManager {
           throw new Error(`통합 작업공간 브랜치가 ${lease.baseBranch}가 아닙니다.`)
         }
         const integrationBaseCommit = await this.git(integration.root, ['rev-parse', 'HEAD'])
-        const integrationBranch = lease.integrationBranch ?? `mnp/integrate/${lease.jobId}`
+        const integrationBranch = lease.integrationBranch ?? (lease.resultCorrection?.phase === 'reintegrating'
+          ? `mnp/integrate/${lease.jobId}-correction-${lease.resultCorrection.refKey}` : `mnp/integrate/${lease.jobId}`)
         lease.integrationBranch = integrationBranch
         lease.integrationBaseCommit = integrationBaseCommit
         lease.integrationAttempt = Number(lease.integrationAttempt ?? 0) + 1
@@ -2096,9 +2815,16 @@ export class WorkspacePoolManager {
         await this.persist()
 
         await this.git(workspace.root, ['fetch', '--no-tags', integration.root, `refs/heads/${lease.baseBranch}`])
-        await this.git(workspace.root, ['switch', '-C', integrationBranch, integrationBaseCommit])
+        const freshRecoveryCandidate = checkpointIntegrationRecoveryTypes.has(lease.integrationRecoveryHistory?.at(-1)?.type)
+          && integrationBranch !== lease.integrationRecoveryHistory.at(-1).preservedBranch
+        await this.git(workspace.root, ['switch', freshRecoveryCandidate ? '-c' : '-C', integrationBranch, integrationBaseCommit], { lfCheckout: true })
         try {
-          await this.git(workspace.root, ['cherry-pick', ...commits])
+          // 기준 브랜치 전환부터 같은 정책을 사용한다. cherry-pick에만 적용하면
+          // 기준에 이미 존재하던 CRLF 파일은 속성 변경 뒤 dirty로 남는다.
+          // 중간 커밋에서 text → -text가 바뀔 때 자동 CRLF checkout이
+          // 로컬 변경으로 오인되지 않도록 이 재생 명령의 checkout 변환만 끈다.
+          // input은 기존 CRLF 파일의 입력 정규화를 유지한다(false는 이를 dirty로 만든다).
+          await this.git(workspace.root, ['cherry-pick', ...commits], { lfCheckout: true })
         } catch (error) {
           const unmerged = await this.git(workspace.root, ['diff', '--name-only', '--diff-filter=U'])
           if (unmerged) return await this.awaitConflictResolution(lease, workspace, unmerged)
@@ -2190,6 +2916,9 @@ export class WorkspacePoolManager {
     return this.runExclusive(async () => {
       const lease = this.state?.leases?.[leaseId]
       if (!lease) return null
+      if (lease.status === 'cancelled' && lease.result?.status === 'released-preserved') return lease.result
+      if (lease.status === 'result-correction-held') return lease.result ?? null
+      if (lease.resultCorrection?.phase === 'correcting' || lease.resultCorrection?.phase === 'preparing') return lease.result ?? null
       if (['completed', 'quarantined'].includes(lease.status)) return lease.result ?? null
       const workspace = this.registry.workspaces.find((candidate) => candidate.id === lease.workspaceId)
       const integration = this.registry.integration
@@ -2223,7 +2952,15 @@ export class WorkspacePoolManager {
 
         const remainingChanges = await this.git(workspace.root, ['status', '--porcelain', '--untracked-files=all'])
         if (remainingChanges) {
-          const message = integrationConflictCheckpointMessage(lease)
+          // Checkpoints created before commitPrefix was stored resolve the prefix the same way a new checkpoint would.
+          const latestCheckpoint = latestMessageCheckpoint(lease)
+          const legacyCommitPrefix = latestCheckpoint && typeof latestCheckpoint.commitPrefix !== 'string'
+            ? resolveCheckpointCommitPrefix({
+              configuredPrefix: this.registry.commitPrefix,
+              authorName: await this.commitAuthorNameForLease(lease),
+            })
+            : ''
+          const message = integrationConflictCheckpointMessage(lease, legacyCommitPrefix)
           await this.git(workspace.root, ['add', '-A'])
           await this.git(workspace.root, ['commit', '-m', message.title, '-m', message.body])
         }
@@ -2307,13 +3044,27 @@ export class WorkspacePoolManager {
 
   async applyIntegration(lease, workspace, integration) {
     const remainingChanges = await this.git(workspace.root, ['status', '--porcelain', '--untracked-files=all'])
-    if (remainingChanges) throw new Error('통합 브랜치에 커밋되지 않은 변경이 남아 있습니다.')
     const integrationHead = await this.git(workspace.root, ['rev-parse', 'HEAD'])
+    if (remainingChanges) {
+      const [tracked, untracked] = await Promise.all([
+        this.git(workspace.root, ['diff', '--name-only', '-z', 'HEAD']),
+        this.git(workspace.root, ['ls-files', '--others', '--exclude-standard', '-z']),
+      ])
+      const trackedChanges = nullSeparated(tracked), untrackedChanges = nullSeparated(untracked)
+      throw Object.assign(new Error(`Fork 작업공간 ${workspace.id}의 통합 후보에 추적 변경 ${trackedChanges.length}개, 미추적 파일 ${untrackedChanges.length}개가 남아 있습니다. 원본을 보존·정리한 뒤 통합 재시도를 요청하세요.`), {
+        integrationFailure: { reasonCode: integrationCandidateDirtyReasonCode, phase: 'candidate-worktree',
+          workspaceId: workspace.id, branch: lease.integrationBranch, candidateCommit: integrationHead,
+          observedAt: new Date().toISOString(), trackedChanges, untrackedChanges },
+      })
+    }
     if (lease.integrationHeadCommit && lease.integrationHeadCommit !== integrationHead) {
       throw new Error('보존된 통합 커밋이 변경되어 자동 통합을 중단했습니다.')
     }
     // 최초 반영 전에 후보를 저장한다. 대기·재시작 후 새 cherry-pick을 만들지 않는다.
     if (!lease.integrationHeadCommit) {
+      if (checkpointIntegrationRecoveryTypes.has(lease.integrationRecoveryHistory?.at(-1)?.type)) {
+        await this.validateIntegrationCheckpointCandidate(lease, workspace, integrationHead)
+      }
       lease.integrationHeadCommit = integrationHead
       await this.persist()
     }
@@ -2325,6 +3076,11 @@ export class WorkspacePoolManager {
     }
     const currentIntegrationHead = await this.git(integration.root, ['rev-parse', 'HEAD'])
     if (currentIntegrationHead === integrationHead) return integrationHead
+    const recovery = lease.integrationRecoveryHistory?.at(-1)
+    if (checkpointIntegrationRecoveryTypes.has(recovery?.type) && recovery.preservedHead === integrationHead) {
+      // 반영 응답 유실 뒤 main이 더 진행됐어도 같은 후보를 다시 적용하지 않는다.
+      if (await this.integrationCommitApplied(integration, integrationHead, currentIntegrationHead)) return currentIntegrationHead
+    }
     if (currentIntegrationHead !== lease.integrationBaseCommit) {
       throw new Error('충돌 해결 중 통합 작업공간의 HEAD가 변경되었습니다.')
     }
@@ -2376,6 +3132,11 @@ export class WorkspacePoolManager {
     })
     lease.status = 'completed'
     lease.result = result
+    if (lease.resultCorrection?.phase === 'reintegrating') {
+      lease.resultCorrection.phase = 'completed'
+      lease.resultCorrection.integratedCommit = resultFields.integratedCommit
+      lease.resultCorrection.completedAt = result.completedAt
+    }
     if (this.state.integrationLeaseId === lease.leaseId) this.state.integrationLeaseId = null
     this.state.workspaces[workspace.id] = {
       status: 'idle',
@@ -2418,14 +3179,48 @@ export class WorkspacePoolManager {
     return result
   }
 
+  async holdIntegrationResultCorrection(lease, workspace, reason, resultFields = {}) {
+    if (lease.status === 'result-correction-held') return lease.result
+    const updatedAt = new Date().toISOString()
+    const result = await this.writeResult(lease, { ...resultFields, status: 'result-correction-held',
+      headCommit: lease.headCommit ?? null, integrationBaseCommit: lease.integrationBaseCommit ?? null,
+      integrationBranch: lease.integrationBranch ?? null, integrationHeadCommit: lease.integrationHeadCommit ?? null,
+      error: reason, updatedAt })
+    lease.resultCorrection.previousPhase = lease.resultCorrection.phase
+    lease.resultCorrection.phase = 'held'
+    lease.resultCorrection.holdReason = reason
+    lease.status = 'result-correction-held'
+    lease.result = result
+    this.state.workspaces[workspace.id] = { ...this.state.workspaces[workspace.id], status: lease.status,
+      reason, jobId: lease.jobId, leaseId: lease.leaseId, updatedAt }
+    // 알 수 없는 dispatch/Git 실패가 뒤의 완료 결과를 먼저 반영하도록 잠금을 해제하지 않는다.
+    await this.persist()
+    return result
+  }
+
   async quarantineIntegrationFailure(lease, workspace, error, resultFields = {}) {
+    if (lease.resultCorrection && lease.resultCorrection.phase !== 'completed') {
+      const result = await this.holdIntegrationResultCorrection(lease, workspace, error?.message ?? String(error), resultFields)
+      return new WorkspacePoolIntegrationError(result.error, result)
+    }
     const reason = error?.message ?? String(error)
     const completedAt = new Date().toISOString()
+    let integrationFailureHeadCommit = null
+    if (localChangesIntegrationCommits({
+      status: 'quarantined', integrationBranch: lease.integrationBranch,
+      integrationBaseCommit: lease.integrationBaseCommit, conflictRound: lease.conflictRound,
+      unmergedFiles: lease.result?.unmergedFiles, ...resultFields, error: reason,
+    })) {
+      try { integrationFailureHeadCommit = await this.git(workspace.root, ['rev-parse', 'HEAD']) } catch { /* 기존 오류를 보존한다. */ }
+    }
     const result = await this.writeResult(lease, {
       status: 'quarantined',
       headCommit: lease.headCommit ?? lease.result?.headCommit ?? null,
       integrationBaseCommit: lease.integrationBaseCommit ?? lease.result?.integrationBaseCommit ?? null,
       integrationBranch: lease.integrationBranch ?? lease.result?.integrationBranch ?? null,
+      integrationHeadCommit: lease.integrationHeadCommit ?? null,
+      ...(integrationFailureHeadCommit ? { integrationFailureHeadCommit } : {}),
+      ...(error?.integrationFailure?.reasonCode === integrationCandidateDirtyReasonCode ? { integrationFailure: error.integrationFailure } : {}),
       conflictRound: lease.conflictRound ?? lease.result?.conflictRound ?? null,
       unmergedFiles: lease.result?.unmergedFiles ?? [],
       ...resultFields,
@@ -2450,6 +3245,7 @@ export class WorkspacePoolManager {
     return this.runExclusive(async () => {
       const lease = this.state?.leases?.[leaseId]
       if (!lease || ['completed', 'cancelled', 'quarantined'].includes(lease.status)) return lease?.result ?? null
+      if (lease.resultCorrection && lease.resultCorrection.phase !== 'completed') throw new WorkspacePoolUnavailableError('진행 중인 결과 정정은 자동 취소·회수할 수 없습니다.')
       const workspace = this.registry.workspaces.find((candidate) => candidate.id === lease.workspaceId)
       if (!workspace) return null
       try {
@@ -2504,6 +3300,12 @@ export class WorkspacePoolManager {
     return this.runExclusive(async () => {
       const lease = this.state?.leases?.[leaseId]
       if (!lease) return null
+      if (lease.status === 'cancelled' && lease.result?.status === 'released-preserved') return lease.result
+      if (lease.status === 'result-correction-held') return lease.result ?? null
+      if (lease.resultCorrection && lease.resultCorrection.phase !== 'completed') {
+        const workspace = this.registry.workers.find((item) => item.id === lease.workspaceId)
+        return this.holdIntegrationResultCorrection(lease, workspace, String(reason ?? '결과 정정 실행을 확인할 수 없습니다.'))
+      }
       if (lease.status === 'quarantined') return lease.result ?? null
       if (!lease.conversationId) lease.executionUnconfirmed = true
       const completedAt = new Date().toISOString()
@@ -2551,9 +3353,37 @@ export class WorkspacePoolManager {
     return stored
   }
 
+  async pruneCompletedLeases(options = {}) {
+    return this.runExclusive(async () => {
+      if (!this.state) return { removed: 0, resultFilesFailed: 0 }
+      const leases = Object.values(this.state.leases ?? {})
+      const candidates = completedWorkspaceLeaseIds(this.state, options)
+      if (!candidates.size) return { removed: 0, resultFilesFailed: 0 }
+      const previous = this.state
+      const lastAssignedAt = { ...previous.lastAssignedAt }
+      for (const lease of leases) {
+        const at = latestHistoryTime(lastAssignedAt[lease.workspaceId], lease.startedAt)
+        if (at !== null) lastAssignedAt[lease.workspaceId] = new Date(at).toISOString()
+      }
+      this.state = { ...previous, lastAssignedAt,
+        leases: Object.fromEntries(Object.entries(previous.leases).filter(([id]) => !candidates.has(id))) }
+      try { await this.persist() } catch (error) { this.state = previous; throw error }
+      let resultFilesFailed = 0
+      const resultRoot = path.resolve(this.registry.sharedRoot, 'job-results')
+      for (const lease of leases.filter((item) => candidates.has(item.leaseId))) {
+        if (!/^[a-zA-Z0-9_-]+$/.test(lease.jobId ?? '')) continue
+        const file = path.resolve(resultRoot, `${lease.jobId}.json`)
+        if (path.dirname(file) !== resultRoot) continue
+        try { await rm(file, { force: true }) } catch { resultFilesFailed++ }
+      }
+      return { removed: candidates.size, resultFilesFailed }
+    })
+  }
+
   async persist() {
     if (!this.state) return
-    this.state.updatedAt = new Date().toISOString()
-    await atomicJson(this.stateFile, this.state)
+    const updatedAt = new Date().toISOString()
+    await atomicJson(this.stateFile, { ...this.state, updatedAt }, this.replaceStateFile)
+    this.state.updatedAt = updatedAt
   }
 }

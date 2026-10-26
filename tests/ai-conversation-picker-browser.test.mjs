@@ -18,7 +18,8 @@ window.setTheme('light');
 const originalFetch = window.fetch.bind(window);
 const conversations = ['running','waiting-confirmation','idle','unknown','unavailable','locked'].map((state,index)=>({
   conversationId:'conversation-'+index,name:'작업공간 설정 검토 · '+(index+1),
-  homeMachineLabel:'개발 PC',homeMachineRole:'main',accessible:state!=='locked',available:state!=='unavailable',
+  homeMachineLabel:'개발 PC',homeMachineRole:'main',accessible:state!=='locked',machineOnline:true,
+  available:state!=='unavailable',linkMissing:state==='unavailable',
   runtime:{state:state==='locked'?'idle':state},agent:{label:'Codex'},model:{label:'테스트 모델'},
   mode:{label:'작업공간 쓰기'},thoughtLevel:{label:'높음'},
   requestPreview:'문서와 그룹의 작업공간 기준을 확인하고 승인한 범위에서 개선합니다.',
@@ -26,8 +27,18 @@ const conversations = ['running','waiting-confirmation','idle','unknown','unavai
   startedBy:{label:'테스트 편집자'},startedAt:'2026-09-13T01:30:00Z',
 }));
 window.audit={selected:null,started:0,closed:0};
-window.fetch = async (url,init) => String(url).startsWith('/api/maps/')
-  ? new Response(JSON.stringify({latestConversationId:'conversation-0',conversations})) : originalFetch(url,init);
+window.pickerFetch={requests:[],releaseDetails:null};
+window.fetch = (url,init) => {
+  if (!String(url).startsWith('/api/maps/')) return originalFetch(url,init);
+  window.pickerFetch.requests.push(String(url));
+  if (String(url).includes('?view=linked')) return Promise.resolve(new Response(JSON.stringify({
+    latestConversationId:'conversation-0',
+    conversations:conversations.map(item=>({...item,available:false,linkMissing:false,liveStatusChecked:false})),
+  })));
+  return new Promise(resolve=>{window.pickerFetch.releaseDetails=()=>resolve(new Response(JSON.stringify({
+    latestConversationId:'conversation-0',conversations,
+  })))});
+};
 createRoot(document.getElementById('root')).render(React.createElement(AiConversationPickerDialog,{
   mapId:'test-map',cardId:'root',cardTitle:'문서 작업공간 개선',onClose:()=>window.audit.closed++,
   onSelect:c=>window.audit.selected=c.conversationId,onStartNew:()=>window.audit.started++,
@@ -47,7 +58,7 @@ window.textContrast = () => {
 `
 
 test('대화 선택 목록의 보조 정보는 다크모드·호버·비활성 상태에서도 읽을 수 있다', {
-  skip: process.env.MNP_BROWSER_TEST !== '1', timeout: 60_000,
+  skip: process.env.MNP_BROWSER_TEST !== '1', timeout: 90_000,
 }, async (t) => {
   const { createServer } = await import('vite')
   const react = (await import('@vitejs/plugin-react')).default
@@ -108,6 +119,13 @@ test('대화 선택 목록의 보조 정보는 다크모드·호버·비활성 �
     }
     await send('Page.navigate', { url: `http://127.0.0.1:${server.httpServer.address().port}/picker-check` })
     await waitFor(() => evaluate('document.querySelectorAll(".ai-conversation-choice").length===6'))
+    assert.equal(await evaluate('document.querySelector(".ai-conversation-choice-status").textContent'), '상태 확인 중')
+    assert.equal(await evaluate('document.querySelectorAll(".ai-conversation-choice-delete").length'), 0)
+    await waitFor(() => evaluate('typeof window.pickerFetch.releaseDetails==="function"'))
+    await evaluate('window.pickerFetch.releaseDetails()')
+    await waitFor(() => evaluate('document.querySelector(".ai-conversation-choice-status").textContent==="AI 작업 중"'))
+    assert.equal(await evaluate('window.pickerFetch.requests.length'), 2)
+    assert.equal(await evaluate('window.pickerFetch.requests[0].endsWith("?view=linked")'), true)
     const typography = () => evaluate('[...document.querySelectorAll(".ai-conversation-choice:first-child *")].map(el=>getComputedStyle(el).fontSize)')
     const lightTypography = await typography()
     const lightColors = await evaluate('window.textContrast().map(item=>item.color)')

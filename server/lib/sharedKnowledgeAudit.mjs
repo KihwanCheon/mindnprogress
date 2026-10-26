@@ -7,14 +7,7 @@ import {
 import { sharedKnowledgeAuditThresholds } from '../../src/utils/sharedKnowledgePolicy.mjs'
 
 export { sharedKnowledgeAuditThresholds }
-
-export const sharedKnowledgeAuthoringPolicy = Object.freeze({
-  writeWhen: '다른 카드나 후속 세션이 다시 사용할 새 사실·결정·제약·검증 결과 또는 적용 조건이 생기거나 기존 내용이 더 이상 유효하지 않을 때만 수정',
-  keep: Object.freeze(['현재 유효한 사실', '확정된 결정과 제약', '검증된 결과', '적용·사용 조건', '원문을 확인할 수 있는 출처 링크']),
-  exclude: Object.freeze(['시간순 진행 기록', '도구 호출과 원문 로그', '설명·댓글의 단순 복사', '중복 내용', '폐기되거나 대체된 결론']),
-  update: '같은 주제의 결론이 바뀌면 새 이력 절을 덧붙이지 말고 기존 절만 해시 조건부로 교체하며, 무관한 유효 정보는 보존',
-  history: '진행 과정, 시도와 검증 이력은 댓글에 기록',
-})
+export { sharedKnowledgeAuthoringPolicy } from '../../src/utils/sharedKnowledgePolicy.mjs'
 
 export const sharedKnowledgeMaintenancePolicy = Object.freeze({
   periodicIntervalDays: 7,

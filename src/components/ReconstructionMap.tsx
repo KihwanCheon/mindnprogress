@@ -40,7 +40,6 @@ function MeasuredMap({ map, members, onMeasured, onError, onZoomChange, layoutPr
     })
   }, [map, members, layoutProposal])
   const preparedEdges = useMemo(() => {
-    if (!layoutProposal) return map.edges
     const byId = new Map(map.nodes.map((node) => [node.id, node]))
     const pairs = new Set(map.edges.filter((edge) => edge.data?.relation !== 'knowledge').map((edge) => `${edge.source}/${edge.target}`))
     return map.edges.map((edge) => {
@@ -56,12 +55,17 @@ function MeasuredMap({ map, members, onMeasured, onError, onZoomChange, layoutPr
         sourceHandle: prefix ? `${prefix}-${side}` : edge.sourceHandle,
         targetHandle: prefix ? `knowledge-target-${opposite[side]}` : edge.targetHandle,
         data: { ...edge.data, parallelOffset: pairs.has(`${edge.source}/${edge.target}`) ? 18 : undefined },
+        className: `knowledge-edge ${primary ? 'reuse-first' : 'inspect-if-insufficient'}`,
         label: primary ? '주요 지식' : '부족할 때 확인',
+        labelStyle: { fill: primary ? 'var(--theme-knowledge-primary-text)' : 'var(--theme-knowledge-fallback-text)', fontSize: 9, fontWeight: 700 },
+        labelBgStyle: { fill: primary ? 'var(--theme-knowledge-primary-bg)' : 'var(--theme-knowledge-fallback-bg)', fillOpacity: .96 },
+        labelBgPadding: [5, 3] as [number, number],
+        labelBgBorderRadius: 5,
         style: { ...edge.style, stroke: primary ? 'var(--theme-knowledge-primary)' : 'var(--theme-knowledge-fallback)', strokeWidth: 2.2, strokeDasharray: primary ? undefined : '6 5' },
-        markerEnd: { type: MarkerType.ArrowClosed, color: primary ? 'var(--theme-knowledge-primary)' : 'var(--theme-knowledge-fallback)' },
+        markerEnd: { type: MarkerType.ArrowClosed, width: 18, height: 18, color: primary ? 'var(--theme-knowledge-primary)' : 'var(--theme-knowledge-fallback)' },
       }
     })
-  }, [map, layoutProposal])
+  }, [map])
   const [nodes, setNodes, onNodesChange] = useNodesState(preparedNodes)
   useEffect(() => { setNodes(preparedNodes) }, [preparedNodes, setNodes])
   useEffect(() => {

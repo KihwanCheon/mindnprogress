@@ -11,11 +11,11 @@ function AiConversationTypingDots() {
   )
 }
 
-export function AiConversationActivityIndicator({ activeCount }: { activeCount: number }) {
+export function AiConversationActivityIndicator({ activeCount, label }: { activeCount: number; label?: string }) {
   if (activeCount <= 0) return null
-  const label = `AI 작업 중인 카드 ${activeCount}개`
+  const indicatorLabel = label ?? `AI 작업 중인 카드 ${activeCount}개`
   return (
-    <span className="ai-conversation-activity-indicator" title={label} aria-label={label}>
+    <span className="ai-conversation-activity-indicator" title={indicatorLabel} aria-label={indicatorLabel}>
       <AiConversationTypingDots />
     </span>
   )
@@ -45,10 +45,12 @@ export function AiConversationRuntimeBadge({ runtime }: { runtime?: AiConversati
 export function AiDelegationStatusBadge({ status }: { status?: AiDelegationCardStatus }) {
   if (!status) return null
   const recoveryRequired = status.recoveryCount > 0 || status.reportCount > 0
-  const label = recoveryRequired ? 'AI 위임 복구 필요' : 'AI 위임 중'
+  const label = recoveryRequired ? 'AI 위임 복구 필요'
+    : status.kind === 'request-failed' ? 'AI 위임 접수 실패'
+    : status.kind === 'attention' ? 'AI 업무 확인 필요' : 'AI 위임 중'
   return (
     <strong
-      className={`ai-delegation-status-badge ${recoveryRequired ? 'recovery-required' : 'active'}`}
+      className={`ai-delegation-status-badge ${recoveryRequired || status.kind === 'request-failed' ? 'recovery-required' : status.kind === 'attention' ? 'task-incomplete' : 'active'}`}
       title={status.title}
       aria-label={`${label}. ${status.title}`}
     >

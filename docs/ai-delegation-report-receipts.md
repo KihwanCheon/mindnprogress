@@ -18,6 +18,20 @@
 3. 서버는 불변 시작 대화·상위 카드, 현재 연결, 하위 실행·통합 완료, 결과 해시·턴을 검증한다. 다른 대화, 오래된 상태, 미캡처·변조 결과, 미완료 통합은 거절한다.
 4. 수신 확인은 위임 메타데이터를 종결하고, 상위 대화에 사용자가 볼 완료 전문을 기록한다. 카드·문서 버전·코드·작업공간·승인을 바꾸거나 AI를 실행하지 않는다. 해당 대화의 후속 위임을 막던 활성 위임 기록은 해제되지만, 실제 실행 중인 대화를 중복 실행할 수는 없다.
 
+## 결과 원문 캡처·절단과 해시 기준
+
+- 서버는 하위 실행 턴이 끝나면 대상 대화의 최근 메시지 100개 중 마지막 `position=left`이고 `type`이 `text` 또는 `tips`인 메시지 하나를 결과 원문으로 캡처한다. 같은 턴의 앞선 텍스트 메시지는 결과에 합치지 않는다. 기존 완료 증거(`aiDelegationSourceCompletion`)가 최종 메시지와 저장 원문의 일치를 요구하기 때문이다.
+- 원문이 12,000자 이하이면 기존과 같이 trim한 원문 그대로 `childResultSnapshot`에 저장한다. 넘으면 앞 12,000자 뒤에 `[MindNProgress 결과 절단]` 표시(원문 길이와 전체 원문 조회 방법)를 붙여 저장한다. 위임 결과는 전체 원문을 최대 100,000자까지 `childResultFull`에 따로 보관한다.
+- `childResultCapture`에는 `hashBasis=stored-snapshot`, `snapshotHash`, `messageId`, `messageType`, `originalLength`, `storedLength`, `inlineLimit`, `truncated`, `fullTextStored`, `fullTextTruncated`, `turnTextMessageCount`, `earlierTextMaxLength`, `splitSuspected`를 기록한다. `splitSuspected`는 같은 턴의 앞선 텍스트가 캡처한 마지막 메시지보다 길 때 true이며 추정 신호다. 메타데이터와 보관 원문은 현재 `childResultSnapshot`의 해시와 일치할 때만 사용한다.
+- `childResultHash`, 목록의 `resultHash`, `acknowledgeResultHash`, `reportReceipt.resultHash`는 모두 저장된 결과 문자열(절단 표시 포함)의 SHA-256이다. 수신 확인에는 `resultFullHash`를 사용하지 않는다.
+- `mindnprogress_list_ai_delegations`의 기본 목록은 `resultAvailability`와 함께 `resultHashBasis`, `resultTruncated`, `resultOriginalLength`, `resultMessageType`, `resultSplitSuspected`를 반환한다. `includeResult=true`이면 `result`, `resultHash`, `resultTurnId`, `resultFullAvailable`을, `includeResult=true&includeFullResult=true`이면 `resultFull`, `resultFullHash`, `resultFullTruncated`를 추가한다. `childResultFull`은 공개 응답과 그룹 문맥에서 제외한다.
+- 상위 재개 전문은 절단·분할 가능성·`tips` 캡처를 `> 결과 절단`, `> 결과 분할 가능성(추정)` 안내로 표시한다. 같은 전문의 결과 처리 지침은 이 전문으로 시작된 턴이 접수되면 서버가 `dispatch-delivered`로 수신을 자동 기록한다는 점을 알리고, 보고 대기(`reportStatus=waiting` 또는 `failed`)일 때만 명시 수신 확인을 요구한다.
+
+## 그룹 문서 지시의 응답 캡처와 최종 회신
+
+- 그룹 문서 지시는 AI 위임이 아니어서 상위 재개 경로가 없다. 서버는 지시를 받은 첫 응답 턴이 `completed`가 되면 같은 방식으로 마지막 메시지 하나를 `response`(12,000자 초과 시 절단 표시 포함)와 `responseHash`, `responseCapture`로 기록하고 상태를 `replied`로 바꾼다. 그룹 지시 응답은 전체 원문을 따로 보관하지 않으며, 절단 표시는 대상 대화 전문 조회를 안내한다.
+- 서버는 총괄 대화를 자동 재개하지 않고 이후 턴의 보고도 전달하지 않는다. 지시 전문의 `## 완료 보고 라우팅`에 있는 "회신 방법"에 따라 문서 AI가 최종 완료 보고를 `session-message`로 유효 회신 대상 대화에 직접 보낸다. 이 전송은 사용자가 승인한 그룹 문서 지시에 포함된 회신 요청이다. 접수·대기·중간 보고는 보내지 않고, 같은 `instructionId`의 최종 보고는 한 번만 보내며 첫 줄에 `instructionId`를 적는다.
+
 ## 사용자에게 보이는 완료 전문
 
 - 수신 확인(`reportReceipt`)과 대화 기록(`reportArchive`)은 별도 근거다. AI가 MCP 응답을 읽었다는 사실만으로 사용자의 대화 화면에 전문이 남았다고 판단하지 않는다.
@@ -26,8 +40,23 @@
 - operation ID는 위임·상위 대화·하위 실행 턴·결과 해시로 고정한다. 응답 유실이나 MnP/Core 재시작 후에도 같은 메시지 ID를 사용하며 다른 본문으로 덮어쓰지 않는다. 재시도에는 처음 저장한 전문을 사용한다.
 - 기본 목록은 `reportArchive`에서 긴 본문을 제외한다. `reportArchived`와 `reportArchivePending`으로 사용자 기록 여부를 별도로 확인할 수 있다. `completed`라도 수신 확인 직후 네트워크 장애가 있으면 전문 저장은 대기 중일 수 있다.
 - 지원 여부는 `historyOnlyReports=true` capability로 확인한다. 구형 Core, 서버 장애, 응답 불일치이면 미완료 기록과 오류 코드를 보존하고 최대 60초 간격으로 재시도한다. 이 재시도는 AI를 실행하지 않는다. 새 완료 보고의 자동 실행은 전문이 저장될 때까지 기다린다.
+- 서브 머신에서는 AionUi 내장 Runner도 `POST /api/conversations/{id}/external-reports`를 허용해야 한다. Core가 API를 지원하더라도 Runner의 허용 경로 목록이 누락되면 보고는 저장되지 않는다. 요청 거절은 `RUNNER_OPERATION_REJECTED` 실패 결과로 즉시 반환하며 같은 묶음의 정상 요청은 계속 처리한다.
+- 실패 시 `reportArchive`에 `errorCode`, `errorReasonCode`, `errorStatus`, `errorMessage`, `errorStage`, `errorMachineId`를 보존한다. `RUNNER_UNAVAILABLE`과 `RESULT_TIMEOUT`을 포괄 오류로 덮지 않으며, 기능 조회(`capabilities`)와 보고 요청(`archive-request`) 실패를 구분한다. 오류 설명은 토큰·보고 본문을 제거하고 1,000자 이내로 제한한다. 로그에는 본문·오류 설명 대신 단계·코드·머신만 남기고 같은 오류의 반복을 억제한다. 저장 성공 시 이전 오류 필드는 비운다.
 
 완료 보고 수신 확인은 기존 위임 조회·갱신 도구로 처리하며, 이를 위한 별도 MCP 도구는 추가하지 않는다. 기본 목록에는 긴 원문을 포함하지 않으며, 전체 대화의 최신 응답으로 과거 위임 결과를 대체하지 않는다.
+
+## 목표를 기준으로 한 검수와 보완 종료
+
+새로 생성하는 상위 재개 전문에는 상위 문서·카드 식별자와 상위 AI 역할을 명시하고, 하위 결과 원문보다 먼저 목표·범위·완료 조건의 확인과 보완 판단 기준을 전달한다. 기준은 최신 사용자 지시와 원래 맡긴 요구사항·계약의 원문 및 출처다. 하위 보고의 후속 제안이나 검수 중 AI가 추가한 체크리스트가 새 완료 조건을 대신하지 않는다.
+
+- **필요한 보완:** 원래 완료 조건의 미충족, 실제 오류·회귀 또는 필수 검증 누락을 확인했다. 위임에는 미충족 조건, 확인된 근거, 목표 달성에 필요한 이유와 이번 보완의 종료 조건을 명시한다.
+- **선택 개선:** 목표 달성과 무관한 정리·일반화·추가 방어는 별도 제안으로 보고한다. 현재 업무의 완료 조건에 자동으로 추가하지 않는다.
+- **보완 종료:** 완료 조건과 필수 검증을 충족하면 해당 보완을 종료하고 맡은 범위의 다음 단계 또는 완료 보고로 넘어간다. 카드 완료와 문서·제품 완료는 구분한다.
+- **진전 없는 반복:** 같은 지적과 같은 처방이 새 증거나 진전 없이 반복되면 자동 재위임을 멈추고 원인과 접근 방법을 재판단한다. 횟수 제한을 근거로 미해결 문제를 완료 처리하지 않는다.
+
+하위 위임과 문서 담당 AI의 보고 지침도 맡은 목표·달성 결과·검증 근거를 먼저 제시하고 필수 미완료와 선택 개선을 구분하게 한다. 일반 MCP의 후속 안내에는 같은 검수 원칙을 조건부로 제공하며, 실제 상위 결과 수신 전문에만 “당신은 이 하위 작업을 위임한 상위 AI입니다”라는 역할 문구를 넣는다.
+
+이 변경은 AI 판단 지침이며 서버가 자연어 범위나 반복 검수 횟수를 강제로 판정하지 않는다. 결과 해시 수신 확인, 원문 보존, 기존 승인·소유권 검사와 실제 위임 접수 확인은 유지한다. 이미 보존된 보고 전문은 재작성하지 않으므로 기존 보고의 재전달에는 당시 전문을 그대로 사용한다.
 
 ## 재시작 및 기존 기록
 
@@ -37,12 +66,16 @@
 
 배포 순서는 AionCore 소스 반영 → 사용자의 Core 빌드·AionUi 재시작이다. MnP를 먼저 재시작해도 대기 기록은 보존되며, 새 Core의 capability가 관측되면 별도 수동 재전달 없이 기록을 보충한다. 실제 A/B 대화의 보충 확인은 새 Core 적용 후 가능하다.
 
+Core가 이미 완료 보고 API를 지원하고 내장 Runner만 수정한 경우에는 Core 재빌드 없이 수정된 AionUi와 Runner를 적용한다. MnP의 상세 진단 보완은 MnP 서버 재시작 후 적용된다. 기존 결과와 고정 operation ID는 그대로 사용하며, 보고 복구를 위해 하위 AI를 재실행하거나 대화를 새로 만들지 않는다.
+
 미전달 결과는 상위 대화가 유휴 상태일 때 자동으로 전달하므로 재시작 후 상위 AI가 다시 실행될 수 있다. 전달 근거가 없거나 실패한 기록까지 일괄 완료 처리하지 않는다. 그런 기록은 결과를 읽은 담당 상위 AI의 명시적 수신 확인 또는 기존 결과 전달 재시도 절차를 사용한다.
 
 ## 회귀 검증
 
+- `tests/ai-approval-instructions.test.mjs`, `tests/ai-instruction-snapshots.test.mjs`: 목표·범위 판단, 보완 종료, 역할별 보고 형식, 실제 전문에서 목표 확인이 하위 원문보다 앞서는지 확인한다.
 - `tests/ai-delegation-reports.test.mjs`: 전달·수신 근거, 무결성, 중지 상태, 미완료 통합 차단.
 - `tests/ai-delegation-report-archive.test.mjs`: 내구 저장 의도, 응답 유실·재시작·배포 간 동일 전문 유지, 구형 Core 대기·업데이트 후 기록, 잘못된 응답·무결성 오류 거절.
+- `tests/ai-delegation-result-capture.test.mjs`, `tests/ai-delegation-result-capture-api.test.mjs`: 결과 절단 표시·보관 원문·해시 기준, 캡처 메시지 형태, 공개 목록 필드, 그룹 지시 응답 캡처.
 - `tests/ai-delegation-reports-api.test.mjs`: 재시작 복원, GET 무변경, 담당 대화 권한·오래된 상태 거절, 상위 실행 중 수신 확인, 유휴 자동 전달, 중복 방지.
 - `tests/ai-delegation-recovery-browser.test.mjs`: 전달 대기/전달 중/보고 실패 표시와 수신 완료 후 복구 목록 제거.
 - 기존 사용량 제한·복구·종결·MCP 회귀 테스트와 함께 실행한다.

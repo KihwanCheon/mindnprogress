@@ -10,12 +10,14 @@ import { fileURLToPath } from 'node:url'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { MCP_TOOL_USAGE_DIRECTORY_NAME, readToolUsageTotals } from '../server/lib/mcpToolUsage.mjs'
-import { sharedKnowledgeMaxLength } from '../src/utils/sharedKnowledgePolicy.mjs'
-import { AI_EXECUTION_APPROVAL_INSTRUCTION, GROUP_APPROVAL_INSTRUCTION } from '../src/utils/aiApprovalInstructions.mjs'
+import { SHARED_KNOWLEDGE_WRITE_INSTRUCTION, sharedKnowledgeAuthoringPolicy, sharedKnowledgeMaxLength } from '../src/utils/sharedKnowledgePolicy.mjs'
+import { AI_EXECUTION_APPROVAL_INSTRUCTION, DOCUMENT_COORDINATOR_INSTRUCTION, GROUP_APPROVAL_INSTRUCTION } from '../src/utils/aiApprovalInstructions.mjs'
 import { expectedMcpToolNames } from '../tests/helpers/mcpToolNames.mjs'
+import { AI_CONVERSATION_SELECTION_INSTRUCTION, aiConversationSelectionRules } from '../mcp/aiConversationSelectionPolicy.mjs'
 
 const projectDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const testDataDirectory = path.resolve(projectDirectory, '.mcp-test-data')
+const mockLiveConversationWorkspace = path.join(testDataDirectory, 'live-worker')
 const expectedPrefix = `${projectDirectory}${path.sep}`
 if (!testDataDirectory.startsWith(expectedPrefix) || path.basename(testDataDirectory) !== '.mcp-test-data') {
   throw new Error('MCP 테스트 데이터 경로가 프로젝트 내부의 전용 디렉터리가 아닙니다.')
@@ -44,12 +46,15 @@ async function startMockAionUi({
   conversationName = 'MCP 전체 대화 조회 검증',
   conversationCreatedAt = Date.parse('2026-07-20T00:00:00.000Z'),
   conversationModelId = `${modelId}[1m]`,
+  conversationWorkspace = mockLiveConversationWorkspace,
 } = {}) {
   let conversationRuntimeState = 'running'
   const dispatchRequests = []
   const conversationTitleUpdates = []
+  const conversationMessageRequests = []
   const dispatches = new Map()
   const server = createHttpServer((request, response) => {
+    const requestUrl = new URL(request.url ?? '/', 'http://127.0.0.1')
     const send = (data, status = 200) => {
       response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' })
       response.end(JSON.stringify({ success: true, data }))
@@ -99,7 +104,7 @@ async function startMockAionUi({
         type: 'acp',
         created_at: conversationCreatedAt,
         modified_at: conversationCreatedAt + 60_000,
-        extra: { agent_id: agentId, current_model_id: conversationModelId, backend: 'claude' },
+        extra: { agent_id: agentId, current_model_id: conversationModelId, backend: 'claude', workspace: conversationWorkspace },
         runtime: {
           state: conversationRuntimeState,
           is_processing: conversationRuntimeState === 'running',
@@ -166,7 +171,87 @@ async function startMockAionUi({
         },
       })
     }
-    if (request.url === `/api/conversations/${conversationId}/messages?limit=10000&content_mode=full`) {
+    if (request.method === 'GET'
+      && requestUrl.pathname === `/api/conversations/${conversationId}/messages`
+      && requestUrl.searchParams.get('content_mode') === 'compact') {
+      const before = requestUrl.searchParams.get('before')
+      if (requestUrl.searchParams.get('limit') !== '200') {
+        return send({ error: 'unexpected conversation statistics limit' }, 400)
+      }
+      if (before === null) {
+        return send({
+          items: [
+            { id: 'compact-user-2', type: 'text', position: 'right', backend_turn_id: 'turn-2' },
+            ...Array.from({ length: 16 }, (_, index) => ({
+              id: `compact-assistant-${index}`,
+              type: 'text',
+              position: 'left',
+              backend_turn_id: 'turn-2',
+            })),
+            ...Array.from({ length: 183 }, (_, index) => ({
+              id: `compact-tool-${index}`,
+              type: 'acp_tool_call',
+              position: 'left',
+              backend_turn_id: 'turn-2',
+            })),
+          ],
+          oldest_cursor: 'compact-user-2',
+          newest_cursor: 'compact-tool-182',
+          has_more_before: true,
+          has_more_after: false,
+        })
+      }
+      if (before === 'compact-user-2') {
+        return send({
+          items: [
+            { id: 'compact-user-1', type: 'text', position: 'right', backend_turn_id: 'turn-1' },
+            { id: 'compact-answer-1', type: 'text', position: 'left', backend_turn_id: 'turn-1' },
+          ],
+          oldest_cursor: 'compact-user-1',
+          newest_cursor: 'compact-answer-1',
+          has_more_before: false,
+          has_more_after: false,
+        })
+      }
+      return send({ error: 'unexpected conversation statistics cursor' }, 400)
+    }
+    if (request.method === 'GET'
+      && requestUrl.pathname === `/api/conversations/${conversationId}/messages`
+      && requestUrl.searchParams.get('content_mode') === 'full') {
+      const messageRequest = {
+        pathname: requestUrl.pathname,
+        limit: requestUrl.searchParams.get('limit'),
+        contentMode: requestUrl.searchParams.get('content_mode'),
+        before: requestUrl.searchParams.get('before'),
+      }
+      conversationMessageRequests.push(messageRequest)
+      if (messageRequest.limit === '2' && messageRequest.before === null) {
+        return send({
+          items: [
+            { id: 'message-tip', type: 'tips', position: 'center', content: '중간 시스템 안내' },
+            { id: 'message-assistant', type: 'text', position: 'left', content: '최종 어시스턴트 응답' },
+          ],
+          oldest_cursor: 'message-tip',
+          newest_cursor: 'message-assistant',
+          has_more_before: true,
+          has_more_after: false,
+        })
+      }
+      if (messageRequest.limit === '2' && messageRequest.before === 'message-tip') {
+        return send({
+          items: [
+            { id: 'message-user', type: 'text', position: 'right', content: { content: '첫 사용자 요청' } },
+            { id: 'message-tool', type: 'acp_tool_call', position: 'left', content: { name: 'internal_tool' } },
+          ],
+          oldest_cursor: 'message-user',
+          newest_cursor: 'message-tool',
+          has_more_before: false,
+          has_more_after: false,
+        })
+      }
+      if (messageRequest.limit !== '50' || messageRequest.before !== null) {
+        return send({ error: 'unexpected conversation message query' }, 400)
+      }
       return send({
         items: [
           { id: 'message-user', type: 'text', position: 'right', content: { content: '첫 사용자 요청' } },
@@ -289,6 +374,7 @@ async function startMockAionUi({
     baseUrl: `http://127.0.0.1:${address.port}`,
     dispatchRequests,
     conversationTitleUpdates,
+    conversationMessageRequests,
     setConversationName: (name) => { conversationName = name },
     setConversationRuntimeState: (state) => { conversationRuntimeState = state },
     completeDispatch: (operationId) => {
@@ -353,6 +439,14 @@ async function main() {
   let mockAionUi = await startMockAionUi()
   const aionUiDiscoveryFile = path.join(testDataDirectory, '_aionui-backend.json')
   await publishMockAionUiDiscovery(aionUiDiscoveryFile, mockAionUi)
+  // Isolated subscription usage snapshot so the read-only usage tool never reads the operator's real AionUi file.
+  const aionUiUsageFile = path.join(testDataDirectory, '_aionui-subscription-usage.json')
+  const usageSnapshotAt = new Date().toISOString()
+  await writeFile(aionUiUsageFile, `${JSON.stringify({
+    schemaVersion: 1, state: 'ready', generatedAt: usageSnapshotAt, updatedAt: usageSnapshotAt, retryAfterMs: null,
+    claude: { state: 'ready', updatedAt: usageSnapshotAt, session: { usedPercent: 12, resetsAt: null }, weekly: { usedPercent: 34, resetsAt: null } },
+    codex: { state: 'ready', updatedAt: usageSnapshotAt, weekly: { usedPercent: 56, resetsAt: null, windowDurationMins: 10080 }, limitReached: false },
+  })}\n`, 'utf8')
   const environment = {
     ...process.env,
     MNP_API_HOST: '127.0.0.1',
@@ -364,6 +458,7 @@ async function main() {
     MNP_WORKSPACE_POOL_REGISTRY: path.join(testDataDirectory, '_missing-workspaces.json'),
     MNP_AIONUI_URL: '',
     MNP_AIONUI_DISCOVERY_FILE: aionUiDiscoveryFile,
+    MNP_AIONUI_USAGE_FILE: aionUiUsageFile,
     MNP_ADMIN_EMAIL: 'mcp-test-admin@mind.local',
     MNP_ADMIN_PASSWORD: 'McpTest!2026',
     MNP_AI_ATTRIBUTION_DURATION_MS: '10000',
@@ -446,6 +541,7 @@ async function main() {
     )
     assert.ok(toolSchema('mindnprogress_add_card')?.properties?.parentCardId)
     assert.ok(toolSchema('mindnprogress_move_card')?.properties?.newParentCardId)
+    assert.ok(toolSchema('mindnprogress_move_card')?.properties?.targetMapId)
     assert.deepEqual(
       toolSchemaVariants('mindnprogress_manage_comment', 'operation').map((variant) => variant.properties?.action?.const),
       ['add', 'update', 'delete', 'set-resolved', 'toggle-reaction'],
@@ -546,66 +642,58 @@ async function main() {
     }
 
     const guide = await invoke('mindnprogress_read_me_first')
+    assert.ok(guide.important.includes(AI_CONVERSATION_SELECTION_INSTRUCTION))
+    assert.ok(guide.guide.operationRules.includes(AI_CONVERSATION_SELECTION_INSTRUCTION))
     assert.equal(guide.guide.product.name, 'MindNProgress')
-    assert.equal(guide.guide.version, '4.23')
-    assert.equal(guide.guide.documentReconstruction.contextTool, 'mindnprogress_get_reconstruction_context')
-    assert.match(guide.guide.operationRules.join('\n'), /AionUi에서 시작한 대화.*임시 귀속.*AI_ATTRIBUTION_UNRESOLVED/)
-    assert.equal(guide.guide.contextLifecycle.bootstrap.successRequired, true)
-    assert.ok(guide.guide.contextLifecycle.unsuccessfulAttempt.cases.includes('응답을 받지 못함'))
+    assert.equal(guide.guide.version, '4.26')
+    const aiUsage = await invoke('mindnprogress_get_ai_usage', { provider: 'all' })
+    assert.equal(aiUsage.source.machineScope, 'mnp-server')
+    assert.equal(aiUsage.source.conversationAccountMatch, 'unverified')
+    assert.equal(aiUsage.snapshot.available, true)
+    assert.deepEqual(Object.keys(aiUsage.providers), ['claude', 'codex'])
+    assert.equal(aiUsage.providers.codex.weekly.usedPercent, 56)
+    const codexUsage = await invoke('mindnprogress_get_ai_usage', { provider: 'codex' })
+    assert.deepEqual(Object.keys(codexUsage.providers), ['codex'])
+    const { maintenance: knowledgeMaintenance, ...knowledgeAuthoring } = guide.guide.sharedKnowledgePolicy
+    assert.deepEqual(knowledgeAuthoring, sharedKnowledgeAuthoringPolicy)
+    assert.equal(knowledgeMaintenance.automaticMutation, false)
+    assert.equal(knowledgeMaintenance.requiresExplicitApproval, true)
+    assert.ok(guide.guide.authoringRules.includes(SHARED_KNOWLEDGE_WRITE_INSTRUCTION))
+    assert.equal(guide.guide.contextLifecycle.bootstrap.tool, 'mindnprogress_get_context')
+    assert.equal(guide.guide.contextLifecycle.unsuccessfulAttempt.retryAllowed, true)
     assert.equal(guide.guide.contextLifecycle.refresh.repeatGetContext, false)
-    assert.equal(guide.guide.contextLifecycle.refresh.card, 'mindnprogress_get_card')
-    assert.match(guide.guide.operationRules.join('\n'), /guide\.contextLifecycle/)
+    assert.match(guide.guide.contextLifecycle.staleWrite.action, /version 또는 SHA-256/)
+    assert.match(guide.guide.contextLifecycle.verification.action, /실제 저장 결과/)
+    assert.match(guide.guide.commentRules.summary, /\[진행\].*\[차단\].*\[결과\]/)
+    assert.match(guide.recommendedWorkflows.editExistingDocument.join(' '), /get_context.*get_document/)
     assert.match(toolDescription('mindnprogress_complete_ai_delegation'), /사용자의 중지.*최종 답변 직전/)
-    assert.match(toolDescription('mindnprogress_finalize_ai_coordination'), /사용자가 명시적으로 요청.*coordination-only/)
-    assert.match(toolDescription('mindnprogress_supersede_ai_delegation'), /사용자가 명시적으로 요청.*superseded/)
-    assert.match(guide.guide.dataModel.cardContent.sharedKnowledge, /재사용/)
-    assert.match(guide.guide.sharedKnowledgePolicy.writeWhen, /새 사실·결정·제약·검증 결과.*기존 내용이 더 이상 유효하지 않을 때만 수정/)
-    assert.match(guide.guide.sharedKnowledgePolicy.update, /새 이력 절을 덧붙이지 말고 기존 절만 해시 조건부로 교체/)
-    assert.deepEqual(guide.guide.sharedKnowledgePolicy.maintenance.reviewOrder, ['priority', 'recommended', 'attention'])
-    assert.equal(guide.guide.sharedKnowledgePolicy.maintenance.acceptedLongReviewMaxAgeDays, 30)
-    assert.equal(guide.guide.sharedKnowledgePolicy.maintenance.automaticMutation, false)
-    assert.match(guide.guide.dataModel.workFields.progress, /일반 isWork=false 묶음 카드.*읽기 전용 요약값/)
-    assert.match(guide.guide.authoringRules.join('\n'), /모든 실제 isWork=true 후손.*동일 가중치.*중간 묶음의 요약값은 상위 집계에 다시 포함하지 않음/)
-    assert.match(guide.guide.authoringRules.join('\n'), /이미지·Ref·Dooray 지식 카드.*자동 집계하지 않음/)
-    assert.equal(guide.guide.knowledgeLinePolicy.mode, 'actual-use-only')
+    assert.match(toolDescription('mindnprogress_finalize_ai_coordination'), /사용자가 명시.*coordination-only/)
+    assert.match(toolDescription('mindnprogress_supersede_ai_delegation'), /사용자가 명시적으로 요청.*감사 이력/)
+    assert.match(guide.guide.authoringRules.join('\n'), /description.*sharedKnowledge/s)
     assert.equal(guide.guide.knowledgeLinePolicy.evaluateAt, 'after-work')
-    assert.match(guide.guide.knowledgeLinePolicy.discovery, /전수 검색하지 않음.*실제로 조회하고 근거로 사용/)
-    assert.match(guide.guide.knowledgeLinePolicy.autoConnectWhenAll.join('\n'), /검증된 sharedKnowledge[\s\S]*직접 영향을 줌[\s\S]*후속 세션[\s\S]*같은 문서/)
-    assert.match(guide.guide.knowledgeLinePolicy.proposeOnlyWhenAny.join('\n'), /아직 확정되지 않았거나[\s\S]*관련 가능성만[\s\S]*다른 문서[\s\S]*명확히 판단할 수 없음/)
-    assert.match(guide.guide.knowledgeLinePolicy.neverConnectFor.join('\n'), /비슷한 제목[\s\S]*일회성 참조[\s\S]*업무 선행 관계/)
-    assert.match(guide.guide.knowledgeLinePolicy.policySelection['reuse-first'], /우선 재사용/)
-    assert.match(guide.guide.knowledgeLinePolicy.policySelection['inspect-if-insufficient'], /부족할 때만/)
-    assert.doesNotMatch(guide.guide.authoringRules.join('\n'), /주요 지식선|보조 지식선/)
+    assert.match(guide.guide.knowledgeLinePolicy.autoConnectWhenAll.join(' '), /실제로 조회.*sharedKnowledge.*직접 영향을.*후속 세션/s)
+    assert.deepEqual(Object.keys(guide.guide.knowledgeLinePolicy.policySelection), ['reuse-first', 'inspect-if-insufficient'])
+    assert.match(guide.guide.knowledgeLinePolicy.proposeOnlyWhenAny.join(' '), /충돌.*다른 문서.*knowledgePolicy/s)
+    assert.match(guide.guide.operationRules.join(' '), /waitingItems.*\[차단\].*\[진행\]/s)
     assert.match(toolDescription('mindnprogress_manage_knowledge_line'), /guide\.knowledgeLinePolicy/)
-    assert.match(guide.guide.authoringRules.join('\n'), /실제로 실행할 카드.*구현·검증 조건이 2개 이상.*결과 중심 체크리스트.*별도 하위 카드.*중복하지 않/)
-    assert.match(guide.guide.operationRules.join('\n'), /변경할 필드만 보내고/)
-    assert.match(guide.guide.operationRules.join('\n'), /textIntegrity SHA-256.*mindnprogress_patch_card_text.*필드 전체를 다시 생성하지 않음/)
-    assert.ok(guide.guide.operationRules.join('\n').includes('\\uXXXX'))
-    assert.match(guide.guide.operationRules.join('\n'), /after\.sha256.*expectedSha256.*이전 해시를 재사용하지 않음/)
     assert.ok(toolDescription('mindnprogress_patch_card_text').includes('\\uXXXX'))
     assert.match(toolDescription('mindnprogress_patch_card_text'), /after\.sha256.*expectedSha256.*이전 해시를 재사용하지 않음/)
-    assert.match(guide.guide.operationRules.join('\n'), /mindnprogress_list_shared_knowledge_candidates.*mindnprogress_get_shared_knowledge_review_context.*mindnprogress_apply_shared_knowledge_review/)
-    assert.match(guide.guide.operationRules.join('\n'), /cardId.*nodeId.*기존 대화 호환용/)
-    assert.match(guide.guide.operationRules.join('\n'), /조회 도구는 문서 version을 변경하지 않으며/)
-    assert.match(guide.guide.operationRules.join('\n'), /mindnprogress_get_ai_work_states.*동시에 수정하지 않음/)
-    assert.match(guide.guide.operationRules.join('\n'), /mindnprogress_get_ai_workspace_pool.*임의로 worker를 사용하지 않음/)
-    assert.match(toolDescription('mindnprogress_checkpoint_ai_workspace'), /동적 폰트·Atlas.*검증.*\[MnP\]/)
-    assert.match(toolDescription('mindnprogress_checkpoint_ai_workspace'), /confirm-no-changes.*git status와 diff/)
+    assert.match(toolDescription('mindnprogress_checkpoint_ai_workspace'), /commit-changes.*confirm-no-changes.*검증 전에/)
     assert.deepEqual(commitCheckpointSchema?.properties?.commitMessage?.required, ['summary', 'background', 'cause', 'changes'])
-    assert.match(toolDescription('mindnprogress_delegate_ai_work'), /같은 문서의 모든 깊이 하위 카드.*후보·작업 상태/)
-    assert.match(guide.guide.operationRules.join('\n'), /복수의 독립적인 완료 조건.*필요한 최소한의 결과 중심 체크리스트.*억지로 나누거나.*별도 하위 카드.*중복하지 않/)
-    assert.match(toolDescription('mindnprogress_update_card'), /checklist.*완료 비율로 progress와 status를 자동 계산/)
+    assert.match(toolDescription('mindnprogress_delegate_ai_work'), /같은 문서의 모든 깊이 하위 카드.*후보·작업 상태.*reasonCode와 message/)
+    assert.match(toolDescription('mindnprogress_update_card'), /checklist.*전체 배열/)
     assert.match(toolSchema('mindnprogress_update_card')?.properties?.data?.properties?.checklist?.description ?? '', /전체 배열.*완료 비율로 progress와 status를 자동 계산/)
-    assert.doesNotMatch(guide.guide.operationRules.join('\n'), /# 사용자 승인과 실행 범위|# 그룹의 두 단계 사용자 승인/)
+    assert.doesNotMatch(JSON.stringify(guide.guide), /# 사용자 승인과 실행 범위|# 그룹의 두 단계 사용자 승인/)
     assert.match(toolDescription('mindnprogress_list_ai_delegations'), /recovery\.failureCategory.*recoveryAvailable.*recommendedAction.*recoveryTool/)
-    assert.match(toolDescription('mindnprogress_recover_ai_delegation'), /parent-wake-failed.*recoveryAvailable=true.*사용량·요청 한도/)
+    assert.match(toolDescription('mindnprogress_recover_ai_delegation'), /parent-wake-failed.*recoveryAvailable=true.*한도·모델 용량/)
+    assert.match(toolDescription('mindnprogress_recover_ai_delegation'), /upstream-interrupted.*복구를 승인.*원 실행이 만료.*원 지시·계정·카드·lease/)
     assert.match(toolDescription('mindnprogress_recover_ai_delegation'), /waiting-model-capacity/)
-    assert.match(guide.guide.operationRules.join('\n'), /mindnprogress_update_card.*responseMode.*full.*기본값.*AI 대화 상세 목록.*affected/)
-    assert.match(guide.guide.operationRules.join('\n'), /댓글 summary는 \[진행\].*\[차단\].*\[결과\]/)
-    assert.match(guide.guide.commentRules.detail, /작업을 이어가거나 결과를 검증/)
-    assert.match(guide.guide.commentRules.legacy, /자동 분리하거나 다시 쓰지 않음/)
-    assert.match(guide.guide.operationRules.join('\n'), /waitingItems가 해제되면 서버가 관련 사용자에게 알림/)
-    assert.match(guide.guide.operationRules.join('\n'), /kind=image.*imageAccess\.localPath.*로컬 이미지 열람 도구/)
+    assert.match(toolDescription('mindnprogress_recover_ai_delegation'), /main HEAD 변경.*retry-integration.*하위 AI 작업은 다시 실행하지 않습니다/)
+    assert.match(toolDescription('mindnprogress_recover_ai_delegation'), /queued.*비동기.*recoveryRequestId/)
+    assert.match(toolDescription('mindnprogress_recover_ai_delegation'), /dispatch-database-transient.*복구를 승인/)
+    assert.match(toolDescription('mindnprogress_supersede_ai_delegation'), /dispatch-database-transient.*실행 턴이 없고.*failed-clean/)
+    assert.match(toolDescription('mindnprogress_manage_comment'), /\[진행\].*\[차단\].*\[결과\].*240자 이하.*detail/)
+    assert.match(guide.guide.dataModel.workFields.checklist, /완료 비율.*진행률과 상태/)
 
     const createdMindmap = await invoke('mindnprogress_create_mindmap', {
       title: 'MCP 전체 회귀 문서',
@@ -641,6 +729,15 @@ async function main() {
     const documents = await invoke('mindnprogress_list_documents')
     assert.deepEqual(documents.maps.map((map) => map.id).sort(), [mapId, secondaryMapId].sort())
     assert.equal(documents.maps.find((map) => map.id === mapId)?.waitingCount, 1)
+    const globalSearch = await invoke('mindnprogress_search_content', {
+      query: '업무 A',
+      mapIds: [mapId],
+      fields: ['cardTitle'],
+      limit: 2,
+    })
+    assert.ok(globalSearch.results.some((item) => item.mapId === mapId && item.cardId === 'task-a'))
+    assert.equal(globalSearch.coverage.semanticCoverage, 'not-guaranteed')
+    assert.match(globalSearch.guide.verification, /mindnprogress_get_card/)
 
     let documentResult = await invoke('mindnprogress_get_document', { mapId })
     assert.equal(documentResult.map.nodes.length, 4)
@@ -653,6 +750,45 @@ async function main() {
     assert.equal(documentResult.map.nodes.find((node) => node.id === 'root')?.data.status, 'in-progress')
     assert.equal(documentResult.access.documentUrl, `https://mindnprogress.test/mindmap/${mapId}`)
     assert.equal(documentResult.access.cards.find((card) => card.cardId === 'task-a')?.accessUrl, `https://mindnprogress.test/mindmap/${mapId}/task-a`)
+    assert.equal(Object.hasOwn(documentResult, 'view'), false, 'view를 생략한 full 응답은 기존 형태를 유지한다')
+    const compactDocument = await invoke('mindnprogress_get_document', { mapId, view: 'compact' })
+    assert.equal(compactDocument.view, 'compact')
+    assert.equal(compactDocument.map.version, documentResult.map.version)
+    assert.deepEqual(compactDocument.map.nodes.map((node) => node.id), documentResult.map.nodes.map((node) => node.id))
+    assert.equal(compactDocument.map.nodes.find((node) => node.id === 'branch-a')?.data.sharedKnowledge, '기능 A의 재사용 가능한 결정과 결과')
+    assert.deepEqual(compactDocument.map.nodes.find((node) => node.id === 'task-a')?.data.waitingItems, documentResult.map.nodes.find((node) => node.id === 'task-a')?.data.waitingItems)
+    assert.equal(compactDocument.access.cardAccessUrlTemplate, `https://mindnprogress.test/mindmap/${mapId}/{cardId}`)
+    assert.equal(Object.hasOwn(compactDocument.access, 'cards'), false)
+    const outlineDocument = await invoke('mindnprogress_get_document', { mapId, view: 'outline', cardIds: ['task-a'] })
+    assert.equal(outlineDocument.cards.length, documentResult.map.nodes.length)
+    const outlineBranch = outlineDocument.cards.find((card) => card.id === 'branch-a')
+    assert.equal(Object.hasOwn(outlineBranch.data, 'sharedKnowledge'), false)
+    assert.equal(outlineBranch.textIntegrity.sharedKnowledge.length, '기능 A의 재사용 가능한 결정과 결과'.length)
+    assert.equal(outlineDocument.selectedCards[0].id, 'task-a')
+    assert.equal(outlineDocument.selectedCards[0].data.description, documentResult.map.nodes.find((node) => node.id === 'task-a')?.data.description)
+    assert.equal(outlineDocument.omitted.cardIds.includes('task-a'), false)
+    assert.equal(outlineDocument.omitted.retrieval.singleCard.tool, 'mindnprogress_get_card')
+    const versionDocument = await invoke('mindnprogress_get_document', { mapId, view: 'version' })
+    assert.equal(versionDocument.map.version, documentResult.map.version)
+    assert.notEqual(versionDocument.documentEtag, outlineDocument.documentEtag, 'documentEtag는 view·cardIds별로 다르다')
+    assert.match(versionDocument.documentEtag, new RegExp(`^v${documentResult.map.version}-version-`))
+    const unchangedDocument = await invoke('mindnprogress_get_document', { mapId, view: 'version', ifNoneMatch: versionDocument.documentEtag })
+    assert.equal(unchangedDocument.notModified, true)
+    assert.equal(Object.hasOwn(unchangedDocument.map, 'nodes'), false)
+    const unchangedOutline = await invoke('mindnprogress_get_document', { mapId, view: 'outline', cardIds: ['task-a'], ifNoneMatch: outlineDocument.documentEtag })
+    assert.equal(unchangedOutline.notModified, true)
+    assert.deepEqual(unchangedOutline.omitted.retrieval.arguments, { mapId, view: 'outline', cardIds: ['task-a'] })
+    const compactWithVersionEtag = await invoke('mindnprogress_get_document', { mapId, view: 'compact', ifNoneMatch: versionDocument.documentEtag })
+    assert.equal(compactWithVersionEtag.notModified, undefined, '다른 view의 documentEtag로는 본문을 생략하지 않는다')
+    assert.equal(compactWithVersionEtag.map.nodes.length, documentResult.map.nodes.length)
+    const outlineWithKnownVersion = await invoke('mindnprogress_get_document', { mapId, view: 'outline', cardIds: ['task-a'], knownVersion: documentResult.map.version })
+    assert.equal(outlineWithKnownVersion.notModified, undefined, 'knownVersion만으로는 본문을 생략하지 않는다')
+    assert.equal(outlineWithKnownVersion.freshness.versionMatched, true)
+    assert.equal(outlineWithKnownVersion.selectedCards[0].id, 'task-a')
+    const fullWithKnownVersion = await invoke('mindnprogress_get_document', { mapId, knownVersion: documentResult.map.version })
+    assert.equal(fullWithKnownVersion.map.nodes.length, documentResult.map.nodes.length)
+    await invokeExpectError('mindnprogress_get_document', { mapId, view: 'compact', cardIds: ['task-a'] }, /cardIds/, 'DOCUMENT_VIEW_ARGUMENT_INVALID')
+    await invokeExpectError('mindnprogress_get_document', { mapId, view: 'outline', cardIds: ['missing-card'] }, /missing-card/, 'DOCUMENT_CARD_NOT_FOUND')
     const knowledgeCandidates = await invoke('mindnprogress_list_shared_knowledge_candidates', { mapId, limit: 10 })
     assert.equal(knowledgeCandidates.maintenance.periodicIntervalDays, 7)
     assert.equal(knowledgeCandidates.maintenance.requiresExplicitApproval, true)
@@ -875,7 +1011,10 @@ async function main() {
       editorId: attribution.editorId,
       attributionToken: attribution.attributionToken,
     })
-    assert.equal(context.contextSchemaVersion, '3.2')
+    assert.equal(context.contextSchemaVersion, '3.3')
+    assert.equal(context.guide.contextLifecycle.bootstrap.tool, 'mindnprogress_get_context')
+    assert.deepEqual(context.guide.sharedKnowledgePolicy, guide.guide.sharedKnowledgePolicy)
+    assert.match(context.nextStep, /sharedKnowledge.*새 지식·변경 조건.*새 지식이 없으면 변경하지/)
     assert.deepEqual(context.currentConversation, {
       displayLabel: 'MCP 전체 대화 조회 검증 (conversation-test)',
     })
@@ -885,6 +1024,8 @@ async function main() {
     assert.equal(context.document.outline.find((card) => card.id === 'task-a')?.parentId, 'branch-a')
     assert.equal(context.document.outline.find((card) => card.id === 'task-a')?.waitingItems[0].resumeCondition, '개발 서버 배포')
     assert.equal(context.selection.card.id, 'task-a')
+    assert.equal(context.selection.role, undefined)
+    assert.equal(context.selection.workflow, undefined)
     assert.equal(context.selection.card.data.waitingItems[0].note, '응답 형식 확정 필요')
     assert.equal(context.selection.card.position, undefined)
     assert.equal(context.selection.taskLinks.available.length, 2)
@@ -897,21 +1038,15 @@ async function main() {
     assert.equal(context.selection.aiWorkCoordination.delegationOrigin.conversationId, 'conversation-test')
     assert.equal(context.selection.aiWorkCoordination.childDelegation.delegateTool, 'mindnprogress_delegate_ai_work')
     const childDelegationInstruction = context.selection.aiWorkCoordination.childDelegation.instruction
-    assert.match(childDelegationInstruction, /후보 목록.*resume 또는 new/)
-    assert.match(childDelegationInstruction, /AionUi 대화 ID.*MCP 재연결.*모든 깊이/)
-    assert.match(childDelegationInstruction, /작업공간 pool.*병렬 위임.*통합.*상위 대화가 재개/)
-    assert.match(childDelegationInstruction, /중지된 위임을 resume하면 같은 AI 대화.*기존 worker lease/)
-    assert.match(childDelegationInstruction, /recovery-required.*recoveryTool/)
-    assert.match(childDelegationInstruction, /parent-wake-failed.*recoveryAvailable=true.*사용량·요청 한도/)
-    assert.match(childDelegationInstruction, /다음 작업을 위임하기로 판단했다면.*실제로 호출하고 성공 결과/)
-    assert.match(childDelegationInstruction, /사용자 요청 또는 상위 AI가 맡긴 작업 범위 안에서만/)
+    assert.match(childDelegationInstruction, /같은 문서의 계층상 하위 카드.*후보 목록.*resume 또는 new/s)
+    assert.match(childDelegationInstruction, /recoveryTool로 기존 대화·작업공간을 이어가세요/)
     assert.match(context.selection.aiWorkCoordination.childDelegation.waitStateInstruction, /waiting-integration-clean.*전문이 아직 전달되지 않은 상태.*재위임하지 마세요/)
     assert.deepEqual(context.selection.aiWorkCoordination.siblingCardIds, [])
     assert.equal(context.selection.aiWorkCoordination.toolArguments, null)
     assert.equal(context.selection.accessUrl, `https://mindnprogress.test/mindmap/${mapId}/task-a`)
     assert.equal(context.selection.commentsPage.total, 1)
     assert.equal(context.selection.commentsPage.hasMore, false)
-    assert.match(context.nextStep, /guide\.knowledgeLinePolicy.*작업 종료 전에 연결 또는 제안 여부/)
+    assert.match(context.nextStep, /의미 있는 진행과 결과.*detail 댓글.*waitingItems.*\[차단\]/s)
     assert.ok(context.teamMembers.every((member) => member.lastLoginAt === undefined))
     mockAionUi.setConversationName('사용자가 변경한 현재 제목')
     const renamedConversationContext = await invoke('mindnprogress_get_context', {
@@ -994,11 +1129,14 @@ async function main() {
       detailLevel: 'full',
     })
     assert.equal(fullContext.detailLevel, 'full')
+    assert.deepEqual(fullContext.guide.sharedKnowledgePolicy, context.guide.sharedKnowledgePolicy)
     assert.equal(fullContext.document.nodes.length, 4)
     assert.equal(fullContext.document.outline, undefined)
     assert.equal(fullContext.selection.knowledgeSources.all.length, 0)
     assert.ok(JSON.stringify(context).length < JSON.stringify(fullContext).length)
-    assert.ok(JSON.stringify(context).length < 25_500, `focused 컨텍스트가 크기 회귀 기준을 초과했습니다: ${JSON.stringify(context).length} / 25500`)
+    // 중복 삽입을 찾기 위한 회귀 기준이다. 넘으면 금지·예외 문장을 삭제·축약해 맞추지 말고 중복 삽입 여부를 먼저 확인한다.
+    // 2026-10-22 승인된 복구(R2)의 get_document 검증·재조회 조건 문구 보강으로 25,500자에서 26,500자로 올렸다.
+    assert.ok(JSON.stringify(context).length < 26_500, `focused 컨텍스트가 크기 회귀 기준을 초과했습니다: ${JSON.stringify(context).length} / 26500. 금지·예외 문장을 삭제·축약해 맞추지 말고 중복 삽입 여부를 먼저 확인하세요.`)
     documentResult = await invoke('mindnprogress_get_document', { mapId })
     assert.equal(documentResult.map.version, versionBeforeReadOnlyTools, '조회 도구가 문서 버전을 변경했습니다.')
 
@@ -1098,13 +1236,30 @@ async function main() {
     assert.equal(conversationList.conversations.length, 1)
     assert.equal(conversationList.conversations[0].runtime.state, 'running')
     assert.equal(conversationList.conversations[0].available, true)
+    assert.equal(conversationList.conversations[0].workspace, mockLiveConversationWorkspace)
+    assert.equal(conversationList.conversations[0].contextHealth.state, 'healthy')
+    assert.equal(conversationList.conversations[0].contextHealth.metrics.eventCount, 202)
+    assert.equal(conversationList.conversations[0].contextHealth.metrics.conversationTurnCount, 2)
+    assert.equal(conversationList.conversations[0].contextHealth.metrics.messagePageCount, 2)
+    assert.equal(conversationList.conversations[0].contextHealth.metrics.historyComplete, true)
     const conversationCandidates = await invoke('mindnprogress_list_ai_conversations', { mapId, cardId: 'task-a' })
     assert.equal(conversationCandidates.latestConversationId, 'conversation-test')
     assert.equal(conversationCandidates.conversations.length, 1)
     assert.equal(conversationCandidates.conversations[0].agent.label, 'Claude Code')
     assert.equal(conversationCandidates.conversations[0].model.label, 'Claude Test Model')
     assert.equal(conversationCandidates.conversations[0].runtime.state, 'running')
-    assert.match(conversationCandidates.selectionRule.exclude, /running.*waiting-confirmation/)
+    assert.match(conversationCandidates.selectionRule.exclude, /runtime\.state가 idle이 아닌 대화/)
+    assert.match(conversationCandidates.selectionRule.busy, /현재 실행과 관련 위임의 통합이 끝난 뒤 후보 목록을 다시 조회/)
+    assert.equal(Object.hasOwn(conversationCandidates.selectionRule, 'queuedResume'), false)
+    assert.match(conversationCandidates.selectionRule.preferResume, /workspaceBinding=pool-rebindable.*workspacePoolId/)
+    assert.equal(conversationCandidates.conversations[0].contextHealth.contextReuseGuardEnabled, false)
+    assert.match(conversationCandidates.selectionRule.preferResume, /컨텍스트 기준 새 대화 전환은 임시로 OFF/)
+    assert.match(conversationCandidates.selectionRule.chooseNew, /같은 workspacePoolId 안의 Fork 경로 차이만으로 새 대화를 만들지 마세요/)
+    assert.deepEqual(conversationCandidates.selectionRule, aiConversationSelectionRules())
+    assert.match(conversationCandidates.selectionRule.candidateSelection, /선택한 conversationId의 contextHealth와 assessmentId/)
+    assert.match(conversationCandidates.selectionRule.preferResume, /입력 파일·구현 담당자·검수 단계가 바뀌었다는 사실만으로 새 대화를 선택하지/)
+    assert.match(conversationCandidates.selectionRule.reviewIndependence, /독립 검수는 구현자와 검수자의 분리이며 매번 새 대화를 뜻하지 않습니다/)
+    assert.match(conversationCandidates.selectionRule.chooseNew, /한 후보의 금지 모델을 다른 관련 후보에 적용하지/)
     const emptyDelegations = await invoke('mindnprogress_list_ai_delegations', { mapId, parentCardId: 'task-a' })
     assert.deepEqual(emptyDelegations.delegations, [])
     await invokeExpectError('mindnprogress_delegate_ai_work', {
@@ -1149,11 +1304,57 @@ async function main() {
     assert.equal(conversationTranscript.messageCount, 4)
     assert.equal(conversationTranscript.exportedMessageCount, 3)
     assert.equal(conversationTranscript.truncated, false)
+    assert.equal(conversationTranscript.page.limit, 50)
+    assert.equal(conversationTranscript.coverage.complete, true)
+    assert.deepEqual(mockAionUi.conversationMessageRequests[0], {
+      pathname: '/api/conversations/conversation-test/messages',
+      limit: '50',
+      contentMode: 'full',
+      before: null,
+    })
     assert.match(conversationTranscript.transcript, /^대화: MCP 전체 대화 조회 검증\n대화 ID: conversation-test\n내보낸 시각: .+\n유형: acp/)
     assert.match(conversationTranscript.transcript, /사용자:\n첫 사용자 요청/)
     assert.match(conversationTranscript.transcript, /시스템:\n중간 시스템 안내/)
     assert.match(conversationTranscript.transcript, /어시스턴트:\n최종 어시스턴트 응답/)
     assert.doesNotMatch(conversationTranscript.transcript, /internal_tool|acp_tool_call/)
+    const recentConversationTranscript = await invoke('mindnprogress_get_ai_conversation_transcript', {
+      mapId,
+      cardId: 'task-a',
+      limit: 2,
+    })
+    assert.equal(recentConversationTranscript.page.limit, 2)
+    assert.equal(recentConversationTranscript.page.before, null)
+    assert.equal(recentConversationTranscript.page.nextBefore, 'message-tip')
+    assert.equal(recentConversationTranscript.coverage.complete, false)
+    assert.equal(recentConversationTranscript.messageCount, 2)
+    assert.match(recentConversationTranscript.transcript, /최종 어시스턴트 응답/)
+    const olderConversationTranscript = await invoke('mindnprogress_get_ai_conversation_transcript', {
+      mapId,
+      cardId: 'task-a',
+      limit: 2,
+      before: recentConversationTranscript.page.nextBefore,
+    })
+    assert.equal(olderConversationTranscript.page.limit, 2)
+    assert.equal(olderConversationTranscript.page.before, 'message-tip')
+    assert.equal(olderConversationTranscript.page.nextBefore, null)
+    assert.equal(olderConversationTranscript.coverage.complete, true)
+    assert.equal(olderConversationTranscript.messageCount, 2)
+    assert.match(olderConversationTranscript.transcript, /사용자:\n첫 사용자 요청/)
+    assert.doesNotMatch(olderConversationTranscript.transcript, /internal_tool|acp_tool_call/)
+    assert.deepEqual(mockAionUi.conversationMessageRequests.slice(1, 3), [
+      {
+        pathname: '/api/conversations/conversation-test/messages',
+        limit: '2',
+        contentMode: 'full',
+        before: null,
+      },
+      {
+        pathname: '/api/conversations/conversation-test/messages',
+        limit: '2',
+        contentMode: 'full',
+        before: 'message-tip',
+      },
+    ])
     await invokeExpectError('mindnprogress_get_ai_conversation_transcript', {
       mapId, cardId: 'branch-a',
     }, /카드에 연결된 AI 대화가 없습니다/)
@@ -1191,6 +1392,7 @@ async function main() {
       targetCardId: delegatedChild.id,
       strategy: 'new',
       instruction: '하위 카드의 요구사항을 확인하고 구현과 검증을 완료한 뒤 결과를 기록하세요.',
+      taskSummary: '하위 카드 구현 및 검증',
       decisionReason: '기존 대화가 없어 상위 대화와 같은 실행 환경으로 새 대화를 시작합니다.',
       sourceRevision: delegationSourceDocument.map.version,
       idempotencyKey: `mcp-regression:${delegatedChild.id}:${delegationSourceDocument.map.version}`,
@@ -1222,6 +1424,14 @@ async function main() {
     await originReconnectClient.connect(originReconnectTransport)
     let delegated
     try {
+      const failedRetry = await originReconnectClient.callTool({ name: 'mindnprogress_delegate_ai_work',
+        arguments: { ...delegationArguments, idempotencyKey: 'mcp-retry-failure', sourceRevision: delegationArguments.sourceRevision + 100 } })
+      assert.equal(failedRetry.isError, true)
+      const retryError = JSON.parse(failedRetry.content.find(item => item.type === 'text').text)
+      assert.equal(retryError.reasonCode, 'AI_DELEGATION_VERSION_CONFLICT')
+      assert.ok(retryError.requestFailure.retryReference.requestId)
+      assert.equal(retryError.requestFailure.requestSummary, '하위 카드 구현 및 검증')
+      delegationArguments.retryOfRequestId = retryError.requestFailure.retryReference.requestId
       delegated = parseToolResult('mindnprogress_delegate_ai_work', await originReconnectClient.callTool({
         name: 'mindnprogress_delegate_ai_work',
         arguments: delegationArguments,
@@ -1234,13 +1444,38 @@ async function main() {
     assert.equal(delegated.delegation.parentCardId, 'task-a', '다른 카드 get_context 조회가 위임 기준 카드를 변경했습니다.')
     assert.equal(delegated.delegation.strategy, 'new')
     assert.equal(delegated.mapVersion, delegationArguments.sourceRevision + 1)
+    const delegatedRoleTransport = new StdioClientTransport({
+      command: process.execPath,
+      args: ['mcp/server.mjs'],
+      cwd: projectDirectory,
+      env: { ...environment, AIONUI_CONVERSATION_ID: 'conversation-delegated' },
+      stderr: 'pipe',
+    })
+    const delegatedRoleClient = new Client({ name: 'mindnprogress-delegated-role', version: '1.0.0' })
+    await delegatedRoleClient.connect(delegatedRoleTransport)
+    try {
+      const delegatedContext = parseToolResult('mindnprogress_get_context', await delegatedRoleClient.callTool({
+        name: 'mindnprogress_get_context',
+        arguments: { mapId, cardId: delegatedChild.id },
+      }))
+      assert.equal(delegatedContext.selection.role, undefined)
+      assert.match(delegatedContext.selection.aiWorkCoordination.childDelegation.instruction, /같은 문서의 계층상 하위 카드/)
+    } finally {
+      await delegatedRoleClient.close()
+    }
     assertReasonMessagePair(delegated, 'AI 위임 접수 응답')
     assert.equal(delegated.reasonCode, 'AI_DELEGATION_ACCEPTED')
+    assert.equal(delegated.delegation.retryOfRequestId, delegationArguments.retryOfRequestId)
+    const failureHistory = await invoke('mindnprogress_list_ai_delegations', { mapId, parentCardId: 'task-a' })
+    assert.equal(failureHistory.requestFailures.find(item => item.id === delegationArguments.retryOfRequestId)?.resolvedByDelegationId, delegated.delegation.id)
     assertReasonMessagePair(delegated.delegation, 'AI 위임 공개 상태')
     const delegatedRepeat = await invoke('mindnprogress_delegate_ai_work', delegationArguments)
     assert.equal(delegatedRepeat.repeated, true)
     assertReasonMessagePair(delegatedRepeat, 'AI 위임 멱등 응답')
     assert.equal(delegatedRepeat.reasonCode, 'AI_DELEGATION_REPEATED')
+    const repeatedRetry = await invoke('mindnprogress_delegate_ai_work', { ...delegationArguments, idempotencyKey: 'mcp-retry-duplicate-key' })
+    assert.equal(repeatedRetry.repeated, true)
+    assert.equal(repeatedRetry.delegation.id, delegated.delegation.id)
     assert.equal(mockAionUi.dispatchRequests.length, 1, '멱등 재호출이 하위 대화를 중복 실행했습니다.')
     assert.deepEqual(mockAionUi.conversationTitleUpdates, [{
       name: 'MCP 전체 회귀 문서: 위임 하위 카드',
@@ -1365,14 +1600,30 @@ async function main() {
     })
     assert.equal(recoveredRun.delegation.state, 'starting')
     assert.equal(recoveredRun.recovery.reusedConversation, true)
-    await invoke('mindnprogress_refresh_ai_delegation', { mapId, delegationId: recoveredRun.delegation.id, expectedUpdatedAt: recoveredRun.delegation.updatedAt })
-    await invokeExpectError('mindnprogress_retry_ai_delegation_report', { mapId, delegationId: recoveredRun.delegation.id, expectedUpdatedAt: recoveredRun.delegation.updatedAt }, /작업 완료|상태가 변경/)
-    await invokeExpectError('mindnprogress_finalize_ai_coordination', { mapId, delegationId: recoveredRun.delegation.id, expectedUpdatedAt: recoveredRun.delegation.updatedAt }, /문서 조정 전용|상태가 변경/)
-    await invokeExpectError('mindnprogress_supersede_ai_delegation', { mapId, delegationId: recoveredRun.delegation.id, replacementDelegationId: recoveredRun.delegation.id, expectedUpdatedAt: recoveredRun.delegation.updatedAt }, /후속 위임|상태가 변경/)
+    const recoveredList = await invoke('mindnprogress_list_ai_delegations', { mapId, parentCardId: 'task-a', targetCardId: delegatedChild.id })
+    const recoveredCurrent = recoveredList.delegations.find((item) => item.id === recoveredRun.delegation.id)
+    assert.ok(recoveredCurrent?.updatedAt, '복구 뒤 실제 위임 목록에서 최신 updatedAt을 확인해야 합니다.')
+    let refreshCurrent = recoveredCurrent
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await invoke('mindnprogress_refresh_ai_delegation', { mapId, delegationId: recoveredRun.delegation.id, expectedUpdatedAt: refreshCurrent.updatedAt })
+        break
+      } catch (error) {
+        if (attempt === 2 || !/위임 상태가 변경됐습니다\. 상태를 다시 확인하세요\./u.test(error.message)) throw error
+        // 자동 폴링의 starting→running 변경과 경합하면 조회만 갱신한다. 복구/실행 요청은 재전달하지 않는다.
+        const latest = await invoke('mindnprogress_list_ai_delegations', { mapId, parentCardId: 'task-a', targetCardId: delegatedChild.id })
+        refreshCurrent = latest.delegations.find(item => item.id === recoveredRun.delegation.id)
+        assert.ok(refreshCurrent?.updatedAt)
+      }
+    }
+    await invokeExpectError('mindnprogress_retry_ai_delegation_report', { mapId, delegationId: recoveredRun.delegation.id, expectedUpdatedAt: recoveredCurrent.updatedAt }, /작업 완료|상태가 변경/)
+    await invokeExpectError('mindnprogress_finalize_ai_coordination', { mapId, delegationId: recoveredRun.delegation.id, expectedUpdatedAt: recoveredCurrent.updatedAt }, /문서 조정 전용|상태가 변경/)
+    await invokeExpectError('mindnprogress_supersede_ai_delegation', { mapId, delegationId: recoveredRun.delegation.id, replacementDelegationId: recoveredRun.delegation.id, expectedUpdatedAt: recoveredCurrent.updatedAt }, /후속 위임|상태가 변경/)
     assert.equal(mockAionUi.dispatchRequests.length, 2)
     assert.equal(mockAionUi.dispatchRequests[1].targetConversationId, 'conversation-delegated')
-    assert.match(mockAionUi.dispatchRequests[1].instruction, /원래 지시를 처음부터 반복하지 말고/)
-    assert.match(mockAionUi.dispatchRequests[1].instruction, /원래 맡긴 범위의 미완료 작업만/)
+    assert.match(mockAionUi.dispatchRequests[1].instruction, /원래 지시를 처음부터 반복하지 말고.*미완료 부분만/s)
+    assert.match(mockAionUi.dispatchRequests[1].instruction, /범위를 벗어난 변경이 필요하면 상위 AI에 보고/)
+    assert.match(mockAionUi.dispatchRequests[1].instruction, /mindnprogress_complete_ai_delegation/)
     assert.doesNotMatch(mockAionUi.dispatchRequests[1].instruction, /# 사용자 승인과 실행 범위|사용자 승인 근거/)
     const recoveryOperationId = recoveredRun.recovery.operationId
     mockAionUi.setDispatchState(recoveryOperationId, 'waiting_resource', {
@@ -1973,7 +2224,10 @@ async function main() {
         checklist: [{ id: 'check-partial-merge', text: '부분 병합 보존', done: false }],
         blockedBy: ['task-a'],
         aiConversationId: 'conversation-partial-merge',
-        waitingItems: [{ label: '캐릭터 아트 전달', resumeCondition: '최종 PNG 수령' }],
+        waitingItems: [
+          { label: '캐릭터 아트 전달', resumeCondition: '최종 PNG 수령' },
+          { label: '외부 검수 결정', resumeCondition: '검수 결과 승인' },
+        ],
       },
     })
     const waitingCard = waitingCardResult.card
@@ -1983,6 +2237,15 @@ async function main() {
     assert.equal(waitingCard.data.waitingItems[0].label, '캐릭터 아트 전달')
     assert.ok(waitingCard.data.waitingItems[0].id)
     assert.ok(waitingCard.data.waitingItems[0].since)
+    assert.equal(waitingCard.data.waitingItems.length, 2)
+    const partiallyReleasedCard = await invoke('mindnprogress_update_card', {
+      mapId,
+      cardId: waitingCard.id,
+      responseMode: 'affected',
+      data: { waitingItems: [waitingCard.data.waitingItems[1]] },
+    })
+    assert.deepEqual(partiallyReleasedCard.card.data.waitingItems.map((item) => item.id), [waitingCard.data.waitingItems[1].id])
+    assert.notEqual(partiallyReleasedCard.card.data.status, 'done')
     assert.equal(waitingCardResult.document.rootProgress, 15)
     assert.equal(waitingCardResult.document.rootStatus, 'in-progress')
     assert.equal(waitingCardResult.root.progress, 15)
@@ -2009,7 +2272,7 @@ async function main() {
       'aiConversationId',
     ]
     const preservedCardData = Object.fromEntries(
-      partialMergePreservedFields.map((field) => [field, waitingCard.data[field]]),
+      partialMergePreservedFields.map((field) => [field, partiallyReleasedCard.card.data[field]]),
     )
     const partialUpdateResult = await invoke('mindnprogress_update_card', {
       mapId,
@@ -2124,7 +2387,12 @@ async function main() {
       field: 'sharedKnowledge',
       expectedSha256: betweenPatch.after.sha256,
       operation: { type: 'append', text: '가'.repeat(sharedKnowledgeMaxLength) },
-    }, /TEXT_PATCH_LENGTH_LIMIT.*15,000자/)
+    }, /TEXT_PATCH_LENGTH_LIMIT.*15,000자.*기존 절에 통합.*정리안을 제시.*카드별 승인/)
+    await invokeExpectError('mindnprogress_update_card', {
+      mapId,
+      cardId: addedCard.id,
+      data: { sharedKnowledge: '가'.repeat(sharedKnowledgeMaxLength + 1) },
+    }, /15,000자.*기존 절에 통합.*정리안을 제시.*카드별 승인/)
     const lengthErrorCard = await invoke('mindnprogress_get_card', { mapId, cardId: addedCard.id })
     assert.equal(lengthErrorCard.document.version, versionBeforeLengthError)
     assert.equal(lengthErrorCard.card.data.sharedKnowledge, '앞[시작]교체[끝]뒤')
@@ -2519,6 +2787,11 @@ async function main() {
     assert.equal(repeatedDeleteConversationLinkResponse.status, 404)
 
     const groupLibrary = await invoke('mindnprogress_list_documents', {})
+    const unconfiguredGroup = await invoke('mindnprogress_get_group_context', { groupId: 'group-mcp-regression' })
+    assert.ok(unconfiguredGroup.documents.some((document) => document.id === mapId))
+    assert.equal(unconfiguredGroup.project.coordinatorMapId, null)
+    assert.equal(unconfiguredGroup.guide.approvalScope, 'group-coordinator')
+    assert.equal(unconfiguredGroup.guide.documentCoordinator, DOCUMENT_COORDINATOR_INSTRUCTION)
     const groupTestId = 'group-mcp-project'
     await invoke('mindnprogress_save_document_layout', {
       documentLayout: {
@@ -2529,6 +2802,8 @@ async function main() {
     })
     const emptyGroup = await invoke('mindnprogress_get_group_context', { groupId: groupTestId })
     assert.equal(emptyGroup.project.version, 0)
+    assert.equal(emptyGroup.guide.approvalScope, 'group-coordinator')
+    assert.equal(emptyGroup.guide.documentCoordinator, DOCUMENT_COORDINATOR_INSTRUCTION)
     const managedGroup = await invoke('mindnprogress_update_group_project', {
       groupId: groupTestId, baseVersion: 0, source: '기획 원본 경로', sourceVersion: 'v1', objective: '요구사항 전체 구현', createCoordinator: true,
     })
@@ -2537,13 +2812,13 @@ async function main() {
     const groupDocument = await invoke('mindnprogress_create_group_document', {
       groupId: groupTestId, baseVersion: managedGroup.project.version, title: '기능 문서', description: '원본 분석 후 하위 업무를 구성합니다.',
     })
+    const groupCoordinatorContext = await invoke('mindnprogress_get_context', { mapId: managedGroup.coordinator.id, cardId: managedGroup.coordinator.root.id })
     const savedGroup = await invoke('mindnprogress_get_group_context', { groupId: groupTestId })
     assert.ok(savedGroup.documents.some((document) => document.id === groupDocument.map.id))
     assert.equal(savedGroup.delegations.length, 0)
     assert.equal(savedGroup.documentInstructions.length, 0)
     assert.match(savedGroup.guide.approval, /전체 방향 승인은 문서별 실행의 일괄 승인이 아닙니다/)
-    assert.match(savedGroup.guide.documentCoordinator, /사용자의 요청 또는 상위 AI가 전달한 작업 범위를 수행/)
-    assert.doesNotMatch(savedGroup.guide.documentCoordinator, /# 사용자 승인과 실행 범위|# 그룹의 두 단계 사용자 승인/)
+    assert.equal(savedGroup.guide.documentCoordinator, DOCUMENT_COORDINATOR_INSTRUCTION)
     assert.equal(savedGroup.guide.approvalScope, 'group-coordinator')
     assert.equal(savedGroup.sourcesSupported, true)
     assert.equal(savedGroup.project.sources[0].source, '기획 원본 경로')
@@ -2555,24 +2830,21 @@ async function main() {
     assert.deepEqual(sourceContext.project, legacyUpdatedGroup.project)
     assert.equal(sourceContext.project.sources[0].sourceVersion, 'v2')
     assert.deepEqual(sourceContext.project.sources[1], multipleSources[1])
-    assert.match(sourceContext.guide.sources, /모든 기획서/)
-    assert.match(sourceContext.guide.documentInstruction, /mindnprogress_send_group_document_instruction/)
+    assert.match(sourceContext.guide.sources, /project\.sources에 등록된 모든 기획서/)
+    assert.match(sourceContext.guide.documentInstruction, /문서별 사용자 승인 후.*문서 루트 AI/)
     assert.equal(sourceContext.guide.executionApproval, AI_EXECUTION_APPROVAL_INSTRUCTION)
     assert.equal(sourceContext.guide.approval, GROUP_APPROVAL_INSTRUCTION)
     assert.ok(!sourceContext.guide.coordinator.includes(AI_EXECUTION_APPROVAL_INSTRUCTION))
     assert.ok(!sourceContext.guide.coordinator.includes(GROUP_APPROVAL_INSTRUCTION))
-    const groupCoordinatorContext = await invoke('mindnprogress_get_context', { mapId: managedGroup.coordinator.id, cardId: managedGroup.coordinator.root.id })
     assert.match(groupCoordinatorContext.groupProject.instruction, /guide\.operationRules의 그룹 총괄 승인 경계/)
-    assert.doesNotMatch(groupCoordinatorContext.groupProject.instruction, /# 사용자 승인과 실행 범위|# 그룹의 두 단계 사용자 승인/)
-    const groupCoordinatorRules = groupCoordinatorContext.guide.operationRules.join('\n')
-    assert.equal(groupCoordinatorRules.split(AI_EXECUTION_APPROVAL_INSTRUCTION).length - 1, 1)
-    assert.equal(groupCoordinatorRules.split(GROUP_APPROVAL_INSTRUCTION).length - 1, 1)
-    assert.match(groupCoordinatorRules, /승인 대기는 정상적인 종료 지점/)
+    assert.match(JSON.stringify(groupCoordinatorContext.guide), /# 사용자 승인과 실행 범위.*# 그룹의 두 단계 사용자 승인/s)
+    assert.equal(groupCoordinatorContext.selection.role, undefined)
+    assert.equal(groupCoordinatorContext.selection.workflow, undefined)
     assert.match(groupCoordinatorContext.nextStep, /미승인 분석·제안은 대화로 보고/)
     assert.equal(groupCoordinatorContext.selection.aiWorkCoordination.groupDocumentInstruction.sendTool, 'mindnprogress_send_group_document_instruction')
     assert.equal(groupCoordinatorContext.selection.aiWorkCoordination.groupDocumentInstruction.listTool, 'mindnprogress_list_group_document_instructions')
     assert.match(groupCoordinatorContext.selection.aiWorkCoordination.groupDocumentInstruction.instruction, /업무 완료 상태가 아닙니다/)
-    assert.match(groupCoordinatorContext.selection.aiWorkCoordination.childDelegation.instruction, /같은 문서의 계층상 하위 카드/)
+    assert.match(groupCoordinatorContext.selection.aiWorkCoordination.childDelegation.instruction, /같은 문서의 하위 카드/)
     assert.equal(Object.hasOwn(toolSchema('mindnprogress_delegate_ai_work').properties, 'targetMapId'), false)
     assert.equal(Object.hasOwn(toolSchema('mindnprogress_delegate_ai_work').properties, 'targetRevision'), false)
     const groupInstructionSchema = toolSchema('mindnprogress_send_group_document_instruction')
@@ -2599,18 +2871,27 @@ async function main() {
       newConversation: { agentId: 'claude-code', modelId: 'claude-test' },
     }, /현재 그룹 총괄 루트 카드|현재 AionUi 대화|현재 AI 대화/)
     const groupDocumentContext = await invoke('mindnprogress_get_context', { mapId: groupDocument.map.id, cardId: groupDocument.map.nodes.find((node) => node.data.kind === 'root').id })
-    for (const value of [groupDocumentContext.groupProject.instruction, groupDocumentContext.guide.operationRules.join('\n'), groupDocumentContext.nextStep, groupDocumentContext.selection.aiWorkCoordination.childDelegation.instruction]) {
+    for (const value of [groupDocumentContext.groupProject.instruction, groupDocumentContext.nextStep, groupDocumentContext.selection.aiWorkCoordination.childDelegation.instruction]) {
       assert.doesNotMatch(value, /# 사용자 승인과 실행 범위|# 그룹의 두 단계 사용자 승인|미승인 분석·제안은|사용자 승인 근거와 허용 범위가 확인된/)
     }
-    assert.match(groupDocumentContext.selection.aiWorkCoordination.childDelegation.instruction, /다음 작업을 위임하기로 판단했다면/)
+    assert.equal(groupDocumentContext.selection.role, undefined)
+    const groupDocumentRoleContext = await invoke('mindnprogress_get_group_context', { groupId: groupTestId })
+    assert.equal(groupDocumentRoleContext.guide.approvalScope, 'group-coordinator')
+    assert.equal(groupDocumentRoleContext.guide.documentCoordinator, DOCUMENT_COORDINATOR_INSTRUCTION)
+    assert.equal(groupDocumentRoleContext.guide.approval, GROUP_APPROVAL_INSTRUCTION)
+    assert.match(groupDocumentContext.selection.aiWorkCoordination.childDelegation.instruction, /같은 문서의 계층상 하위 카드/)
     const coordinatorAgain = await invoke('mindnprogress_get_context', { mapId: managedGroup.coordinator.id, cardId: managedGroup.coordinator.root.id, detailLevel: 'full' })
-    assert.match(coordinatorAgain.guide.operationRules.join('\n'), /# 사용자 승인과 실행 범위/)
+    assert.equal(coordinatorAgain.selection.workflow, undefined)
+    const coordinatorRoleContext = await invoke('mindnprogress_get_group_context', { groupId: groupTestId })
+    assert.equal(coordinatorRoleContext.guide.executionApproval, AI_EXECUTION_APPROVAL_INSTRUCTION)
+    assert.equal(coordinatorRoleContext.guide.approval, GROUP_APPROVAL_INSTRUCTION)
     const coordinatorChild = await invoke('mindnprogress_add_card', { mapId: managedGroup.coordinator.id, parentCardId: managedGroup.coordinator.root.id, data: { label: '총괄 문서의 일반 하위 카드', kind: 'task', isWork: false } })
     const coordinatorChildContext = await invoke('mindnprogress_get_context', { mapId: managedGroup.coordinator.id, cardId: coordinatorChild.card.id, detailLevel: 'full' })
-    assert.doesNotMatch(coordinatorChildContext.guide.operationRules.join('\n'), /# 사용자 승인과 실행 범위/)
+    assert.doesNotMatch(JSON.stringify(coordinatorChildContext.guide), /# 사용자 승인과 실행 범위/)
+    assert.equal(coordinatorChildContext.selection.role, undefined)
     assert.doesNotMatch(coordinatorChildContext.groupProject.instruction, /# 그룹의 두 단계 사용자 승인/)
     const commonGuideAgain = await invoke('mindnprogress_read_me_first', {})
-    assert.doesNotMatch(commonGuideAgain.guide.operationRules.join('\n'), /# 사용자 승인과 실행 범위/)
+    assert.doesNotMatch(JSON.stringify(commonGuideAgain.guide), /# 사용자 승인과 실행 범위/)
     await invokeExpectError('mindnprogress_update_group_project', {
       groupId: groupTestId, baseVersion: 0, objective: '오래된 설정으로 변경',
     }, /그룹 설정이 변경/)
@@ -2746,6 +3027,8 @@ async function main() {
       totalCalls: [...calledTools.values()].reduce((sum, count) => sum + count, 0),
       measuredTools: usageTotals.tools.filter((tool) => tool.calls > 0).length,
       measuredCalls: usageTotals.totalCalls,
+      readMeFirstResponseChars: JSON.stringify(guide).length,
+      selectedContextResponseChars: JSON.stringify(context).length,
       status: 'passed',
     }, null, 2))
   } catch (error) {

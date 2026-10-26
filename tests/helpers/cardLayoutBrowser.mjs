@@ -93,6 +93,7 @@ export async function cardLayoutBrowser({ base, directory, mapId, api, submit })
         assert.deepEqual(alerts, [], '배치 실측 오류')
         return evaluate('document.querySelector(".card-layout-dialog")?.innerText.includes("카드 크기와 겹침 검증을 통과했습니다.") && document.querySelector(".card-layout-approval input")?.disabled === false')
       }, '실제 미리보기 검증 실패')
+      for (const position of Object.values(await nodePositions())) assert.ok(Number.isInteger(position.x / 24) && Number.isInteger(position.y / 24), '실제 렌더된 카드도 Alt 이동과 같은 24px 격자')
     }
     const preview = async (id) => {
       await submit(id)

@@ -65,3 +65,17 @@ test('변경 요청도 연결 성립 전 거부된 경우에는 다음 후보를
   })
   assert.equal(calls.length, 2)
 })
+
+test('AionCore 오류의 상태·코드와 실제 설명을 결과로 반환한다', async () => {
+  for (const error of ['완료 보고 API를 사용할 수 없습니다.', { code: 'REPORT_DISABLED', message: '완료 보고 API를 사용할 수 없습니다.' }]) {
+    const caller = createAionUiCaller({
+      candidateBaseUrls: async () => ['http://127.0.0.1:1986'],
+      fetchImpl: async () => response({ success: false, error }, 503),
+    })
+    const result = await caller({ method: 'POST', pathname: '/api/conversations/parent/external-reports', timeoutMs: 1_000 })
+    assert.equal(result.ok, false)
+    assert.equal(result.status, 503)
+    assert.equal(result.message, '완료 보고 API를 사용할 수 없습니다.')
+    assert.equal(result.code, typeof error === 'string' ? null : error.code)
+  }
+})

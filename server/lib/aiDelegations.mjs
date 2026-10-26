@@ -1,4 +1,7 @@
 import { createHash } from 'node:crypto'
+import { aiConversationTitle } from '../../src/utils/aiConversationLaunch.mjs'
+import { integrationRecoveryPending } from './aiIntegrationRecovery.mjs'
+import { aiDelegationResultCaptureMetadata } from './aiDelegationResultCapture.mjs'
 
 export const AI_DELEGATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_:-]{0,127}$/
 export const AI_DELEGATION_WAIT_POLL_DELAYS_MS = Object.freeze([3_000, 5_000, 10_000, 30_000])
@@ -87,7 +90,7 @@ const AI_DELEGATION_STATE_REASONS = Object.freeze({
   },
   closed: {
     reasonCode: 'AI_DELEGATION_CLOSED',
-    message: '보존할 실행 결과 없이 위임 기록을 종료했습니다.',
+    message: '업무 완료나 결과 전달로 처리하지 않고 위임 기록을 종료했습니다.',
   },
   'parent-wake-failed': {
     reasonCode: 'AI_DELEGATION_PARENT_WAKE_FAILED',
@@ -116,6 +119,14 @@ export function aiDelegationResponseBody(statusCode, reasonCode, message, payloa
 }
 
 export function aiDelegationStateReason(delegation) {
+  if (integrationRecoveryPending(delegation)) return requiredAiDelegationReason(
+    delegation.integrationRecoveryRequest.reasonCode, delegation.integrationRecoveryRequest.message)
+  if (['failed', 'parent-wake-failed'].includes(delegation?.state) && aiDelegationDatabaseRecoveryCandidate(delegation)) return requiredAiDelegationReason(
+    'AI_DELEGATION_DATABASE_DISPATCH_FAILED', 'AI 실행 전 DB 접수 오류로 시작되지 않은 실패가 기록돼 있습니다. 원 접수 기록을 검증해 수동 재개하거나 완료된 후속 위임을 확인하세요. 자동 재실행하지 않습니다.')
+  if (delegation?.state === 'recovery-required' && !delegation.resultCorrection && delegation.recoveryDispatchRejection) return requiredAiDelegationReason(
+    'AI_DELEGATION_RECOVERY_CONVERSATION_BUSY', '대상 대화가 사용 중이어서 복구 실행을 시작하지 않았습니다. 기존 작업과 작업공간을 보존했으며 대화가 유휴 상태가 된 뒤 같은 위임을 복구하세요.')
+  if (delegation?.resultCorrection?.phase === 'held') return requiredAiDelegationReason('AI_DELEGATION_RESULT_CORRECTION_HELD',
+    '결과 정정 실행 또는 Git 상태를 확인할 수 없어 기존 작업공간과 통합 잠금을 보존합니다. 별도 증거 검토가 필요합니다.')
   const displayState = aiDelegationDisplayState(delegation)
   if (displayState === 'waiting-workspace') {
     return requiredAiDelegationReason(
@@ -151,8 +162,16 @@ export function aiDelegationStateReason(delegation) {
       ? '작업 완료 · 통합 정리 대기' : '작업 완료 · 통합 대기'
     return requiredAiDelegationReason(
       result.reasonCode ?? 'AI_DELEGATION_WAITING_INTEGRATION',
-      `${label}. ${result.waitingReason}${paths.length ? `\n충돌/변경 파일:\n${paths.join('\n')}` : ''}`,
+      `${label}. ${aiDelegationRecoveryAvailability(delegation)?.recommendedAction === 'correct-integration-result'
+        ? '사용자 통합 파일은 보존합니다. 승인된 기존 결과의 우발 변경은 원 담당자에게 명시적 통합 대기 결과 정정을 요청할 수 있습니다.'
+        : result.waitingReason}${paths.length ? `\n충돌/변경 파일:\n${paths.join('\n')}` : ''}`,
     )
+  }
+  if (displayState === 'parent-wake-failed' && !aiDelegationSucceeded(delegation)) {
+    return requiredAiDelegationReason('AI_DELEGATION_PARENT_WAKE_FAILED',
+      (delegation.workspaceResult?.childStatus ?? delegation.childStatus) === 'failed'
+        ? '하위 AI 실행이 중단됐으며 상위 AI로의 실패 보고도 전달하지 못했습니다. 보존된 작업의 복구가 필요합니다.'
+        : '하위 업무 또는 필요한 통합을 완료하지 못했으며 상위 AI로의 상태 보고도 전달하지 못했습니다. 보존된 작업의 복구 상태를 확인하세요.')
   }
   const configured = AI_DELEGATION_STATE_REASONS[displayState]
   if (configured) return requiredAiDelegationReason(configured.reasonCode, configured.message)
@@ -250,6 +269,8 @@ function partialAiDelegationSelectionFromSource(source) {
     disabledBuiltinSkillIds: normalizedSelectionList(source.disabledBuiltinSkillIds),
     mcpIds: normalizedSelectionList(source.mcpIds ?? source.mcpServers),
     workspace: String(source.workspace ?? '').trim().slice(0, 4_096) || null,
+    // Claude 멀티 계정: 계정이 1개면 비어 있어 기존 선택과 같다.
+    claudeAccountId: String(source.claudeAccountId ?? '').trim().slice(0, 120) || null,
   }
 }
 
@@ -290,6 +311,9 @@ export function mergeAiDelegationSelections(...sources) {
     disabledBuiltinSkillIds: firstList(['disabledBuiltinSkillIds'], 'disabledBuiltinSkillIds'),
     mcpIds: firstList(['mcpIds', 'mcpServers'], 'mcpIds'),
     workspace: firstValue('workspace', entries),
+    // 계정은 같은 AI 종류의 선택에서만 물려받는다.
+    claudeAccountId: firstValue('claudeAccountId', compatibleEntries
+      .filter((entry) => !entry.selection.agent || entry.selection.agent.id === agent?.id)),
   }
   return merged.agent && merged.model ? merged : null
 }
@@ -366,6 +390,7 @@ export function aiDelegationWorkspaceLeaseMatches(expected, actual) {
     && expected.leaseId === actual.leaseId
     && normalizedWorkspaceRoot(expected.projectRoot) === normalizedWorkspaceRoot(actual.projectRoot)
     && (!expected.branch || !Object.hasOwn(actual, 'branch') || expected.branch === actual.branch)
+    && (!expected.ownership || ['coordinatorId', 'machineId', 'poolId', 'generation'].every((key) => expected.ownership[key] === actual.ownership?.[key]))
 }
 
 export function aiDelegationNewWorkspace(requested, parent, target) {
@@ -423,7 +448,8 @@ export function aiDelegationReportResult(delegation) {
   if ((storedHash && storedHash !== hash) || (capturedTurnId && childTurnId && capturedTurnId !== childTurnId)) {
     return { availability: 'integrity-failed', text: '', hash: null, turnId: null }
   }
-  return { availability: 'captured', text, hash, turnId: capturedTurnId || childTurnId || null }
+  const capture = aiDelegationResultCaptureMetadata(delegation, text)
+  return { availability: 'captured', text, hash, turnId: capturedTurnId || childTurnId || null, ...(capture ? { capture } : {}) }
 }
 
 export function retryableExternalLimitCategory(error) {
@@ -439,8 +465,181 @@ export function retryableExternalLimitCategory(error) {
   return null
 }
 
+export function retryableAiExecutionFailureCategory(error) {
+  if (/^Internal error: Database error: error returned from database: \(code: 1\) cannot start a transaction within a transaction$/iu.test(String(error ?? '').trim())) return 'dispatch-database-transient'
+  return retryableExternalLimitCategory(error)
+    ?? (/^stream disconnected before completion(?::|$)/iu.test(String(error ?? '').trim()) ? 'upstream-interrupted' : null)
+}
+
+export function aiDelegationDatabaseDispatchRejected(dispatch, conversationId, operationId) {
+  return Boolean(conversationId && operationId && dispatch?.operationId === operationId
+    && dispatch.conversationId === conversationId && dispatch.state === 'failed' && !dispatch.turnId
+    && retryableAiExecutionFailureCategory(dispatch.errorMessage) === 'dispatch-database-transient')
+}
+
+export function aiDelegationDatabaseRecoveryCandidate(delegation) {
+  const result = delegation?.workspaceResult, lease = delegation?.workspaceLease
+  return Boolean(!delegation?.childTurnId && delegation?.childOperationId && delegation?.childStatus === 'failed'
+    && result?.status === 'failed-clean' && result.childStatus === 'failed' && !result.integratedCommit && !result.integrationBranch
+    && result.headCommit === lease?.baseCommit && !result.unmergedFiles?.length
+    && retryableAiExecutionFailureCategory(result.childError) === 'dispatch-database-transient'
+    && ['workspaceId', 'jobId', 'leaseId', 'branch', 'baseCommit'].every(key => lease?.[key] && result[key] === lease[key])
+    && result.mapId === delegation.mapId && result.cardId === delegation.targetCardId && result.conversationId === delegation.targetConversationId)
+}
+
+export function assertAiDelegationDatabaseRejection(delegation, dispatch, storedLease) {
+  if (!aiDelegationDatabaseRecoveryCandidate(delegation)
+    || !aiDelegationDatabaseDispatchRejected(dispatch, delegation.targetConversationId, delegation.childOperationId)
+    || dispatch.errorMessage !== delegation.workspaceResult.childError
+    || !aiDelegationWorkspaceLeaseMatches(delegation.workspaceLease, dispatch.workspaceLease)
+    || !aiDelegationWorkspaceLeaseMatches(delegation.workspaceLease, storedLease)
+    || storedLease?.mapId !== delegation.mapId || storedLease.cardId !== delegation.targetCardId || storedLease.conversationId !== delegation.targetConversationId
+    || !['cancelled', 'failed-clean'].includes(storedLease.status)
+    || JSON.stringify(storedLease.result) !== JSON.stringify(delegation.workspaceResult)
+    || storedLease.checkpoints?.length) throw Object.assign(new Error('원 DB 접수 실패·실행 턴 없음·무변경 반환을 확인하지 못했습니다.'), { status: 409, code: 'AI_DELEGATION_DATABASE_REJECTION_UNCONFIRMED' })
+}
+
+// busy는 새 실행이 시작되지 않은 접수 거절이다. 실행 턴이 있으면 이 예외를 적용하지 않는다.
+export function aiDelegationBusyDispatchRejected(dispatch, conversationId, operationId) {
+  return Boolean(conversationId && operationId && dispatch?.operationId === operationId
+    && dispatch.conversationId === conversationId && dispatch.state === 'failed' && !dispatch.turnId
+    && dispatch.errorMessage === `Conversation is busy: conversation ${conversationId} is already running`)
+}
+
+export function aiDelegationBusyRecoveryOperation(delegation) {
+  if (delegation?.resultCorrection) return null
+  const rejection = delegation?.recoveryDispatchRejection
+  if (delegation?.state === 'recovery-required' && rejection && delegation.recoveryOperationId === rejection.operationId
+    && aiDelegationBusyDispatchRejected(rejection, delegation.targetConversationId, rejection.operationId)) return rejection.operationId
+  // 이전 버전은 거절된 복구 요청을 child operation으로 바꾼 뒤 worker를 격리했다.
+  const result = delegation?.workspaceResult
+  const operationId = delegation?.recoveryOperationId
+  if (delegation?.state !== 'failed' || !operationId || delegation.childOperationId !== operationId
+    || !Number.isInteger(delegation.recoveryAttempt) || delegation.recoveryAttempt < 1 || delegation.childTurnId || result?.status !== 'quarantined'
+    || result.childStatus !== 'failed' || result.integratedCommit || result.integrationBranch
+    || result.unmergedFiles?.length || !['workspaceId', 'jobId', 'leaseId', 'branch', 'baseCommit'].every(key =>
+      typeof delegation.workspaceLease?.[key] === 'string' && Boolean(delegation.workspaceLease[key])
+      && result[key] === delegation.workspaceLease[key])
+    || result.mapId !== delegation.mapId || result.cardId !== delegation.targetCardId
+    || result.conversationId !== delegation.targetConversationId) return null
+  return aiDelegationBusyDispatchRejected({ operationId, conversationId: delegation.targetConversationId,
+    state: 'failed', errorMessage: result.childError }, delegation.targetConversationId, operationId) ? operationId : null
+}
+
+export function rejectedAiDelegationRecoveryPatch(delegation, pending, dispatch, at = new Date().toISOString()) {
+  if (!aiDelegationBusyDispatchRejected(dispatch, delegation.targetConversationId, pending.operationId)
+    || !aiDelegationWorkspaceLeaseMatches(pending.workspaceLease ?? null, dispatch.workspaceLease ?? null)) {
+    throw new Error('복구 접수 거절의 실행·대화·작업공간을 확인하지 못했습니다.')
+  }
+  const rejection = { operationId: pending.operationId, conversationId: dispatch.conversationId,
+    state: dispatch.state, errorMessage: dispatch.errorMessage, turnId: null, executionStarted: false, rejectedAt: at }
+  return { state: pending.integrationRecovery ? 'integration-recovery-required' : 'recovery-required',
+    pendingRecovery: null, recoveryWorkspaceLease: null, workspaceLease: pending.workspaceLease,
+    recoveryAttempt: pending.attempt, recoveryOperationId: pending.operationId,
+    recoverySourceState: pending.sourceState, recoveryRequiredAt: at, completedAt: null,
+    recoveryDispatchError: dispatch.errorMessage, recoveryDispatchRejection: rejection,
+    recoveryDispatchRejections: [...(delegation.recoveryDispatchRejections ?? []), rejection].slice(-20) }
+}
+
+export function localChangesIntegrationCommits(result) {
+  if (result?.status !== 'quarantined' || result.childStatus !== 'completed'
+    || result.integratedCommit || !result.integrationBranch || !result.integrationBaseCommit
+    || result.conflictRound || result.unmergedFiles?.length) return null
+  const error = String(result.error ?? '')
+  const command = error.match(/^Command failed: git(?: -c core\.autocrlf=(?:false|input))? cherry-pick((?: [a-f0-9]{40})+)\r?\n/iu)
+  if (!command || !/local changes[^\n]*would be overwritten by (?:cherry-pick|merge)/iu.test(error)) return null
+  return command[1].trim().split(/\s+/)
+}
+
+export function integrationGitLockFailure(result) {
+  if (result?.status !== 'quarantined' || result.childStatus !== 'completed'
+    || result.integratedCommit || !result.integrationBranch || !result.integrationBaseCommit
+    || result.conflictRound || result.unmergedFiles?.length) return null
+  const error = String(result.error ?? '')
+  const command = error.match(/^Command failed: git merge --ff-only(?: --no-overwrite-ignore)? ([a-f0-9]{40})\r?\n/iu)
+  const lock = error.match(/^(?:error|fatal): Unable to create '([^'\r\n]+[/\\]index\.lock)': File exists\.[\t ]*\r?$/imu)
+  if (!command || !lock || (result.integrationHeadCommit && result.integrationHeadCommit !== command[1])) return null
+  return { candidateCommit: command[1], lockPath: lock[1] }
+}
+
+export function integrationHeadChangedFailure(result) {
+  if (result?.status !== 'quarantined' || result.childStatus !== 'completed' || result.integratedCommit
+    || !result.integrationBranch || result.conflictRound || result.unmergedFiles?.length
+    || !['통합 직전에 통합 작업공간의 HEAD가 변경되었습니다.', '충돌 해결 중 통합 작업공간의 HEAD가 변경되었습니다.'].includes(String(result.error ?? '').trim())
+    || !['headCommit', 'integrationBaseCommit', 'integrationHeadCommit'].every(key => /^[a-f0-9]{40}$/u.test(String(result[key] ?? '')))) return null
+  return { candidateCommit: result.integrationHeadCommit }
+}
+
+export const integrationCandidateDirtyReasonCode = 'integration-candidate-worktree-dirty'
+
+export function integrationCandidateWorktreeFailure(result) {
+  if (result?.status !== 'quarantined' || result.childStatus !== 'completed' || result.childError
+    || result.integratedCommit || !result.integrationBranch || result.conflictRound || result.unmergedFiles?.length
+    || !['headCommit', 'integrationBaseCommit'].every(key => /^[a-f0-9]{40}$/u.test(String(result[key] ?? '')))) return null
+  const failure = result.integrationFailure
+  const legacy = !failure && result.error === '통합 브랜치에 커밋되지 않은 변경이 남아 있습니다.'
+  if (!legacy && (failure?.reasonCode !== integrationCandidateDirtyReasonCode
+    || failure.phase !== 'candidate-worktree' || failure.workspaceId !== result.workspaceId
+    || failure.branch !== result.integrationBranch)) return null
+  const candidateCommit = result.integrationHeadCommit ?? failure?.candidateCommit ?? null
+  if ((candidateCommit && !/^[a-f0-9]{40}$/u.test(candidateCommit))
+    || (!legacy && (!candidateCommit || failure.candidateCommit !== candidateCommit))) return null
+  // 구버전은 후보 HEAD를 저장하기 전에 실패했다. 복구 시 현재 HEAD를 그대로 신뢰하지 않고
+  // 모든 원 체크포인트를 적용한 tree와 각 부모 커밋을 공통 검증기로 대조한다.
+  return { candidateCommit }
+}
+
 export function aiDelegationRecoveryAvailability(delegation) {
+  if (integrationRecoveryPending(delegation)) return { failurePhase: 'integration', failureCategory: 'integration-recovery-pending',
+    recoveryAvailable: false, recommendedAction: 'refresh-status', recoveryTool: 'mindnprogress_refresh_ai_delegation' }
+  if (delegation?.resultCorrection && (['completed', 'superseded', 'closed'].includes(delegation.state)
+    || aiDelegationSucceeded(delegation))) return null
+  if (delegation?.resultCorrection?.phase === 'held') return { failurePhase: 'integration', failureCategory: 'integration-result-correction',
+    recoveryAvailable: false, recommendedAction: 'inspect-failure' }
   if (delegation?.pendingRecovery) return { failurePhase: 'dispatch', failureCategory: 'unknown', recoveryAvailable: false, recommendedAction: 'refresh-status', recoveryTool: 'mindnprogress_refresh_ai_delegation' }
+  if (!delegation?.resultCorrection && aiDelegationBusyRecoveryOperation(delegation)) {
+    return { failurePhase: 'dispatch', failureCategory: 'recovery-dispatch-busy', recoveryAvailable: true,
+      recommendedAction: 'resume-existing', recoveryTool: 'mindnprogress_recover_ai_delegation' }
+  }
+  if (delegation?.resultCorrection && (delegation.resultCorrection.phase === 'preparing'
+    || ['recovery-required', 'waiting-child-resume'].includes(delegation.state))) {
+    return { failurePhase: 'integration', failureCategory: 'integration-result-correction', recoveryAvailable: true,
+      recommendedAction: 'correct-integration-result', recoveryTool: 'mindnprogress_recover_ai_delegation' }
+  }
+  if (delegation?.state === 'waiting-integration') {
+    const result = delegation.workspaceResult
+    if (!delegation.resultCorrection && delegation.workspaceLease?.leaseId && result?.status === 'waiting-integration'
+      && result.childStatus === 'completed' && !result.integratedCommit && result.integrationHeadCommit
+      && result.reasonCode === 'integration-untracked-collision') {
+      return { failurePhase: 'integration', failureCategory: 'integration-result-correction', recoveryAvailable: true,
+        recommendedAction: 'correct-integration-result', recoveryTool: 'mindnprogress_recover_ai_delegation' }
+    }
+    return null
+  }
+  // 완료 결과의 통합 실패는 상위 보고가 끝나기 전에도 명시적으로 재시도할 수 있다.
+  // 보고 상태만으로 허용하지 않고 아래의 기존 실패 증거·lease 검증을 그대로 사용한다.
+  const retryCompletedIntegration = delegation?.state === 'failed'
+    || (!delegation?.resultCorrection && ['waiting-parent', 'waking-parent', 'parent-wake-failed'].includes(delegation?.state)
+      && delegation.childStatus === 'completed')
+  if (retryCompletedIntegration && delegation.workspaceLease?.leaseId
+    && localChangesIntegrationCommits(delegation.workspaceResult)) {
+    return { failurePhase: 'integration', failureCategory: 'workspace-local-changes', recoveryAvailable: true, recommendedAction: 'retry-integration', recoveryTool: 'mindnprogress_recover_ai_delegation' }
+  }
+  if (retryCompletedIntegration && delegation.workspaceLease?.leaseId
+    && integrationGitLockFailure(delegation.workspaceResult)) {
+    return { failurePhase: 'integration', failureCategory: 'integration-git-lock', recoveryAvailable: true,
+      recommendedAction: 'retry-integration', recoveryTool: 'mindnprogress_recover_ai_delegation' }
+  }
+  if (retryCompletedIntegration && delegation.workspaceLease?.leaseId
+    && integrationHeadChangedFailure(delegation.workspaceResult)) {
+    return { failurePhase: 'integration', failureCategory: 'integration-head-changed', recoveryAvailable: true,
+      recommendedAction: 'retry-integration', recoveryTool: 'mindnprogress_recover_ai_delegation' }
+  }
+  if (retryCompletedIntegration && delegation.workspaceLease?.leaseId
+    && integrationCandidateWorktreeFailure(delegation.workspaceResult)) {
+    return { failurePhase: 'integration', failureCategory: integrationCandidateDirtyReasonCode, recoveryAvailable: true,
+      recommendedAction: 'retry-integration', recoveryTool: 'mindnprogress_recover_ai_delegation' }
+  }
   if (!['parent-wake-failed', 'failed', 'waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity', 'recovery-required', 'integration-recovery-required', 'waiting-child-resume'].includes(delegation?.state)) return null
   if (['recovery-required', 'integration-recovery-required', 'waiting-child-resume'].includes(delegation.state)) {
     return { failurePhase: 'child', failureCategory: delegation.state === 'waiting-child-resume' ? 'user-stop' : 'restart', recoveryAvailable: true, recommendedAction: 'resume-existing', recoveryTool: 'mindnprogress_recover_ai_delegation' }
@@ -456,15 +655,16 @@ export function aiDelegationRecoveryAvailability(delegation) {
   }
 
   const childFailure = delegation?.workspaceResult?.childError ?? delegation?.childError
-  const failureCategory = retryableExternalLimitCategory(childFailure)
+  const failureCategory = retryableAiExecutionFailureCategory(childFailure)
   const hasRecoverableWorkspace = Boolean(
     delegation?.workspaceLease?.leaseId
     && ['quarantined', 'failed-clean'].includes(delegation?.workspaceResult?.status)
     && delegation?.workspaceResult?.childStatus === 'failed',
   )
-  const canResume = Boolean(failureCategory && (hasRecoverableWorkspace || !delegation?.workspaceLease?.leaseId))
+  const canResume = failureCategory === 'dispatch-database-transient' ? aiDelegationDatabaseRecoveryCandidate(delegation)
+    : Boolean(failureCategory && (hasRecoverableWorkspace || !delegation?.workspaceLease?.leaseId))
   return {
-    failurePhase: 'child',
+    failurePhase: failureCategory === 'dispatch-database-transient' ? 'dispatch' : 'child',
     failureCategory: failureCategory ?? 'non-retryable',
     recoveryAvailable: canResume,
     recommendedAction: canResume
@@ -496,6 +696,7 @@ export function aiDelegationAttemptHistory(delegation, reason, at = new Date().t
     workspaceLease: delegation.workspaceLease ?? null, workspaceResult: delegation.workspaceResult ?? null,
     parentDispatchState: delegation.parentDispatchState, wakeOperationId: delegation.wakeOperationId,
     result: delegation.childResultSnapshot ?? '', resultCapturedAt: delegation.childResultCapturedAt ?? null,
+    resultHash: delegation.childResultHash ?? null, resultTurnId: delegation.childResultTurnId ?? null,
     reportPayloadHash: delegation.reportPayloadHash ?? null,
     reportResultAvailability: delegation.reportResultAvailability ?? null,
     reportResultHash: delegation.reportResultHash ?? null,
@@ -503,6 +704,9 @@ export function aiDelegationAttemptHistory(delegation, reason, at = new Date().t
     reportPreparedAt: delegation.reportPreparedAt ?? null,
     reportReceipt: delegation.reportReceipt ?? null,
     reportArchive: delegation.reportArchive ?? null,
+    parentWakeRetry: delegation.parentWakeRetry ?? null,
+    parentWakeFailures: delegation.parentWakeFailures ?? [],
+    parentRuntimeObservation: delegation.parentRuntimeObservation ?? null,
   }]
 }
 
@@ -512,11 +716,17 @@ export function aiDelegationWorkPending(delegation) {
 }
 
 export function aiDelegationIsTerminal(delegation) {
+  if (integrationRecoveryPending(delegation)) return false
   return AI_DELEGATION_TERMINAL_STATES.has(String(delegation?.state ?? ''))
 }
 
 export function aiDelegationClosureAvailability(delegation) {
-  if (!delegation || aiDelegationIsTerminal(delegation) || delegation.pendingRecovery) return null
+  if (delegation?.state === 'failed' && !delegation.groupId && !delegation.pendingRecovery
+    && !integrationRecoveryPending(delegation) && !delegation.resultCorrection && !delegation.workspaceLease?.ownership
+    && delegation.workspaceLease?.leaseId && localChangesIntegrationCommits(delegation.workspaceResult)) {
+    return { closeAvailable: true, reason: 'preserve-integration-result', workspaceReleaseRequired: true }
+  }
+  if (!delegation || aiDelegationIsTerminal(delegation) || delegation.pendingRecovery || integrationRecoveryPending(delegation)) return null
   if (delegation.groupId) return { closeAvailable: false, reason: 'group-managed' }
   if (delegation.state === 'parent-wake-failed' && aiDelegationSucceeded(delegation)) {
     return { closeAvailable: true, reason: 'completed-child-report-abandonment' }
@@ -532,12 +742,33 @@ export function aiDelegationClosureAvailability(delegation) {
   return { closeAvailable: false, reason: 'execution-or-recovery-still-active' }
 }
 
+export function preservedIntegrationReleaseClosure(delegation, lease) {
+  const result = lease?.result
+  const receipt = result?.preservedRelease
+  if (delegation?.state !== 'failed' || delegation.pendingRecovery || integrationRecoveryPending(delegation)
+    || !aiDelegationClosureAvailability(delegation)?.workspaceReleaseRequired
+    || lease?.status !== 'cancelled' || result?.status !== 'released-preserved' || receipt?.phase !== 'released'
+    || !receipt.releasedAt || !receipt.reason || result.integratedCommit
+    || lease.leaseId !== delegation.workspaceLease?.leaseId || result.leaseId !== lease.leaseId
+    || lease.jobId !== result.jobId || lease.mapId !== delegation.mapId || result.mapId !== delegation.mapId
+    || lease.cardId !== delegation.targetCardId || result.cardId !== delegation.targetCardId
+    || lease.conversationId !== delegation.targetConversationId || result.conversationId !== delegation.targetConversationId
+    || result.previousResult?.headCommit !== delegation.workspaceResult?.headCommit
+    || receipt.sourceHead !== delegation.workspaceResult?.headCommit) return null
+  return { state: 'closed', workspaceResult: result, workspaceReleasedAt: receipt.releasedAt,
+    closedAt: receipt.releasedAt, closedByUserId: receipt.approvedByUserId ?? null,
+    closedByOperator: receipt.approvedByOperator ?? null, closureSourceState: delegation.state,
+    closureReason: 'no-longer-needed', closureNote: receipt.reason,
+    closureSource: 'workspace-pool-preserved-release', reportApprovalRequired: false, reportCancelledAt: receipt.releasedAt }
+}
+
 export function aiDelegationCanBeSupersededBy(delegation, replacement) {
   const failedCleanLimit = ['waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity'].includes(delegation?.state)
+  const failedCleanDatabaseDispatch = ['failed', 'parent-wake-failed'].includes(delegation?.state) && aiDelegationDatabaseRecoveryCandidate(delegation)
   const completedReportFailure = !delegation?.groupId
     && delegation?.state === 'parent-wake-failed'
     && aiDelegationSucceeded(delegation)
-  if (!failedCleanLimit && !completedReportFailure) return false
+  if (integrationRecoveryPending(delegation) || (!failedCleanLimit && !failedCleanDatabaseDispatch && !completedReportFailure)) return false
   if (!replacement || replacement.id === delegation.id || replacement.state !== 'completed' || !aiDelegationSucceeded(replacement)) return false
   if ((replacement.groupId ?? null) !== (delegation.groupId ?? null)) return false
   if (replacement.mapId !== delegation.mapId
@@ -558,6 +789,7 @@ export function completedAiDelegationReplacement(delegation, delegations) {
 }
 
 export function aiDelegationDisplayState(delegation) {
+  if (integrationRecoveryPending(delegation)) return 'integration-recovery-checking'
   if (delegation.pendingRecovery) return 'recovery-dispatch-pending'
   return aiDelegationLimitState(delegation) ?? delegation.state
 }
@@ -591,7 +823,7 @@ export function activeAiDelegationsForConversation(delegations, {
       && delegation?.mapId === mapId
       && delegation?.targetCardId === targetCardId
       && delegation?.targetConversationId === targetConversationId
-      && ACTIVE_AI_DELEGATION_STATES.has(delegation?.state))
+      && (ACTIVE_AI_DELEGATION_STATES.has(delegation?.state) || integrationRecoveryPending(delegation)))
     .sort((first, second) => String(second.createdAt ?? '').localeCompare(String(first.createdAt ?? '')))
 }
 
@@ -610,8 +842,8 @@ export function explicitCompletionAiDelegationsForConversation(delegations, {
       .localeCompare(String(first.updatedAt ?? first.createdAt ?? '')))
 }
 
-export function formatAiConversationTitle(documentTitle, cardTitle) {
-  return `${documentTitle}: ${cardTitle}`.replace(/\s+/g, ' ').trim().slice(0, 120)
+export function formatAiConversationTitle(documentTitle, cardTitle, options = {}) {
+  return aiConversationTitle({ ...options, documentTitle, cardTitle })
 }
 
 export function initialAiDelegationRuntime(dispatch, completedAt = new Date().toISOString()) {

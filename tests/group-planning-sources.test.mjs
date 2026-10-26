@@ -1,14 +1,15 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createHash } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { createGroupProjects } from '../server/lib/groupProjects.mjs'
+import { replaceFileWithRetry } from '../server/lib/replaceFileWithRetry.mjs'
 import { groupCriteriaFingerprint, applyGroupWaitingReview, groupWaitingDetails } from '../server/lib/groupWaitingReviews.mjs'
 import { GROUP_PLANNING_SOURCE_LIMIT, groupPlanningSources, withGroupPlanningSources, groupProjectCriteriaEqual, groupPlanningSourceSummary, groupPlanningBaseline } from '../src/utils/groupPlanningSources.mjs'
 import { groupProjectDraftAfterRefresh } from '../src/utils/groupOverview.mjs'
-import { buildGroupCoordinatorRequest, buildGroupDocumentRequest } from '../src/utils/aiApprovalInstructions.mjs'
+import { buildGroupCoordinatorRequest, buildGroupDocumentRequest, DOCUMENT_COORDINATOR_INSTRUCTION, GROUP_COORDINATOR_INSTRUCTION } from '../src/utils/aiApprovalInstructions.mjs'
 import { buildAiConversationPrompt } from '../src/utils/aiConversationLaunch.mjs'
 
 const legacy = () => ({ version: 7, coordinatorMapId: null, source: 'https://example.invalid/기본?x=1&y=2', sourceVersion: 'v0.4', objective: '전체 목표\n\n마지막 절 보존', instructions: '공통 지침\n  들여쓰기 보존' })
@@ -23,7 +24,7 @@ async function fixture(action) {
     const map = { id: 'map-test', title: '담당 문서', version: 4, nodes: [{ id: 'root', data: { kind: 'root', label: '최상위', status: 'planned', isWork: false, waitingItems: [{ id: 'wait', label: '최종 아트', resumeCondition: '아트 제공 후 재개' }] } }], edges: [] }
     const group = { id: 'group-test', name: '기획 그룹', mapIds: [map.id] }
     const forbidden = () => { throw Error('기준 저장으로 문서·배치·AI를 변경하면 안 됩니다.') }
-    const create = () => createGroupProjects({ dataDirectory: directory, replaceFile: rename, listMaps: async () => [map], readMap: async () => map, saveMap: forbidden, readLayout: async () => ({ groups: [group] }), writeLayout: forbidden, delegations: new Map(), publicDelegation: (item) => item, runtimeSnapshot: () => [] })
+    const create = () => createGroupProjects({ dataDirectory: directory, replaceFile: replaceFileWithRetry, listMaps: async () => [map], readMap: async () => map, saveMap: forbidden, readLayout: async () => ({ groups: [group] }), writeLayout: forbidden, delegations: new Map(), publicDelegation: (item) => item, runtimeSnapshot: () => [] })
     const file = path.join(directory, '_group-projects', 'group-test.json')
     await mkdir(path.dirname(file), { recursive: true })
     const original = `${JSON.stringify(legacy(), null, 2)}\n`
@@ -139,8 +140,12 @@ test('기준 요약·재구성 기본값과 총괄·문서 AI 전문은 여러 �
     request: buildGroupCoordinatorRequest({ groupId: 'group-test' }),
   })
   for (const prompt of [coordinatorPrompt, buildGroupDocumentRequest({ groupId: 'group-test', groupName: '시험' })]) {
-    assert.match(prompt, /project.sources의 모든 기획서 주소·개별 버전/)
-    assert.match(prompt, /추가 기획서를 기존 원본의 대체본으로 간주하지/)
-    assert.match(prompt, /기획서 추가·제거·주소·개별 버전/)
+    assert.match(prompt, /get_group_context/)
+    assert.match(prompt, /project\.sources의 모든 기획서 주소·개별 버전/)
   }
+  assert.match(GROUP_COORDINATOR_INSTRUCTION, /project\.sources의 모든 기획서 주소·개별 버전/)
+  assert.match(GROUP_COORDINATOR_INSTRUCTION, /추가 기획서를 기존 원본의 대체본으로 간주하지/)
+  assert.match(DOCUMENT_COORDINATOR_INSTRUCTION, /project\.sources의 모든 기획서 주소·개별 버전/)
+  assert.match(DOCUMENT_COORDINATOR_INSTRUCTION, /추가 기획서를 기존 원본의 대체본으로 간주하지/)
+  assert.match(DOCUMENT_COORDINATOR_INSTRUCTION, /기획서 추가·제거·주소·개별 버전/)
 })

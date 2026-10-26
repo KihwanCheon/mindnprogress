@@ -38,6 +38,8 @@ $script:InstallLogPath = ''
 $script:AgentGuidanceStartMarker = '<!-- BEGIN MnP Suite managed agent guidance -->'
 $script:AgentGuidanceEndMarker = '<!-- END MnP Suite managed agent guidance -->'
 $script:ManagedSkillMarkerName = '.mnp-suite-managed.json'
+# Skills that MnP server instructions reference directly are always installed.
+$script:RequiredSkillNames = @('mnp-dooray', 'mnp-spec-driven-development')
 $script:OptionalMcpConfigRelativePath = 'mcp\mnp-suite-mcp-bootstrap.json'
 $script:DooraySecretRelativePath = 'secrets\dooray-api-key.dpapi'
 
@@ -304,9 +306,16 @@ function Get-MnPSuiteAgentGuidance {
 
 - MindNProgress MCP 도구를 호출하거나 Dooray 업무·댓글을 다루기 전에 `mnp-dooray` 스킬을 읽고 따른다.
 - 사용자가 작성한 요구사항과 아직 유효한 기존 내용을 임의로 삭제하거나 의미가 달라지도록 바꾸지 않는다.
-- 한국어 자연어는 실제 문자로 작성하고, 긴 원문은 파일로 확보해 프로그램으로 수정한 뒤 저장 문자열을 비교한다.
+- 한국어 자연어는 실제 문자로 작성한다. MnP 카드 본문의 일부 수정은 `mindnprogress_patch_card_text`로 바꿀 부분만 보내고, 그 밖의 긴 원문은 파일로 확보해 프로그램으로 수정한다. 어느 경우든 저장 후 원문과 저장 문자열을 비교한다.
 - Dooray 업무 생성·수정은 사용자가 승인했거나 현재 요청에서 명시한 경우에만 수행한다.
 '@.Trim())
+
+  $sections += @'
+## MindNProgress 공통 문서 운영
+
+- MindNProgress 그룹의 공통 준비·계획, 공통 산출물을 사용하는 문서·하위 업무, 최종 통합 검증 전에 `mnp-spec-driven-development` 스킬을 읽고 따른다.
+- 각 작업은 사용자에게 승인된 범위에서만 수행한다. 전체 방향 승인은 문서별 실행·AI 위임의 일괄 승인이 아니다.
+'@.Trim()
 
   if ($IncludeUnityWork) {
     $sections += @'
@@ -314,7 +323,7 @@ function Get-MnPSuiteAgentGuidance {
 
 - Unity MCP로 프로젝트를 변경하거나 Unity UI 배치 코드를 작성하기 전에 `unity-work` 스킬을 읽고 따른다.
 - 변경 호출마다 대상 `unity_instance`를 명시하고, `execute_code` 첫 줄에서 `Application.dataPath`를 검증하며 `replay`를 사용하지 않는다.
-- `RectTransform`, `LayoutGroup`, `ScrollRect`의 시각적 배치를 런타임 코드로 덮어쓰지 않는다.
+- 실서비스 UI의 `RectTransform`, `LayoutGroup`, `ScrollRect` 배치 값은 아트 디자이너가 프리팹·에디터에서 정하며 런타임 코드로 덮어쓰지 않는다. 개발·디버그·검수·테스트 전용 UI는 이 제한의 대상이 아니다.
 '@.Trim()
   }
 
@@ -337,7 +346,7 @@ function Assert-MnPSuiteAgentConfigurationTargets {
     [bool]$IncludeUnityWork,
     [bool]$IncludePptx
   )
-  $skillNames = @('mnp-dooray')
+  $skillNames = @($script:RequiredSkillNames)
   if ($IncludeUnityWork) { $skillNames += 'unity-work' }
   if ($IncludePptx) { $skillNames += 'pptx' }
   $platforms = @(
@@ -369,7 +378,7 @@ function Install-MnPSuiteAgentConfiguration {
     [bool]$IncludePptx
   )
   Assert-MnPSuiteAgentConfigurationTargets $CodexHome $ClaudeHome $IncludeUnityWork $IncludePptx
-  $skillNames = @('mnp-dooray')
+  $skillNames = @($script:RequiredSkillNames)
   if ($IncludeUnityWork) { $skillNames += 'unity-work' }
   if ($IncludePptx) { $skillNames += 'pptx' }
   $platforms = @(
@@ -1328,9 +1337,7 @@ function Write-WorkspacePoolScaffold {
 
   $poolRoot = Join-Path $RootPath 'workspace-pool'
   $commonDirectory = Join-Path $poolRoot 'common'
-  $inboxDirectory = Join-Path $poolRoot 'knowledge-inbox'
-  $appliedDirectory = Join-Path $poolRoot 'knowledge-applied'
-  foreach ($directory in @($poolRoot, $commonDirectory, $inboxDirectory, $appliedDirectory)) {
+  foreach ($directory in @($poolRoot, $commonDirectory)) {
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
   }
 
@@ -1366,29 +1373,35 @@ function Write-WorkspacePoolScaffold {
   }
 
   $rulesPath = Join-Path $commonDirectory 'MULTI_WORKSPACE.md'
+  # Keep the shared sections identical to the project shared root MULTI_WORKSPACE.md (Holdem_AIShared/common).
   $rules = @'
 # Unity 멀티 작업공간 공통 규칙
 
 ## 기본 모델
 
-- `workspaces.json`이 작업공간 목록과 경로의 유일한 정적 원본입니다.
-- `role=integration` 작업공간은 사용자 작업과 결과 통합 기준입니다.
-- `role=worker`, `enabled=true`인 항목만 AI 위임 후보입니다.
-- 실제 가용 상태는 MindNProgress 작업공간 풀 조회 결과로 판단합니다.
+- 서로 다른 폴더에 있는 복수의 Unity/Git clone을 작업공간 풀로 사용합니다. 작업공간은 AI 종류에 귀속되지 않으며, 비어 있는 작업공간에는 어떤 AI든 배정될 수 있습니다.
+- MindNProgress(MnP)가 비어 있는 worker 하나를 원자적으로 점유(lease)하고, AionCore가 위임 대화의 작업 폴더를 그 프로젝트 루트로 지정해 AI를 실행합니다. 하나의 작업공간에는 동시에 AI 하나만 들어갑니다.
+- `workspaces.json`이 작업공간 목록과 경로의 유일한 정적 원본입니다. 운영자 스크립트가 이 파일을 작성하고, MnP는 서버 기동 시에만 읽습니다.
+- 실제 가용 상태와 최신 목록은 MnP 작업공간 풀 조회 결과(`mindnprogress_get_ai_workspace_pool`)로 판단합니다. registry를 바꾼 뒤 MnP를 재시작하기 전에는 두 값이 다를 수 있으며, 이때도 AI는 조회 결과를 기준으로 삼습니다. `idle`이 아닌 worker를 임의로 사용하지 않습니다.
+- 폴더명, 작업공간 개수, 특정 AI와 작업공간의 대응 관계를 문서·프롬프트·대화 기억으로 추측하거나 하드코딩하지 않습니다.
+- `role=integration` 작업공간은 사용자 작업과 결과 통합의 기준입니다. `role=worker`, `enabled=true`인 항목만 AI 위임 후보입니다.
 - 위임 전문이나 `.ai-session.json`이 없는 일반 대화에서는 worker를 임의로 선택하거나 점유하지 않습니다.
 
 ## AI 작업 규칙
 
-1. 배정된 프로젝트 루트의 `.ai-workspace.json`과 `.ai-session.json`을 확인합니다.
-2. 배정된 `projectRoot`, `branch`, `jobId`, `leaseId`만 사용합니다.
-3. 다른 작업공간으로 이동하거나 그곳을 수정하지 않습니다.
-4. 작업공간 선택, 점유, 전환과 해제는 MindNProgress만 수행합니다.
-5. 코드와 Unity 에셋은 Git으로만 전달하며 작업공간 사이에 직접 복사하거나 링크하지 않습니다.
-6. 공통 지식 제안은 `knowledge-inbox/<jobId>.md`에 기록하고, 적용이 끝난 항목은 `knowledge-applied`에 보관합니다.
+1. 작업 시작 시 배정된 프로젝트 루트의 `.ai-workspace.json`과 `.ai-session.json`을 읽습니다.
+2. 위임 전문이 지시하는 배정 값(`workspaceId`, `jobId`, `leaseId`, `projectRoot`, `branch`, `baseCommit` 등)이 `.ai-session.json`과 일치하는지 확인합니다. 확인할 필드와 불일치 시 보고 방법의 원본은 위임 전문이며, 불일치하면 작업하지 않고 위임 전문의 지시대로 보고합니다.
+3. 배정된 `projectRoot`, `branch`, `jobId`, `leaseId`만 사용합니다. 배정된 프로젝트 루트 밖의 다른 작업공간으로 이동하거나 그곳을 읽거나 수정해 작업을 우회하지 않습니다.
+4. 작업공간 선택, 점유, 전환과 해제는 MnP만 수행합니다. 브랜치를 임의로 전환하지 않으며, 전환이 필요하면 작업을 멈추고 MnP 작업으로 반환합니다.
+5. 위임 작업에서는 Git 커밋을 직접 만들지 않습니다. 변경은 위임 전문이 안내하는 MnP 체크포인트(`mindnprogress_checkpoint_ai_workspace`)로 고정합니다. 통합 충돌 해결처럼 위임 전문이 Git 명령을 명시한 경우에만 그 범위에서 사용합니다.
+6. 코드와 Unity 에셋은 Git으로만 전달합니다. 작업공간 사이에 `Assets`, `Packages`, `ProjectSettings`를 링크하거나 직접 복사하지 않습니다.
+7. `Library`, `Temp`, `Logs`, `UserSettings`, `obj`, `.vs`, 빌드 출력, AI 세션·로그·인증 정보는 작업공간별로 분리합니다.
+8. 공통 규칙·지식과 Skill은 일반 작업에서 읽기 전용입니다. 공유 루트나 프로젝트 저장소에 별도 지식 제안 파일을 만들지 않습니다.
+9. 완료 시 변경 파일, 검증 결과, 체크포인트(커밋) 여부, dirty 상태, 잔여 작업을 구조화해 보고합니다.
 
 ## Unity MCP
 
-Unity MCP 대상은 등록된 `assetsPath`와 `unityInstanceHash`로 구분합니다. 프로젝트를 변경하는 호출은 배정된 작업공간과 일치하는 Unity 인스턴스만 사용합니다.
+Unity MCP 대상은 등록된 `assetsPath`와 `unityInstanceHash`로 구분합니다. 프로젝트를 변경하는 호출은 배정된 작업공간과 일치하는 Unity 인스턴스만 사용하고, 다른 작업공간의 Unity 에디터를 대신 사용하지 않습니다.
 '@
   Write-Utf8File $rulesPath $rules
   Write-Info "관리 작업공간 규칙 최신화: $rulesPath"
@@ -1692,8 +1705,6 @@ secrets/
   dooray-api-key.dpapi             Dooray MCP 선택 시, 현재 사용자 DPAPI 암호화
 workspace-pool/
   common/MULTI_WORKSPACE.md
-  knowledge-inbox/
-  knowledge-applied/
   workspaces.json
 dev/
   Start-MindNProgress-Dev.ps1      Dooray 선택 시 DPAPI 키를 MnP 프로세스에 전달
@@ -1739,7 +1750,7 @@ MnP의 `AI 대화 시작` 창을 다시 열면 `MindNProgress · 필수`가 표�
 
 설치기는 현재 Windows 사용자에게 다음 구성을 적용합니다.
 
-- 필수: `mnp-dooray`
+- 필수: `mnp-dooray`, `mnp-spec-driven-development`
 - 선택: 설치 중 각각 선택한 `unity-work`, `pptx`
 - Codex: `.codex\skills`와 `.codex\AGENTS.md`
 - Claude Code: `.claude\skills`와 `.claude\CLAUDE.md`
@@ -1853,13 +1864,12 @@ function Invoke-SelfTest {
       throw '전역 지침이 pptx 스킬의 상세 렌더링 절차를 중복함'
     }
     $pptxSkillText = Read-Utf8File (Join-Path (Get-MnPSuitePackagedSkillPath 'pptx') 'SKILL.md')
-    if ($pptxSkillText -notmatch 'PowerPoint COM' -or
+    if ($pptxSkillText -notmatch 'powerpoint-com' -or
+        $pptxSkillText -notmatch 'COM을 사용할 수 없다는 오류' -or
         $pptxSkillText -notmatch 'officecli view.+screenshot --render html' -or
-        $pptxSkillText -notmatch '--screenshot-width \$renderWidth' -or
+        $pptxSkillText -notmatch '--screenshot-width' -or
         $pptxSkillText -match '--screenshot-height' -or
-        $pptxSkillText -notmatch '\$renderDpi = 150' -or
-        $pptxSkillText -notmatch 'slideWidthEmu \* \$renderDpi / 914400' -or
-        $pptxSkillText -notmatch '최대 변이 1920px' -or
+        $pptxSkillText -notmatch '150 DPI' -or
         $pptxSkillText -notmatch 'officecli-html') {
       throw 'pptx 스킬의 COM 우선·OfficeCLI fallback 절차 누락'
     }
@@ -1898,6 +1908,10 @@ function Invoke-SelfTest {
     if ($rulesText -match 'outdated user-edited managed rules' -or
         $rulesText -notmatch '# Unity 멀티 작업공간 공통 규칙') {
       throw '재설치 시 관리 작업공간 규칙 최신화 실패'
+    }
+    if ($rulesText -match 'knowledge-inbox|knowledge-applied' -or
+        (Test-Path -LiteralPath (Join-Path $workspacePool.Root 'knowledge-inbox'))) {
+      throw '폐기된 knowledge-inbox 제출 절차가 작업공간 템플릿에 남아 있음'
     }
     $mindNProgressLauncher = Get-Content -LiteralPath (Join-Path $dev 'Start-MindNProgress-Dev.bat') -Raw
     if ($mindNProgressLauncher -notmatch 'MNP_WORKSPACE_POOL_REGISTRY=%SUITE_ROOT%\\workspace-pool\\workspaces\.json') {
@@ -2124,7 +2138,7 @@ exit /b %ERRORLEVEL%
         if ([regex]::Matches($instructionText, [regex]::Escape($script:AgentGuidanceStartMarker)).Count -ne 1) {
           throw "전역 지침 관리 블록 개수 오류 ($($agentCase.Name)): $($platform.Instructions)"
         }
-        foreach ($skillName in @('mnp-dooray', 'unity-work', 'pptx')) {
+        foreach ($skillName in @($script:RequiredSkillNames + @('unity-work', 'pptx'))) {
           if (-not (Test-MnPSuiteManagedSkill $platform.SkillsRoot $skillName)) {
             throw "전역 스킬 설치 검증 실패 ($($agentCase.Name)): $($platform.Name) $skillName"
           }
@@ -2212,13 +2226,26 @@ exit /b %ERRORLEVEL%
     $requiredOnlyClaude = Join-Path $requiredOnlyRoot '.claude'
     $requiredOnlyResult = Install-MnPSuiteAgentConfiguration $requiredOnlyCodex $requiredOnlyClaude $false $false
     foreach ($platform in $requiredOnlyResult.Platforms) {
-      if (-not (Test-MnPSuiteManagedSkill $platform.SkillsRoot 'mnp-dooray')) { throw '필수 mnp-dooray 설치 실패' }
+      foreach ($requiredSkill in $script:RequiredSkillNames) {
+        if (-not (Test-MnPSuiteManagedSkill $platform.SkillsRoot $requiredSkill)) { throw "필수 $requiredSkill 설치 실패" }
+      }
+      # Skills are deployed as whole directories, not just SKILL.md.
+      $packagedSpecRoot = [IO.Path]::GetFullPath((Get-MnPSuitePackagedSkillPath 'mnp-spec-driven-development')).TrimEnd('\', '/')
+      foreach ($packagedFile in Get-ChildItem -LiteralPath $packagedSpecRoot -File -Recurse) {
+        $relativeSpecPath = $packagedFile.FullName.Substring($packagedSpecRoot.Length).TrimStart([char[]]'\/')
+        $installedSpecFile = Join-Path (Join-Path $platform.SkillsRoot 'mnp-spec-driven-development') $relativeSpecPath
+        if (-not (Test-Path -LiteralPath $installedSpecFile -PathType Leaf) -or
+            (Get-FileHash -LiteralPath $installedSpecFile -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $packagedFile.FullName -Algorithm SHA256).Hash) {
+          throw "mnp-spec-driven-development 디렉터리 단위 설치 실패: $relativeSpecPath"
+        }
+      }
       if (Test-Path -LiteralPath (Join-Path $platform.SkillsRoot 'unity-work')) { throw '선택하지 않은 unity-work가 설치됨' }
       if (Test-Path -LiteralPath (Join-Path $platform.SkillsRoot 'pptx')) { throw '선택하지 않은 pptx가 설치됨' }
       $instructionText = Read-Utf8File $platform.Instructions
       if ($instructionText -match '## Unity 작업') { throw '선택하지 않은 unity-work 전역 지침이 추가됨' }
       if ($instructionText -match '## PowerPoint 파일 확인') { throw '선택하지 않은 pptx 전역 지침이 추가됨' }
       if ($instructionText -notmatch '## MindNProgress·Dooray 작업') { throw '필수 mnp-dooray 전역 지침이 누락됨' }
+      if ($instructionText -notmatch '## MindNProgress 공통 문서 운영') { throw '필수 mnp-spec-driven-development 전역 지침이 누락됨' }
     }
 
     $optionalSkillCases = @(
@@ -2392,7 +2419,7 @@ try {
   Write-Info "PowerPoint MCP: $(if ($installPptxMcp) { "$PptxMcpRepository ($PptxMcpBranch) 설치·AionUi 등록" } else { '설치 안 함' })"
   Write-Info 'Dev 실행 파일: <설치 루트>\dev'
   Write-Info '작업공간 구성: <설치 루트>\workspace-pool\workspaces.json (초기 비활성)'
-  Write-Info '필수 전역 스킬: mnp-dooray (Claude Code + Codex)'
+  Write-Info '필수 전역 스킬: mnp-dooray, mnp-spec-driven-development (Claude Code + Codex)'
   Write-Info "Unity 전역 스킬: $(if ($installUnityWork) { 'unity-work 설치' } else { '설치 안 함' })"
   Write-Info "PowerPoint 전역 스킬: $(if ($installPptx) { 'pptx 설치' } else { '설치 안 함' })"
   if ($installPptx -or $installPptxMcp) {
@@ -2614,8 +2641,8 @@ try {
     }
     agentConfiguration = [ordered]@{
       scope = 'user-global'
-      requiredSkills = @('mnp-dooray')
-      selectedOptionalSkills = @($agentConfiguration.Skills | Where-Object { $_ -ne 'mnp-dooray' })
+      requiredSkills = @($script:RequiredSkillNames)
+      selectedOptionalSkills = @($agentConfiguration.Skills | Where-Object { $script:RequiredSkillNames -notcontains $_ })
       platforms = @($agentConfiguration.Platforms | ForEach-Object {
         [ordered]@{
           name = $_.Name

@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type Dispatch, type FormEvent as ReactFormEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type SetStateAction, type TouchEvent as ReactTouchEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type CSSProperties, type Dispatch, type FormEvent as ReactFormEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type SetStateAction, type TouchEvent as ReactTouchEvent } from 'react'
+import { createCoalescedRefresh } from './utils/coalescedRefresh.mjs'
 import {
   addEdge,
   Background,
@@ -44,18 +45,20 @@ import { DailyBackupPreviewDialog, type DailyBackupPreview } from './components/
 import { DoorayMentionsPanel } from './components/DoorayMentionsPanel'
 import { ImagePreviewDialog } from './components/ImagePreviewDialog'
 import { SharedKnowledgeReviewDialog, type SharedKnowledgeReviewApplied } from './components/SharedKnowledgeReviewDialog'
+import { GlobalSearchDialog } from './components/GlobalSearchDialog'
 import { DashboardView, KanbanView, TimelineView } from './components/WorkViews'
 import type { AiConversationLink, AiConversationRuntime, AiDelegationCardStatus, ChecklistItem, KnowledgePolicy, MindDoorayLinkData, MindDoorayTaskData, MindDoorayWikiData, MindImageData, MindMapEdgeData, MindNodeData, MindWebLinkData, TeamMember, WaitingItem } from './types/mindMap'
 import { aiDelegationStatusByCard } from './utils/aiDelegationStatus.mjs'
 import { delegationHierarchyPathNodeIds, delegationPreviewEdgeState, delegationPreviewNodeRole, type AiDelegationSummary } from './utils/aiDelegationManagement.mjs'
 import { resolveAiConversationTarget, type AiConversationExplicitTarget } from './utils/aiConversationLaunch.mjs'
+import { claudeAccountMark, mostUsedClaudeUsageEntry } from './utils/claudeAccounts.mjs'
 import { applyBoxSelection, boxSelectionNodeIds, boxSelectionRect, isBoxSelectionDrag } from './utils/boxSelection.mjs'
 import { copyTextToClipboard } from './utils/clipboardText.mjs'
 import { parseGroupDeepLink } from './utils/groupDeepLink.mjs'
 import { collectDragDescendantOwners, dragRootIds, hierarchyReparentPairs } from './utils/hierarchyDrag.mjs'
 import { blockingNodes, createsDependencyCycle, dependentNodes, prerequisiteNodes } from './utils/dependencies'
-import { collapsedDocumentGroupsStorageKey, initialCollapsedDocumentGroupIds, normalizeCollapsedDocumentGroupIds } from './utils/documentGroupCollapse.mjs'
-import { isPhoneViewport, PHONE_VIEWPORT_QUERY, resolveDocumentNodeSelection, synchronizeNodeSelection } from './utils/documentSelection.mjs'
+import { activeDocumentCountInGroup, collapsedDocumentGroupsStorageKey, initialCollapsedDocumentGroupIds, normalizeCollapsedDocumentGroupIds } from './utils/documentGroupCollapse.mjs'
+import { hierarchyAncestorNodeIds, isPhoneViewport, PHONE_VIEWPORT_QUERY, resolveDocumentNodeSelection, synchronizeNodeSelection } from './utils/documentSelection.mjs'
 import { createsKnowledgeCycle, isHierarchyEdge, isKnowledgeEdge, knowledgePolicyOf } from './utils/knowledgeEdges'
 import { isSameDoorayKnowledgeUrl, normalizedDoorayKnowledgeUrl, taskUrlProvider } from './utils/externalLinks'
 import { splitImageFileName, uniqueImageFileName } from './utils/imageFileNames.mjs'
@@ -65,7 +68,11 @@ import { shouldReconnectEventStream } from './utils/eventStreamHealth.mjs'
 import { aiConversationLinksFromData } from './utils/aiConversations.mjs'
 import { revisionReasonLabel, shouldRefreshMapContentForAction } from './utils/mapChangeMetadata.mjs'
 import { mapContentsEqual, reconcileRemoteMapContent } from './utils/mapDocumentSync.mjs'
+import { createMapContentPatch } from './utils/mapContentPatch.mjs'
+import { mapCacheKey, reclaimSynchronizedMapCaches, tryWriteMapCache } from './utils/mapLocalCache.mjs'
+import { createLocalBackupNotice, localBackupNoticeReducer } from './utils/localBackupNotice.mjs'
 import { mergeMapContent } from './utils/mergeMapContent.mjs'
+import { MINDMAP_GRID_SIZE, snapMindMapPosition } from './utils/mindMapGrid.mjs'
 import { nextOverlappingNodeId, nodeOverlapPresentation } from './utils/nodeOverlap.mjs'
 import { viewportForNodeVisibility } from './utils/nodeViewportVisibility.mjs'
 import { notificationTitle } from './utils/notificationTitles.mjs'
@@ -76,8 +83,9 @@ import { rootDeletionPlan } from './utils/rootDeletion.mjs'
 import { sharedKnowledgeMaxLength } from './utils/sharedKnowledgePolicy.mjs'
 import { extractTextLinks } from './utils/textLinks.mjs'
 import { touchPointCentroid, touchPointDistance, viewportForTouchGesture } from './utils/touchViewport.mjs'
-import { normalizeWorkspaceLocation, restorableWorkspaceLocation, workspaceLocationStorageKey } from './utils/workspaceLocation.mjs'
+import { normalizeWorkspaceLocation, restorableWorkspaceLocation, workspaceLocationPath, workspaceLocationStorageKey } from './utils/workspaceLocation.mjs'
 import { appliedUiTheme, applyUiTheme, storedUiTheme, UI_THEME_STORAGE_KEY, type UiTheme } from './theme'
+import { AI_INDICATOR_MOTION_STORAGE_KEY, applyAiIndicatorMotion, initialAiIndicatorMotion, storedAiIndicatorMotion, type AiIndicatorMotion } from './aiIndicatorMotion'
 
 const DOCUMENT_COLORS = [
   { id: 'violet', label: '보라', solid: '#6758d8', halo: '#dedafd' },
@@ -92,7 +100,6 @@ const DOCUMENT_COLORS = [
   { id: 'pink', label: '분홍', solid: '#cc62a0', halo: '#f6deeb' },
 ] as const
 
-const MINDMAP_GRID_SIZE = 24
 const MINDMAP_MIN_ZOOM = 0.25
 const MINDMAP_MAX_ZOOM = 1.8
 const TOUCH_CARD_LONG_PRESS_MS = 500
@@ -131,13 +138,6 @@ function aionUiConversationWebUrl(baseUrl: string, conversationId: string) {
   url.search = ''
   url.hash = `/conversation/${encodeURIComponent(conversationId)}`
   return url.toString()
-}
-
-function snapMindMapPosition(position: { x: number; y: number }) {
-  return {
-    x: Math.round(position.x / MINDMAP_GRID_SIZE) * MINDMAP_GRID_SIZE,
-    y: Math.round(position.y / MINDMAP_GRID_SIZE) * MINDMAP_GRID_SIZE,
-  }
 }
 
 function childMindMapHorizontalPosition(parentPosition: { x: number; y: number }, parentWidth = MINDMAP_DOORAY_TASK_DEFAULT_WIDTH) {
@@ -558,6 +558,18 @@ type MachineRegistryResponse = {
   mainMachineId: string
   machines: MachineSummary[]
   runner: RunnerConnectionInfo
+  remoteWorkspaceCoordinatorId?: string | null
+  remotePools?: RemoteWorkspacePoolSummary[]
+}
+
+type RemoteWorkspacePoolSummary = {
+  machineId: string
+  poolId: string
+  registryDigest: string
+  originUrl: string
+  approved: boolean
+  stale: boolean
+  workspaces: { workspaceId: string; projectRoot: string; status: string; dirty: boolean; branch: string; headCommit: string; runtimeIdle: boolean; leaseId?: string | null }[]
 }
 
 type DistributedWorkSettings = {
@@ -585,19 +597,23 @@ type SubscriptionUsageWindow = {
   resetsAt: string | null
 }
 
+type ClaudeSubscriptionUsageView = {
+  state: 'loading' | 'ready' | 'unavailable'
+  updatedAt: string | null
+  stale: boolean
+  session: SubscriptionUsageWindow | null
+  weekly: SubscriptionUsageWindow | null
+}
+
 type AionUiSubscriptionUsage = {
   available: boolean
   state: 'loading' | 'ready' | 'partial' | 'unavailable'
   generatedAt: string | null
   updatedAt: string | null
   retryAfterMs: number | null
-  claude: {
-    state: 'loading' | 'ready' | 'unavailable'
-    updatedAt: string | null
-    stale: boolean
-    session: SubscriptionUsageWindow | null
-    weekly: SubscriptionUsageWindow | null
-  } | null
+  claude: ClaudeSubscriptionUsageView | null
+  /** Claude 멀티 계정: 계정이 2개 이상일 때만 있다. `claude`는 기본 계정이다. */
+  claudeAccounts?: Array<ClaudeSubscriptionUsageView & { id: string; number: number; label: string }>
   codex: {
     state: 'loading' | 'ready' | 'unavailable'
     updatedAt: string | null
@@ -648,6 +664,7 @@ type DocumentLayout = {
 type DocumentLibraryResponse = {
   maps: MapSummary[]
   documentLayout: DocumentLayout
+  lifecycleCounts?: { archived: number; trashed: number }
 }
 
 const EMPTY_DOCUMENT_LAYOUT: DocumentLayout = { version: 1, items: [], groups: [] }
@@ -1169,7 +1186,6 @@ function useMapHistory(
   return { ...availability, undo, redo, resetHistory, rebaseline, beginTransaction, endTransaction, cancelTransaction }
 }
 
-const MAP_CACHE_KEY = 'mindnprogress-map-cache-v1'
 const ASSIGNEE_COLORS: TeamMember['color'][] = ['violet', 'blue', 'mint', 'orange']
 
 function assigneeInitials(name: string) {
@@ -1398,13 +1414,26 @@ function AionUiSubscriptionUsageIndicator({ onOpen }: { onOpen?: () => void }) {
 
   const claude = usage?.claude
   const codex = usage?.codex
-  const claudeLoading = claude?.state === 'loading'
   const codexLoading = codex?.state === 'loading'
-  const showClaude = claudeLoading || Boolean(claude?.state === 'ready' && !claude.stale && (claude.session || claude.weekly))
+  // Claude 멀티 계정: 계정이 2개 이상이면 사용량이 가장 높은 계정 하나를 표시하고
+  // 전체 계정은 툴팁과 상세 목록에 보여 준다. 1개면 기존 단일 표시와 같다.
+  const claudeEntries = usage?.claudeAccounts?.length
+    ? usage.claudeAccounts.map((account) => ({
+        key: account.id,
+        label: `Claude ${claudeAccountMark(account.number)}`,
+        name: `Claude ${claudeAccountMark(account.number)} ${account.label}`,
+        value: account as ClaudeSubscriptionUsageView | null | undefined,
+      }))
+    : [{ key: 'claude', label: 'Claude', name: 'Claude', value: claude }]
+  const claudeUsageVisible = (value: ClaudeSubscriptionUsageView | null | undefined) => value?.state === 'loading'
+    || Boolean(value?.state === 'ready' && !value.stale && (value.session || value.weekly))
+  const visibleClaudeEntries = claudeEntries.filter(({ value }) => claudeUsageVisible(value))
+  const pillClaudeEntry = mostUsedClaudeUsageEntry(visibleClaudeEntries)
+  const pillClaudeEntries = pillClaudeEntry ? [pillClaudeEntry] : []
+  const showClaude = visibleClaudeEntries.length > 0
   const showCodex = codexLoading || Boolean(codex?.state === 'ready' && !codex.stale && codex.weekly)
   const visibleUsageValues = [
-    showClaude ? claude?.session?.usedPercent : null,
-    showClaude ? claude?.weekly?.usedPercent : null,
+    ...visibleClaudeEntries.flatMap(({ value }) => [value?.session?.usedPercent, value?.weekly?.usedPercent]),
     showCodex ? codex?.weekly?.usedPercent : null,
     showCodex && codex?.limitReached ? 100 : null,
   ].filter((value): value is number => Number.isFinite(value))
@@ -1413,31 +1442,37 @@ function AionUiSubscriptionUsageIndicator({ onOpen }: { onOpen?: () => void }) {
 
   if (!usage?.available || (!showClaude && !showCodex)) return null
 
-  const claudeTitle = claude?.state === 'ready'
+  const claudeTitle = (name: string, value: ClaudeSubscriptionUsageView | null | undefined) => value?.state === 'ready'
     ? [
-        'Claude 사용량',
-        claude.session ? `5시간 ${Math.round(claude.session.usedPercent)}% · ${usageResetLabel(claude.session.resetsAt)}` : null,
-        claude.weekly ? `주간 ${Math.round(claude.weekly.usedPercent)}% · ${usageResetLabel(claude.weekly.resetsAt)}` : null,
+        `${name} 사용량`,
+        value.session ? `5시간 ${Math.round(value.session.usedPercent)}% · ${usageResetLabel(value.session.resetsAt)}` : null,
+        value.weekly ? `주간 ${Math.round(value.weekly.usedPercent)}% · ${usageResetLabel(value.weekly.resetsAt)}` : null,
       ].filter(Boolean).join('\n')
-    : 'Claude 사용량을 조회하고 있습니다.'
+    : `${name} 사용량을 조회하고 있습니다.`
+  const claudePillTitle = (name: string, value: ClaudeSubscriptionUsageView | null | undefined) => claudeEntries.length > 1
+    ? claudeEntries.map((entry) => claudeUsageVisible(entry.value)
+        ? claudeTitle(entry.name, entry.value)
+        : `${entry.name} 사용량 정보 없음`).join('\n\n')
+    : claudeTitle(name, value)
   const codexTitle = codex?.state === 'ready' && codex.weekly
     ? `Codex 사용량\n주간 ${Math.round(codex.weekly.usedPercent)}% · ${usageResetLabel(codex.weekly.resetsAt)}`
     : 'Codex 사용량을 조회하고 있습니다.'
 
   return (
     <div className="subscription-usage-summary" aria-label="AI 구독 사용량" ref={containerRef}>
-      {showClaude && <div
-        className={`subscription-usage-pill claude ${usageTone(claude?.session?.usedPercent, claude?.weekly?.usedPercent)}`}
-        title={claudeTitle}
+      {pillClaudeEntries.map(({ key, label, name, value }) => <div
+        key={key}
+        className={`subscription-usage-pill claude ${usageTone(value?.session?.usedPercent, value?.weekly?.usedPercent)}`}
+        title={claudePillTitle(name, value)}
       >
-        <strong>Claude</strong>
-        {claudeLoading
+        <strong>{label}</strong>
+        {value?.state === 'loading'
           ? <LoadingUsageDots />
           : <span>{[
-              claude?.session ? `${Math.round(claude.session.usedPercent)}%` : null,
-              claude?.weekly ? `${Math.round(claude.weekly.usedPercent)}%` : null,
+              value?.session ? `${Math.round(value.session.usedPercent)}%` : null,
+              value?.weekly ? `${Math.round(value.weekly.usedPercent)}%` : null,
             ].filter(Boolean).join(' · ')}</span>}
-      </div>}
+      </div>)}
       {showCodex && <div
         className={`subscription-usage-pill codex ${usageTone(codex?.weekly?.usedPercent, codex?.limitReached ? 100 : null)}`}
         title={codexTitle}
@@ -1476,15 +1511,15 @@ function AionUiSubscriptionUsageIndicator({ onOpen }: { onOpen?: () => void }) {
           </button>
         </header>
         <div className="subscription-usage-provider-list">
-          {showClaude && <section className={usageTone(claude?.session?.usedPercent, claude?.weekly?.usedPercent)}>
-            <strong>Claude</strong>
-            {claudeLoading
+          {visibleClaudeEntries.map(({ key, name, value }) => <section key={key} className={usageTone(value?.session?.usedPercent, value?.weekly?.usedPercent)}>
+            <strong>{name}</strong>
+            {value?.state === 'loading'
               ? <LoadingUsageDots />
               : <div>
-                  {claude?.session && <span><b>5시간 {Math.round(claude.session.usedPercent)}%</b><small>{usageResetLabel(claude.session.resetsAt)}</small></span>}
-                  {claude?.weekly && <span><b>주간 {Math.round(claude.weekly.usedPercent)}%</b><small>{usageResetLabel(claude.weekly.resetsAt)}</small></span>}
+                  {value?.session && <span><b>5시간 {Math.round(value.session.usedPercent)}%</b><small>{usageResetLabel(value.session.resetsAt)}</small></span>}
+                  {value?.weekly && <span><b>주간 {Math.round(value.weekly.usedPercent)}%</b><small>{usageResetLabel(value.weekly.resetsAt)}</small></span>}
                 </div>}
-          </section>}
+          </section>)}
           {showCodex && <section className={usageTone(codex?.weekly?.usedPercent, codex?.limitReached ? 100 : null)}>
             <strong>Codex</strong>
             {codexLoading
@@ -1597,13 +1632,9 @@ function CommentCard({ comment, isReply, mode, user, collaborators, readOnly = f
   )
 }
 
-function storageKeyForMap(mapId: string) {
-  return `${MAP_CACHE_KEY}:${mapId}`
-}
-
 function readSavedMap(mapId: string) {
   try {
-    const saved = localStorage.getItem(storageKeyForMap(mapId))
+    const saved = localStorage.getItem(mapCacheKey(mapId))
     if (!saved) return null
     return JSON.parse(saved) as { nodes: MindMapNode[]; edges: MindMapEdge[] }
   } catch {
@@ -1766,7 +1797,11 @@ function LoginScreen({ onAuthenticated, theme, onToggleTheme, publicViewerEnable
         method: 'POST',
         body: JSON.stringify({ email: loginEmail, password: loginPassword, rememberMe }),
       })
-      localStorage.setItem(LAST_LOGIN_EMAIL_KEY, loginEmail.trim())
+      try {
+        localStorage.setItem(LAST_LOGIN_EMAIL_KEY, loginEmail.trim())
+      } catch {
+        // 마지막 로그인 이메일은 편의 정보이므로 저장 실패가 로그인을 막지 않는다.
+      }
       onAuthenticated(result.user)
     } catch (loginError) {
       setError(loginError instanceof Error ? loginError.message : '로그인하지 못했습니다.')
@@ -1984,6 +2019,8 @@ function DistributedWorkDialog({ onClose }: { onClose: () => void }) {
   const [probingMachineId, setProbingMachineId] = useState('')
   const [probeResults, setProbeResults] = useState<Record<string, MachineProbeResult>>({})
   const [pairing, setPairing] = useState<RunnerPairingResponse | null>(null)
+  const [remotePools, setRemotePools] = useState<RemoteWorkspacePoolSummary[]>([])
+  const [workspaceCoordinatorId, setWorkspaceCoordinatorId] = useState<string | null>(null)
 
   const applySettings = useCallback((payload: { settings: DistributedWorkSettings; targets: DistributedWorkTargets }) => {
     setTargets(payload.targets)
@@ -1999,6 +2036,8 @@ function DistributedWorkDialog({ onClose }: { onClose: () => void }) {
     applySettings(settings)
     setMachines(registry.machines)
     setRunnerInfo(registry.runner)
+    setRemotePools(registry.remotePools ?? [])
+    setWorkspaceCoordinatorId(registry.remoteWorkspaceCoordinatorId ?? null)
   }, [applySettings])
 
   useEffect(() => {
@@ -2024,6 +2063,8 @@ function DistributedWorkDialog({ onClose }: { onClose: () => void }) {
           if (cancelled) return
           setMachines(registry.machines)
           setRunnerInfo(registry.runner)
+          setRemotePools(registry.remotePools ?? [])
+          setWorkspaceCoordinatorId(registry.remoteWorkspaceCoordinatorId ?? null)
         })
         .catch(() => {})
     }, 15_000)
@@ -2147,6 +2188,18 @@ function DistributedWorkDialog({ onClose }: { onClose: () => void }) {
 
   const subMachines = machines.filter((machine) => machine.role === 'sub')
 
+  async function registerWorkspacePool(pool: RemoteWorkspacePoolSummary) {
+    if (!window.confirm(`${pool.machineId}의 ${pool.poolId} 풀을 ${pool.approved ? '비활성화' : '등록 승인'}할까요? 진행 중인 lease는 반환 확인 전까지 보존됩니다.`)) return
+    setSubmitting(true); setError('')
+    try {
+      await apiRequest(`/api/machines/${encodeURIComponent(pool.machineId)}/workspace-pool`, {
+        method: 'PUT', body: JSON.stringify({ poolId: pool.poolId, registryDigest: pool.registryDigest, enabled: !pool.approved }),
+      })
+      await reload()
+    } catch (failure) { setError(failure instanceof Error ? failure.message : '원격 풀 등록을 변경하지 못했습니다.') }
+    finally { setSubmitting(false) }
+  }
+
   return (
     <div className="history-modal-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
       <section ref={dialogRef} className="history-modal distributed-work-modal" role="dialog" aria-modal="true" aria-label="분산 작업 설정">
@@ -2160,7 +2213,8 @@ function DistributedWorkDialog({ onClose }: { onClose: () => void }) {
         ) : (
           <div className="distributed-work-body">
             <p className="distributed-work-intro">
-              메인 머신이 MnP를 단독으로 운영하고, 서브 머신은 자체 AionUi와 Unity 작업공간 풀로 위임 작업을 수행합니다.
+              메인 머신이 MnP를 운영하고, 서브 머신은 연결된 Runner로 AI 작업을 수행합니다.
+              Unity Fork 위임에는 서브 머신 registry 보고, 메인 풀 등록 승인, 최신 AionCore의 소유권 지원이 모두 필요합니다.
               이 설정을 켜야 서브 머신이 위임 대상 후보로 올라오며, 실제 실행은 해당 머신에 Runner를 연결한 뒤부터 가능합니다.
             </p>
 
@@ -2194,6 +2248,19 @@ function DistributedWorkDialog({ onClose }: { onClose: () => void }) {
             </label>
 
             <div className="distributed-work-machines">
+              <h4>원격 Unity Fork 풀</h4>
+              <p>서브 머신 registry의 coordinatorId: <code>{workspaceCoordinatorId ?? '확인 중'}</code></p>
+              {remotePools.length === 0 && <p>Runner가 보고한 관리형 Fork 풀이 없습니다. 일반 대화 경로는 풀 등록이 아닙니다.</p>}
+              {remotePools.map((pool) => (
+                <section key={`${pool.machineId}:${pool.poolId}`}>
+                  <strong>{pool.machineId} · {pool.poolId} · {pool.stale ? '보고 만료' : pool.approved ? '승인됨' : '승인 대기'}</strong>
+                  <p>origin: <code>{pool.originUrl.replace(/(https?:\/\/)[^/@]+@/, '$1[인증정보 생략]@')}</code></p>
+                  <ul>{pool.workspaces.map((worker) => (
+                    <li key={worker.workspaceId}><code>{worker.projectRoot}</code> · {worker.status}{worker.dirty ? ' · 미커밋 변경 있음' : ''}{worker.leaseId ? ` · ${worker.leaseId}` : ''}<small>Git 보고: {worker.branch} · {worker.headCommit.slice(0, 10)} · AI runtime {worker.runtimeIdle ? '유휴' : '사용 중'}</small></li>
+                  ))}</ul>
+                  <button type="button" disabled={submitting || pool.stale && !pool.approved} onClick={() => void registerWorkspacePool(pool)}>{pool.approved ? '새 배정 비활성화' : '풀 등록 승인'}</button>
+                </section>
+              ))}
               <h4>등록된 머신</h4>
               <ul>
                 {machines.map((machine) => {
@@ -2321,11 +2388,12 @@ function DistributedWorkDialog({ onClose }: { onClose: () => void }) {
   )
 }
 
-function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onToggleTheme }: { user: AuthUser; onLogout: () => void; initialDeepLink: WorkspaceDeepLink | null; initialGroupId: string | null; theme: UiTheme; onToggleTheme: () => void }) {
+function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onToggleTheme, aiIndicatorMotion, onToggleAiIndicatorMotion }: { user: AuthUser; onLogout: () => void; initialDeepLink: WorkspaceDeepLink | null; initialGroupId: string | null; theme: UiTheme; onToggleTheme: () => void; aiIndicatorMotion: AiIndicatorMotion; onToggleAiIndicatorMotion: () => void }) {
   const [nodes, setNodes, onNodesChange] = useNodesState<MindMapNode>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState<MindMapEdge>([])
   const { canUndo, canRedo, undo, redo, resetHistory, rebaseline: rebaselineHistory, beginTransaction: beginHistoryTransaction, endTransaction: endHistoryTransaction, cancelTransaction: cancelHistoryTransaction } = useMapHistory(nodes, setNodes, edges, setEdges)
-  const [activeMapId, setActiveMapId] = useState('')
+  const [activeMapId, setActiveMapId] = useState(initialGroupId ? '' : initialDeepLink?.mapId ?? '')
+  const [lifecycleCounts, setLifecycleCounts] = useState<{ archived: number; trashed: number } | null>(null)
   const [activeDocumentRecord, setActiveDocumentRecord] = useState<MapDocument | null>(null)
   const accountMode: AccessMode = user.role === 'viewer' ? 'viewer' : 'editor'
   const documentArchived = activeDocumentRecord?.id === activeMapId && Boolean(activeDocumentRecord.archivedAt)
@@ -2335,8 +2403,21 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
   const [archivedDocuments, setArchivedDocuments] = useState<MapSummary[]>([])
   const [adminOpen, setAdminOpen] = useState(false)
   const closeAdminPanel = useCallback(() => setAdminOpen(false), [])
-  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
-  const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false)
+  const [mobilePanel, setMobilePanel] = useState<'sidebar' | 'inspector' | null>(null)
+  const mobileSidebarOpen = mobilePanel === 'sidebar'
+  const mobileInspectorOpen = mobilePanel === 'inspector'
+  const setMobileSidebarOpen = useCallback((open: SetStateAction<boolean>) => {
+    setMobilePanel((current) => {
+      const nextOpen = typeof open === 'function' ? open(current === 'sidebar') : open
+      return nextOpen ? 'sidebar' : current === 'sidebar' ? null : current
+    })
+  }, [])
+  const setMobileInspectorOpen = useCallback((open: SetStateAction<boolean>) => {
+    setMobilePanel((current) => {
+      const nextOpen = typeof open === 'function' ? open(current === 'inspector') : open
+      return nextOpen ? 'inspector' : current === 'inspector' ? null : current
+    })
+  }, [])
   const [accountMenuOpen, setAccountMenuOpen] = useState(false)
   const [distributedWorkOpen, setDistributedWorkOpen] = useState(false)
   const [passwordDialogOpen, setPasswordDialogOpen] = useState(false)
@@ -2371,6 +2452,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
   const [loadedMapId, setLoadedMapId] = useState<string | null>(null)
   const [mapReloadToken, setMapReloadToken] = useState(0)
   const [historyOpen, setHistoryOpen] = useState(false)
+  const [globalSearchOpen, setGlobalSearchOpen] = useState(false)
   const [sharedKnowledgeReviewOpen, setSharedKnowledgeReviewOpen] = useState(false)
   const [doorayMentionsOpen, setDoorayMentionsOpen] = useState(false)
   const [historyTab, setHistoryTab] = useState<'changes' | 'daily'>('changes')
@@ -2540,6 +2622,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
 
   const dependencyBlockRef = useRef<HTMLDivElement | null>(null)
   const canvasWrapRef = useRef<HTMLElement | null>(null)
+  const inspectorContentRef = useRef<HTMLDivElement | null>(null)
   const sidebarResizeStart = useRef({ pointerX: 0, width: 226 })
   const inspectorResizeStart = useRef({ pointerX: 0, width: 278 })
   const descriptionTextareaRef = useRef<HTMLTextAreaElement | null>(null)
@@ -2548,6 +2631,8 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [savedAt, setSavedAt] = useState('서버에서 불러오는 중…')
   const [saveError, setSaveError] = useState('')
+  const [localBackupNotice, updateLocalBackupNotice] = useReducer(localBackupNoticeReducer, null, createLocalBackupNotice)
+  const [phoneViewport, setPhoneViewport] = useState(() => isPhoneViewport())
   const [serverBaselineRevision, setServerBaselineRevision] = useState(0)
   const dragSnapshot = useRef<DragSnapshot | null>(null)
   const rightPanGesture = useRef<RightPanGesture | null>(null)
@@ -2565,17 +2650,20 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
   const suppressTouchContextMenu = useRef<{ nodeId: string; until: number } | null>(null)
   const suppressMobileInspectorSelection = useRef<string | null>(null)
   const serverBaseline = useRef<MapDocument | null>(null)
+  const pendingMapCacheWrite = useRef<{ mapId: string; content: Pick<MapDocument, 'nodes' | 'edges'> } | null>(null)
+  const mapCacheRecovery = useRef<Promise<void> | null>(null)
   const pastedNodeNotificationSuppressions = useRef<Map<string, Set<string>>>(new Map())
   const cursorSendAt = useRef(0)
   const nodeLinkCopyTimer = useRef<number | null>(null)
   const doorayUrlCommitTimer = useRef<number | null>(null)
   const pendingSelection = useRef<string | null>(null)
-  const pendingAiConversationSelectionReveal = useRef<{ mapId: string; cardId: string } | null>(null)
+  const pendingCardSelectionReveal = useRef<{ mapId: string; cardId: string } | null>(null)
   const pendingDeepLink = useRef(initialDeepLink)
   const lastLoadedMapId = useRef<string | null>(null)
   const selectedIdRef = useRef<string | null>(selectedId)
   const focusedNodeIdRef = useRef<string | null>(null)
   const activeMapIdRef = useRef(activeMapId)
+  const loadedMapIdRef = useRef(loadedMapId)
   const nodesRef = useRef(nodes)
   const edgesRef = useRef(edges)
   const canvasPointerRef = useRef({ inside: false, x: 0, y: 0 })
@@ -2586,19 +2674,74 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
   const referenceCommentTargetsRef = useRef<ReferenceCommentTarget[]>([])
   selectedIdRef.current = selectedId
   activeMapIdRef.current = activeMapId
+  loadedMapIdRef.current = loadedMapId
   nodesRef.current = nodes
   edgesRef.current = edges
 
   useEffect(() => {
+    updateLocalBackupNotice({ type: 'open', mapId: activeMapId })
+  }, [activeMapId, mapReloadToken, selectedGroupId])
+
+  const saveMapCache = useCallback((mapId: string, content: Pick<MapDocument, 'nodes' | 'edges'>) => {
+    let storage: Storage
+    try {
+      storage = window.localStorage
+    } catch {
+      if (activeMapIdRef.current === mapId) updateLocalBackupNotice({ type: 'backup-failed', mapId })
+      return false
+    }
+    pendingMapCacheWrite.current = { mapId, content }
+    const result = tryWriteMapCache(storage, mapId, content)
+    if (result.saved) {
+      pendingMapCacheWrite.current = null
+      if (activeMapIdRef.current === mapId) updateLocalBackupNotice({ type: 'backup-saved', mapId })
+      return true
+    }
+    if (activeMapIdRef.current === mapId) updateLocalBackupNotice({ type: 'backup-failed', mapId })
+    if (!result.quotaExceeded) {
+      pendingMapCacheWrite.current = null
+      return false
+    }
+    if (!mapCacheRecovery.current) {
+      const retryWrite = () => {
+        const pending = pendingMapCacheWrite.current
+        if (!pending) return true
+        const retry = tryWriteMapCache(storage, pending.mapId, pending.content)
+        if (retry.saved) {
+          pendingMapCacheWrite.current = null
+          if (activeMapIdRef.current === pending.mapId) {
+            updateLocalBackupNotice({ type: 'backup-saved', mapId: pending.mapId })
+            if (!serverBaseline.current) setSavedAt('로컬 백업만 저장됨 · 서버 재연결 필요')
+          }
+          return true
+        }
+        if (!retry.quotaExceeded) pendingMapCacheWrite.current = null
+        return false
+      }
+      mapCacheRecovery.current = reclaimSynchronizedMapCaches({
+        storage,
+        loadRemoteMap: async (candidateMapId: string) => {
+          const { map } = await apiRequest<MapDocumentResponse>(`/api/maps/${encodeURIComponent(candidateMapId)}`)
+          return map
+        },
+        retryWrite,
+      }).then(() => {}).catch(() => {}).finally(() => { mapCacheRecovery.current = null })
+    }
+    return false
+  }, [])
+
+  useEffect(() => {
     const mobileViewport = window.matchMedia(PHONE_VIEWPORT_QUERY)
-    const closeMobilePanelsOnDesktop = (event: MediaQueryListEvent) => {
+    setPhoneViewport(mobileViewport.matches)
+    const syncMobileViewport = (event: MediaQueryListEvent) => {
+      setPhoneViewport(event.matches)
       if (event.matches) return
       setMobileSidebarOpen(false)
       setMobileInspectorOpen(false)
     }
-    mobileViewport.addEventListener('change', closeMobilePanelsOnDesktop)
-    return () => mobileViewport.removeEventListener('change', closeMobilePanelsOnDesktop)
-  }, [])
+    mobileViewport.addEventListener('change', syncMobileViewport)
+    return () => mobileViewport.removeEventListener('change', syncMobileViewport)
+  }, [setMobileInspectorOpen, setMobileSidebarOpen])
 
   useEffect(() => {
     if (!selectedId) {
@@ -2613,7 +2756,15 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       return
     }
     if (isPhoneViewport()) setMobileInspectorOpen(true)
-  }, [selectedId])
+  }, [selectedId, setMobileInspectorOpen])
+
+  useEffect(() => {
+    if (!selectedId || (isPhoneViewport() && !mobileInspectorOpen)) return
+    const frame = window.requestAnimationFrame(() => {
+      if (inspectorContentRef.current) inspectorContentRef.current.scrollTop = 0
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [mobileInspectorOpen, selectedId])
   const reconcileRemoteMap = useCallback((remoteMap: MapDocument) => {
     if (activeMapIdRef.current !== remoteMap.id) return
     const baseline = serverBaseline.current
@@ -2645,10 +2796,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
           updatedBy: remoteMap.updatedBy,
         }
       : document))
-    localStorage.setItem(storageKeyForMap(remoteMap.id), JSON.stringify({
-      nodes: nextNodes,
-      edges: reconciliation.edges,
-    }))
+    saveMapCache(remoteMap.id, createPersistedMapContent(nextNodes, reconciliation.edges))
     setExternalChange(null)
 
     if (reconciliation.needsSave) {
@@ -2658,9 +2806,10 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       setSavedAt('병합 내용 저장 대기 중…')
       window.setTimeout(() => setMergeNotice(''), 5000)
     } else {
+      updateLocalBackupNotice({ type: 'server-saved', mapId: remoteMap.id })
       setSavedAt('서버와 동기화됨')
     }
-  }, [resetHistory, setEdges, setNodes])
+  }, [resetHistory, saveMapCache, setEdges, setNodes])
   const handleSharedKnowledgeReviewApplied = useCallback((applied: SharedKnowledgeReviewApplied) => {
     setDocuments((current) => current.map((document) => document.id === applied.document.id
       ? {
@@ -2687,6 +2836,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     const currentContent = createPersistedMapContent(nodesRef.current, edgesRef.current)
     const reconciliation = reconcileRemoteMapContent(sentContent, currentContent, savedMap)
     serverBaseline.current = structuredClone(savedMap)
+    if (!reconciliation.needsSave) updateLocalBackupNotice({ type: 'server-saved', mapId: savedMap.id })
     if (!mapContentsEqual(currentContent, reconciliation)) {
       const currentSelectedId = selectedIdRef.current
       // 선택 카드가 사라졌으면 선택을 해제한다. 첫 카드로 넘기면 실행 취소 도중 최상위 카드가 갑자기 선택된다.
@@ -2698,13 +2848,10 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       setEdges(reconciliation.edges)
       setSelectedId(nextSelectedId)
       rebaselineHistory(nextNodes, reconciliation.edges)
-      localStorage.setItem(storageKeyForMap(savedMap.id), JSON.stringify({
-        nodes: nextNodes,
-        edges: reconciliation.edges,
-      }))
+      saveMapCache(savedMap.id, createPersistedMapContent(nextNodes, reconciliation.edges))
     }
     setServerBaselineRevision((current) => current + 1)
-  }, [rebaselineHistory, setEdges, setNodes])
+  }, [rebaselineHistory, saveMapCache, setEdges, setNodes])
   const { fitView, screenToFlowPosition, setCenter, setViewport } = useReactFlow<MindMapNode, MindMapEdge>()
   const reactFlowStore = useStoreApi<MindMapNode, MindMapEdge>()
   const showFullMindMap = useCallback((duration = 500) => {
@@ -2830,33 +2977,42 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     : []
   const unreadNotificationCount = notifications.filter((notification) => !notification.readAt).length
 
-  const openWaitingItems = useCallback((nodeId: string) => {
+  const selectCardLocally = useCallback((nodeId: string) => {
+    setNodes((current) => synchronizeNodeSelection(current, nodeId))
     setSelectedId(nodeId)
+  }, [setNodes])
+
+  const clearCardSelection = useCallback(() => {
+    setNodes((current) => synchronizeNodeSelection(current, null))
+    setSelectedId(null)
+  }, [setNodes])
+
+  const openWaitingItems = useCallback((nodeId: string) => {
+    selectCardLocally(nodeId)
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => {
         waitingBlockRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
       })
     })
-  }, [])
+  }, [selectCardLocally])
 
   const openDependencies = useCallback((nodeId: string) => {
-    setSelectedId(nodeId)
+    selectCardLocally(nodeId)
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => {
         dependencyBlockRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
       })
     })
-  }, [])
+  }, [selectCardLocally])
 
   const openAiDelegationRecovery = useCallback((nodeId: string) => {
-    setNodes((current) => synchronizeNodeSelection(current, nodeId))
-    setSelectedId(nodeId)
+    selectCardLocally(nodeId)
     if (isPhoneViewport()) setMobileInspectorOpen(true)
     setAiDelegationRecoveryFocus((current) => ({
       cardId: nodeId,
       requestId: (current?.requestId ?? 0) + 1,
     }))
-  }, [setNodes])
+  }, [selectCardLocally, setMobileInspectorOpen])
 
   const activeDocument = [...documents, ...archivedDocuments].find((document) => document.id === activeMapId) ?? null
   const activeRootState = useMemo(() => rootStateOf(nodes, edges), [edges, nodes])
@@ -2924,20 +3080,16 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     hierarchyEdges.forEach((edge) => result.set(edge.target, [...(result.get(edge.target) ?? []), edge.source]))
     return result
   }, [hierarchyEdges])
-  const selectAiDelegationCard = useCallback((mapId: string, cardId: string) => {
+  const selectCardAndReveal = useCallback((mapId: string, cardId: string | null) => {
     setSelectedGroupId(null)
     setViewMode('mindmap')
     setTrashOpen(false)
-    if (mapId === activeMapId) {
-      const ancestorIds = new Set<string>()
-      const remaining = [...(parentsById.get(cardId) ?? [])]
-      while (remaining.length > 0) {
-        const ancestorId = remaining.pop() as string
-        if (ancestorIds.has(ancestorId)) continue
-        ancestorIds.add(ancestorId)
-        remaining.push(...(parentsById.get(ancestorId) ?? []))
-      }
+    pendingCardSelectionReveal.current = cardId ? { mapId, cardId } : null
+
+    if (mapId === activeMapIdRef.current && loadedMapIdRef.current === mapId) {
+      const ancestorIds = cardId ? hierarchyAncestorNodeIds(edgesRef.current, cardId) : new Set<string>()
       setNodeSearchTerm('')
+      setNodeSearchIndex(-1)
       setNodeFilter('all')
       setAssigneeFilter('all')
       setCollapsedNodeIds((current) => {
@@ -2952,9 +3104,14 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     }
     pendingSelection.current = cardId
     setActiveMapId(mapId)
-  }, [activeMapId, parentsById, setNodes])
+  }, [setNodes])
+
+  const selectAiDelegationCard = useCallback((mapId: string, cardId: string) => {
+    selectCardAndReveal(mapId, cardId)
+  }, [selectCardAndReveal])
+
   useEffect(() => {
-    const request = pendingAiConversationSelectionReveal.current
+    const request = pendingCardSelectionReveal.current
     if (!request
       || request.mapId !== activeMapId
       || loadedMapId !== activeMapId
@@ -2962,19 +3119,13 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       || !nodesInitialized) return
     const target = nodes.find((node) => node.id === request.cardId)
     if (!target) {
-      pendingAiConversationSelectionReveal.current = null
+      pendingCardSelectionReveal.current = null
       return
     }
 
-    const ancestorIds = new Set<string>()
-    const remaining = [...(parentsById.get(request.cardId) ?? [])]
-    while (remaining.length > 0) {
-      const ancestorId = remaining.pop() as string
-      if (ancestorIds.has(ancestorId)) continue
-      ancestorIds.add(ancestorId)
-      remaining.push(...(parentsById.get(ancestorId) ?? []))
-    }
+    const ancestorIds = hierarchyAncestorNodeIds(edges, request.cardId)
     setNodeSearchTerm('')
+    setNodeSearchIndex(-1)
     setNodeFilter('all')
     setAssigneeFilter('all')
     setCollapsedNodeIds((current) => {
@@ -2984,8 +3135,8 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     })
 
     const frame = window.requestAnimationFrame(() => {
-      if (pendingAiConversationSelectionReveal.current !== request) return
-      pendingAiConversationSelectionReveal.current = null
+      if (pendingCardSelectionReveal.current !== request) return
+      pendingCardSelectionReveal.current = null
       focusedNodeIdRef.current = null
       const bounds = canvasWrapRef.current?.getBoundingClientRect()
       if (!bounds) return
@@ -2999,7 +3150,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       if (nextViewport) void setViewport(nextViewport, { duration: 420 })
     })
     return () => window.cancelAnimationFrame(frame)
-  }, [activeMapId, loadedMapId, nodes, nodesInitialized, parentsById, reactFlowStore, setViewport, viewMode])
+  }, [activeMapId, edges, loadedMapId, nodes, nodesInitialized, reactFlowStore, setViewport, viewMode])
   const collapsibleNodeIds = useMemo(() => new Set(nodes.filter((node) => (childrenById.get(node.id)?.length ?? 0) > 0).map((node) => node.id)), [childrenById, nodes])
   const descendantCounts = useMemo(() => {
     const result = new Map<string, number>()
@@ -3357,6 +3508,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       : (nodeSearchIndex + direction + nodeSearchMatches.length) % nodeSearchMatches.length
     const target = nodeSearchMatches[nextIndex]
     setNodeSearchIndex(nextIndex)
+    setNodes((current) => synchronizeNodeSelection(current, target.id))
     setSelectedId(target.id)
     focusedNodeIdRef.current = null
     setCenter(target.position.x + 109, target.position.y + 65, { zoom: Math.max(.85, Math.min(1.2, viewport.zoom)), duration: 420 })
@@ -3382,6 +3534,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
 
   useEffect(() => {
     const availableTrashIds = new Set(trashedDocuments.map((document) => document.id))
+    setLifecycleCounts((current) => current ? { ...current, trashed: trashedDocuments.length } : current)
     setSelectedTrashIds((current) => {
       const next = new Set([...current].filter((mapId) => availableTrashIds.has(mapId)))
       return next.size === current.size ? current : next
@@ -3389,13 +3542,18 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
   }, [trashedDocuments])
 
   useEffect(() => {
+    setLifecycleCounts((current) => current ? { ...current, archived: archivedDocuments.length } : current)
+  }, [archivedDocuments])
+
+  useEffect(() => {
     if (!collapsedDocumentGroupsInitialized.current) return
     const storageKey = collapsedDocumentGroupsStorageKey(user.id)
     if (!storageKey) return
-    localStorage.setItem(
-      storageKey,
-      JSON.stringify([...collapsedDocumentGroupIds]),
-    )
+    try {
+      localStorage.setItem(storageKey, JSON.stringify([...collapsedDocumentGroupIds]))
+    } catch {
+      // 접기 상태 저장 실패가 문서 사용을 막지 않는다.
+    }
   }, [collapsedDocumentGroupIds, user.id])
 
   useEffect(() => {
@@ -3412,26 +3570,15 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
   }, [documentLayout.groups])
 
   useEffect(() => {
-    if (selectedId && !visibleFlowNodeIds.has(selectedId)) setSelectedId(null)
-  }, [selectedId, visibleFlowNodeIds])
+    if (selectedId && !visibleFlowNodeIds.has(selectedId)) clearCardSelection()
+  }, [clearCardSelection, selectedId, visibleFlowNodeIds])
 
   useEffect(() => {
     let active = true
-    void Promise.all([
-      apiRequest<DocumentLibraryResponse>('/api/maps'),
-      accountMode === 'editor'
-        ? apiRequest<{ maps: MapSummary[] }>('/api/maps/trash')
-        : Promise.resolve({ maps: [] as MapSummary[] }),
-      apiRequest<{ maps: MapSummary[] }>('/api/maps/archive').catch((error) => {
-        // 개발 중 이전 API와 새 UI가 잠시 함께 동작해도 기존 문서 목록을 유지한다.
-        if (error instanceof ApiRequestError && [400, 404].includes(error.status)) return { maps: [] as MapSummary[] }
-        throw error
-      }),
-    ])
-      .then(async ([{ maps, documentLayout: loadedDocumentLayout }, { maps: trash }, { maps: archive }]) => {
+    void apiRequest<DocumentLibraryResponse>('/api/maps')
+      .then(async ({ maps, documentLayout: loadedDocumentLayout, lifecycleCounts: counts }) => {
         if (!active) return
-        setArchivedDocuments(archive)
-        setTrashedDocuments(trash)
+        if (counts) setLifecycleCounts(counts)
         setDocumentLayout(loadedDocumentLayout)
         setDocuments(maps)
         if (!collapsedDocumentGroupsInitialized.current) {
@@ -3446,6 +3593,12 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         // 그룹 링크로 들어오면 마지막 문서보다 총괄 페이지를 우선한다.
         // 빈 그룹도 열 수 있으며 관계없는 문서를 뒤에서 불러오지 않는다.
         if (initialGroupId) return
+        // 링크로 지정한 문서는 목록과 병렬로 열었다. 보관 문서 또는 빈 목록일 때만 보관함을 조회한다.
+        const needsArchive = maps.length === 0 || Boolean(initialDeepLink?.mapId && !maps.some((map) => map.id === initialDeepLink.mapId))
+        const archive = needsArchive ? (await apiRequest<{ maps: MapSummary[] }>('/api/maps/archive')).maps : []
+        if (!active) return
+        if (needsArchive) setArchivedDocuments(archive)
+        if (initialDeepLink?.mapId && [...maps, ...archive].some((map) => map.id === initialDeepLink.mapId)) return
         if (maps.length > 0 || archive.length > 0) {
           const deepLink = pendingDeepLink.current
           const requestedDocument = deepLink?.mapId
@@ -3458,15 +3611,15 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
             ? maps.find((map) => map.id === storedLocation.mapId) ?? null
             : null
           const targetDocument = requestedDocument ?? restoredDocument ?? maps[0] ?? archive[0]
-          if (!deepLink && storedLocation) {
-            setViewMode(storedLocation.viewMode)
-            pendingSelection.current = isPhoneViewport() ? null : storedLocation.nodeId
+          if (storedLocation) {
+            setViewMode(deepLink?.viewMode ?? storedLocation.viewMode)
+            pendingSelection.current = storedLocation.nodeId
           }
           if (deepLink) {
             pendingDeepLink.current = {
               ...deepLink,
               mapId: targetDocument.id,
-              nodeId: requestedDocument ? deepLink.nodeId : null,
+              nodeId: requestedDocument ? deepLink.nodeId : storedLocation?.nodeId ?? null,
             }
           }
           setActiveMapId(targetDocument.id)
@@ -3486,17 +3639,39 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       })
       .finally(() => { if (active) setDocumentLibraryLoaded(true) })
     return () => { active = false }
-  }, [initialGroupId, accountMode, setEdges, setNodes])
+  }, [initialDeepLink, initialGroupId, accountMode, setEdges, setNodes])
 
   useEffect(() => {
+    if (!trashOpen || accountMode !== 'editor') return
+    let active = true
+    void apiRequest<{ maps: MapSummary[] }>('/api/maps/trash').then(({ maps }) => {
+      if (active) setTrashedDocuments(maps)
+    }).catch((error) => { if (active) setSaveError(error instanceof Error ? error.message : '휴지통을 불러오지 못했습니다.') })
+    return () => { active = false }
+  }, [trashOpen, accountMode])
+
+  useEffect(() => {
+    if (selectedGroupId) {
+      const pathname = `/groups/${encodeURIComponent(selectedGroupId)}`
+      if (window.location.pathname !== pathname) {
+        window.history.replaceState(window.history.state, '', `${pathname}${window.location.search}${window.location.hash}`)
+      }
+      return
+    }
     if (!activeMapId || loadedMapId !== activeMapId) return
-    const storedLocation = storeWorkspaceLocation(user.id, {
+    const location = {
       mapId: activeMapId,
       viewMode,
       nodeId: selectedId,
-    })
+    }
+    const storedLocation = storeWorkspaceLocation(user.id, location)
     if (storedLocation) lastWorkspaceLocation.current = storedLocation
-  }, [activeMapId, loadedMapId, selectedId, user.id, viewMode])
+    const viewerEntry = decodePathSegment(window.location.pathname.split('/')[1])?.toLowerCase() === 'viewer'
+    const pathname = workspaceLocationPath(location, viewerEntry)
+    if (pathname && window.location.pathname !== pathname) {
+      window.history.replaceState(window.history.state, '', `${pathname}${window.location.search}${window.location.hash}`)
+    }
+  }, [activeMapId, loadedMapId, selectedGroupId, selectedId, user.id, viewMode])
 
   useEffect(() => {
     void Promise.all([
@@ -3624,12 +3799,12 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       if (controller.signal.aborted || inFlight) return
       inFlight = true
       try {
-        const result = await apiRequest<{ delegations: AiDelegationSummary[] }>(
+        const result = await apiRequest<{ delegations: AiDelegationSummary[]; requestFailures?: AiDelegationSummary[] }>(
           `/api/maps/${encodeURIComponent(activeMapId)}/ai-delegations`,
           { signal: controller.signal },
         )
         if (!controller.signal.aborted) {
-          setAiDelegationStatuses(aiDelegationStatusByCard(result.delegations, activeMapId))
+          setAiDelegationStatuses(aiDelegationStatusByCard([...result.delegations, ...(result.requestFailures ?? [])], activeMapId))
         }
       } catch {
         // 일시적인 조회 실패로 이미 확인한 복구 표시를 지우지 않는다.
@@ -3658,14 +3833,15 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     let disposed = false
     let eventSource: EventSource | null = null
     let lastEventAt = Date.now()
+    const libraryRefresh = createCoalescedRefresh(() => apiRequest<DocumentLibraryResponse>('/api/maps'))
 
     const synchronizeAfterReconnect = async () => {
       const [notificationResult, library, trashResult] = await Promise.all([
         user.publicAccess
           ? Promise.resolve(null)
           : apiRequest<{ notifications: UserNotification[] }>('/api/notifications').catch(() => null),
-        apiRequest<DocumentLibraryResponse>('/api/maps').catch(() => null),
-        mode === 'editor'
+        libraryRefresh.request().catch(() => null),
+        mode === 'editor' && trashOpen
           ? apiRequest<{ maps: MapSummary[] }>('/api/maps/trash').catch(() => null)
           : Promise.resolve(null),
       ])
@@ -3675,6 +3851,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
 
       setDocuments(library.maps)
       setDocumentLayout(library.documentLayout)
+      if (library.lifecycleCounts) setLifecycleCounts(library.lifecycleCounts)
       if (trashResult) setTrashedDocuments(trashResult.maps)
 
       const remoteMap = library.maps.find((map) => map.id === activeMapId) ?? null
@@ -3716,18 +3893,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         const event = JSON.parse(message.data) as MapChangeEvent | PresenceEvent | CursorEvent | CommentChangeEvent | AiConversationLinkedEvent | AiConversationRuntimeEvent | AiConversationRuntimeSnapshotEvent | AiConversationRuntimeSummaryEvent | AiConversationRuntimeSummarySnapshotEvent | AiConversationSelectionRequestedEvent | NotificationEvent | NotificationsReadEvent | NotificationsRemovedEvent | HeartbeatEvent | { type: 'connected' }
         if (event.type === 'heartbeat') return
         if (event.type === 'ai-conversation-selection-requested') {
-          pendingAiConversationSelectionReveal.current = { mapId: event.mapId, cardId: event.cardId }
-          setSelectedGroupId(null)
-          setViewMode('mindmap')
-          setTrashOpen(false)
-          if (event.mapId === activeMapId) {
-            pendingSelection.current = null
-            setNodes((current) => synchronizeNodeSelection(current, event.cardId))
-            setSelectedId(event.cardId)
-          } else {
-            pendingSelection.current = event.cardId
-            setActiveMapId(event.mapId)
-          }
+          selectCardAndReveal(event.mapId, event.cardId)
           return
         }
         if (event.type === 'presence') {
@@ -3831,7 +3997,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
           return
         }
         if (event.type !== 'map-changed') return
-        if (['archived', 'archive-restored', 'reconstructed'].includes(event.action)) {
+        if (['archived', 'archive-restored', 'reconstructed', 'trashed', 'trash-restored'].includes(event.action)) {
           void apiRequest<{ maps: MapSummary[] }>('/api/maps/archive').then((result) => setArchivedDocuments(result.maps)).catch(() => undefined)
           if (event.mapId === activeMapId) setMapReloadToken((current) => current + 1)
         }
@@ -3840,14 +4006,15 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         if (event.sourceClientId === CLIENT_ID) return
         void (async () => {
           const [library, trashResult] = await Promise.all([
-            apiRequest<DocumentLibraryResponse>('/api/maps'),
-            mode === 'editor'
+            libraryRefresh.request(),
+            mode === 'editor' && trashOpen
               ? apiRequest<{ maps: MapSummary[] }>('/api/maps/trash')
-              : Promise.resolve({ maps: [] as MapSummary[] }),
+              : Promise.resolve(null),
           ])
           setDocuments(library.maps)
           setDocumentLayout(library.documentLayout)
-          if (mode === 'editor') setTrashedDocuments(trashResult.maps)
+          if (library.lifecycleCounts) setLifecycleCounts(library.lifecycleCounts)
+          if (trashResult) setTrashedDocuments(trashResult.maps)
 
           if (event.action === 'trashed' && event.mapId === activeMapId) {
             setActiveMapId(library.maps[0]?.id ?? '')
@@ -3896,13 +4063,14 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
 
     return () => {
       disposed = true
+      libraryRefresh.dispose()
       window.clearInterval(watchdog)
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       window.removeEventListener('online', handleOnline)
       window.removeEventListener('focus', handleFocus)
       eventSource?.close()
     }
-  }, [activeMapId, mode, reconcileRemoteMap, refreshResolvedReferences, setNodes, user.id, user.publicAccess])
+  }, [activeMapId, mode, trashOpen, reconcileRemoteMap, refreshResolvedReferences, selectCardAndReveal, setNodes, user.id, user.publicAccess])
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -4083,8 +4251,12 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         const nextSelectedId = deepLinkTargetsMap
           ? deepLinkedNodeId
           : resolveDocumentNodeSelection(map.nodes, requestedNodeId, isPhoneViewport())
+        if (lastLoadedMapId.current === null && isPhoneViewport()) {
+          suppressMobileInspectorSelection.current = nextSelectedId
+        }
         const loadedNodes = synchronizeNodeSelection(map.nodes, nextSelectedId)
         serverBaseline.current = structuredClone(map)
+        updateLocalBackupNotice({ type: 'server-saved', mapId: activeMapId })
         resetHistory(loadedNodes, map.edges)
         setReferenceCommentStats(loadedReferenceCommentStats ?? {})
         setUnresolvedReferenceNodeIds(new Set(unresolvedIds ?? []))
@@ -4096,7 +4268,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         }
         pendingSelection.current = null
         lastLoadedMapId.current = map.id
-        localStorage.setItem(storageKeyForMap(activeMapId), JSON.stringify(createPersistedMapContent(loadedNodes, map.edges)))
+        saveMapCache(activeMapId, createPersistedMapContent(loadedNodes, map.edges))
         setDocuments((current) => current.map((document) => document.id === map.id
           ? { ...document, title: map.title, color: map.color, nodeCount: map.nodes.length }
           : document))
@@ -4106,6 +4278,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       })
       .catch((error) => {
         if (!active) return
+        updateLocalBackupNotice({ type: 'server-failed', mapId: activeMapId })
         const localMap = readSavedMap(activeMapId)
         if (localMap) {
           const nextSelectedId = resolveDocumentNodeSelection(
@@ -4113,6 +4286,9 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
             selectedNodeIdBeforeReload,
             isPhoneViewport(),
           )
+          if (lastLoadedMapId.current === null && isPhoneViewport()) {
+            suppressMobileInspectorSelection.current = nextSelectedId
+          }
           const loadedNodes = synchronizeNodeSelection(localMap.nodes, nextSelectedId)
           serverBaseline.current = null
           resetHistory(loadedNodes, localMap.edges)
@@ -4128,19 +4304,19 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         setSaveError(error instanceof Error ? error.message : '마인드맵을 불러오지 못했습니다.')
       })
     return () => { active = false }
-  }, [activeMapId, mapReloadToken, mode, resetHistory, setEdges, setNodes])
+  }, [activeMapId, mapReloadToken, mode, resetHistory, saveMapCache, setEdges, setNodes])
 
   useEffect(() => {
     if (!activeMapId || loadedMapId !== activeMapId) return
     const localContent = createPersistedMapContent(nodes, edges)
-    localStorage.setItem(storageKeyForMap(activeMapId), JSON.stringify(localContent))
+    const localBackupSaved = saveMapCache(activeMapId, localContent)
     if (mode === 'viewer') {
       setSavedAt('읽기 전용')
       return
     }
     const saveBase = serverBaseline.current
     if (!saveBase || saveBase.id !== activeMapId) {
-      setSavedAt('로컬 백업만 저장됨 · 서버 재연결 필요')
+      setSavedAt(localBackupSaved ? '로컬 백업만 저장됨 · 서버 재연결 필요' : '로컬 백업 저장 실패 · 서버 재연결 필요')
       return
     }
     if (mapContentsEqual(localContent, saveBase)) {
@@ -4160,10 +4336,10 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         suppressedNotificationNodeIds.forEach((nodeId) => current.delete(nodeId))
         if (current.size === 0) pastedNodeNotificationSuppressions.current.delete(savingMapId)
       }
-      void apiRequest<{ map: MapDocument; summary: MapSummary }>(`/api/maps/${encodeURIComponent(savingMapId)}`, {
-        method: 'PUT',
+      void apiRequest<{ map: MapDocument; summary: MapSummary }>(`/api/maps/${encodeURIComponent(savingMapId)}/content-patch`, {
+        method: 'PATCH',
         body: JSON.stringify({
-          map: localContent,
+          patch: createMapContentPatch(saveBase, localContent),
           baseVersion: saveBase.version,
           suppressWorkNotificationNodeIds: suppressedNotificationNodeIds,
         }),
@@ -4189,10 +4365,10 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                 return
               }
               const mergedContent = { nodes: merged.nodes, edges: merged.edges }
-              const result = await apiRequest<{ map: MapDocument; summary: MapSummary }>(`/api/maps/${encodeURIComponent(savingMapId)}`, {
-                method: 'PUT',
+              const result = await apiRequest<{ map: MapDocument; summary: MapSummary }>(`/api/maps/${encodeURIComponent(savingMapId)}/content-patch`, {
+                method: 'PATCH',
                 body: JSON.stringify({
-                  map: mergedContent,
+                  patch: createMapContentPatch(remote, mergedContent),
                   baseVersion: remote.version,
                   suppressWorkNotificationNodeIds: suppressedNotificationNodeIds,
                 }),
@@ -4220,16 +4396,18 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                 return
               }
               setSaveError(mergeError instanceof Error ? mergeError.message : '동시 변경을 병합하지 못했습니다.')
+              updateLocalBackupNotice({ type: 'server-failed', mapId: savingMapId })
               setSavedAt('병합 실패')
               return
             }
           }
           setSaveError(error instanceof Error ? error.message : '저장하지 못했습니다.')
+          updateLocalBackupNotice({ type: 'server-failed', mapId: savingMapId })
           setSavedAt('저장 실패')
         })
     }, 600)
     return () => window.clearTimeout(timer)
-  }, [acceptSavedMap, activeMapId, edges, loadedMapId, mode, nodes, reconcileRemoteMap, serverBaselineRevision])
+  }, [acceptSavedMap, activeMapId, edges, loadedMapId, mode, nodes, reconcileRemoteMap, saveMapCache, serverBaselineRevision])
 
   const onConnect = useCallback(
     (connection: Connection) => {
@@ -4364,7 +4542,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
   const startOrOpenContextNodeAiConversation = () => {
     if (!contextMenuNode) return
     setNodeContextMenu(null)
-    setSelectedId(contextMenuNode.id)
+    selectCardLocally(contextMenuNode.id)
     if (contextMenuNode.data.aiConversationId) {
       openAiConversationForNode(
         contextMenuNode,
@@ -4497,13 +4675,13 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
 
   const startKnowledgeConnectionFromMenu = useCallback((policy: KnowledgePolicy) => {
     if (!nodeContextMenu || mode !== 'editor' || viewMode !== 'mindmap') return
-    setSelectedId(nodeContextMenu.nodeId)
+    selectCardLocally(nodeContextMenu.nodeId)
     setKnowledgeConnection({ sourceId: nodeContextMenu.nodeId, policy })
     setKnowledgeConnectionTargetId(null)
     setKnowledgeConnectionMessage('')
     setKnowledgeError('')
     setNodeContextMenu(null)
-  }, [mode, nodeContextMenu, viewMode])
+  }, [mode, nodeContextMenu, selectCardLocally, viewMode])
 
   const addKnowledgeSource = () => {
     if (!selectedNode || !knowledgeCandidate || mode !== 'editor') return
@@ -4562,7 +4740,11 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
   }, [selectedId])
 
   useEffect(() => {
-    localStorage.setItem('mindnprogress-sidebar-width', String(sidebarWidth))
+    try {
+      localStorage.setItem('mindnprogress-sidebar-width', String(sidebarWidth))
+    } catch {
+      // 저장 공간 부족이어도 현재 세션의 사이드바 크기는 유지한다.
+    }
   }, [sidebarWidth])
 
   useEffect(() => {
@@ -4570,7 +4752,11 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
   }, [sidebarMinWidth])
 
   useEffect(() => {
-    localStorage.setItem('mindnprogress-inspector-width', String(inspectorWidth))
+    try {
+      localStorage.setItem('mindnprogress-inspector-width', String(inspectorWidth))
+    } catch {
+      // 저장 공간 부족이어도 현재 세션의 세부 정보 크기는 유지한다.
+    }
   }, [inspectorWidth])
 
   const rememberInspectorTextareaHeight = useCallback((field: InspectorTextareaField, height: number) => {
@@ -4644,6 +4830,19 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       },
     }
     setNodes((current) => synchronizeNodeSelection([...current, node], id))
+    if (activeMapId) pendingCardSelectionReveal.current = { mapId: activeMapId, cardId: id }
+    setNodeSearchTerm('')
+    setNodeSearchIndex(-1)
+    setNodeFilter('all')
+    setAssigneeFilter('all')
+    if (parent) {
+      setCollapsedNodeIds((current) => {
+        if (!current.has(parent.id)) return current
+        const next = new Set(current)
+        next.delete(parent.id)
+        return next
+      })
+    }
     if (parent) {
       setEdges((current) => [...current, {
         id: `edge-${parent.id}-${id}`,
@@ -4656,7 +4855,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       }])
     }
     setSelectedId(id)
-  }, [hierarchyEdges, mode, nodes, selectedNode, setEdges, setNodes])
+  }, [activeMapId, hierarchyEdges, mode, nodes, selectedNode, setEdges, setNodes])
 
   useEffect(() => {
     const handleInsert = (event: KeyboardEvent) => {
@@ -4842,14 +5041,14 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       setMobileInspectorOpen(false)
       suppressMobileInspectorSelection.current = selectedIdRef.current === nodeId ? null : nodeId
     }
-    setSelectedId(nodeId)
+    selectCardLocally(nodeId)
     const menuHeight = nodes.find((node) => node.id === nodeId)?.data.kind === 'image' ? 310 : 440
     setNodeContextMenu({
       x: Math.max(8, Math.min(clientX, window.innerWidth - 230)),
       y: Math.max(8, Math.min(clientY, window.innerHeight - menuHeight)),
       nodeId,
     })
-  }, [mode, nodes])
+  }, [mode, nodes, selectCardLocally, setMobileInspectorOpen])
 
   const openNodeContextMenu = useCallback((event: ReactMouseEvent, nodeId: string) => {
     const touchSuppression = suppressTouchContextMenu.current
@@ -5596,17 +5795,19 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         { method: 'POST' },
       )
       serverBaseline.current = structuredClone(result.map)
-      resetHistory(result.map.nodes, result.map.edges)
-      setNodes(result.map.nodes)
+      const nextSelectedId = resolveDocumentNodeSelection(result.map.nodes, null, isPhoneViewport())
+      const restoredNodes = synchronizeNodeSelection(result.map.nodes, nextSelectedId)
+      resetHistory(restoredNodes, result.map.edges)
+      setNodes(restoredNodes)
       setEdges(result.map.edges)
-      setSelectedId(resolveDocumentNodeSelection(result.map.nodes, null, isPhoneViewport()))
+      setSelectedId(nextSelectedId)
       setDocuments((current) => current.map((document) => document.id === result.summary.id ? result.summary : document))
       setMapRevisions(result.revisions)
       setHistoryHasMore(result.historyHasMore)
       setHistoryNextOffset(result.historyNextOffset)
       setHistoryPaginationError('')
       setExternalChange(null)
-      localStorage.setItem(storageKeyForMap(activeMapId), JSON.stringify({ nodes: result.map.nodes, edges: result.map.edges }))
+      saveMapCache(activeMapId, createPersistedMapContent(restoredNodes, result.map.edges))
       setSavedAt('이전 버전 복원됨')
       window.setTimeout(() => showFullMindMap(400), 0)
     } catch (error) {
@@ -5628,10 +5829,12 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         { method: 'POST' },
       )
       serverBaseline.current = structuredClone(result.map)
-      resetHistory(result.map.nodes, result.map.edges)
-      setNodes(result.map.nodes)
+      const nextSelectedId = resolveDocumentNodeSelection(result.map.nodes, null, isPhoneViewport())
+      const restoredNodes = synchronizeNodeSelection(result.map.nodes, nextSelectedId)
+      resetHistory(restoredNodes, result.map.edges)
+      setNodes(restoredNodes)
       setEdges(result.map.edges)
-      setSelectedId(resolveDocumentNodeSelection(result.map.nodes, null, isPhoneViewport()))
+      setSelectedId(nextSelectedId)
       setDocuments((current) => current.map((document) => document.id === result.summary.id ? result.summary : document))
       setDailyBackups(result.dailyBackups)
       setMapRevisions(result.revisions)
@@ -5639,7 +5842,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       setHistoryNextOffset(result.historyNextOffset)
       setHistoryPaginationError('')
       setExternalChange(null)
-      localStorage.setItem(storageKeyForMap(activeMapId), JSON.stringify({ nodes: result.map.nodes, edges: result.map.edges }))
+      saveMapCache(activeMapId, createPersistedMapContent(restoredNodes, result.map.edges))
       setSavedAt(`${backup.date} 일일 백업 복원됨`)
       window.setTimeout(() => showFullMindMap(400), 0)
     } catch (error) {
@@ -5773,9 +5976,13 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     setSaveError('')
 
     try {
-      const sourceMap = mapId === activeMapId && loadedMapId === activeMapId
-        ? { nodes, edges, version: serverBaseline.current?.version }
-        : (await apiRequest<{ map: MapDocument }>(`/api/maps/${encodeURIComponent(mapId)}`)).map
+      const active = mapId === activeMapId && loadedMapId === activeMapId
+      const remoteMap = active ? null : (await apiRequest<{ map: MapDocument }>(`/api/maps/${encodeURIComponent(mapId)}`)).map
+      const sourceMap = active
+        ? createPersistedMapContent(nodes, edges)
+        : remoteMap!
+      const baseline = active ? serverBaseline.current : remoteMap
+      if (!baseline || !Number.isInteger(baseline.version)) throw new Error('현재 문서 버전을 확인할 수 없습니다. 다시 열어 주세요.')
       const completedNodes = sourceMap.nodes.map((node) => node.data.kind === 'image' ? node : ({
         ...node,
         data: {
@@ -5786,9 +5993,9 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
           waitingItems: [],
         },
       }))
-      const result = await apiRequest<{ map: MapDocument; summary: MapSummary }>(`/api/maps/${encodeURIComponent(mapId)}`, {
-        method: 'PUT',
-        body: JSON.stringify({ map: { nodes: completedNodes, edges: sourceMap.edges }, baseVersion: sourceMap.version }),
+      const result = await apiRequest<{ map: MapDocument; summary: MapSummary }>(`/api/maps/${encodeURIComponent(mapId)}/content-patch`, {
+        method: 'PATCH',
+        body: JSON.stringify({ patch: createMapContentPatch(baseline, { nodes: completedNodes, edges: sourceMap.edges }), baseVersion: baseline.version }),
       })
       setDocuments((current) => current.map((document) => document.id === result.summary.id ? result.summary : document))
       if (mapId === activeMapId) {
@@ -5801,8 +6008,14 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
   }
 
   const refreshLifecycleLibrary = async () => {
-    const [library, archive] = await Promise.all([apiRequest<DocumentLibraryResponse>('/api/maps'), apiRequest<{ maps: MapSummary[] }>('/api/maps/archive')])
+    const [library, archive, trash] = await Promise.all([apiRequest<DocumentLibraryResponse>('/api/maps'), apiRequest<{ maps: MapSummary[] }>('/api/maps/archive'),
+      accountMode === 'editor' ? apiRequest<{ maps: MapSummary[] }>('/api/maps/trash') : Promise.resolve({ maps: [] as MapSummary[] })])
     setDocuments(library.maps); setDocumentLayout(library.documentLayout); setArchivedDocuments(archive.maps)
+    if (library.lifecycleCounts) setLifecycleCounts(library.lifecycleCounts)
+    setTrashedDocuments(trash.maps)
+    if (activeMapId && ![...library.maps, ...archive.maps].some((document) => document.id === activeMapId)) {
+      setLoadedMapId(null); setActiveMapId(library.maps[0]?.id ?? '')
+    }
     setMapReloadToken((current) => current + 1)
   }
   const archiveDocument = async (mapId: string) => {
@@ -5844,7 +6057,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     if (mode !== 'editor') return
     setSaveError('')
     try {
-      const result = await apiRequest<{ maps: MapSummary[]; documentLayout: DocumentLayout; trash: MapSummary[] }>(`/api/maps/${encodeURIComponent(mapId)}/restore`, { method: 'POST' })
+      const result = await apiRequest<{ summary: MapSummary; maps: MapSummary[]; documentLayout: DocumentLayout; trash: MapSummary[] }>(`/api/maps/${encodeURIComponent(mapId)}/restore`, { method: 'POST' })
       setDocuments(result.maps)
       setDocumentLayout(result.documentLayout)
       setTrashedDocuments(result.trash)
@@ -5853,6 +6066,11 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         next.delete(mapId)
         return next
       })
+      if (result.summary.archivedAt) {
+        setArchivedDocuments((current) => [result.summary, ...current.filter((document) => document.id !== mapId)])
+        setSavedAt('보관함으로 복원됨')
+        return
+      }
       setTrashOpen(false)
       setSelectedGroupId(null)
       setActiveMapId(mapId)
@@ -5867,7 +6085,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     const mapIds = deleteAll ? trashedDocuments.map((document) => document.id) : [...selectedTrashIds]
     if (mapIds.length === 0) return
     const targetLabel = deleteAll ? `휴지통의 문서 ${mapIds.length}개를 모두` : `선택한 문서 ${mapIds.length}개를`
-    if (!window.confirm(`${targetLabel} 영구 삭제할까요?\n\n문서, 댓글, 변경 이력이 함께 삭제되며 이 작업은 되돌릴 수 없습니다.`)) return
+    if (!window.confirm(`${targetLabel} 영구 삭제할까요?\n\n문서, 댓글, 변경 이력과 MnP의 AI 위임·결과 보고·연결·복구 기록이 함께 삭제되며 이 작업은 되돌릴 수 없습니다.`)) return
 
     setTrashDeleting(true)
     setSaveError('')
@@ -6312,14 +6530,9 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
   }
 
   const openNotification = (notification: UserNotification) => {
-    setSelectedGroupId(null)
     void markNotificationRead(notification)
-    pendingSelection.current = notification.nodeId
-    setViewMode('mindmap')
-    setTrashOpen(false)
     setNotificationsOpen(false)
-    if (notification.mapId === activeMapId) setSelectedId(notification.nodeId)
-    else setActiveMapId(notification.mapId)
+    selectCardAndReveal(notification.mapId, notification.nodeId)
   }
 
   const copySelectedNodeLink = async () => {
@@ -6378,7 +6591,8 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       return
     }
     setSelectedId(node.id)
-  }, [cancelKnowledgeConnection, connectKnowledgeCards, knowledgeConnection])
+    if (isPhoneViewport()) setMobileInspectorOpen(true)
+  }, [cancelKnowledgeConnection, connectKnowledgeCards, knowledgeConnection, setMobileInspectorOpen])
 
   const onKnowledgeTargetEnter = useCallback((_event: ReactMouseEvent, node: MindMapNode) => {
     if (!knowledgeConnection) return
@@ -6777,6 +6991,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     if (gesture.phase === 'pressing') {
       setNodes((current) => synchronizeNodeSelection(current, gesture.nodeId))
       setSelectedId(gesture.nodeId)
+      if (isPhoneViewport()) setMobileInspectorOpen(true)
       const now = Date.now()
       const previousTap = lastTouchCardTap.current
       const isDoubleTap = Boolean(previousTap
@@ -6793,7 +7008,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     const node = nodesRef.current.find((candidate) => candidate.id === gesture.nodeId)
     if (node) stopNodeDrag({ ...node, position: gesture.currentPosition, selected: true }, true)
     else restoreNodeDragForTouchPan()
-  }, [cancelTouchCardGesture, restoreNodeDragForTouchPan, setNodes, stopNodeDrag, toggleNodeFocus])
+  }, [cancelTouchCardGesture, restoreNodeDragForTouchPan, setMobileInspectorOpen, setNodes, stopNodeDrag, toggleNodeFocus])
 
   useEffect(() => {
     const cancelOnBlur = () => cancelTouchCardGesture(true)
@@ -6961,7 +7176,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
               key={id}
               className={viewMode === id ? 'active' : ''}
               onClick={() => {
-                if (id !== 'mindmap' && selectedNode && !selectedNode.data.isWork) setSelectedId(null)
+                if (id !== 'mindmap' && selectedNode && !selectedNode.data.isWork) clearCardSelection()
                 setViewMode(id)
                 setMobileSidebarOpen(false)
                 setMobileInspectorOpen(false)
@@ -6991,6 +7206,16 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
           <Icon name="edit" size={18} />
         </button>
         <div className="topbar-actions">
+          <button
+            type="button"
+            className={`global-search-trigger ${globalSearchOpen ? 'active' : ''}`}
+            onClick={() => setGlobalSearchOpen(true)}
+            aria-haspopup="dialog"
+            aria-expanded={globalSearchOpen}
+            title="전체 문서 검색"
+          >
+            <Icon name="search" size={15} /><span>전체 검색</span>
+          </button>
           {!user.publicAccess && <AionUiSubscriptionUsageIndicator onOpen={() => {
             setNotificationsOpen(false)
             setAccountMenuOpen(false)
@@ -7064,7 +7289,6 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
             <span className={`access-dot ${user.role}`} />
             {user.role === 'admin' ? '관리자' : mode === 'editor' ? '편집자' : '뷰어'}
           </div>
-          <button className="share-button" onClick={() => window.alert('공유 기능은 현재 준비 중입니다.')}><Icon name="share" size={16} />공유</button>
           <div className="account-menu-wrap">
             <button className="user-menu" onClick={() => setAccountMenuOpen((current) => !current)} title={`${user.email} · 계정 메뉴`} aria-expanded={accountMenuOpen}>
               <span className="avatar">{user.name.replace(/\s/g, '').slice(0, 2)}</span>
@@ -7074,6 +7298,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
             {accountMenuOpen && (
               <div className="account-popover">
                 <div className="account-summary"><strong>{user.name}</strong><span>{user.email}</span></div>
+                <button type="button" aria-pressed={aiIndicatorMotion === 'always'} title="이 브라우저에서만 AI 작업 표시의 점 3개를 항상 움직일 수 있습니다. 다른 애니메이션과 시스템 설정은 변경하지 않습니다." onClick={onToggleAiIndicatorMotion}><Icon name="sparkles" size={14} /><span>AI 작업 표시 움직임</span><span className="account-setting-state">{aiIndicatorMotion === 'always' ? '항상' : '시스템'}</span></button>
                 {!user.publicAccess && mode === 'editor' && <button onClick={() => { setAccountMenuOpen(false); setDistributedWorkOpen(true) }}><Icon name="sparkles" size={14} /><span>분산 작업 설정</span></button>}
                 {!user.publicAccess && <button onClick={() => { setAccountMenuOpen(false); setPasswordDialogOpen(true) }}><Icon name="lock" size={14} /><span>비밀번호 변경</span></button>}
                 <button className="account-logout" onClick={onLogout}><Icon name="logout" size={14} /><span>{user.publicAccess ? '로그인 화면으로 이동' : '로그아웃'}</span></button>
@@ -7098,6 +7323,19 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         <div className="merge-notice" role="status">
           <Icon name="check" size={15} /><span>{mergeNotice}</span>
           <button onClick={() => setMergeNotice('')} aria-label="병합 알림 닫기"><Icon name="close" size={12} /></button>
+        </div>
+      )}
+      {localBackupNotice.mapId === activeMapId && localBackupNotice.backupFailed && !localBackupNotice.dismissed && !selectedGroupId
+        && (!phoneViewport || localBackupNotice.serverFailed || serverBaseline.current?.id !== activeMapId) && (
+        <div className="local-backup-warning" role="alert">
+          <span>{localBackupNotice.serverFailed
+            ? '서버 저장에 실패했고 이 기기의 로컬 백업도 저장하지 못했습니다. 변경 내용이 보존되지 않을 수 있습니다.'
+            : serverBaseline.current?.id === activeMapId
+            ? '이 기기의 로컬 백업을 저장하지 못했습니다. 서버 저장은 계속됩니다. 오프라인에서는 변경 내용이 보존되지 않을 수 있습니다.'
+            : '서버에 연결되지 않았고 이 기기의 로컬 백업도 저장하지 못했습니다. 연결을 복구하기 전에는 변경 내용을 보존할 수 없습니다.'}</span>
+          <button type="button" onClick={() => updateLocalBackupNotice({ type: 'dismiss', mapId: activeMapId })} aria-label="로컬 백업 경고 닫기" title="로컬 백업 경고 닫기">
+            <Icon name="close" size={14} />
+          </button>
         </div>
       )}
 
@@ -7256,6 +7494,9 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                     : groupDocuments
                   if (normalizedDocumentSearch && !groupNameMatches && visibleGroupDocuments.length === 0) return null
                   const collapsed = !normalizedDocumentSearch && collapsedDocumentGroupIds.has(group.id)
+                  const activeGroupDocumentCount = collapsed
+                    ? activeDocumentCountInGroup(groupDocuments.map((document) => document.id), aiConversationActiveCounts)
+                    : 0
                   const groupDropKey = `group:${group.id}`
                   return (
                     <section
@@ -7331,12 +7572,16 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                           <Icon name={collapsed ? 'chevron' : 'chevron-down'} size={12} />
                         </button>
                         <button type="button" className="document-group-open" title={`${group.name} 그룹 개요`} aria-current={selectedGroup?.id === group.id ? 'page' : undefined} onClick={() => {
-                          setSelectedGroupId(group.id); setSelectedId(null); setRenamingMap(false); setMobileSidebarOpen(false); setMobileInspectorOpen(false)
+                          setSelectedGroupId(group.id); clearCardSelection(); setRenamingMap(false); setMobileSidebarOpen(false); setMobileInspectorOpen(false)
                         }}>
                           <Icon name="folder" size={14} />
                           <span className="document-group-label">
                             <strong>{group.name}</strong>
                             <span className="document-group-count">{group.mapIds.length}</span>
+                            <AiConversationActivityIndicator
+                              activeCount={activeGroupDocumentCount}
+                              label={`AI 작업 중인 문서 ${activeGroupDocumentCount}개`}
+                            />
                           </span>
                         </button>
                         {mode === 'editor' && (
@@ -7425,7 +7670,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                     />
                   )}
                   <span><strong>{document.title}</strong><small>{document.nodeCount}개 항목 · {document.trashedAt ? new Date(document.trashedAt).toLocaleDateString('ko-KR') : ''}</small></span>
-                  {mode === 'editor' && <button disabled={trashDeleting} onClick={() => { void restoreDocument(document.id) }} title="문서 복원"><Icon name="restore" size={14} />복원</button>}
+                  {mode === 'editor' && <button disabled={trashDeleting} onClick={() => { void restoreDocument(document.id) }} title={document.archivedAt ? '보관함으로 복원' : '문서 복원'}><Icon name="restore" size={14} />{document.archivedAt ? '보관함으로 복원' : '복원'}</button>}
                 </div>
               ))}
               {trashedDocuments.length === 0 && <div className="empty-map-list">휴지통이 비어 있습니다.</div>}
@@ -7433,13 +7678,13 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
           )}
           {mode === 'editor' && (
             <button className={`sidebar-trash ${trashOpen ? 'active' : ''}`} onClick={() => { setTrashOpen((current) => !current); setCreatingMap(false) }}>
-              <span><Icon name="trash" size={15} />휴지통</span><small>{trashedDocuments.length}</small>
+              <span><Icon name="trash" size={15} />휴지통</span><small>{lifecycleCounts?.trashed ?? (trashedDocuments.length || '—')}</small>
             </button>
           )}
           <button className="sidebar-trash" onClick={() => {
             if (!documentArchived && serverBaseline.current && !mapContentsEqual(createPersistedMapContent(nodesRef.current, edgesRef.current), serverBaseline.current)) { setSaveError('현재 문서의 변경이 저장된 뒤 문서 재구성을 열어 주세요.'); return }
             setLifecycleOpen(true)
-          }}><span><Icon name="folder" size={15} />보관함 · 문서 재구성</span><small>{archivedDocuments.length}</small></button>
+          }}><span><Icon name="folder" size={15} />보관함 · 문서 재구성</span><small>{lifecycleCounts?.archived ?? (archivedDocuments.length || '—')}</small></button>
           <div className="sidebar-footer">
             <span>현재 보기</span>
             <strong><span className={`access-dot ${mode}`} />{mode === 'editor' ? '편집 가능' : '읽기 전용'}</strong>
@@ -7497,9 +7742,8 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
           editable={accountMode === 'editor'}
           clientId={CLIENT_ID}
           onNavigate={(mapId, rootId) => {
-            setSelectedGroupId(null); setViewMode('mindmap'); setMobileSidebarOpen(false)
-            pendingSelection.current = rootId ?? null
-            setSelectedId(rootId ?? null); setActiveMapId(mapId)
+            setMobileSidebarOpen(false)
+            selectCardAndReveal(mapId, rootId ?? null)
           }}
           onLaunch={setAiConversationLaunch}
           onConversations={(target) => setAiConversationPicker({ mapId: target.mapId, cardId: target.cardId, cardTitle: target.cardTitle ?? '', launch: target })}
@@ -7920,7 +8164,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                   <button onClick={() => setSelectedId(null)} aria-label="닫기"><Icon name="close" size={17} /></button>
                 </div>
               </div>
-              <div className="inspector-content image-inspector-content">
+              <div ref={inspectorContentRef} className="inspector-content image-inspector-content">
                 <div className="image-inspector-preview">
                   <img
                     src={imageAssetUrl(activeMapId, selectedNode.data.image.assetId)}
@@ -8020,7 +8264,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                   <button onClick={() => setSelectedId(null)} aria-label="닫기"><Icon name="close" size={17} /></button>
                 </div>
               </div>
-              <div className="inspector-content dooray-knowledge-inspector-content">
+              <div ref={inspectorContentRef} className="inspector-content dooray-knowledge-inspector-content">
                 <div className="dooray-knowledge-origin">
                   <div className="dooray-knowledge-provider-row">
                     <span className="dooray-linked-icon" aria-hidden="true">D</span>
@@ -8174,7 +8418,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                   <button onClick={() => setSelectedId(null)} aria-label="닫기"><Icon name="close" size={17} /></button>
                 </div>
               </div>
-              <div className="inspector-content">
+              <div ref={inspectorContentRef} className="inspector-content">
                 {mode === 'editor' && !documentArchived && <AiDelegationRecovery
                   key={`${selectedCommentMapId}:${selectedCommentNodeId ?? selectedNode.id}`}
                   mapId={selectedCommentMapId} cardId={selectedCommentNodeId ?? selectedNode.id}
@@ -8383,7 +8627,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                   )}
                   {knowledgeError && <em>{knowledgeError}</em>}
                 </section>
-                <label>
+                {(selectedNode.data.isWork || selectedProgressRollup) && <label>
                   <span>상태</span>
                   <select
                     value={selectedProgress >= 100 ? 'done' : selectedStatus}
@@ -8402,7 +8646,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                     <option value="in-progress">진행 중</option>
                     <option value="done">완료</option>
                   </select>
-                </label>
+                </label>}
                 {(selectedNode.data.isWork || selectedProgressRollup) && (
                   <label className={`progress-field ${selectedProgressRollup ? 'automatic' : ''}`}>
                     <span>
@@ -8434,23 +8678,26 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                 <section className={`work-section ${selectedNode.data.isWork ? 'enabled' : ''}`}>
                   <div className="work-section-heading">
                     <div>
-                      <span>업무 관리</span>
+                      <span>카드 용도</span>
                       <small>{selectedNode.data.isWork
-                        ? '담당자와 실행 항목을 관리합니다.'
-                        : selectedHasWaitingItems
-                          ? '업무 관리와 별개로 등록된 대기 항목을 확인합니다.'
-                          : '이 노드를 실행 가능한 업무로 전환합니다.'}</small>
+                        ? '상태·진행률·담당자를 관리하는 업무입니다.'
+                        : selectedProgressRollup
+                          ? '자료 카드이며 하위 업무의 진행률은 자동 집계합니다.'
+                          : '자료·지식을 보관하며 업무 상태를 표시하지 않습니다.'}</small>
                     </div>
-                    <button
-                      type="button"
-                      className={`work-switch ${selectedNode.data.isWork ? 'on' : ''}`}
-                      onClick={() => updateNode(selectedNode.id, { isWork: !selectedNode.data.isWork })}
-                      disabled={selectedReferenceReadOnly}
-                      aria-label={selectedNode.data.isWork ? '업무 관리 해제' : '업무로 전환'}
-                      aria-pressed={Boolean(selectedNode.data.isWork)}
-                    >
-                      <span />
-                    </button>
+                    <div className="card-purpose-options" role="group" aria-label="카드 용도">
+                      {([{ label: '업무', isWork: true }, { label: '자료', isWork: false }]).map((option) => (
+                        <button
+                          key={option.label}
+                          type="button"
+                          onClick={() => updateNode(selectedNode.id, { isWork: option.isWork })}
+                          disabled={selectedReferenceReadOnly}
+                          aria-pressed={Boolean(selectedNode.data.isWork) === option.isWork}
+                        >
+                          {option.label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
 
                   {(selectedNode.data.isWork || selectedHasWaitingItems) && (
@@ -8871,13 +9118,26 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
           }}
           onOpenCard={(mapId, cardId) => {
             setDoorayMentionsOpen(false)
+            selectCardAndReveal(mapId, cardId)
+          }} />
+      )}
+      {globalSearchOpen && (
+        <GlobalSearchDialog
+          api={apiRequest}
+          documents={documents}
+          groups={documentLayout.groups}
+          assignees={assigneeUsers}
+          onClose={() => setGlobalSearchOpen(false)}
+          onNavigate={(mapId, cardId) => {
+            setGlobalSearchOpen(false)
             setSelectedGroupId(null)
             pendingSelection.current = cardId
             setViewMode('mindmap')
             setTrashOpen(false)
             if (mapId === activeMapId) setSelectedId(cardId)
             else setActiveMapId(mapId)
-          }} />
+          }}
+        />
       )}
       {sharedKnowledgeReviewOpen && mode === 'editor' && (
         <SharedKnowledgeReviewDialog
@@ -9182,25 +9442,32 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
           </button>
         </div>
       )}
-      {lifecycleOpen && <DocumentLifecycle api={apiRequest} editable={accountMode === 'editor'} documents={documents} initialIds={selectedGroup?.mapIds ?? (activeMapId ? [activeMapId] : [])} scope={lifecycleEntry.scope} initialTab={lifecycleEntry.initialTab} userId={user.id} members={teamMembers} launchInWebUi={aionUiWebNavigation.configured || !isLoopbackHostname(window.location.hostname)} onClose={() => { setLifecycleOpen(false); setLifecycleEntry({ initialTab: 'archive' }) }} onChanged={refreshLifecycleLibrary} onNavigate={(id, cardId) => { setLifecycleOpen(false); setLifecycleEntry({ initialTab: 'archive' }); setSelectedGroupId(null); pendingSelection.current = cardId ?? null; setSelectedId(cardId ?? null); setActiveMapId(id); setViewMode('mindmap') }} />}
+      {lifecycleOpen && <DocumentLifecycle api={apiRequest} editable={accountMode === 'editor'} documents={documents} initialIds={selectedGroup?.mapIds ?? (activeMapId ? [activeMapId] : [])} scope={lifecycleEntry.scope} initialTab={lifecycleEntry.initialTab} userId={user.id} members={teamMembers} launchInWebUi={aionUiWebNavigation.configured || !isLoopbackHostname(window.location.hostname)} onClose={() => { setLifecycleOpen(false); setLifecycleEntry({ initialTab: 'archive' }) }} onChanged={refreshLifecycleLibrary} onNavigate={(id, cardId) => { setLifecycleOpen(false); setLifecycleEntry({ initialTab: 'archive' }); selectCardAndReveal(id, cardId ?? null) }} />}
     </div>
   )
 }
 
 function App() {
-  const deepLink = parseWorkspaceDeepLink(window.location.pathname)
-  const groupId = parseGroupDeepLink(window.location.pathname)
+  const [deepLink] = useState(() => parseWorkspaceDeepLink(window.location.pathname))
+  const [groupId] = useState(() => parseGroupDeepLink(window.location.pathname))
   const deepLinkEntry = deepLink !== null || groupId !== null
   const [user, setUser] = useState<AuthUser | null>(null)
   const [checkingSession, setCheckingSession] = useState(true)
   const [publicViewerEnabled, setPublicViewerEnabled] = useState(false)
   const [theme, setTheme] = useState<UiTheme>(() => appliedUiTheme())
+  const [aiIndicatorMotion, setAiIndicatorMotion] = useState<AiIndicatorMotion>(() => initialAiIndicatorMotion())
 
   const toggleTheme = useCallback(() => {
     const nextTheme = theme === 'dark' ? 'light' : 'dark'
     applyUiTheme(nextTheme, true)
     setTheme(nextTheme)
   }, [theme])
+
+  const toggleAiIndicatorMotion = useCallback(() => {
+    const nextMotion = aiIndicatorMotion === 'always' ? 'system' : 'always'
+    applyAiIndicatorMotion(nextMotion, true)
+    setAiIndicatorMotion(nextMotion)
+  }, [aiIndicatorMotion])
 
   useEffect(() => {
     const synchronizeTheme = (event: StorageEvent) => {
@@ -9212,6 +9479,17 @@ function App() {
     }
     window.addEventListener('storage', synchronizeTheme)
     return () => window.removeEventListener('storage', synchronizeTheme)
+  }, [])
+
+  useEffect(() => {
+    const synchronizeAiIndicatorMotion = (event: StorageEvent) => {
+      if (event.key !== AI_INDICATOR_MOTION_STORAGE_KEY) return
+      const nextMotion = storedAiIndicatorMotion(event.newValue)
+      applyAiIndicatorMotion(nextMotion)
+      setAiIndicatorMotion(nextMotion)
+    }
+    window.addEventListener('storage', synchronizeAiIndicatorMotion)
+    return () => window.removeEventListener('storage', synchronizeAiIndicatorMotion)
   }, [])
 
   useEffect(() => {
@@ -9236,7 +9514,7 @@ function App() {
       await apiRequest('/api/auth/logout', { method: 'POST' })
     } finally {
       setUser(null)
-      if (deepLinkEntry) window.location.replace('/')
+      if (parseWorkspaceDeepLink(window.location.pathname) || parseGroupDeepLink(window.location.pathname)) window.location.replace('/')
     }
   }
 
@@ -9253,7 +9531,7 @@ function App() {
 
   return (
     <ReactFlowProvider>
-      <Workspace user={user} onLogout={() => { void logout() }} initialDeepLink={deepLink} initialGroupId={groupId} theme={theme} onToggleTheme={toggleTheme} />
+      <Workspace user={user} onLogout={() => { void logout() }} initialDeepLink={deepLink} initialGroupId={groupId} theme={theme} onToggleTheme={toggleTheme} aiIndicatorMotion={aiIndicatorMotion} onToggleAiIndicatorMotion={toggleAiIndicatorMotion} />
     </ReactFlowProvider>
   )
 }

@@ -6,7 +6,7 @@ import {
   sharedKnowledgeReviewState,
   sharedKnowledgeSha256,
 } from './sharedKnowledgeReview.mjs'
-import { sharedKnowledgeMaxLength } from '../../src/utils/sharedKnowledgePolicy.mjs'
+import { sharedKnowledgeAuthoringPolicy, sharedKnowledgeMaxLength } from '../../src/utils/sharedKnowledgePolicy.mjs'
 
 const maximumBatchSize = 20
 const maximumRelatedCardsPerType = 40
@@ -150,9 +150,14 @@ export function buildSharedKnowledgeReviewContext(map, cardId, { now = new Date(
         .map(([name]) => name),
     },
     guidance: {
-      keep: '후속 카드나 AI가 다시 사용해야 하는 현재의 확정 사실·결정·제약·검증 결과와 적용 조건만 유지합니다.',
-      remove: '시간순 진행 기록, 도구 호출과 원문 로그, 중복·폐기된 결론, description의 요구사항 단순 복사는 제외합니다.',
-      preserveMeaning: '근거 없이 내용을 추가하거나 사용자가 작성한 요구사항의 의미를 바꾸지 않습니다.',
+      purpose: sharedKnowledgeAuthoringPolicy.purpose,
+      keep: sharedKnowledgeAuthoringPolicy.keep.join(' / '),
+      remove: sharedKnowledgeAuthoringPolicy.exclude.join(' / '),
+      update: sharedKnowledgeAuthoringPolicy.update,
+      preserveMeaning: sharedKnowledgeAuthoringPolicy.preserve,
+      history: sharedKnowledgeAuthoringPolicy.history,
+      capacity: sharedKnowledgeAuthoringPolicy.capacity,
+      length: sharedKnowledgeAuthoringPolicy.length,
       resultChoice: `본문을 실제로 정리하면 cleaned, 길지만 모든 내용이 계속 필요하면 replacement 없이 accepted-long을 사용합니다. accepted-long은 ${acceptedLongReviewMaxAgeDays}일 뒤 다시 검토합니다.`,
     },
   }
