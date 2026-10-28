@@ -4473,7 +4473,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       })
     }
     // 팝업 차단을 피하려고 클릭 시점에 빈 탭을 먼저 열고, 서버가 만든 대화 주소로 바꾼다.
-    const openServerResolvedConversationTab = (linkedMapId: string, linkedCardId: string, failureMessage: string) => {
+    const openServerResolvedConversationTab = (linkedMapId: string, linkedCardId: string, failureMessage: string, fallbackUrl?: string) => {
       const aionUiTab = window.open('about:blank', '_blank')
       if (!aionUiTab) {
         window.alert('AionUi 대화 탭을 열지 못했습니다. 브라우저의 팝업 차단을 해제한 뒤 다시 시도해 주세요.')
@@ -4486,6 +4486,11 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         aionUiTab.location.replace(openUrl)
         aionUiTab.focus()
       }).catch((error) => {
+        if (fallbackUrl) {
+          aionUiTab.location.replace(fallbackUrl)
+          aionUiTab.focus()
+          return
+        }
         aionUiTab.close()
         window.alert(error instanceof Error ? error.message : failureMessage)
       })
@@ -4502,6 +4507,11 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     if (useWebUi) {
       try {
         const conversationUrl = aionUiConversationWebUrl(aionUiWebNavigation.baseUrl, conversationId)
+        // AionUi의 실제 WebUI 포트(dev 7777, release 25808)는 서버가 확인하므로 가능하면 서버 주소를 쓴다.
+        if (mapId && cardId) {
+          openServerResolvedConversationTab(mapId, cardId, 'AionUi 대화 주소를 확인하지 못했습니다.', conversationUrl)
+          return
+        }
         const aionUiTab = window.open(conversationUrl, '_blank')
         if (!aionUiTab) {
           window.alert('AionUi 대화 탭을 열지 못했습니다. 브라우저의 팝업 차단을 해제한 뒤 다시 시도해 주세요.')

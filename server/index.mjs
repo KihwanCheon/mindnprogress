@@ -171,6 +171,7 @@ import {
   parseMindNProgressCompletionToken,
 } from './lib/aionUiExternalLaunch.mjs'
 import { probeAionUiWebPorts, replaceUrlPort } from './lib/aionUiWebPortProbe.mjs'
+import { createAionUiWebBaseUrlResolver } from './lib/aionUiWebBaseUrlResolver.mjs'
 import { createAionUiLaunchTracking } from './lib/aionUiLaunchTracking.mjs'
 import {
   isLocalLoopbackRequest,
@@ -451,6 +452,7 @@ function resolveAionUiWebBaseUrl() {
 }
 
 const aionUiWebBaseUrl = resolveAionUiWebBaseUrl()
+const aionUiWebBaseUrlResolver = createAionUiWebBaseUrlResolver()
 
 function hashPassword(password, salt) {
   return scryptSync(password, salt, 64)
@@ -872,6 +874,11 @@ function aionUiWebBaseUrlForMachine(machineId) {
   return url.toString().replace(/\/+$/, '')
 }
 
+// 대화 링크에는 설정 포트 대신 그 머신의 AionUi가 실제로 응답하는 포트를 쓴다(dev 7777, release 25808).
+async function resolvedAionUiWebBaseUrlForMachine(machineId) {
+  return aionUiWebBaseUrlResolver.resolve(aionUiWebBaseUrlForMachine(machineId), { signal: runtimeLifecycle.signal })
+}
+
 // 'AI 대화 열기'가 쓰는 WebUI 주소에서 AionUi가 실제로 응답하는 포트를 확인한다.
 async function probeAionUiWebForMachine(machineId) {
   const configuredFromEnv = Boolean(configuredAionUiWebBaseUrl)
@@ -885,6 +892,7 @@ async function probeAionUiWebForMachine(machineId) {
   const isMainMachine = !machineId || machineId === machineRegistry.mainMachineId
   // loopback은 MnP와 같은 PC에서 실행 중인 메인 머신의 AionUi만 가리킨다.
   const result = await probeAionUiWebPorts(baseUrl, { checkLoopback: isMainMachine, signal: runtimeLifecycle.signal })
+  if (!runtimeLifecycle.signal.aborted) aionUiWebBaseUrlResolver.remember(baseUrl, result)
   const suggestedPort = result.status === 'port-mismatch'
     ? result.respondingPorts[0]
     : result.status === 'remote-access-disabled' && !result.loopbackRespondingPorts.includes(result.configuredPort)
@@ -8992,7 +9000,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
             method: 'POST',
             body: payload,
           })
-          const launchUrl = createAionUiWebLaunchUrl(aionUiWebBaseUrlForMachine(launch.homeMachineId), result?.launchId)
+          const launchUrl = createAionUiWebLaunchUrl(await resolvedAionUiWebBaseUrlForMachine(launch.homeMachineId), result?.launchId)
           const desktopLaunchUrl = createAionUiDesktopLaunchUrl(result?.launchId)
           console.log('[AionUi launch ticket issued]', JSON.stringify({ mapId: launch.mapId, cardId: launch.cardId, homeMachineId: launch.homeMachineId }))
           return {
@@ -11253,7 +11261,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           homeMachineId,
           homeMachineLabel: machineLabel(homeMachineId),
           homeMachineRole: homeMachineId === machineRegistry.mainMachineId ? 'main' : 'sub',
-          openUrl: createAionUiConversationWebUrl(aionUiWebBaseUrlForMachine(homeMachineId), conversationId),
+          openUrl: createAionUiConversationWebUrl(await resolvedAionUiWebBaseUrlForMachine(homeMachineId), conversationId),
         })
       } catch (error) {
         if (error instanceof SubMachinePayloadError) {

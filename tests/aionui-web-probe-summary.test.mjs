@@ -15,37 +15,33 @@ test('설정 포트가 응답하면 ok 한 줄만 보여 준다', () => {
   assert.equal(summary.hint, null)
 })
 
-test('메인 머신의 포트 불일치는 지정할 주소와 재시작을 안내한다', () => {
+test('포트가 달라도 대화는 응답 포트로 자동으로 열리므로 정상으로 표시하고 고정 방법만 안내한다', () => {
   const summary = aionUiWebProbeSummary({
     ...base, status: 'port-mismatch', respondingPorts: [25808], suggestedConfigUrl: 'http://10.0.0.5:25808',
   }, { isMainMachine: true })
-  assert.equal(summary.tone, 'fail')
-  assert.equal(summary.text, 'WebUI 설정 포트 7777 응답 없음 · 25808 포트에서 응답 (release)')
-  assert.match(summary.hint, /MNP_AIONUI_WEB_URL을 http:\/\/10\.0\.0\.5:25808로 지정한 뒤 MnP를 재시작/)
+  assert.equal(summary.tone, 'ok')
+  assert.equal(summary.text, 'WebUI 설정 포트 7777 응답 없음 · 25808 포트 자동 사용 (release)')
+  assert.match(summary.hint, /AI 대화 열기는 25808 포트로 자동으로 엽니다/)
+  assert.match(summary.hint, /포트를 고정하려면 MNP_AIONUI_WEB_URL을 http:\/\/10\.0\.0\.5:25808로 지정한 뒤 MnP를 재시작/)
   assert.match(summary.hint, /지금은 MNP_AIONUI_WEB_URL이 비어 있어 기본 7777 포트를 씁니다/)
 })
 
-test('서브 머신의 포트 불일치는 모든 머신이 같은 포트를 쓴다는 점을 알린다', () => {
+test('서브 머신은 머신마다 응답 포트를 따로 쓰므로 고정 안내를 하지 않는다', () => {
   const summary = aionUiWebProbeSummary({
     ...base, configuredFromEnv: true, configuredUrl: 'http://192.0.2.23:7777',
     status: 'port-mismatch', respondingPorts: [25808], suggestedConfigUrl: 'http://10.0.0.5:25808',
   }, { isMainMachine: false })
-  assert.match(summary.hint, /모든 머신이 같은 WebUI 포트를 씁니다/)
-  assert.match(summary.hint, /같은 모드\(dev\)로 실행/)
-  assert.doesNotMatch(summary.hint, /비어 있어/)
+  assert.equal(summary.tone, 'ok')
+  assert.equal(summary.hint, '이 머신의 AI 대화 열기는 25808 포트로 자동으로 엽니다.')
 })
 
-test('loopback에서만 응답하면 원격 접속 허용을 안내하고 포트가 다르면 주소도 안내한다', () => {
-  const same = aionUiWebProbeSummary({ ...base, status: 'remote-access-disabled', respondingPorts: [], loopbackRespondingPorts: [7777] }, { isMainMachine: true })
-  assert.equal(same.text, 'WebUI 원격 접속 꺼짐 · 이 PC의 7777 포트에서만 응답 (dev)')
-  assert.match(same.hint, /원격 접속 허용/)
-  assert.doesNotMatch(same.hint, /MNP_AIONUI_WEB_URL을/)
-
-  const other = aionUiWebProbeSummary({
+test('loopback에서만 응답하면 원격 접속 허용만 안내한다', () => {
+  const summary = aionUiWebProbeSummary({
     ...base, status: 'remote-access-disabled', respondingPorts: [], loopbackRespondingPorts: [25808], suggestedConfigUrl: 'http://10.0.0.5:25808',
   }, { isMainMachine: true })
-  assert.match(other.hint, /원격 접속 허용/)
-  assert.match(other.hint, /MNP_AIONUI_WEB_URL을 http:\/\/10\.0\.0\.5:25808로 지정/)
+  assert.equal(summary.tone, 'fail')
+  assert.equal(summary.text, 'WebUI 원격 접속 꺼짐 · 이 PC의 25808 포트에서만 응답 (release)')
+  assert.equal(summary.hint, 'AionUi 설정의 WebUI에서 원격 접속 허용을 켜세요. 켜면 AI 대화 열기가 응답 포트를 자동으로 찾습니다.')
 })
 
 test('어느 포트도 응답하지 않으면 확인한 포트와 WebUI 켜기를 안내한다', () => {
