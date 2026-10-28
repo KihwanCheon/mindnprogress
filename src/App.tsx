@@ -49,6 +49,7 @@ import { GlobalSearchDialog } from './components/GlobalSearchDialog'
 import { DashboardView, KanbanView, TimelineView } from './components/WorkViews'
 import type { AiConversationLink, AiConversationRuntime, AiDelegationCardStatus, ChecklistItem, KnowledgePolicy, MindDoorayLinkData, MindDoorayTaskData, MindDoorayWikiData, MindImageData, MindMapEdgeData, MindNodeData, MindWebLinkData, TeamMember, WaitingItem } from './types/mindMap'
 import { aiDelegationStatusByCard } from './utils/aiDelegationStatus.mjs'
+import { aionUiWebProbeSummary, type AionUiWebProbeResult } from './utils/aionUiWebProbeSummary.mjs'
 import { delegationHierarchyPathNodeIds, delegationPreviewEdgeState, delegationPreviewNodeRole, type AiDelegationSummary } from './utils/aiDelegationManagement.mjs'
 import { resolveAiConversationTarget, type AiConversationExplicitTarget } from './utils/aiConversationLaunch.mjs'
 import { claudeAccountMark, mostUsedClaudeUsageEntry } from './utils/claudeAccounts.mjs'
@@ -590,6 +591,7 @@ type MachineProbeResult = {
   conversationCount?: number | null
   reasonCode?: string | null
   error?: string
+  webUi?: AionUiWebProbeResult
 }
 
 type SubscriptionUsageWindow = {
@@ -2265,6 +2267,7 @@ function DistributedWorkDialog({ onClose }: { onClose: () => void }) {
               <ul>
                 {machines.map((machine) => {
                   const probe = probeResults[machine.machineId]
+                  const webUiSummary = aionUiWebProbeSummary(probe?.webUi, { isMainMachine: machine.role === 'main' })
                   return (
                     <li key={machine.machineId} className={machine.enabled ? '' : 'disabled'}>
                       <span className={`machine-role ${machine.role}`}>{machine.role === 'main' ? '메인' : '서브'}</span>
@@ -2290,6 +2293,12 @@ function DistributedWorkDialog({ onClose }: { onClose: () => void }) {
                               : `연결 실패${probe.reasonCode ? ` · ${probe.reasonCode}` : ''}`}
                           </small>
                         )}
+                        {webUiSummary && (
+                          <small className={`machine-probe ${webUiSummary.tone}`} title={probe?.webUi?.configuredUrl}>
+                            {webUiSummary.text}
+                          </small>
+                        )}
+                        {webUiSummary?.hint && <small className="machine-probe-hint">{webUiSummary.hint}</small>}
                       </span>
                       <span className="machine-actions">
                         {(machine.role === 'main' || machine.manageable) && (

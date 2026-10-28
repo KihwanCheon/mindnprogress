@@ -716,6 +716,7 @@
 .machine-probe { font-size: 7px; font-weight: 700; }
 .machine-probe.ok { color: #3f7a68; }
 .machine-probe.fail { color: #b94d4d; }
+.machine-probe-hint { color: #8c8592; font-size: 7px; line-height: 1.6; overflow-wrap: anywhere; }
 .distributed-work-token { display: flex; flex-direction: column; gap: 6px; margin-top: 9px; padding: 10px 11px; border: 1px solid #d5cef0; border-radius: 8px; background: #f7f5fd; }
 .distributed-work-token strong { color: #4a3fa8; font-size: 8px; }
 /* 복사 버튼이 막히는 환경에서도 한 번 클릭으로 전체를 선택해 복사할 수 있어야 한다. */

@@ -1114,6 +1114,10 @@
   color: #ff9ca2;
 }
 
+[data-theme="dark"] .machine-probe-hint {
+  color: var(--theme-text-muted);
+}
+
 [data-theme="dark"] .distributed-work-token {
   border-color: var(--theme-border-strong);
   background: var(--theme-surface-raised);

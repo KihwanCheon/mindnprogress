@@ -170,6 +170,7 @@ import {
   normalizeAionUiExternalLaunchPayload,
   parseMindNProgressCompletionToken,
 } from './lib/aionUiExternalLaunch.mjs'
+import { probeAionUiWebPorts, replaceUrlPort } from './lib/aionUiWebPortProbe.mjs'
 import { createAionUiLaunchTracking } from './lib/aionUiLaunchTracking.mjs'
 import {
   isLocalLoopbackRequest,
@@ -869,6 +870,32 @@ function aionUiWebBaseUrlForMachine(machineId) {
   const url = new URL(aionUiWebBaseUrl)
   url.hostname = observedAddress.includes(':') ? `[${observedAddress}]` : observedAddress
   return url.toString().replace(/\/+$/, '')
+}
+
+// 'AI 대화 열기'가 쓰는 WebUI 주소에서 AionUi가 실제로 응답하는 포트를 확인한다.
+async function probeAionUiWebForMachine(machineId) {
+  const configuredFromEnv = Boolean(configuredAionUiWebBaseUrl)
+  let baseUrl
+  try {
+    baseUrl = aionUiWebBaseUrlForMachine(machineId)
+  } catch (error) {
+    if (!(error instanceof SubMachinePayloadError)) throw error
+    return { status: 'address-unknown', error: error.message, configuredFromEnv, suggestedConfigUrl: null }
+  }
+  const isMainMachine = !machineId || machineId === machineRegistry.mainMachineId
+  // loopback은 MnP와 같은 PC에서 실행 중인 메인 머신의 AionUi만 가리킨다.
+  const result = await probeAionUiWebPorts(baseUrl, { checkLoopback: isMainMachine, signal: runtimeLifecycle.signal })
+  const suggestedPort = result.status === 'port-mismatch'
+    ? result.respondingPorts[0]
+    : result.status === 'remote-access-disabled' && !result.loopbackRespondingPorts.includes(result.configuredPort)
+      ? result.loopbackRespondingPorts[0]
+      : null
+  return {
+    ...result,
+    configuredFromEnv,
+    // 서브 머신도 메인 설정의 포트를 함께 쓰므로 제안 주소는 항상 메인 WebUI 주소 기준이다.
+    suggestedConfigUrl: suggestedPort ? replaceUrlPort(aionUiWebBaseUrl, suggestedPort) : null,
+  }
 }
 
 function isLoopbackClientAddress(value) {
@@ -11787,6 +11814,10 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
       }
 
       const startedAt = Date.now()
+      const webUiProbe = probeAionUiWebForMachine(machineId).catch((error) => ({
+        status: 'error',
+        error: error instanceof Error ? error.message : 'AionUi WebUI 포트를 확인하지 못했습니다.',
+      }))
       try {
         const snapshot = await fetchAionUiOn(machineId, '/api/internal/conversation-runtimes/active', { timeoutMs: 5_000 })
         return sendJson(response, 200, {
@@ -11794,8 +11825,11 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           reachable: true,
           elapsedMs: Date.now() - startedAt,
           conversationCount: Array.isArray(snapshot?.items) ? snapshot.items.length : null,
+          webUi: await webUiProbe,
         })
       } catch (error) {
+        // 종료 중이어도 WebUI 확인이 끝난 뒤 응답해, 요청 추적이 끝날 때 남은 fetch가 없게 한다.
+        const webUi = await webUiProbe
         throwIfRuntimeStopping(error, runtimeLifecycle.signal)
         return sendJson(response, 200, {
           machineId,
@@ -11803,6 +11837,7 @@ const server = createServer(runtimeLifecycle.request(async (request, response) =
           elapsedMs: Date.now() - startedAt,
           reasonCode: error instanceof MachineOperationError ? error.reasonCode : null,
           error: error instanceof Error ? error.message : 'AionUi에 연결하지 못했습니다.',
+          webUi,
         })
       }
     }
