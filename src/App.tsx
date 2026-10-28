@@ -4472,11 +4472,8 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         console.warn('[AI conversation attribution refresh]', error)
       })
     }
-    if (homeMachineRole === 'sub') {
-      if (!mapId || !cardId) {
-        window.alert('서브 머신 대화를 열려면 연결된 문서와 카드 정보가 필요합니다.')
-        return
-      }
+    // 팝업 차단을 피하려고 클릭 시점에 빈 탭을 먼저 열고, 서버가 만든 대화 주소로 바꾼다.
+    const openServerResolvedConversationTab = (linkedMapId: string, linkedCardId: string, failureMessage: string) => {
       const aionUiTab = window.open('about:blank', '_blank')
       if (!aionUiTab) {
         window.alert('AionUi 대화 탭을 열지 못했습니다. 브라우저의 팝업 차단을 해제한 뒤 다시 시도해 주세요.')
@@ -4484,14 +4481,21 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       }
       aionUiTab.opener = null
       void apiRequest<{ openUrl: string }>(
-        `/api/maps/${encodeURIComponent(mapId)}/cards/${encodeURIComponent(cardId)}/ai-conversations/${encodeURIComponent(conversationId)}/open-url`,
+        `/api/maps/${encodeURIComponent(linkedMapId)}/cards/${encodeURIComponent(linkedCardId)}/ai-conversations/${encodeURIComponent(conversationId)}/open-url`,
       ).then(({ openUrl }) => {
         aionUiTab.location.replace(openUrl)
         aionUiTab.focus()
       }).catch((error) => {
         aionUiTab.close()
-        window.alert(error instanceof Error ? error.message : '서브 머신의 AionUi 대화 주소를 확인하지 못했습니다.')
+        window.alert(error instanceof Error ? error.message : failureMessage)
       })
+    }
+    if (homeMachineRole === 'sub') {
+      if (!mapId || !cardId) {
+        window.alert('서브 머신 대화를 열려면 연결된 문서와 카드 정보가 필요합니다.')
+        return
+      }
+      openServerResolvedConversationTab(mapId, cardId, '서브 머신의 AionUi 대화 주소를 확인하지 못했습니다.')
       return
     }
     const useWebUi = aionUiWebNavigation.configured || !isLoopbackHostname(window.location.hostname)
