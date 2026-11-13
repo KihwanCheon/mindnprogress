@@ -30,7 +30,9 @@ test('일반·보관 휴지통 이동은 최신 외부 Ref 확인과 편집 권�
     MNP_API_HOST: '127.0.0.1', MNP_API_PORT: String(port), MNP_WEB_PORT: String(port), MNP_API_URL: base,
     MNP_ADMIN_PASSWORD: 'TestOnly!2026', MNP_ADMIN_EMAIL: 'reconstruction-test@mind.local',
     MNP_WORKSPACE_POOL_REGISTRY: path.join(directory, 'no-pool.json'), MNP_MCP_USAGE_DISABLED: '1', AIONUI_CONVERSATION_ID: '',
-    MNP_AIONUI_URL: `http://127.0.0.1:${fakeAion.address().port}`, MNP_AIONUI_DISCOVERY_FILE: path.join(directory, 'no-discovery.json') }
+    MNP_AIONUI_URL: `http://127.0.0.1:${fakeAion.address().port}`, MNP_AIONUI_DISCOVERY_FILE: path.join(directory, 'no-discovery.json'),
+    // 이 포크는 비로그인 공개 뷰어를 기본으로 끈다. 다른 뷰어 기반 API 테스트처럼 명시적으로 켠다.
+    MNP_PUBLIC_VIEWER_ENABLED: '1' }
   const child = spawn(process.execPath, ['server/index.mjs'], { cwd: root, env, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
   let stderr = ''
   child.stderr.on('data', (value) => { stderr += value })
