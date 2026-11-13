@@ -56,6 +56,7 @@ test('최신 61개 이름·input schema와 복구한 도구 설명 전문을 검
     assert.deepEqual(tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })), fixture)
     assert.equal(tools.length, 61)
     // 이 포크는 mindnprogress_delegate_ai_work에 선택 인자 role(하위 AI 역할·페르소나)을 더해 아래 해시와 설명 수가 업스트림과 다르다.
+    // 또 새 위임·그룹 지시 idempotencyKey에서 콜론을 뺐다(서브 머신 Runner가 실행 ID 경로의 콜론을 거부함).
     // 2026-11-09: tools/list에서 $schema와 정수 표현 한도(MAX_SAFE_INTEGER)만 뺀다(mcp/toolListSurface.mjs). 입력 검증은 그대로다.
     assert.ok(tools.every((tool) => !('$schema' in tool.inputSchema)) && !JSON.stringify(tools).includes(String(Number.MAX_SAFE_INTEGER)))
     // REQ-MNP-04: 기존 변경 도구의 requestId/resultOnly 호환 확장. 도구 개수는 유지한다.
@@ -74,10 +75,10 @@ test('최신 61개 이름·input schema와 복구한 도구 설명 전문을 검
     //   저장 도구 23개의 설명 꼬리말에서 resultOnly 속성 설명과 같은 문장을 뺐다(B1). 83,542자 → 79,258자.
     // 2026-11-10: 그룹 지시에 담당·보조 역할과 규칙 모델별 담당 자동 선택을 추가한다.
     // 2026-11-11: 중단된 통합 충돌 복구에 원본 해시를 지정하는 선택적 줄바꿈 보존·정리를 추가한다.
-    assert.equal(createHash('sha256').update(JSON.stringify(tools.map(({ name, inputSchema }) => ({ name, inputSchema })))).digest('hex'), 'b42407c2d6b880c4e65f64476a2503554600b956440d767bd9f7e8b0019d2055')
+    assert.equal(createHash('sha256').update(JSON.stringify(tools.map(({ name, inputSchema }) => ({ name, inputSchema })))).digest('hex'), 'ad273b6260049badd7c09912c1bfdd9d538e50759b60883a07de7d0b5504eddd')
     // 2026-11-11: 자동 루트 인계의 후속 대화가 보내는 acceptHandoff 인수 확인을 추가한다.
     const legacyTools = tools.filter((tool) => tool.name !== 'mindnprogress_start_card_conversation')
-    assert.equal(createHash('sha256').update(JSON.stringify(legacyTools.map(({ name, inputSchema }) => ({ name, inputSchema })))).digest('hex'), 'f94b5f7eb1f2554684f6ca2cee16f6789174959f69aee74cfbc9edaab06bab39')
+    assert.equal(createHash('sha256').update(JSON.stringify(legacyTools.map(({ name, inputSchema }) => ({ name, inputSchema })))).digest('hex'), '94501f07fd663e17c269ec84982f226f04df8b6cbe2331dbff80e5608256d99d')
     assert.equal(tools.reduce((sum, tool) => sum + countSchemaDescriptions(tool.inputSchema), 0), 239)
     const handoff = tools.find((tool) => tool.name === 'mindnprogress_start_card_conversation')
     assert.deepEqual(handoff.inputSchema.required, ['mapId', 'cardId', 'requestId'])
