@@ -34,3 +34,4 @@ MindNProgress_*.zip
 *.njsproj
 *.sln
 *.sw?
+.tmp/

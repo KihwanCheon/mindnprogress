@@ -43,17 +43,19 @@ window.fetch = async (url, init = {}) => {
   else if (url === '/api/integrations/aionui/attributions') body = {editorId:'fixture',attributionToken:'fixture',completionUrl:'http://fixture.invalid/completion',statusUrl:'/api/integrations/aionui/launches/'+ 'A'.repeat(43) +'/status',approvalRequest:a.approvalRequest};
   else if (url.endsWith('/status')) {
     if (a.statusHttp) return new Response(JSON.stringify({error:'시작 상태 조회 실패'}),{status:a.statusHttp});
-    body = {status:a.launchStatus || 'completed',conversationId:a.launchStatus ? null : 'fixture-conversation',launchUrl:'about:blank',error:a.confirmationError || ''};
+    body = {status:a.launchStatus || 'completed',conversationId:a.launchStatus ? null : 'fixture-conversation',launchUrl:'about:blank',error:a.confirmationError || '',createdConversationId:a.createdConversationId,canRetry:a.canRetry};
   }
+  else if (url.endsWith('/confirm')) { a.launchStatus=null; a.confirmationError=''; a.canRetry=false; body={conversationId:a.createdConversationId}; }
+  else if (url.includes('/response-approvals/') && url.includes('/confirmation?')) body={status:'completed',conversationId:'fixture-conversation'};
   else if (url === '/api/integrations/aionui/external-conversation-launches') body = {launchUrl:'about:blank'};
   else throw new Error('예상하지 않은 테스트 요청: '+url);
   return new Response(JSON.stringify(body),{headers:{'Content-Type':'application/json'}});
 };
 let sequence = 0;
 window.renderDialog = (input = {}, flags = {}) => {
-  Object.assign(window.audit,{calls:[],fail:false,hold:false,closed:0,launchStatus:null,statusHttp:0,confirmationError:'',approvalRequest:null,context:{map:{id:'map-coordinator',nodes:[{id:'root',data:{kind:'root'}},{id:'child',data:{kind:'task'}}],edges:[{source:'root',target:'child'}]},groupProject:{groupId:'group-manager',role:'coordinator',coordinatorMapId:'map-coordinator'}},...flags});
+  Object.assign(window.audit,{calls:[],fail:false,hold:false,closed:0,launchStatus:null,statusHttp:0,confirmationError:'',createdConversationId:null,canRetry:false,approvalRequest:null,context:{map:{id:'map-coordinator',nodes:[{id:'root',data:{kind:'root'}},{id:'child',data:{kind:'task'}}],edges:[{source:'root',target:'child'}]},groupProject:{groupId:'group-manager',role:'coordinator',coordinatorMapId:'map-coordinator'}},...flags});
   window.audit.userId = input.userId || 'fixture';
-  flushSync(()=>root.render(React.createElement(AiConversationDialog,{key:++sequence,userId:'fixture',documentId:'map-coordinator',documentTitle:'총괄 문서',cardId:'root',cardTitle:'총괄 루트',purpose:'card',knowledgeSources:[],launchInWebUi:true,onClose:()=>window.audit.closed++,...input})));
+  flushSync(()=>root.render(React.createElement(AiConversationDialog,{key:++sequence,userId:'fixture',documentId:'map-coordinator',documentTitle:'총괄 문서',cardId:'root',cardTitle:'총괄 루트',purpose:'card',knowledgeSources:[],launchInWebUi:true,onClose:()=>window.audit.closed++,delegationSettingAvailable:true,...input})));
 };
 window.fixtureReady = true;
 `
@@ -152,6 +154,14 @@ test('실제 대화 팝업의 총괄 전문·선택적 위임 모델·전달 목
     }
     const chooseDelegation = (index, value) => choose(`.ai-delegation-model-section .ai-dialog-grid label:nth-child(${index + 1}) select`, value)
     const delegationValues = () => evaluate('[...document.querySelectorAll(".ai-delegation-model-section select")].map(el=>el.value)')
+    const toggleDelegation = () => evaluate('document.querySelector(".ai-delegation-model-section").open=true;document.querySelector(".ai-delegation-enabled-toggle input").click()')
+    const delegationEnabled = () => evaluate('document.querySelector(".ai-delegation-enabled-toggle input").checked')
+    const assertDisabledDelegation = async () => {
+      assert.equal(await delegationEnabled(), false)
+      assert.deepEqual(await delegationValues(), [])
+      assert.equal(await evaluate('document.querySelector(".ai-delegation-narrative-toggle, .ai-delegation-narrative textarea")'), null)
+      assert.equal(await evaluate('document.querySelector(".ai-delegation-model-section .ai-section-selection").textContent'), '미사용')
+    }
     const toggleNarrative = () => evaluate('document.querySelector(".ai-delegation-model-section").open=true;document.querySelector(".ai-delegation-narrative-toggle input").click()')
     const enterNarrative = value => evaluate(`(() => {
       const input = document.querySelector('.ai-delegation-narrative textarea');
@@ -161,9 +171,11 @@ test('실제 대화 팝업의 총괄 전문·선택적 위임 모델·전달 목
     await open()
     assert.equal(await evaluate('document.querySelector(".ai-delegation-model-section").open'), false)
     assert.equal(await evaluate('document.querySelector(".ai-delegation-restore")'), null, '마지막 선택값 적용 버튼을 제거한다')
-    assert.equal(await evaluate('document.querySelector(".ai-delegation-narrative-toggle input").checked'), false)
+    await assertDisabledDelegation()
     assert.equal(await preview(), expected)
     await evaluate('document.querySelector(".ai-delegation-model-section summary").click()')
+    await toggleDelegation()
+    assert.equal(await evaluate('document.querySelector(".ai-delegation-narrative-toggle input").checked'), false)
     assert.deepEqual(await evaluate('[...document.querySelectorAll(".ai-delegation-model-section select")].map(el=>el.value)'), ['', '', '', ''])
     await chooseDelegation(0, 'claude')
     await waitFor(async () => (await preview()).includes('AI 종류 `Claude Code`'))
@@ -207,6 +219,23 @@ test('실제 대화 팝업의 총괄 전문·선택적 위임 모델·전달 목
     assert.equal(await preview(), DEFAULT_AI_EDITOR_REQUEST + '\n\n' + instruction, '다시 열면 마지막 설정을 자동 적용한다')
     assert.equal(await evaluate('window.audit.calls.some(c=>c.method==="POST")'), false, '자동 복원은 대화나 위임을 실행하지 않는다')
 
+    // 2026-11-09: 앱 기본값은 위임 설정 미사용 고정이다(서버 위임 규칙으로 일원화). 저장된 사용 설정이 있어도 전달·변경하지 않고 저장값은 남긴다.
+    await open({ cardId: 'child', delegationSettingAvailable: false })
+    assert.equal(await delegationEnabled(), false)
+    assert.equal(await evaluate('document.querySelector(".ai-delegation-enabled-toggle input").disabled'), true)
+    assert.equal(await evaluate('document.querySelector(".ai-delegation-model-section .ai-section-selection").textContent'), '미사용 · 계정 메뉴의 AI 위임 규칙 적용')
+    assert.deepEqual(await delegationValues(), [])
+    assert.match(await evaluate('document.querySelector(".ai-delegation-model-notice").textContent'), /계정 메뉴의 「AI 위임 규칙」/)
+    assert.equal(await preview(), DEFAULT_AI_EDITOR_REQUEST, '미사용 고정이면 저장된 위임 설정을 전달하지 않는다')
+    await evaluate('document.querySelector(".ai-delegation-model-section").open=true;document.querySelector(".ai-delegation-model-section").scrollIntoView({block:"center"})')
+    const offShot = await send('Page.captureScreenshot', { format: 'png' })
+    await writeFile(path.join(tmpdir(), 'mnp-delegation-model-off.png'), Buffer.from(offShot.data, 'base64'))
+    await evaluate('document.querySelector(".ai-dialog footer .primary").click()')
+    await waitFor(() => evaluate('window.audit.closed === 1'))
+    assert.ok((await evaluate('window.audit.calls.find(c=>c.url.endsWith("/external-conversation-launches")).body.prompt')).endsWith(DEFAULT_AI_EDITOR_REQUEST))
+    await open({ cardId: 'child' })
+    assert.deepEqual(await delegationValues(), ['claude', 'opus', 'accept-edits', 'high'], '미사용 고정 동안 저장값을 지우지 않는다')
+
     await evaluate('window.fixtureReady=false')
     await send('Page.reload')
     await waitFor(() => evaluate('window.fixtureReady'))
@@ -214,9 +243,27 @@ test('실제 대화 팝업의 총괄 전문·선택적 위임 모델·전달 목
     assert.equal(await preview(), DEFAULT_AI_EDITOR_REQUEST + '\n\n' + instruction, '페이지 새로고침 후에도 자동 복원한다')
     assert.deepEqual(await delegationValues(), ['claude', 'opus', 'accept-edits', 'high'], '브라우저 저장값을 다시 읽는다')
 
+    await toggleDelegation()
+    await assertDisabledDelegation()
+    assert.equal(await preview(), DEFAULT_AI_EDITOR_REQUEST, '선택형 값이 남아 있어도 미사용이면 전달하지 않는다')
+    await open({ cardId: 'child' })
+    await assertDisabledDelegation()
+    await evaluate('window.fixtureReady=false')
+    await send('Page.reload')
+    await waitFor(() => evaluate('window.fixtureReady'))
+    await open({ cardId: 'child' })
+    await assertDisabledDelegation()
+    await evaluate('document.querySelector(".ai-dialog footer .primary").click()')
+    await waitFor(() => evaluate('window.audit.closed === 1'))
+    const disabledPosts = await evaluate('window.audit.calls.filter(c=>c.method === "POST")')
+    assert.ok(disabledPosts.find(c=>c.url.endsWith('/external-conversation-launches')).body.prompt.endsWith(DEFAULT_AI_EDITOR_REQUEST))
+    assert.equal(disabledPosts.find(c=>c.url.endsWith('/attributions')).body.requestPreview, DEFAULT_AI_EDITOR_REQUEST)
+    await open({ cardId: 'child' })
+    await toggleDelegation()
+    assert.deepEqual(await delegationValues(), ['claude', 'opus', 'accept-edits', 'high'], '재사용 시 이전 입력을 복원한다')
+
     await open({ userId: 'other-account', cardId: 'child' })
-    assert.deepEqual(await delegationValues(), ['', '', '', ''], '다른 계정의 저장 설정을 불러오지 않는다')
-    assert.equal(await evaluate('document.querySelector(".ai-delegation-narrative-toggle input").checked'), false)
+    await assertDisabledDelegation()
     await evaluate('window.fixtureOptions.agents[1].models=[{id:"sonnet",label:"Sonnet"}]')
     await open({ cardId: 'child' })
     assert.deepEqual(await delegationValues(), ['claude', '', 'accept-edits', 'high'], '없어진 모델은 기본 모델로 바꾸지 않는다')
@@ -238,6 +285,17 @@ test('실제 대화 팝업의 총괄 전문·선택적 위임 모델·전달 목
     assert.deepEqual(await delegationValues(), [])
     await enterNarrative(narrativeText)
     assert.equal(await preview(), DEFAULT_AI_EDITOR_REQUEST + '\n\n' + narrativeInstruction)
+    await toggleDelegation()
+    await assertDisabledDelegation()
+    await open({ cardId: 'child' })
+    await assertDisabledDelegation()
+    assert.equal(await preview(), DEFAULT_AI_EDITOR_REQUEST, '미사용 서술형은 자동 적용 내용에서 제외한다')
+    await evaluate('document.querySelector(".ai-dialog footer .primary").click()')
+    await waitFor(() => evaluate('window.audit.closed === 1'))
+    assert.ok((await evaluate('window.audit.calls.find(c=>c.url.endsWith("/external-conversation-launches")).body.prompt')).endsWith(DEFAULT_AI_EDITOR_REQUEST))
+    await open({ cardId: 'child' })
+    await toggleDelegation()
+    assert.equal(await evaluate('document.querySelector(".ai-delegation-narrative textarea").value'), narrativeText, '재사용 시 서술형 원문과 방식도 복원한다')
     await open({ cardId: 'child' })
     assert.equal(await evaluate('document.querySelector(".ai-delegation-narrative-toggle input").checked'), true)
     assert.equal(await evaluate('document.querySelector(".ai-delegation-narrative textarea").value'), narrativeText)
@@ -286,6 +344,8 @@ test('실제 대화 팝업의 총괄 전문·선택적 위임 모델·전달 목
     await choose('.ai-machine-select select', 'sub')
     await waitFor(() => evaluate('Boolean(document.querySelector(".ai-auto-request textarea")) && document.querySelector(".ai-machine-select select").value === "sub"'))
     assert.equal(await preview(), DEFAULT_AI_EDITOR_REQUEST, '머신 변경 시 이전 머신 위임 설정을 전달하지 않는다')
+    await assertDisabledDelegation()
+    await toggleDelegation()
     assert.equal(await evaluate('document.querySelector(".ai-delegation-narrative-toggle input").checked'), false)
     await chooseDelegation(0, 'test')
     await toggleNarrative()
@@ -325,6 +385,7 @@ test('실제 대화 팝업의 총괄 전문·선택적 위임 모델·전달 목
     assert.equal(await evaluate('window.audit.closed'), 0, 'ticket 발급만으로 팝업을 닫지 않는다')
     assert.equal(await evaluate('window.audit.calls.filter(c=>c.url.endsWith("/external-conversation-launches")).length'), 1)
     assert.equal(await evaluate('document.querySelector(".ai-workspace-input input").matches(":disabled")'), true)
+    assert.equal(await evaluate('document.querySelector(".ai-delegation-enabled-toggle input").matches(":disabled")'), true, '시작 확인 중에는 사용 여부도 변경할 수 없다')
     assert.equal(await evaluate('document.querySelector(".ai-delegation-narrative-toggle input").matches(":disabled")'), true, '시작 확인 중에는 서술형 전환으로 요청을 변경할 수 없다')
     for (const [width, height] of [[1440, 900], [900, 480], [390, 640]]) {
       await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false })
@@ -353,7 +414,13 @@ test('실제 대화 팝업의 총괄 전문·선택적 위임 모델·전달 목
     await evaluate('window.audit.statusHttp=0;window.audit.launchStatus="confirmation-failed";window.audit.confirmationError="작업공간 연결 검증 실패";Array.from(document.querySelectorAll("button")).find(b=>b.textContent==="상태 다시 확인").click()')
     await waitFor(() => evaluate('document.querySelector(".ai-launch-error")?.textContent.includes("작업공간 연결 검증 실패")'))
     assert.equal(await evaluate('window.audit.closed'), 0)
-    await evaluate('window.audit.launchStatus=null;window.audit.confirmationError="";Array.from(document.querySelectorAll("button")).find(b=>b.textContent==="상태 다시 확인").click()')
+    await evaluate('window.audit.createdConversationId="fixture-conversation";window.audit.canRetry=true;Array.from(document.querySelectorAll("button")).find(b=>b.textContent==="상태 다시 확인").click()')
+    await waitFor(() => evaluate('document.querySelector(".ai-launch-confirmation strong")?.textContent==="대화 연결 확인 중…"'))
+    const repairScreenshot = await send('Page.captureScreenshot', { format: 'png' })
+    const repairScreenshotPath = path.join(tmpdir(), `mnp-approval-repair-${Date.now()}.png`)
+    await writeFile(repairScreenshotPath, Buffer.from(repairScreenshot.data, 'base64'))
+    console.log(`승인 연결 재확인 UI: ${repairScreenshotPath}`)
+    await evaluate('Array.from(document.querySelectorAll("button")).find(b=>b.textContent==="기존 대화 연결 다시 확인").click()')
     await waitFor(() => evaluate('window.audit.closed === 1'))
     assert.equal(await evaluate('Object.keys(sessionStorage).some(k=>k.startsWith("mindnprogress-ai-launch:"))'), false)
 
@@ -367,6 +434,14 @@ test('실제 대화 팝업의 총괄 전문·선택적 위임 모델·전달 목
     await evaluate('window.confirm=()=>true;Array.from(document.querySelectorAll("button")).find(b=>b.textContent==="대화 목록 확인 후 새로 준비").click()')
     await waitFor(() => evaluate('!document.querySelector(".ai-launch-confirmation")'))
     assert.equal(await evaluate('window.audit.calls.filter(c=>c.url.endsWith("/external-conversation-launches")).length'), 1, '초기화는 자동 재시작하지 않는다')
+
+    await open({ purpose: 'dooray-response', doorayApproval: { responseId: 'repair-approval', proposalRevision: 'a'.repeat(64) } }, { launchStatus: 'pending', approvalRequest: '저장된 승인 전문' })
+    await evaluate('document.querySelector(".ai-dialog footer .primary").click()')
+    await waitFor(() => evaluate('Boolean(document.querySelector(".ai-launch-confirmation")) && !document.querySelector(".ai-dialog header button").disabled'))
+    await evaluate('window.audit.statusHttp=404;Array.from(document.querySelectorAll("button")).find(b=>b.textContent==="상태 다시 확인").click()')
+    await waitFor(() => evaluate('window.audit.closed===1'))
+    assert.equal(await evaluate('window.audit.calls.filter(c=>c.url.includes("/confirmation?")).length'), 1)
+    assert.equal(await evaluate('window.audit.calls.filter(c=>c.url.endsWith("/external-conversation-launches")).length'), 1, '만료 후 실제 승인 연결 조회도 새 대화를 만들지 않는다')
 
     await evaluate('localStorage.removeItem("mindnprogress-ai-delegation-runtime:fixture:fixture");window.renderDialog({}, {hold:true})')
     await waitFor(() => evaluate('document.querySelector(".ai-dialog [role=status]")?.textContent.includes("대화 역할")'))

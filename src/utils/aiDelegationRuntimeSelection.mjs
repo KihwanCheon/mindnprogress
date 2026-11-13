@@ -1,3 +1,6 @@
+// 2026-11-09 사용자 결정: 하위 위임의 AI 설정은 계정 메뉴 「AI 위임 규칙」(서버 규칙)으로 일원화했다.
+// 대화 시작 화면의 위임 설정은 코드와 저장값을 남긴 채 사용하지 않는다(미사용 고정). true로 바꾸면 다시 쓸 수 있다.
+export const AI_DELEGATION_DIALOG_SETTING_AVAILABLE = false
 const storagePrefix = 'mindnprogress-ai-delegation-runtime:'
 const optionalFields = ['modelId', 'mode', 'thoughtLevel']
 export const AI_DELEGATION_NARRATIVE_MAX_LENGTH = 4_000
@@ -14,6 +17,7 @@ function storageKey(userId, machineId) {
 
 export function normalizeAiDelegationPreferences(value) {
   return {
+    enabled: value?.enabled === true,
     selection: normalizeAiDelegationRuntime(value?.selection),
     narrativeMode: value?.narrativeMode === true,
     narrativeText: typeof value?.narrativeText === 'string' && value.narrativeText.length <= AI_DELEGATION_NARRATIVE_MAX_LENGTH ? value.narrativeText : '',
@@ -25,9 +29,12 @@ export function readAiDelegationPreferences(userId, machineId, storage) {
   if (!key) return null
   try {
     const saved = JSON.parse((storage ?? globalThis.localStorage).getItem(key) ?? 'null')
-    if (saved?.version !== 1 && saved?.version !== 2) return null
+    if (![1, 2, 3].includes(saved?.version)) return null
     // 이전 선택형 설정도 자동 복원하되 읽기만으로 저장 원본을 덮어쓰지 않는다.
-    return normalizeAiDelegationPreferences(saved.version === 1 ? { selection: saved.selection } : saved)
+    const value = normalizeAiDelegationPreferences(saved.version === 1 ? { selection: saved.selection } : saved)
+    // 사용 여부가 없던 버전은 실제 전달하던 설정이 있을 때만 사용 상태로 복원한다.
+    if (saved.version < 3) value.enabled = value.narrativeMode ? Boolean(value.narrativeText.trim()) : Boolean(value.selection.agentId)
+    return value
   } catch {
     return null
   }
@@ -38,7 +45,7 @@ export function saveAiDelegationPreferences(userId, machineId, value, storage) {
   if (!key) return false
   try {
     // 사용자 조작에서만 저장한다. 명시적으로 비운 값도 다음 진입에서 그대로 복원한다.
-    (storage ?? globalThis.localStorage).setItem(key, JSON.stringify({ version: 2, ...normalizeAiDelegationPreferences(value) }))
+    (storage ?? globalThis.localStorage).setItem(key, JSON.stringify({ version: 3, ...normalizeAiDelegationPreferences(value) }))
     return true
   } catch {
     // 저장이 불가능해도 현재 팝업의 선택과 대화 시작은 유지한다.

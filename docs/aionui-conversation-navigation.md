@@ -4,6 +4,62 @@ AionUi 백엔드는 현재 대화가 MindNProgress 카드에 연결되어 있는
 
 브라우저에 MindNProgress 연동 토큰을 노출하지 않도록 두 API는 AionUi 백엔드에서 호출한다.
 
+## 카드의 담당 대화 선택
+
+「AI 대화 선택」 목록의 담당 체크박스는 카드당 하나만 선택할 수 있으며 체크 변경 즉시 저장된다. 기존 카드의 초기 담당은 가장 최신 대화다. 다른 대화를 열거나 새 보조 대화를 연결해도 선택은 유지한다.
+
+`PUT /api/maps/{mapId}/cards/{cardId}/ai-conversations/primary`는 로그인한 편집자가 사용한다. `conversationId`와 현재 선택인 `expectedPrimaryConversationId`를 보내며, 다른 곳에서 선택이 바뀌었으면 409로 응답한다. 연결된 대화와 머신 접근 권한을 검증하고 `aiPrimaryConversationId`만 변경한다. 이 API는 Aion 대화를 실행하거나 조회하지 않는다. 카드 대화 목록 응답의 `primaryConversationId`로 선택을 확인할 수 있다.
+
+하위 카드 또는 동일 CLI 안의 모델 변경은 규칙 모델에 맞는 최신 연결 대화를 담당으로 지정하고, 없으면 새로 만든다. 루트 카드의 CLI가 바뀌면 기존 담당의 인계문 작성과 후속 대화의 인수 확인을 거쳐 전환한다. 하위 위임의 담당 저장은 실행 확인 후 이루어진다. 자세한 전환·예외·대기 동작은 [AI 위임 규칙](ai-delegation-policy.md)의 담당 대화 항목을 따른다.
+
+## 자기 카드의 후속 대화 시작
+
+`mindnprogress_start_card_conversation`은 사용자가 요청한 인계를 위해 현재 대화의 원본 카드에 후속 대화를 만든다. 그룹 총괄 루트도 사용할 수 있으며, 하위 카드 위임이나 worker 배정을 수행하지 않는다. 현재 대화와 같은 실행 머신만 지원한다.
+
+서버 경로는 `POST /api/maps/{mapId}/cards/{cardId}/ai-conversation-starts`다. 호출 대화의 원본 카드·시작 편집자·머신 접근 권한을 확인한다. 보관·휴지통 문서, Ref·이미지 카드, 진행 중인 위임·그룹 지시·작업공간 복구가 있는 경우에는 새 인계를 시작하지 않는다. 호출하는 현재 대화의 실행 중 상태 자체는 차단 조건이 아니다.
+
+최초 호출에는 `requestId`, `predecessorConversationId`, `newConversation`, `initialMessage`, `decisionReason`, `approvalEvidence`가 필요하다. `newConversation`은 그룹 문서 지시와 같은 형식으로 `agentId`, `modelId`, 선택적인 `modeId`, `thoughtLevelId`, `enabledSkillIds`, `disabledBuiltinSkillIds`, `mcpIds`, `workspace`를 받는다. 생략한 선택 항목은 이전 대화 설정을 상속하고 필수 MnP MCP를 포함한다.
+
+Claude는 선택적인 `claudeAccountId`로 새 대화의 계정을 고를 수 있다. 값은 `list_ai_conversations`가 반환하는 `claudeAccount.id`와 같다. 생략하면 이 도구를 호출한 현재 대화와 같은 계정을 쓴다. AionUi가 반환한 현재 대화의 실제 계정을 우선하며, 값이 없으면 기본 계정이다. AionUi에서 그 대화를 확인하지 못하면 MnP 연결 기록, 그다음 기본 계정을 쓴다. 수동 인계에는 위임용 계정 정책을 적용하지 않는다. 서버 규칙에 따른 루트 CLI 전환은 서버가 확정한 후속 계정을 사용한다. 새 대화의 AI 종류에서 고를 수 없는 계정을 지정하면 `CARD_CONVERSATION_START_CLAUDE_ACCOUNT_INVALID`로 생성 전에 거절한다. 확정한 계정은 `requestedConfig.claudeAccountId`·`claudeAccount`로 반환한다.
+
+상속할 기본 외 계정이 목록에 없거나 목록 조회가 불완전하면 기본 계정으로 바꾸지 않고 같은 코드로 거절한다. 단일 계정 환경에서도 `claudeAccountId: "default"`는 허용한다. 기존 대화의 MCP 서버가 이전 스키마를 사용 중이면 새 계정 인자가 누락될 수 있으므로, 적용 시 MnP 서버 재시작과 함께 해당 대화의 MnP MCP도 재연결해야 한다.
+
+`initialMessage`에는 파일 경로 대신 파일에서 읽은 원문을 전달한다. 원문 앞에 작성자 귀속과 `get_context` 안내를 붙이며, 원문의 공백·줄바꿈은 보존한다. 입력 10만 자 또는 안내 포함 256 KiB를 넘으면 원문을 자르지 않고 거절한다. 응답에는 원문의 길이와 SHA-256만 반환하고 본문·귀속 토큰은 노출하지 않는다.
+
+요청은 `_card-conversation-starts.json`에 저장하며, 원격 호출은 문서 잠금 밖에서 수행한다. 같은 `requestId`에 다른 본문을 전달하면 거절한다. 동일 요청의 결과 조회와 미완료 단계 복구에는 다음 인자만 사용한다.
+
+```json
+{
+  "mapId": "map-example",
+  "cardId": "root-example",
+  "requestId": "handoff:example:1",
+  "resultOnly": true
+}
+```
+
+처리 상태는 다음과 같다.
+
+| 상태 | 의미 |
+|---|---|
+| `reserved`, `prepared`, `dispatching` | 요청 저장, 실행 환경 준비 또는 생성·전달 요청 중 |
+| `observing` | 대화 생성 후 첫 실행 또는 요청한 실제 설정과의 일치를 확인 중 |
+| `awaiting-acceptance` | 자동 루트 인계에서 후속 대화의 명시적 인수 확인을 기다리는 상태 |
+| `ready` | 대표 연결과 런타임이 반환한 필수 설정값을 확인함. AI 작업 완료를 뜻하지 않음 |
+| `recovery-required` | 원격 결과 또는 연결을 확정하지 못함. 같은 요청을 조회하여 복구 |
+| `failed` | MnP 검증 또는 Core의 생성 전 검사에서 거절됨. 사유를 해결한 뒤 새 요청 필요 |
+
+`ready`는 첫 메시지 실행과 실제 설정 일치, 대표 연결을 확인한 상태다. 생성·실행 관찰은 `observing`, 자동 루트 인수 확인 대기는 `awaiting-acceptance`로 표시한다. `starting` 또는 스냅샷만으로 담당을 전환하지 않는다. 자동 루트 인계의 후속 대화는 인계문·최신 문맥 확인 뒤 같은 도구에 `resultOnly=true, acceptHandoff=true`를 보내야 한다. 이전 대화는 인수 확인을 대신할 수 없다.
+
+AionCore가 반환하는 `starting`만으로는 대표 연결을 바꾸지 않는다. `running` 또는 `completed`와 `turnId`를 확인한 뒤 요청한 실제 설정 일치와 필요한 인수 확인을 마치고, 현재 대표가 이전 대화와 같은지 다시 검사한다. 다른 대화가 대표가 됐다면 덮어쓰지 않는다. 새 대화의 연결 이력과 이전 대화는 보존한다.
+
+생성 요청 이후 응답이 유실되거나 서버가 재시작돼도 같은 `operationId`를 조회한다. 원격 처리 결과 자체를 찾을 수 없다면 임의로 다시 생성하지 않고 `recovery-required`를 유지한다. 카드 연결 저장만 실패한 경우에는 이미 생성된 대화의 연결 단계만 복구한다. 수동 인계의 자동 확인은 최초 접수 후 10분까지이며, 이후에도 같은 요청의 명시적 조회로 복구할 수 있다. 자동 루트 인계는 연결된 그룹 지시가 대기 중인 동안 같은 요청을 계속 확인한다.
+
+`requestedConfig`는 확정한 요청 설정이고 `runtimeConfig`는 AionCore의 조회 결과다. 모델은 정규화된 ID, 모드와 사고 강도는 요청한 값을 대조하며 모든 필드의 `source=runtime`이어야 담당을 전환한다. `snapshot`·`unavailable` 또는 값 불일치는 `CARD_CONVERSATION_START_RUNTIME_UNCONFIRMED`로 남기고 기존 담당을 유지한다.
+
+자동 루트 인수 확인의 `acceptHandoff` 인자를 사용하려면 기존 대화의 MnP MCP를 재연결해 최신 도구 정의를 읽혀야 한다. MnP 서버도 최신 코드로 재시작해야 하며, 이 변경을 위한 AionCore 재빌드는 필요하지 않다.
+
+기존 대화를 중지하거나 외부 총괄의 회신 주소를 변경하지 않는다. 인계 요청 기록도 해당 문서를 영구 삭제할 때 함께 정리한다. 운영 로그에는 요청·문서·카드·대화 ID와 상태만 남긴다.
+
 ## 서브 머신 Runner 중계
 
 서브 머신의 AionCore는 로컬 MnP를 사용할 수 없으면 AionUi Runner의 로컬 중계 정보를 읽어 같은 조회·선택 API를 호출한다. Runner는 로컬 전용 토큰을 검증하고 메인 MnP로 보낼 때만 머신 토큰을 사용한다. 브라우저와 AionCore에는 머신 토큰을 전달하지 않는다.
@@ -55,10 +111,14 @@ GET /api/integrations/aionui/conversations/{conversationId}/mindnprogress
   "exists": true,
   "target": {
     "mapId": "map-123",
-    "documentTitle": "총괄 문서",
+    "documentTitle": "개발 문서",
     "cardId": "card-456",
     "cardTitle": "연결 기능",
-    "archived": false
+    "archived": false,
+    "titlePrefix": "[상위] ",
+    "cardRole": "document-root",
+    "conversationRole": "primary",
+    "primaryConversationId": "2b31432e"
   },
   "selectionAvailable": true,
   "matchingViewCount": 1,
@@ -69,6 +129,35 @@ GET /api/integrations/aionui/conversations/{conversationId}/mindnprogress
 ```
 
 `target.titlePrefix`는 최신 문서 계층으로 판정한 대화 역할의 접두어다. 그룹 총괄 루트는 `[그룹 총괄] `, 일반 문서의 최상위 원본 카드는 `[상위] `, 하위 카드와 참조 카드는 빈 문자열을 반환한다. 신규 대화 제목과 자동 위임으로 생성한 제목에 같은 규칙을 적용한다. 기존 대화는 AionUi의 제목 동기화 버튼으로 반영하며, `[지식정리]` 등 별도 작업 용도의 접두어는 유지한다. 구버전 MnP가 이 필드를 생략하면 AionUi는 기존 역할 접두어를 보존한다.
+
+### 담당·보조 구분
+
+2026-11-10부터 같은 조회 응답의 `target`에 다음 필드를 추가한다. 별도 API를 호출하거나 제목 문자열을 분석할 필요가 없다. `POST .../mindnprogress/select`의 `target`에도 같은 필드가 포함된다.
+
+| 필드 | 값과 의미 |
+| --- | --- |
+| `cardRole` | `group-coordinator`: 그룹 총괄 루트, `document-root`: 일반 문서 최상위 원본 카드, `card`: 그 밖의 카드 |
+| `conversationRole` | `primary`: 이 카드의 담당 대화, `auxiliary`: 이 카드의 보조 대화 |
+| `primaryConversationId` | 현재 담당 대화 ID. 담당이 없으면 `null` |
+
+`cardRole`과 `conversationRole`은 서로 독립이다. 같은 상위 카드에 연결된 담당·보조 대화는 모두 `cardRole=document-root`이며 `conversationRole`만 다르다. 그룹 총괄 카드도 같은 방식이다. `titlePrefix`는 기존 `[상위] `·`[그룹 총괄] ` 계약을 유지하므로 이것만 보고 담당으로 판단하면 안 된다. Aion은 `conversationRole`로 담당·보조 배지나 제목 표기를 조합한다.
+
+보조 대화의 응답 예시는 다음과 같다.
+
+```json
+{
+  "cardRole": "group-coordinator",
+  "conversationRole": "auxiliary",
+  "primaryConversationId": "conversation-primary",
+  "titlePrefix": "[그룹 총괄] "
+}
+```
+
+- 판정 기준은 MnP 카드의 담당 선택이다. 미지정 상태의 기존 카드는 가장 최신 연결 대화를 초기 담당으로 취급한다.
+- 담당을 바꾸면 다음 조회부터 새 담당은 `primary`, 이전 담당은 `auxiliary`다. 담당을 삭제해 재선택을 기다리는 상태면 남은 대화는 모두 `auxiliary`, 담당 ID는 `null`이다.
+- 연결이 없으면 기존처럼 `exists=false`, `target=null`이다. 구버전 서버가 새 필드를 생략하면 **역할 미확인**으로 처리하며 담당이나 보조라고 추정하지 않는다.
+- 조회는 MnP 저장 데이터만 사용한다. Aion 모델·런타임 추가 조회, 담당 자동 변경, 문서 저장을 수행하지 않는다. 위임 규칙에 따른 담당 자동 교체는 그룹 지시 접수 또는 하위 위임 실행 확인 시 처리한다.
+- 응답은 `Cache-Control: no-store`다. Aion에서 별도로 캐시한다면 담당 변경 후 이전·새 담당 대화의 연결 정보를 다시 조회해야 한다. 이 API 추가만으로 Aion의 기존 제목이 자동 변경되지는 않는다.
 
 ## 같은 계정·디바이스 화면 선택
 

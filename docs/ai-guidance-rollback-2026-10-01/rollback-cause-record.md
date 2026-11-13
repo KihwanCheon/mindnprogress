@@ -85,3 +85,8 @@
   - 이 재생성은 행동 평가([behavior-evaluation-checklist.md](behavior-evaluation-checklist.md)) 없이 이루어졌다.
 - 2차 재생성(2026-10-22, 지침 감사 위험 복구 R1·R2): 승인 근거는 증거 파일의 `rebaseline.approvalRef`에 기록했다. 기준선 보호 강화(R1)와 get_document 검증 문구 보강(R2)의 지침 문구 변경을 반영한다. 기록에는 캡처 시점 HEAD와 `headTree`, 작업 트리 diff 해시, 작업 트리를 Git 트리로 쓴 `capturedTree`(루트와 `mcp`·`server`·`src` 트리 해시)가 있다. 그대로 커밋했다면 `git rev-parse <커밋>:mcp` 등과 비교해 어느 커밋이 이 기준선과 같은지 확인할 수 있다. 직전(1차) 기준선 원문은 `rebaseline.previousEvidenceRecovery`의 `git show`로 읽고, 1차 기록 요약은 `rebaseline.previousRebaseline`에 있다.
   - 2차 재생성 뒤 R2 검수 보완에서 `mcp/documentViews.mjs`에 응답 형식 식별자(`DOCUMENT_VIEW_FORMAT`)를 documentEtag 해시 입력으로 추가했다. 이 변경은 기준선 소스 9개와 guide·전달 필드 원문에 영향이 없어 기준선을 다시 만들지 않았다. 그 대신 커밋 트리의 `mcp` 해시는 `capturedTree.paths.mcp`와 다르며, 차이는 `mcp/documentViews.mjs` 한 파일이다. `server`·`src` 해시는 그대로 대조할 수 있다.
+- 3차 재생성(2026-10-30, `77581d7`, 위임 대화 문맥 기준 재사용 재활성화)은 2026-10-31에 그 커밋과 함께 되돌렸다. 지금 유효한 기준선은 다시 2차다.
+  - 승인 근거는 사용자 발언 "개선 작업을 리버트 한 것과 동일한 상태로 동작하게 해줘. 지침까지 포함해서 모든 것이."(AionUi 대화 `524b7200`)다.
+  - 재생성 스크립트를 실행하지 않고 `git revert`로 증거 파일을 2차 원문으로 되돌렸다.
+  - 같은 날 사용자 결정에 따라 개선 코드는 스위치를 끈 채 다시 넣었다. OFF 지침은 2차 기준선과 같다(`tests/initial-guidance-restoration.test.mjs`, `tests/ai-context-reuse-off-equivalence.test.mjs`). 다시 켜려면 사용자 승인을 받아 기준선을 재생성한다(`docs/ai-conversation-context-reuse.md`).
+  - 3차 기록 원문은 `git show 77581d7:docs/ai-guidance-rollback-2026-10-01/rollback-cause-record.md`로 읽는다.

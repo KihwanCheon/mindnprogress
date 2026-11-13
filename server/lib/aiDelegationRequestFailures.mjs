@@ -25,12 +25,20 @@ function failureError(status, reasonCode, message) {
 const retryablePreflightCodes = new Set(['AI_DELEGATION_VERSION_CONFLICT', 'AI_DELEGATION_ALREADY_ACTIVE', 'AI_DELEGATION_CONVERSATION_BUSY'])
 const instructionDigest = instruction => createHash('sha256').update(instruction).digest('hex')
 
-function sameWork(failure, candidate) {
+// 위임 규칙이 담당·실행 방식을 바꾼 위임도 원래 요청한 방식·대화로 비교한다.
+const requestedStrategy = candidate => candidate.primarySelection?.requestedStrategy ?? (candidate.aiPolicyResumeConversion ? 'resume' : candidate.strategy)
+const requestedConversation = candidate => candidate.primarySelection?.requestedConversationId ?? candidate.aiPolicyResumeConversion?.conversationId ?? candidate.targetConversationId
+
+function sameInstruction(failure, candidate) {
   return sameRequestScope(failure, candidate) && failure.instructionHash
     && failure.instructionHash === candidate.instructionHash
     && failure.parentConversationId && failure.parentConversationId === candidate.parentConversationId
-    && failure.strategy === candidate.strategy
-    && (!failure.requestedConversationId || failure.requestedConversationId === candidate.targetConversationId)
+}
+
+function sameWork(failure, candidate) {
+  return sameInstruction(failure, candidate)
+    && failure.strategy === requestedStrategy(candidate)
+    && (!failure.requestedConversationId || failure.requestedConversationId === requestedConversation(candidate))
 }
 
 function verifiedReplacement(failure, delegations, records = []) {
@@ -48,13 +56,15 @@ function verifiedReplacement(failure, delegations, records = []) {
       visited.add(id)
       if (id === failure.id) return true
       const previous = records.find(record => record.id === id)
-      if (!previous || previous.phase !== 'preflight' || previous.executionState !== 'not-started' || !sameWork(previous, candidate)) return false
+      // 재접수 참조는 접수 때 validateRetry가 원 요청과 같은 업무인지 이미 확인했다. 그 뒤 서버가 바꿀 수 있는 방식·대화는 비교하지 않는다.
+      if (!previous || previous.phase !== 'preflight' || previous.executionState !== 'not-started' || !sameInstruction(previous, candidate)) return false
       id = previous.retryOfRequestId
     }
     return false
   }
-  const candidate = [...delegations.values()].filter(item => sameWork(failure, item)
-    && (retryablePreflightCodes.has(failure.reasonCode) || referencesFailure(item)))
+  const candidate = [...delegations.values()].filter(item => referencesFailure(item)
+    ? sameInstruction(failure, item)
+    : retryablePreflightCodes.has(failure.reasonCode) && sameWork(failure, item))
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0]
   return candidate ? { id: candidate.id, method: referencesFailure(candidate) ? 'retry-reference' : 'same-instruction' } : null
 }
@@ -86,9 +96,21 @@ export function safeDelegationFailureMessage(message, instruction = '') {
 }
 
 // Request failures are not executable delegations and never enter the delegation poller.
-export async function createAiDelegationRequestFailures({ filePath, readJson, writeJson, deletedMapIds = new Set() }) {
+export async function createAiDelegationRequestFailures({ filePath, readJson, writeJson, deletedMapIds = new Set(), withMutation, onRollback = () => {} }) {
   let records = await readJson(filePath)
   let queue = Promise.resolve()
+  const exclusive = (action) => {
+    const protectedAction = async () => {
+      const previous = records
+      const previousDeleted = [...deletedMapIds]
+      onRollback(() => { records = previous; deletedMapIds.clear(); for (const id of previousDeleted) deletedMapIds.add(id) })
+      return action()
+    }
+    if (withMutation) return withMutation(protectedAction)
+    const result = queue.catch(() => {}).then(protectedAction)
+    queue = result.catch(() => {})
+    return result
+  }
   return {
     record(context, { status, reasonCode, message }) {
       const action = async () => {
@@ -116,9 +138,7 @@ export async function createAiDelegationRequestFailures({ filePath, readJson, wr
         records = next
         return publicFailure(record)
       }
-      const result = queue.catch(() => {}).then(action)
-      queue = result.catch(() => {})
-      return result
+      return exclusive(action)
     },
     purgeMaps(mapIds) {
       const ids = new Set(mapIds)
@@ -130,9 +150,7 @@ export async function createAiDelegationRequestFailures({ filePath, readJson, wr
         for (const mapId of ids) deletedMapIds.add(mapId)
         return removedCount
       }
-      const result = queue.catch(() => {}).then(action)
-      queue = result.catch(() => {})
-      return result
+      return exclusive(action)
     },
     list({ mapId, parentCardId, targetCardId, delegations }) {
       return records.filter(item => (item.parentMapId === mapId || item.mapId === mapId)
@@ -154,9 +172,7 @@ export async function createAiDelegationRequestFailures({ filePath, readJson, wr
         })
         if (changed) { await writeJson(filePath, next); records = next }
       }
-      const result = queue.catch(() => {}).then(action)
-      queue = result.catch(() => {})
-      return result
+      return exclusive(action)
     },
     validateRetry(context, requestId, delegations) {
       if (requestId === undefined) return null
@@ -190,9 +206,7 @@ export async function createAiDelegationRequestFailures({ filePath, readJson, wr
         }
         return { requestFailure: verificationView(record, delegations, records) }
       }
-      const result = queue.catch(() => {}).then(action)
-      queue = result.catch(() => {})
-      return result
+      return exclusive(action)
     },
     get(id) {
       const record = records.find(item => item.id === id)
@@ -223,9 +237,7 @@ export async function createAiDelegationRequestFailures({ filePath, readJson, wr
         records = next
         return { requestFailure: verificationView(updated, delegations, records), repeated: false }
       }
-      const result = queue.catch(() => {}).then(action)
-      queue = result.catch(() => {})
-      return result
+      return exclusive(action)
     },
     resolve({ mapId, failureId, replacementDelegationId, expectedUpdatedAt, confirmSameWork, note, actorId }, delegations) {
       const action = async () => {
@@ -251,9 +263,7 @@ export async function createAiDelegationRequestFailures({ filePath, readJson, wr
         records = next
         return { requestFailure: publicFailure(updated), repeated: false }
       }
-      const result = queue.catch(() => {}).then(action)
-      queue = result.catch(() => {})
-      return result
+      return exclusive(action)
     },
   }
 }

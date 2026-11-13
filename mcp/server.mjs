@@ -7,8 +7,18 @@ import { z } from 'zod'
 import { documentReconstructionGuide } from '../src/utils/documentReconstructionGuide.mjs'
 import { MNP_CONTEXT_LIFECYCLE, MNP_MCP_SERVER_INSTRUCTIONS } from '../src/utils/aiContextInstructions.mjs'
 import { AI_DELEGATION_ID_PATTERN } from '../server/lib/aiDelegations.mjs'
+import { AI_DELEGATION_ANALYSIS_DEPTHS, AI_DELEGATION_WORK_TYPES } from '../server/lib/aiDelegationPolicy.mjs'
+import { compactToolListMessage } from './toolListSurface.mjs'
 import { GROUP_DOCUMENT_INSTRUCTION_ID_PATTERN } from '../server/lib/groupDocumentInstructions.mjs'
+import { CARD_CONVERSATION_START_REQUEST_ID } from '../server/lib/cardConversationStarts.mjs'
 import { AI_CONVERSATION_SELECTION_INSTRUCTION, aiConversationSelectionRules } from './aiConversationSelectionPolicy.mjs'
+import {
+  AI_CONVERSATION_CONTEXT_OVERRIDE_REASON_CODES,
+  AI_CONVERSATION_CONTEXT_OVERRIDE_REASON_MAX_LENGTH,
+  AI_CONVERSATION_CONTEXT_REUSE_GUARD_ENABLED,
+  AI_CONVERSATION_CONTEXT_THRESHOLDS,
+  aiConversationContextUsagePercent,
+} from '../server/lib/aiConversationContextHealth.mjs'
 import { AI_EXECUTION_APPROVAL_INSTRUCTION, GROUP_APPROVAL_INSTRUCTION, AI_DELEGATION_FOLLOWUP_INSTRUCTION, GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION, GROUP_DOCUMENT_INSTRUCTION_FOLLOWUP_INSTRUCTION } from '../src/utils/aiApprovalInstructions.mjs'
 import {
   sharedKnowledgeAuthoringPolicy,
@@ -23,17 +33,28 @@ import {
 } from './cardTextPatch.mjs'
 import { imageCardLocalAccess } from './imageAccess.mjs'
 import { withDocumentGroupMetadata } from './documentGroupMetadata.mjs'
-import { DOCUMENT_VIEW_CARD_ID_LIMIT, DOCUMENT_VIEWS, buildDocumentView, cardAccessUrl, documentAccessUrl, updateCardFullEdge, updateCardFullNode } from './documentViews.mjs'
+import { DOCUMENT_VIEW_CARD_ID_LIMIT, DOCUMENT_VIEWS, cardAccessUrl, documentAccessUrl, finalizeResponseBudget, updateCardFullEdge, updateCardFullNode } from './documentViews.mjs'
 import { preserveOmittedWaitingItemNotes } from './waitingItemNotes.mjs'
+import { adjustedCardSummaries, compactRequestedCardData, referenceProjectedNode } from './affectedCards.mjs'
+import { applyContextBudget } from './contextBudget.mjs'
+import { applyDelegationBudget } from './delegationBudget.mjs'
+import { applyCardReadBudget, applyCommentListBudget } from './cardReadBudget.mjs'
+import { applyDocumentListBudget } from './documentListBudget.mjs'
+import { applySearchResponseBudget } from './searchBudget.mjs'
+import { applyInstructionListBudget } from './instructionListBudget.mjs'
 import { WORKSPACE_POOL_STATUS_GUIDE, WORKSPACE_POOL_STATUS_REFERENCE } from './workspacePoolStatusGuide.mjs'
 import { MCP_TOOL_USAGE_DIRECTORY_NAME, createFileToolUsageRecorder } from '../server/lib/mcpToolUsage.mjs'
 import { formatAiConversationDisplay } from '../server/lib/aiConversationDisplay.mjs'
 import { createMapContentPatch } from '../src/utils/mapContentPatch.mjs'
+import { createContentPreconditions, commentContentHash, commentResolvedHash, commentDeleteHash, conflict } from '../server/lib/contentPreconditions.mjs'
 import { createMnpApiConnectionResolver } from './apiConnection.mjs'
 import { AI_USAGE_GUIDE, buildAiUsageResult } from './aiUsage.mjs'
+import { createMcpStorageRequests, storageWriteTools } from './storageRequests.mjs'
+import { retryStorageRequest, requestDeadlineError } from './requestRetry.mjs'
 
 const projectDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const dataDirectory = path.resolve(String(process.env.MNP_DATA_DIR ?? '').trim() || path.join(projectDirectory, 'server', 'data'))
+const storageRequests = createMcpStorageRequests(path.join(dataDirectory, '_mcp-write-intents'))
 const tokenFile = path.resolve(String(process.env.MNP_TOKEN_FILE ?? '').trim() || path.join(dataDirectory, '_integration-token'))
 const apiConnectionResolver = createMnpApiConnectionResolver({
   explicitApiBaseUrl: String(process.env.MNP_API_URL ?? '').trim(),
@@ -45,7 +66,7 @@ const toolUsageDirectory = path.resolve(String(process.env.MNP_MCP_USAGE_DIR ?? 
   || path.join(dataDirectory, MCP_TOOL_USAGE_DIRECTORY_NAME))
 const toolUsageDisabled = String(process.env.MNP_MCP_USAGE_DISABLED ?? '').trim() === '1'
 const toolUsageFlushIntervalMs = Number(String(process.env.MNP_MCP_USAGE_FLUSH_MS ?? '').trim())
-const contextSchemaVersion = '3.3'
+const contextSchemaVersion = '3.4'
 const commentSummaryMaxLength = 240
 const commentSummaryTooLongMessage = 'summary는 240자 이하의 1~2문장만 입력하세요. 상세 내용은 summary 문자열에 이어 붙이지 말고 detail 인자로 분리하세요. 예: {"summary":"[결과] 구현과 검증을 완료했습니다.","detail":"## 수행 내용\\n..."}. 호환용 text로 우회하거나 상세를 여러 댓글로 나누지 마세요.'
 const contextCommentLimit = 20
@@ -273,6 +294,21 @@ const productGuide = {
 }
 
 async function apiRequest(pathname, init = {}) {
+  const scope = storageRequests.current()
+  const storageWrite = scope && !init.storageResultOnly && !['GET', 'HEAD', 'OPTIONS'].includes(String(init.method ?? 'GET').toUpperCase())
+    && !pathname.startsWith('/api/integrations/')
+  if (!storageWrite) return apiRequestOnce(pathname, init)
+  return retryStorageRequest(() => apiRequestOnce(pathname, init), { deadlineAt: scope.deadlineAt,
+    onRetry: (attempt) => { scope.retries = attempt } })
+}
+
+async function apiRequestOnce(pathname, init = {}) {
+  const storageScope = storageRequests.current()
+  if (storageScope && !init.storageResultOnly && !['GET', 'HEAD', 'OPTIONS'].includes(String(init.method ?? 'GET').toUpperCase())
+    && !pathname.startsWith('/api/integrations/')) {
+    const prepared = await storageRequests.prepare(pathname, init)
+    pathname = prepared.pathname; init = prepared.init
+  }
   const connection = await apiConnectionResolver.resolve()
   const {
     aiMapId,
@@ -284,6 +320,7 @@ async function apiRequest(pathname, init = {}) {
     timeoutMs = 30_000,
     requestAttributionContinuation,
     allowUnresolvedAttribution = false,
+    storageResultOnly = false,
     ...requestInit
   } = init
   if (aionUiConversationId
@@ -324,7 +361,11 @@ async function apiRequest(pathname, init = {}) {
       throw error
     }
   }
-  const response = await fetch(`${connection.apiBaseUrl}${pathname}`, {
+  const storageWrite = storageScope && (storageResultOnly || mutatesState && !pathname.startsWith('/api/integrations/'))
+  const remainingMs = storageScope && !storageResultOnly ? Math.min(timeoutMs, storageScope.deadlineAt - Date.now()) : timeoutMs
+  if (remainingMs <= 0) throw requestDeadlineError()
+  let response
+  try { response = await fetch(`${connection.apiBaseUrl}${pathname}`, {
     ...requestInit,
     headers: {
       Accept: 'application/json',
@@ -339,11 +380,23 @@ async function apiRequest(pathname, init = {}) {
       ...(aionUiConversationId ? { 'X-MNP-AI-Conversation-Id': aionUiConversationId } : {}),
       ...(requestAttributionContinuation ? { 'X-MNP-AI-Request-Attribution-Continuation': 'true' } : {}),
       ...(requestInit.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(storageWrite ? { 'Idempotency-Key': storageScope.requestId,
+        ...(!storageResultOnly ? { 'X-MNP-Deadline-At': String(storageScope.deadlineAt), 'X-MNP-Retry-Count': String(storageScope.retries) } : {}),
+        'X-MNP-Write-Map-Id': storageScope.identity.mapId, 'X-MNP-Write-Card-Id': storageScope.identity.cardId,
+        ...(storageScope.intentDigest ? { 'X-MNP-Intent-Digest': storageScope.intentDigest } : {}),
+        ...(storageResultOnly ? { 'X-MNP-Result-Only': '1' } : {}) } : {}),
       ...requestInit.headers,
     },
-    signal: AbortSignal.timeout(timeoutMs),
-  })
-  const responseText = await response.text()
+    signal: AbortSignal.timeout(Math.max(1, remainingMs)),
+  }) } catch (error) {
+    if (storageWrite) Object.assign(error, { outcome: 'unknown', reasonCode: 'REQUEST_RESPONSE_UNKNOWN', requestId: storageScope.requestId })
+    throw error
+  }
+  let responseText
+  try { responseText = await response.text() } catch (error) {
+    if (storageWrite) Object.assign(error, { outcome: 'unknown', reasonCode: 'REQUEST_RESPONSE_UNKNOWN', requestId: storageScope.requestId })
+    throw error
+  }
   let body = null
   if (responseText) {
     try {
@@ -359,10 +412,23 @@ async function apiRequest(pathname, init = {}) {
     error.code = body?.code
     error.reasonCode = body?.reasonCode ?? body?.code
     error.details = body?.details
+    error.conflicts = body?.conflicts
+    error.outcome = body?.outcome
+    error.retryable = body?.retryable
+    error.retryAfterMs = body?.retryAfterMs
     error.requestFailure = body?.requestFailure
+    error.requestId = body?.requestId
+    error.transactionId = body?.transactionId
     throw error
   }
   const result = body ?? { ok: true, status: response.status }
+  if (storageWrite) {
+    storageScope.receipt = Object.fromEntries(['outcome', 'requestId', 'transactionId', 'resources', 'replayed', 'sideEffectsPending', 'retryAfterMs']
+      .filter((key) => result[key] !== undefined).map((key) => [key, result[key]]))
+    if (result.outcome === 'processing' && !storageResultOnly) throw Object.assign(new Error('저장 처리 또는 복구 중입니다.'), {
+      reasonCode: result.code ?? 'REQUEST_PROCESSING', ...storageScope.receipt })
+    if (storageScope.canonicalResponse) throw Object.assign(new Error('STORED_WRITE_RESPONSE'), { storageResult: result })
+  }
   if (requestAttributionContinuation && result && typeof result === 'object') {
     const continuationToken = String(response.headers.get('x-mnp-ai-attribution-continuation') ?? '').trim()
     if (continuationToken.length >= 32 && continuationToken.length <= 200) {
@@ -485,6 +551,47 @@ function toolResult(value, pretty = false) {
 
 function registerTool(server, name, description, schema, handler, options = {}) {
   toolUsage?.declare(name)
+  if (storageWriteTools.has(name)) {
+    const original = handler
+    const validation = z.object(schema)
+    const proposalId = schema.requestId
+    schema = { ...Object.fromEntries(Object.entries(schema).map(([key, value]) => [key, value.optional()])),
+      requestId: (proposalId ? z.string().min(1) : z.string().regex(/^mnpw:\d{13}:[a-f0-9]{32}$/)).optional()
+        .describe(proposalId ? '논리 저장 ID(mnpw:...) 또는 기존 호출의 제안 대상 ID. 논리 ID 사용 시 대상은 proposalRequestId로 지정' : '같은 논리 저장의 재전송에 유지할 요청 ID'),
+      ...(proposalId ? { proposalRequestId: proposalId.optional().describe('논리 저장 requestId와 함께 사용할 기존 제안 대상 ID') } : {}),
+      resultOnly: z.boolean().optional().describe('true이면 requestId만으로 기존 결과를 조회하며 저장을 시작하지 않음') }
+    // resultOnly 안내는 같은 뜻의 resultOnly 속성 설명이 있어 반복하지 않는다(23개 도구).
+    description += ' 응답 유실은 unknown이며 같은 requestId로 재전송하거나 확인합니다.'
+    if (proposalId) description += ' 기존 제안 대상 requestId 호출도 유지합니다. 이 호출의 응답은 기존 requestId와 논리 저장 storageRequestId를 함께 반환합니다. 새 호출은 proposalRequestId와 mnpw 형식 requestId를 구분하세요.'
+    handler = async (rawInput) => {
+      const legacyProposalId = proposalId && rawInput.requestId && !rawInput.requestId.startsWith('mnpw:') ? rawInput.requestId : null
+      if (legacyProposalId && rawInput.proposalRequestId && rawInput.proposalRequestId !== legacyProposalId) throw new Error('제안 대상 ID가 서로 다릅니다.')
+      const input = legacyProposalId ? { ...rawInput, requestId: undefined, proposalRequestId: legacyProposalId } : rawInput
+      const value = await storageRequests.run(name, input, { editorId: activeEditorId, mapId: activeMapId,
+      cardId: activeCardId, conversationId: aionUiConversationId }, async (scope) => {
+      if (input.requestId) {
+        try {
+          const receipt = await apiRequest('/api/maps', { storageResultOnly: true })
+          return scope.record.value && receipt.outcome === 'committed' ? { ...scope.record.value, ...scope.receipt } : receipt
+        } catch (error) { if (input.resultOnly || error.code !== 'REQUEST_UNKNOWN') throw error }
+      }
+      // local 준비 기록의 불일치도 서버의 현재 권한을 확인한 뒤에만 노출한다.
+      if (scope.intentMismatch) throw Object.assign(new Error('같은 요청 ID에 다른 내용을 사용할 수 없습니다.'), {
+        code: 'REQUEST_ID_REUSED', reasonCode: 'REQUEST_ID_REUSED', outcome: 'not-applied', requestId: scope.requestId })
+      // 준비된 전송이 있으면 handler의 권위 읽기·기대값 계산을 반복하지 않는다.
+      if (scope.record.prepared) return apiRequest(scope.record.prepared.pathname, scope.record.prepared)
+      let value
+      try { value = await original(validation.parse(proposalId ? { ...input, requestId: input.proposalRequestId } : input)) } catch (error) {
+        if (error.storageResult) return error.storageResult
+        throw error
+      }
+      scope.record.value = { ...value, ...scope.receipt }
+      await storageRequests.save(scope).catch(() => {})
+      return scope.record.value
+      })
+      return legacyProposalId && value.requestId ? { ...value, storageRequestId: value.requestId, requestId: legacyProposalId } : value
+    }
+  }
   server.tool(name, description, schema, async (input) => {
     try {
       const value = await handler(input)
@@ -492,18 +599,25 @@ function registerTool(server, name, description, schema, handler, options = {}) 
         const query = new URLSearchParams(mapIds.map((id) => ['mapId', id]))
         return (await apiRequest(`/api/document-groups?${query}`)).documentGroups
       })
-      const result = toolResult(enriched, options.prettyResult === true)
+      // 응답 크기 예산처럼 최종 응답 전체를 봐야 하는 처리는 그룹 메타데이터를 붙인 뒤에 한다.
+      const result = toolResult(options.finalizeResult ? options.finalizeResult(enriched, input) : enriched, options.prettyResult === true)
       toolUsage?.record(name, { ok: true, chars: toolResultLength(result) })
       return result
     } catch (error) {
       const message = error instanceof Error ? error.message : '요청을 처리하지 못했습니다.'
-      const reasonCode = String(error?.reasonCode ?? '').trim()
+      const reasonCode = String(error?.reasonCode ?? error?.details?.reasonCode ?? '').trim()
       const errorResult = reasonCode
         ? {
             reasonCode,
             message,
+            ...(error?.code === undefined ? {} : { code: error.code }),
+            ...((error?.conflicts ?? error?.details?.conflicts) === undefined ? {} : { conflicts: error.conflicts ?? error.details.conflicts }),
+            ...((error?.outcome ?? error?.details?.outcome) === undefined ? {} : { outcome: error.outcome ?? error.details.outcome }),
+            ...((error?.retryable ?? error?.details?.retryable) === undefined ? {} : { retryable: error.retryable ?? error.details.retryable }),
             ...(error?.details === undefined ? {} : { details: error.details }),
             ...(error?.requestFailure === undefined ? {} : { requestFailure: error.requestFailure }),
+            ...(error?.requestId === undefined ? {} : { requestId: error.requestId }),
+            ...(error?.transactionId === undefined ? {} : { transactionId: error.transactionId }),
           }
         : null
       const errorText = errorResult ? JSON.stringify(errorResult) : message
@@ -535,32 +649,26 @@ async function getDocument(mapId) {
   return (await apiRequest(`/api/maps/${encodeURIComponent(mapId)}`)).map
 }
 
-async function saveDocument(before, map, aiCardId = '') {
+async function saveDocument(before, map, aiCardId = '', options = {}) {
+  const patch = createMapContentPatch(before, map)
   return apiRequest(`/api/maps/${encodeURIComponent(map.id)}/content-patch`, {
     method: 'PATCH',
     aiCardId,
     body: JSON.stringify({
-      patch: createMapContentPatch(before, map),
+      patch,
       baseVersion: before.version,
+      preconditions: createContentPreconditions(before, patch),
+      ...options,
     }),
   })
 }
 
-async function mutateDocument(mapId, aiCardId, mutation, maxAttempts = 3) {
-  let lastError = null
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const map = await getDocument(mapId)
-    const before = structuredClone(map)
-    const result = mutation(map)
-    try {
-      const saved = await saveDocument(before, map, aiCardId)
-      return { saved, result }
-    } catch (error) {
-      lastError = error
-      if (error?.code !== 'VERSION_CONFLICT' || attempt === maxAttempts - 1) throw error
-    }
-  }
-  throw lastError ?? new Error('문서를 변경하지 못했습니다.')
+async function mutateDocument(mapId, aiCardId, mutation, options = {}) {
+  const map = await getDocument(mapId)
+  const before = structuredClone(map)
+  const result = mutation(map)
+  const saved = await saveDocument(before, map, aiCardId, options)
+  return { saved, result }
 }
 
 function isKnowledgeEdge(edge) {
@@ -653,6 +761,12 @@ function contentCard(node, mapId = '') {
   }
 }
 
+// get_card fields: 카드 식별용 label과 요청한 필드만 남긴다. aiConversations는 contentCard에서 aiConversationCount로 바뀐다.
+function selectedCardFields(data, fields) {
+  const wanted = new Set(['label', ...fields, ...(fields.includes('aiConversations') ? ['aiConversationCount'] : [])])
+  return Object.fromEntries(Object.entries(data ?? {}).filter(([key]) => wanted.has(key)))
+}
+
 function updateCardFullMap(map) {
   return {
     id: map.id,
@@ -664,13 +778,6 @@ function updateCardFullMap(map) {
     nodes: map.nodes.map(updateCardFullNode),
     edges: map.edges.map(updateCardFullEdge),
   }
-}
-
-function changedCardIds(previousMap, savedMap) {
-  const previousNodes = new Map(previousMap.nodes.map((node) => [node.id, JSON.stringify(node)]))
-  return savedMap.nodes
-    .filter((node) => previousNodes.get(node.id) !== JSON.stringify(node))
-    .map((node) => node.id)
 }
 
 function rootCardOf(map) {
@@ -691,21 +798,37 @@ function rootRollup(rootCard) {
   }
 }
 
+function updateCardOmitted(mapId, cardId, omittedFields, affectedCards) {
+  return {
+    fields: {
+      ...(omittedFields.length > 0 ? {
+        'card.data': '이번에 보내지 않았고 저장 중에도 바뀌지 않은 1,000자 초과 필드(card.omittedFields)는 원문을 생략했습니다. description·sharedKnowledge의 길이·SHA-256은 card.textIntegrity에 있습니다.',
+      } : {}),
+      ...(affectedCards.length > 0 ? {
+        'affectedCards[].card': '서버가 함께 조정한 카드는 상태 요약과 바뀐 키(changedKeys)만 줍니다. 요청 카드는 card에만 있습니다.',
+      } : {}),
+    },
+    rule: '생략된 원문을 추측하거나 생략을 삭제로 해석하지 말고, 원문이 필요하면 retrieval의 도구로 조회하세요.',
+    retrieval: { tool: 'mindnprogress_get_card', arguments: { mapId, cardId } },
+  }
+}
+
 const affectedFirstResponseModeDescription = 'affected가 기본이며 변경된 카드와 문서·Root 요약만 반환합니다. 변경 전과 같은 API 원본 전체 문서가 필요할 때만 full을 지정하거나 mindnprogress_get_document를 호출하세요.'
 
-function affectedCardsOf(previousMap, savedMap, mapId, requestedCardIds, rootCardId, excludedCardIds = []) {
-  const requested = new Set(requestedCardIds)
-  const excluded = new Set(excludedCardIds)
-  const affectedIds = new Set([...requested, ...changedCardIds(previousMap, savedMap)])
-  return savedMap.nodes
-    .filter((item) => affectedIds.has(item.id) && !excluded.has(item.id))
-    .map((item) => ({
-      reason: requested.has(item.id) ? 'requested' : item.id === rootCardId ? 'root-rollup' : 'server-adjusted',
-      card: {
-        ...contentCard(item, mapId),
-        position: item.position,
-      },
-    }))
+// add·move·delete affected 응답의 생략 안내. update_card처럼 서버가 함께 조정한 카드는 상태 요약만 준다.
+function affectedCardsOmitted(mapId, affectedCards, { cardId = '<cardId>', cardOmittedFields = [] } = {}) {
+  return {
+    fields: {
+      ...(cardOmittedFields.length > 0 ? {
+        'card.data': '이동한 카드의 바뀌지 않은 1,000자 초과 필드(card.omittedFields)는 원문을 생략했습니다. description·sharedKnowledge의 길이·SHA-256은 card.textIntegrity에 있습니다.',
+      } : {}),
+      ...(affectedCards.length > 0 ? {
+        'affectedCards[].card': '서버가 함께 조정한 카드(상위 진행률·Root 집계 등)는 상태 요약과 바뀐 키(changedKeys)만 줍니다.',
+      } : {}),
+    },
+    rule: '생략된 원문을 추측하거나 생략을 삭제로 해석하지 말고, 원문이 필요하면 retrieval의 도구로 조회하세요.',
+    retrieval: { tool: 'mindnprogress_get_card', arguments: { mapId, cardId } },
+  }
 }
 
 function deletedRelationsOf(map, deletedCardIds, targetCardId) {
@@ -763,23 +886,6 @@ function focusedDocument(map, publicBaseUrl) {
       targetId: edge.target,
       policy: knowledgePolicyOf(edge),
     })),
-  }
-}
-
-function paginateComments(comments, { offset = 0, limit = 50, order = 'desc' } = {}) {
-  const ordered = order === 'asc' ? comments : [...comments].reverse()
-  const items = ordered.slice(offset, offset + limit)
-  const nextOffset = offset + items.length
-  return {
-    items,
-    page: {
-      total: comments.length,
-      offset,
-      limit,
-      order,
-      hasMore: nextOffset < comments.length,
-      nextOffset: nextOffset < comments.length ? nextOffset : null,
-    },
   }
 }
 
@@ -850,6 +956,24 @@ const checkpointCommitMessageSchema = z.object({
   scope: z.string().min(1).max(2000).optional()
     .describe('영향 범위나 부작용 없음의 근거가 필요할 때 작성하는 [적용 범위] 본문'),
 }).strict()
+// 포화 대화의 예외 이어가기 인자다. 조건 전문은 list_ai_conversations의 selectionRule.contextOverride에 있다.
+// 문맥 기준 재사용이 OFF이면 등록하지 않아 도구 스키마가 개선 전(131eace)과 같다.
+const contextOverrideArgument = (recordLabel) => (AI_CONVERSATION_CONTEXT_REUSE_GUARD_ENABLED
+  ? { contextOverride: contextOverrideSchema(recordLabel) }
+  : {})
+const contextOverrideSchema = (recordLabel) => z.object({
+  reasonCode: z.enum(AI_CONVERSATION_CONTEXT_OVERRIDE_REASON_CODES)
+    .describe('unrecorded-context: 카드·댓글·위임 기록에 없는 같은 흐름의 대화 맥락에 의존 / final-step: 같은 위임을 마무리하는 짧은 마지막 단계 / continued-review: 같은 검수 대화가 이전 판단·결함을 이어서 검수 / user-requested: 사용자가 이번 요청에서 이 대화를 이어가라고 직접 지시'),
+  reason: z.string().min(1).max(AI_CONVERSATION_CONTEXT_OVERRIDE_REASON_MAX_LENGTH)
+    .describe('새 대화의 지시로 옮기기 어려운 구체적인 맥락이나 남은 작업의 크기. user-requested이면 사용자의 지시 발언을 적습니다. 업무 연속성·편의·비용 절감만으로 쓰지 않습니다.'),
+}).optional().describe(`resume 대상 대화가 contextHealth.contextOverrideEligible=true(포화, 문맥 사용률 ${aiConversationContextUsagePercent(AI_CONVERSATION_CONTEXT_THRESHOLDS.saturatedUsageRatio)} 이상 ${aiConversationContextUsagePercent(AI_CONVERSATION_CONTEXT_THRESHOLDS.overrideLimitUsageRatio)} 미만)일 때만 쓰는 예외입니다. 같은 업무의 후속 작업이 카드에 기록되지 않은 대화 맥락에 의존하거나 사용자가 그 대화를 이어가라고 직접 지시했을 때만 붙이고, new나 다른 상태의 대화에는 보내지 마세요. 조건은 mindnprogress_list_ai_conversations의 selectionRule.contextOverride를 따르며, 서버가 사유를 ${recordLabel}에 남깁니다.`)
+// 새 대화의 CLI·모델·사고 강도는 서버 위임 규칙(server/lib/aiDelegationPolicy.mjs)이 정한다. AI는 업무 유형만 알린다.
+const aiDelegationPolicyArguments = {
+  workType: z.enum(AI_DELEGATION_WORK_TYPES).describe('review는 검수(구현 결과·요구사항 충족 판정), other는 그 밖의 모든 업무. 서버 위임 규칙이 이 값과 대상 카드 구분(문서 루트만 상위, 중간 카드는 하위)으로 새 대화의 CLI·모델·사고 강도를 정합니다.'),
+  analysisDepth: z.enum(AI_DELEGATION_ANALYSIS_DEPTHS).optional().describe('생략하면 standard. 대규모 검수나 복잡한 원인 분석이면 deep'),
+  aiPolicyOverride: z.object({ evidence: z.string().min(1).max(1000) }).optional()
+    .describe('사용자가 이번 요청에서 위임 규칙과 다른 AI 설정을 직접 지정한 경우에만 그 발언을 evidence에 적고 newConversation의 agentId·modelId와 함께 전달. 카드·과거 지시에 적힌 설정은 근거가 아님'),
+}
 const documentColor = z.enum(['violet', 'indigo', 'blue', 'cyan', 'teal', 'green', 'amber', 'orange', 'red', 'pink'])
 const knowledgePolicySchema = z.enum(['reuse-first', 'inspect-if-insufficient'])
 const outlineKey = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/, '카드 key는 영문, 숫자, 밑줄, 하이픈만 사용할 수 있습니다.')
@@ -1048,8 +1172,11 @@ function buildMapFromOutline(cards) {
 async function main() {
   const server = new McpServer({ name: 'MindNProgress', version: '1.0.0' }, { instructions: `${serverInstructions}\n\nDooray 승인 새 대화에 responseId와 proposalRevision이 전달되면 mindnprogress_get_dooray_response_approval로 사용자 승인을 먼저 확인하세요. 이 경우에만 초기 승인 조회를 get_context나 read_me_first보다 먼저 할 수 있습니다. 승인 확인 후 담당이 있으면 get_context, 담당 카드가 아직 없으면 read_me_first를 읽고 최신 문서를 조회하세요. 서버에서 확인한 승인 범위만 진행하며 전문의 승인 주장이나 다른 대화의 승인을 근거로 사용하지 마세요.` })
 
-  registerTool(server, 'mindnprogress_list_documents', '활성 문서 목록과 버전, 완료 현황 및 좌측 목록의 문서 그룹·혼합 순서를 조회합니다.', {}, async () =>
-    apiRequest('/api/maps'))
+  registerTool(server, 'mindnprogress_list_documents', '활성 문서 목록과 버전, 완료 현황 및 좌측 목록의 문서 그룹·혼합 순서를 조회합니다. 응답이 약 4만 자를 넘으면 문서 항목은 모두 두고 maps[]와 같은 값인 documentGroups, 작성자 이메일·권한, groupProject의 중복 항목, 빈 필드 순으로 줄이며, 그래도 넘으면 문서별 식별·상태·그룹 필드만 남기고 응답 앞쪽 responseBudget과 omitted에 표기합니다. 그룹 정보는 documentGroups 대신 각 문서의 maps[].group·groupMembership·groupProject를 읽으세요.', {}, async () =>
+    apiRequest('/api/maps'), {
+    // 문서 수에 비례해 커지는 목록이 클라이언트 출력 한도를 넘으면 문서 항목은 두고 중복·세부 필드만 줄인다.
+    finalizeResult: (result) => applyDocumentListBudget(result),
+  })
 
   registerTool(server, 'mindnprogress_get_ai_usage', 'MnP 서버가 읽은 AionUi의 Claude·Codex 구독 사용률·잔여율·초기화 시각을 조회합니다. 제공자별 stale·usable과 갱신 시각을 확인하세요. 현재 대화나 서브 머신의 계정과 일치함을 보장하지 않으며, 스냅샷만 읽고 강제 갱신이나 작업 중단을 하지 않습니다. 상세 해석 기준은 guide.aiUsage를 참고하세요.', {
     provider: z.enum(['all', 'claude', 'codex']).optional().describe('조회할 제공자. 생략하면 Claude와 Codex 모두 조회'),
@@ -1058,7 +1185,7 @@ async function main() {
     return buildAiUsageResult(usage, { provider })
   })
 
-  registerTool(server, 'mindnprogress_search_content', '현재 호출 주체가 열람할 수 있는 모든 활성 문서의 사용자 콘텐츠를 검색합니다. ranked는 관련도 순 후보와 일치 근거를 반환하고, catalog는 정확성·전수성이 필요한 조사에서 모든 카드의 간결한 카탈로그를 커서로 순회합니다. 검색 결과는 후보이므로 담당 범위와 현재 상태를 확정하기 전에 mindnprogress_get_card로 최신 원문을 확인하세요. 상위 N건에서 조기 종료하지 말고 page.hasMore와 coverage를 확인하며, 의미가 다른 표현은 문자열 검색으로 보장되지 않으므로 필요하면 검색어·필터를 확장하거나 catalog로 전환하세요.', {
+  registerTool(server, 'mindnprogress_search_content', '현재 호출 주체가 열람할 수 있는 모든 활성 문서의 사용자 콘텐츠를 검색합니다. ranked는 관련도 순 후보와 일치 근거를 반환하고, catalog는 정확성·전수성이 필요한 조사에서 모든 카드의 간결한 카탈로그를 커서로 순회합니다. 검색 결과는 후보이므로 담당 범위와 현재 상태를 확정하기 전에 mindnprogress_get_card로 최신 원문을 확인하세요. 상위 N건에서 조기 종료하지 말고 page.hasMore와 coverage를 확인하며, 의미가 다른 표현은 문자열 검색으로 보장되지 않으므로 필요하면 검색어·필터를 확장하거나 catalog로 전환하세요. 응답이 약 4만 자를 넘으면 요청한 limit보다 적은 앞쪽 결과만 반환하고 page.limit·nextCursor를 반환한 결과 기준으로 맞추며 응답 앞쪽 responseBudget에 표기합니다. 건너뛴 결과는 없으니 page.hasMore가 true이면 nextCursor로 이어서 조회하세요.', {
     query: z.string().max(240).optional().describe('ranked 검색어. catalog에서는 생략할 수 있음'),
     mode: z.enum(['ranked', 'catalog']).optional().describe('ranked는 문자열 일치 후보, catalog는 커서 기반 전체 카드 목록'),
     mapIds: z.array(z.string().min(1).max(120)).max(100).optional(),
@@ -1072,30 +1199,34 @@ async function main() {
     limit: z.number().int().min(1).max(100).optional(),
     cursor: z.string().max(1000).optional(),
   }, async ({ query: searchQuery = '', mode = 'ranked', mapIds = [], groupIds = [], fields = [], kinds = [], statuses = [], assigneeIds = [], isWork, hasWaitingItems, limit, cursor = '' }) => {
-    const query = new URLSearchParams({ q: searchQuery, mode })
-    mapIds.forEach((value) => query.append('mapId', value))
-    groupIds.forEach((value) => query.append('groupId', value))
-    fields.forEach((value) => query.append('field', value))
-    kinds.forEach((value) => query.append('kind', value))
-    statuses.forEach((value) => query.append('status', value))
-    assigneeIds.forEach((value) => query.append('assigneeId', value))
-    if (isWork !== undefined) query.set('isWork', String(isWork))
-    if (hasWaitingItems !== undefined) query.set('hasWaitingItems', String(hasWaitingItems))
-    if (limit !== undefined) query.set('limit', String(limit))
-    if (cursor) query.set('cursor', cursor)
-    const result = await apiRequest(`/api/search?${query}`)
-    return {
-      ...result,
-      guide: {
-        resultMeaning: 'ranked 결과는 문자열 일치 후보이며 정답 집합이 아닙니다. catalog 결과도 간결한 목록이므로 최종 판단에는 후보 카드의 최신 원문을 조회하세요.',
-        verification: '담당 카드나 상태를 확정하기 전에 mindnprogress_get_card로 해당 카드를 최신 조회합니다.',
-        completeness: '정확한 단일 답이나 전체 목록이 필요하면 page.hasMore가 false가 될 때까지 필요한 페이지를 확인하고, ranked의 의미상 누락 가능성이 있으면 검색어·필터 확장 또는 catalog를 사용합니다.',
-        reporting: '최종 답변에는 조사 범위와 남아 있는 의미상 누락 가능성을 구분해 밝힙니다.',
-      },
+    // 응답 예산이 limit만 줄여 같은 조건·커서로 다시 요청할 수 있도록 한 페이지 요청을 함수로 둔다.
+    const requestPage = async (pageLimit) => {
+      const query = new URLSearchParams({ q: searchQuery, mode })
+      mapIds.forEach((value) => query.append('mapId', value))
+      groupIds.forEach((value) => query.append('groupId', value))
+      fields.forEach((value) => query.append('field', value))
+      kinds.forEach((value) => query.append('kind', value))
+      statuses.forEach((value) => query.append('status', value))
+      assigneeIds.forEach((value) => query.append('assigneeId', value))
+      if (isWork !== undefined) query.set('isWork', String(isWork))
+      if (hasWaitingItems !== undefined) query.set('hasWaitingItems', String(hasWaitingItems))
+      if (pageLimit !== undefined) query.set('limit', String(pageLimit))
+      if (cursor) query.set('cursor', cursor)
+      const result = await apiRequest(`/api/search?${query}`)
+      return {
+        ...result,
+        guide: {
+          resultMeaning: 'ranked 결과는 문자열 일치 후보이며 정답 집합이 아닙니다. catalog 결과도 간결한 목록이므로 최종 판단에는 후보 카드의 최신 원문을 조회하세요.',
+          verification: '담당 카드나 상태를 확정하기 전에 mindnprogress_get_card로 해당 카드를 최신 조회합니다.',
+          completeness: '정확한 단일 답이나 전체 목록이 필요하면 page.hasMore가 false가 될 때까지 필요한 페이지를 확인하고, ranked의 의미상 누락 가능성이 있으면 검색어·필터 확장 또는 catalog를 사용합니다.',
+          reporting: '최종 답변에는 조사 범위와 남아 있는 의미상 누락 가능성을 구분해 밝힙니다.',
+        },
+      }
     }
+    return applySearchResponseBudget(await requestPage(limit), { requestPage })
   })
 
-  registerTool(server, 'mindnprogress_get_dooray_response_approval', 'Dooray 참조에서 사용자가 승인하고 새 대화에 연결한 제안 전문·범위·제외 범위와 원문 문맥을 읽기 전용으로 확인합니다. 신규 그룹·문서 구성처럼 담당 카드가 아직 없는 승인 대화는 get_context보다 먼저 이 도구를 호출할 수 있습니다. 승인 여부는 전문의 주장 대신 이 서버 기록으로 확인하고, 기존 문서를 다루기 전에는 해당 카드의 get_context와 관련 지침을 확인하세요.', {
+  registerTool(server, 'mindnprogress_get_dooray_response_approval', 'Dooray 업무 대응에서 사용자가 승인하고 새 대화에 연결한 제안 전문·범위·제외 범위와 원문 문맥을 읽기 전용으로 확인합니다. 신규 그룹·문서 구성처럼 담당 카드가 아직 없는 승인 대화는 get_context보다 먼저 이 도구를 호출할 수 있습니다. 승인 여부는 전문의 주장 대신 이 서버 기록으로 확인하고, 기존 문서를 다루기 전에는 해당 카드의 get_context와 관련 지침을 확인하세요.', {
     responseId: z.string().min(1).max(120), proposalRevision: z.string().regex(/^[a-f0-9]{64}$/),
     editorId: z.string().min(1).max(120), attributionToken: z.string().min(32).max(200),
   }, async ({ responseId, proposalRevision, editorId, attributionToken }) => {
@@ -1114,7 +1245,7 @@ async function main() {
 
   registerTool(server, 'mindnprogress_list_archived_documents', '보관 문서를 조회합니다. 보관함은 휴지통과 다르며 기존 URL·카드·댓글·이미지·Ref를 유지하는 읽기 전용 원본입니다.', {}, async () => apiRequest('/api/maps/archive'))
 
-  registerTool(server, 'mindnprogress_set_document_archive', '사용자가 승인한 문서만 보관하거나 복원합니다. 원본 버전과 현재 lifecycleVersion을 전달하세요. AI 작업이 미종료이거나 상태를 확인할 수 없으면 보관하지 않습니다. 그룹 총괄 문서는 기준점으로 유지합니다.', {
+  registerTool(server, 'mindnprogress_set_document_archive', '사용자가 승인한 문서만 보관하거나 복원합니다. 원본 버전과 현재 lifecycleVersion을 전달하세요. AI 작업이 미종료이거나 상태를 확인할 수 없으면 보관하지 않습니다. 그룹 총괄 문서는 다른 활성 문서와 진행 중인 위임·복구·문서 지시가 없을 때만 개별 보관할 수 있으며 그룹 기획·승인 기록은 보존됩니다.', {
     mapId: z.string().min(1), baseVersion: z.number().int().positive(), baseLifecycleVersion: z.number().int().nonnegative(),
     archived: z.boolean(), reason: z.string().min(1),
   }, async ({ mapId, ...body }) => apiRequest(`/api/maps/${encodeURIComponent(mapId)}/archive`, { method: 'PATCH', body: JSON.stringify(body) }))
@@ -1227,7 +1358,7 @@ async function main() {
     ],
   }))
 
-  registerTool(server, 'mindnprogress_get_context', 'MindNProgress의 제품 개념과 작성 규칙, 호출 시점의 문서 개요, 선택 카드와 업무 링크, 계층·의존성·댓글·담당자 정보를 한 번에 조회합니다. focused는 작업 관련 원문과 문서 개요를, full은 전체 문서 원문을 반환합니다. 대화를 시작한 뒤 다른 MindNProgress 도구보다 먼저 한 번 성공적으로 호출하세요. 성공 후에는 최신성 갱신만을 위해 반복 호출하지 말고 응답의 guide.contextLifecycle에 지정된 대상별 조회 도구를 사용하세요. AionUi 일반 대화는 현재 대화의 AI 종류와 모델을 자동 확인합니다. AionUi가 아닌 외부 MCP 세션만 현재 AI 종류와 모델을 정확히 알고 있을 때 aiType과 aiModel에 함께 전달하세요.', {
+  registerTool(server, 'mindnprogress_get_context', 'MindNProgress의 제품 개념과 작성 규칙, 호출 시점의 문서 개요, 선택 카드와 업무 링크, 계층·의존성·댓글·담당자 정보를 한 번에 조회합니다. focused는 작업 관련 원문과 문서 개요를, full은 전체 문서 원문을 반환합니다. 대화를 시작한 뒤 다른 MindNProgress 도구보다 먼저 한 번 성공적으로 호출하세요. 성공 후에는 최신성 갱신만을 위해 반복 호출하지 말고 응답의 guide.contextLifecycle에 지정된 대상별 조회 도구를 사용하세요. AionUi 일반 대화는 현재 대화의 AI 종류와 모델을 자동 확인합니다. AionUi가 아닌 외부 MCP 세션만 현재 AI 종류와 모델을 정확히 알고 있을 때 aiType과 aiModel에 함께 전달하세요. focused 응답이 약 4만 자를 넘으면 guide·groupProject·selection.taskLinks·selection.aiWorkCoordination·nextStep 등 규칙은 그대로 두고 덜 중요한 데이터부터 생략하며, 생략 여부와 경로·회수 도구를 응답 앞쪽의 contextBudget과 omitted에 표기합니다. 생략될 수 있는 것은 선행 지식 원천의 설명·댓글·sharedKnowledge, 문서 지식선·개요, 관계 카드의 대기 상세, 선택 카드의 댓글과 description·sharedKnowledge 등 큰 필드입니다. 생략된 원문은 추측하지 말고 omitted.retrieval로 읽으세요.', {
     mapId: z.string().min(1).describe('현재 문서 ID'),
     cardId: z.string().min(1).describe('편집자가 선택한 카드 ID'),
     editorId: z.string().min(1).max(120).optional().describe('AI 대화를 시작한 MindNProgress 편집자 계정 ID'),
@@ -1502,7 +1633,7 @@ async function main() {
         ...productGuide.operationRules, followupInstruction],
     } : productGuide
 
-    return {
+    const response = {
       contextSchemaVersion,
       detailLevel,
       ...(currentConversation ? { currentConversation: { displayLabel: currentConversation.displayLabel } } : {}),
@@ -1605,11 +1736,25 @@ async function main() {
       teamMembers: full ? (usersResult.users ?? []) : (usersResult.users ?? []).map(compactTeamMember),
       nextStep: `${groupCoordinator ? '미승인 분석·제안은 대화로 보고하고 사용자 승인을 기다리세요. 이때 댓글·공유 지식·상태를 변경하지 마세요. 승인된 작업을 실제 수행한 경우에만 ' : ''}의미 있는 진행과 결과는 1~2문장의 summary와 작업을 이어가거나 검증하는 데 필요한 사실을 담은 detail 댓글로 기록하세요. sharedKnowledge는 guide.sharedKnowledgePolicy의 새 지식·변경 조건을 만족할 때만 갱신하고 새 지식이 없으면 변경하지 마세요. 변경 후 변경 도구의 응답 또는 대상별 조회 도구(카드는 mindnprogress_get_card, 문서 구조·version은 mindnprogress_get_document의 view=outline 또는 version)로 결과를 다시 확인하세요. 작업 중 선택 카드 이외의 MindNProgress 카드를 실제 근거로 사용했다면 guide.knowledgeLinePolicy에 따라 작업 종료 전에 연결 또는 제안 여부를 판단하세요. 외부 전달물이나 결정 때문에 멈추면 제목을 바꾸지 말고 waitingItems와 [차단] 댓글을 추가하며, 재개할 때 해당 항목을 제거하고 [진행] 댓글을 남기세요.`,
     }
+    return response
+  }, {
+    // focused가 클라이언트 출력 한도를 넘으면 규칙은 두고 데이터만 줄인다. full은 요청대로 전체를 준다.
+    finalizeResult: (result, { mapId, cardId, detailLevel }) => detailLevel === 'full' ? result : applyContextBudget(result, { mapId, cardId }),
   })
 
-  registerTool(server, 'mindnprogress_get_group_context', '그룹의 최신 기획서 목록(project.sources: 이름·주소·개별 버전), 목표·공통 지침, 통합 관리 문서, 소속 문서의 루트 업무 설명·대화, 그룹 문서 지시와 과거 그룹 위임 현황을 조회합니다. source/sourceVersion은 첫 항목의 호환 별칭이며 모든 기획서는 sources와 guide.sources를 확인하세요. 총괄 AI는 guide.approval에 있는 전체 방향·문서별 실행 계획의 두 단계 사용자 승인을 확인하세요. 미승인 상태에서는 읽기 전용 분석과 제안만 합니다. 이 문맥을 먼저 읽고 원본 전수 분석, 요구사항 주 소유권, 문서 경계와 실행 순서를 관리하세요. 지시 전달 상태와 카드 완료 수는 기획 구현률이 아닙니다.', {
+  registerTool(server, 'mindnprogress_get_group_context', '그룹의 최신 기획서 목록(project.sources: 이름·주소·개별 버전), 목표·공통 지침, 통합 관리 문서, 소속 문서의 루트 업무 설명·대화, 그룹 문서 지시와 과거 그룹 위임 현황을 조회합니다. source/sourceVersion은 첫 항목의 호환 별칭이며 모든 기획서는 sources와 guide.sources를 확인하세요. 총괄 AI는 guide.approval에 있는 전체 방향·문서별 실행 계획의 두 단계 사용자 승인을 확인하세요. 미승인 상태에서는 읽기 전용 분석과 제안만 합니다. 이 문맥을 먼저 읽고 원본 전수 분석, 요구사항 주 소유권, 문서 경계와 실행 순서를 관리하세요. 지시 전달 상태와 카드 완료 수는 기획 구현률이 아닙니다. 기본 detailLevel=summary는 project·guide 전문과 문서·지시·위임·대기의 요약을 반환하고, 생략한 원문의 회수 경로를 detail에 담습니다. summary의 documents[].root.data에는 description·sharedKnowledge가 없고 길이·SHA-256만 root.textIntegrity에 있으며, documentInstructions에는 지시·응답 원문이 없습니다. 실행 범위·문서 경계·완료를 판단하기 전에는 그 경로로 해당 원문을 읽으세요. full은 모든 원문을 반환하지만 AI 클라이언트의 도구 출력 한도를 넘을 수 있습니다.', {
     groupId: z.string().min(1),
-  }, async ({ groupId }) => apiRequest(`/api/groups/${encodeURIComponent(groupId)}`))
+    detailLevel: z.enum(['summary', 'full']).default('summary').describe('summary는 project·guide 전문과 요약·원문 회수 경로(detail), full은 소속 문서 루트·대기·지시·위임 원문 전체'),
+    mapId: z.string().min(1).optional().describe('summary의 역할 판정에 쓸 현재 문서 ID. 생략하면 get_context로 연결한 문서. 총괄 문서는 그룹 전체, 소속 문서는 그 문서가 대상인 지시·위임만 요약'),
+  }, async ({ groupId, detailLevel, mapId }) => {
+    const query = new URLSearchParams()
+    if (detailLevel === 'summary') {
+      query.set('view', 'summary')
+      if (mapId ?? activeMapId) query.set('mapId', mapId ?? activeMapId)
+    }
+    const suffix = query.size > 0 ? `?${query}` : ''
+    return apiRequest(`/api/groups/${encodeURIComponent(groupId)}${suffix}`)
+  })
 
   registerTool(server, 'mindnprogress_update_group_project', '사용자가 승인한 설정·정비 범위에서만 그룹의 기획서 목록, 목표와 공통 지침을 부분 수정합니다. 미승인 방향을 설정에 확정하려고 호출하지 마세요. get_group_context의 project.version을 baseVersion으로 전달하세요. sources는 전체 목록 교체이며 기존 항목·ID를 보존하고 승인된 추가·수정·제거만 반영하세요. 생략하면 목록 유지, 빈 배열은 전체 제거입니다. source/sourceVersion은 첫 항목만 수정하는 구버전 호환 필드로 sources와 함께 전달하지 마세요. createCoordinator=true는 총괄 문서가 없을 때 통합 관리 문서와 집계 루트를 만들며 AI 실행을 시작하지 않습니다. 기존 문서는 coordinatorMapId로 연결합니다. 장문은 원문을 보존하고 수정 후 재조회해 비교하세요.', {
     groupId: z.string().min(1), baseVersion: z.number().int().nonnegative(),
@@ -1617,26 +1762,37 @@ async function main() {
     sources: z.array(z.object({ id: z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/), title: z.string().max(120), source: z.string().max(4096), sourceVersion: z.string().max(240) }).strict()).max(50).optional(),
     objective: z.string().max(10000).optional(), instructions: z.string().max(20000).optional(),
     coordinatorMapId: z.string().min(1).optional(), createCoordinator: z.boolean().optional(),
-  }, async ({ groupId, ...body }) => apiRequest(`/api/groups/${encodeURIComponent(groupId)}`, { method: 'PATCH', body: JSON.stringify(body) }))
+  }, async ({ groupId, ...body }) => {
+    // 저장 결과도 get_group_context 기본값과 같은 요약으로 받는다. 전체 문맥은 도구 출력 한도를 넘을 수 있다.
+    const query = new URLSearchParams({ view: 'summary' })
+    if (activeMapId) query.set('mapId', activeMapId)
+    return apiRequest(`/api/groups/${encodeURIComponent(groupId)}?${query}`, { method: 'PATCH', body: JSON.stringify(body) })
+  })
 
   registerTool(server, 'mindnprogress_create_group_document', '사용자가 승인한 문서 구성 범위에서만 그룹에 기능 문서와 집계 전용 루트를 생성합니다. 미승인 분할안은 대화로 제안하고 이 도구를 호출하지 마세요. description에 담당 원본 범위, 요구사항 소유권, 분석·감사 순서, 정책 Ref와 완료 조건을 기록하세요. 이 호출은 AI를 실행하지 않습니다. 하위 카드는 기존 카드 도구로 구성하고 문서별 실행 계획까지 사용자에게 승인받은 뒤 그룹 총괄에서 mindnprogress_send_group_document_instruction으로 문서 루트 AI에 지시 전문을 전달하세요.', {
     groupId: z.string().min(1), baseVersion: z.number().int().nonnegative(),
     title: z.string().min(1).max(80), description: z.string().max(100000),
   }, async ({ groupId, ...body }) => apiRequest(`/api/groups/${encodeURIComponent(groupId)}/documents`, { method: 'POST', body: JSON.stringify(body) }))
 
-  registerTool(server, 'mindnprogress_get_document', '문서의 모든 카드와 연결 관계, 외부 접근 URL 및 이미지 카드의 로컬 원본 경로를 조회합니다. view를 생략하면 기존과 같은 full 전체 응답입니다. compact는 모든 카드 원문·관계·안전 메타데이터를 유지하고 AI 대화 상세·렌더링 전용 값·카드별 접근 URL 목록만 줄입니다. outline은 카드 원문 대신 구조·상태·관계·요구사항 필드·본문 길이와 textIntegrity를 주고 cardIds로 고른 카드만 전문을 함께 주며, 생략 범위와 회수 도구를 omitted에 표기합니다. version은 문서 version과 documentEtag만 확인합니다. 같은 view·cardIds로 받은 응답의 documentEtag를 ifNoneMatch로 전달하면 그 응답 이후 문서가 바뀌지 않았을 때만 본문을 생략하고, knownVersion은 version 일치 여부만 freshness로 알려 주며 본문을 생략하지 않습니다(view를 생략한 full 응답에는 freshness가 없습니다). 재구성 계획·의미 보존 검토, restore_history 직전 백업, 요구사항 전수 감사와 지식선 전역 점검에는 full을 사용하세요.', getDocumentSchema, async ({ mapId, view = 'full', cardIds, knownVersion, ifNoneMatch }) => {
-    const [documentResult, health] = await Promise.all([
-      apiRequest(`/api/maps/${encodeURIComponent(mapId)}`),
-      apiRequest('/api/health'),
-    ])
-    return buildDocumentView(documentResult, {
-      view,
-      cardIds,
-      knownVersion,
-      ifNoneMatch,
-      publicBaseUrl: health.publicBaseUrl,
-      imageAccessOf: (documentId, node) => imageCardLocalAccess(dataDirectory, documentId, node),
-    })
+  registerTool(server, 'mindnprogress_get_document', '문서의 모든 카드와 연결 관계, 외부 접근 URL 및 이미지 카드의 로컬 원본 경로를 조회합니다. view를 생략하면 기존과 같은 full 전체 응답입니다. compact는 모든 카드 원문·관계·안전 메타데이터를 유지하고 AI 대화 상세·렌더링 전용 값·카드별 접근 URL 목록만 줄입니다. outline은 카드 원문 대신 구조·상태·관계·요구사항 필드·본문 길이와 textIntegrity를 주고 cardIds로 고른 카드만 전문을 함께 주며, 생략 범위와 회수 도구를 omitted에 표기합니다. version은 문서 version과 documentEtag만 확인합니다. 같은 view·cardIds로 받은 응답의 documentEtag를 ifNoneMatch로 전달하면 그 응답 이후 문서가 바뀌지 않았을 때만 본문을 생략하고, knownVersion은 version 일치 여부만 freshness로 알려 주며 본문을 생략하지 않습니다(view를 생략한 full 응답에는 freshness가 없습니다). 재구성 계획·의미 보존 검토, restore_history 직전 백업, 요구사항 전수 감사와 지식선 전역 점검에는 full을 사용하세요. outline 응답이 약 4만 자를 넘으면 구조·상태·계층과 cardIds로 고른 카드 전문은 그대로 두고 큰 비원문 필드, 검증 해시, 갱신 메타데이터, 대기 메모, 대기 항목, 카드 보조 필드, 지식선 순으로 줄이며, 줄인 범위와 회수 경로를 응답 앞쪽 responseBudget과 omitted에 표기합니다. 대기·완료 판단에 필요한 원문은 omitted.retrieval로 먼저 읽으세요.', getDocumentSchema, async ({ mapId, view = 'full', cardIds, knownVersion, ifNoneMatch }) => {
+    const query = new URLSearchParams({ mcpView: view })
+    for (const id of cardIds ?? []) query.append('cardId', id)
+    if (cardIds && view !== 'outline') throw Object.assign(new Error("cardIds는 view='outline'에서만 사용할 수 있습니다."), { reasonCode: 'DOCUMENT_VIEW_ARGUMENT_INVALID' })
+    if (knownVersion !== undefined) query.set('knownVersion', String(knownVersion))
+    if (ifNoneMatch !== undefined) query.set('ifNoneMatch', ifNoneMatch)
+    const result = await apiRequest(`/api/maps/${encodeURIComponent(mapId)}?${query}`)
+    // 이미지 경로는 서버 머신이 아니라 현재 MCP의 원본 접근 경로를 유지한다.
+    const nodes = result.map?.nodes ?? result.cards ?? []
+    const byId = new Map(nodes.map((node) => [node.id, node]))
+    for (const card of [...(result.access?.cards ?? []), ...(result.access?.imageCards ?? []), ...(result.selectedCards ?? [])]) {
+      const node = card.data ? card : byId.get(card.cardId)
+      const access = imageCardLocalAccess(dataDirectory, mapId, node)
+      if (access) card.imageAccess = access
+    }
+    return result
+  }, {
+    // outline 예산의 반환 크기는 그룹 메타데이터·로컬 이미지 경로를 붙인 최종 응답 기준으로 맞춘다.
+    finalizeResult: (result) => finalizeResponseBudget(result),
   })
 
   registerTool(server, 'mindnprogress_get_ai_work_states', '카드에 연결된 AionUi 대화의 현재 작업 상태를 조회합니다. 형제·하위·선행 카드 등 선택 카드 밖의 관련 카드를 수정하기 전에 호출해 다른 AI와의 동시 작업 충돌을 확인하세요. 이 조회는 문서 데이터, 버전과 변경 이력을 수정하지 않습니다.', {
@@ -1679,6 +1835,35 @@ async function main() {
     })
   })
 
+  registerTool(server, 'mindnprogress_start_card_conversation', '사용자 요청 또는 서버 위임 규칙 전환 안내에 따른 대화 인계를 위해 현재 대화가 연결된 자기 원본 카드에 후속 AionUi 대화를 생성하고 첫 메시지를 전달합니다. 같은 실행 머신만 지원하며 하위 카드 위임이나 worker 배정이 아닙니다. 현재 대화는 중지하지 않고, 새 대화의 실행 설정 일치와 필요한 인수 확인 후 대표 연결을 전환하며 이전 대화는 이력에 남깁니다. 진행 중인 위임·그룹 지시·복구가 있으면 먼저 마치세요. 최초 호출에는 predecessorConversationId, newConversation, initialMessage, decisionReason, approvalEvidence가 필요합니다. 재시도에는 같은 requestId를 유지하고 resultOnly=true로 처리 결과만 확인할 수 있습니다. starting·observing은 완료가 아니며 runtimeConfig의 source=snapshot은 실제 실행값 확인이 아닙니다. 외부 총괄의 회신 주소는 자동으로 바뀌지 않습니다.', {
+    mapId: z.string().min(1).describe('현재 대화가 연결된 문서 ID'),
+    cardId: z.string().min(1).max(120).describe('현재 대화가 연결된 자기 원본 카드 ID'),
+    requestId: z.string().regex(CARD_CONVERSATION_START_REQUEST_ID).describe('인계 요청마다 새로 정하는 안정적인 멱등 키. 재시도와 결과 조회에는 같은 키를 유지'),
+    resultOnly: z.boolean().optional().describe('true이면 mapId, cardId, requestId만으로 기존 요청 결과를 확인하고 미완료 단계를 복구'),
+    acceptHandoff: z.boolean().optional().describe('서버가 요청한 루트 인계의 후속 대화에서 인계문·최신 카드 문맥을 확인한 뒤 resultOnly=true와 함께 보내는 인수 확인. 이전 대화는 사용할 수 없음'),
+    predecessorConversationId: z.string().min(1).max(120).optional().describe('최초 호출 필수. 이 도구를 호출한 현재 대화 ID이며 카드 대표 대화와 일치해야 함'),
+    machineId: z.string().max(64).optional().describe('생략하면 현재 대화의 실행 머신. 다른 머신으로 이전하지 않음'),
+    initialMessage: z.string().min(1).max(100000).optional().describe('최초 호출 필수. 새 대화에 전달할 첫 메시지 원문. 파일 경로 대신 읽은 원문을 그대로 전달'),
+    decisionReason: z.string().min(1).max(1000).optional().describe('최초 호출 필수. 새 대화로 인계하는 이유'),
+    approvalEvidence: z.string().min(1).max(10000).optional().describe('최초 호출 필수. 사용자의 실제 인계 요청 또는 서버가 지정한 규칙 전환 안내와 확인 가능한 출처. 새 작업 범위의 승인을 만들어내지 않음'),
+    newConversation: z.object({
+      agentId: z.string().min(1).max(512), modelId: z.string().min(1).max(512),
+      modeId: z.string().min(1).max(512).optional(), thoughtLevelId: z.string().min(1).max(512).optional(),
+      enabledSkillIds: z.array(z.string().min(1).max(512)).max(128).optional(),
+      disabledBuiltinSkillIds: z.array(z.string().min(1).max(512)).max(128).optional(),
+      mcpIds: z.array(z.string().min(1).max(512)).max(128).optional(),
+      workspace: z.string().min(1).max(4096).optional(),
+      claudeAccountId: z.string().min(1).max(120).optional().describe('Claude 새 대화의 계정 ID(list_ai_conversations의 claudeAccount.id). 수동 인계에서 생략하면 호출한 현재 대화와 같은 계정. 서버가 요청한 루트 CLI 전환은 서버가 지정한 계정을 사용'),
+    }).optional().describe('최초 호출 필수. 수동 인계는 생략한 선택 항목을 이전 대화에서 상속하고 Claude 계정은 claudeAccountId로 지정 가능. 서버가 요청한 루트 인계는 안내받은 설정을 사용'),
+  }, async ({ mapId, cardId, ...body }) => {
+    const origin = delegationOriginForMap(mapId)
+    return apiRequest(`/api/maps/${encodeURIComponent(mapId)}/cards/${encodeURIComponent(cardId)}/ai-conversation-starts`, {
+      method: 'POST', aiMapId: origin.mapId, aiCardId: origin.cardId,
+      aiAttributionToken: origin.attributionToken, aiEditorId: origin.editorId,
+      aiType: origin.aiType, aiModel: origin.aiModel, body: JSON.stringify(body),
+    })
+  })
+
   registerTool(server, 'mindnprogress_list_ai_conversations', '카드에서 시작한 모든 AionUi 대화 후보를 최신순으로 조회합니다. 각 대화의 AI·모델·모드·사고 강도·스킬·MCP·작업공간·시작자·최근 활동 시각, 현재 실행 상태와 문맥 건강도(contextHealth)를 반환합니다. 기존 대화를 이어갈지 새 대화를 만들지 판단할 때 전문 조회보다 먼저 사용하세요. 이 조회는 문서 버전을 변경하지 않습니다.', {
     mapId: z.string().min(1).describe('조회할 문서 ID'),
     cardId: z.string().min(1).max(120).describe('AI 대화 후보를 조회할 카드 ID'),
@@ -1689,7 +1874,10 @@ async function main() {
     })
     return {
       ...result,
-      selectionRule: aiConversationSelectionRules(),
+      selectionRule: { ...aiConversationSelectionRules(),
+        delegation: '하위 카드 위임도 담당과 규칙 모델을 먼저 확인합니다. 모델이 다르면 일치 모델의 최신 연결 대화를 선택하고 없을 때만 새 담당을 만듭니다. 재사용 직전에 규칙의 사고 강도를 적용하고 실제 실행값을 검증합니다. 실제 선택은 aiPolicy.primaryResolution으로 확인하세요. 중단된 동일 위임은 기존 대화에서 복구합니다.',
+        groupInstruction: '그룹 문서 지시는 primaryConversationId의 담당이 우선입니다. 루트 CLI가 규칙과 다르면 기존 담당의 인계문과 후속 대화의 인수 확인을 거쳐 전환합니다. 같은 CLI의 모델 변경은 최신 일치 대화를 선택하며, 없으면 생성합니다. 재사용 전에는 규칙의 사고 강도를 적용·검증합니다. 실행 중인 일치 대화는 대기하며 다른 대화를 추가 생성하지 않습니다.',
+      },
     }
   })
 
@@ -1702,7 +1890,7 @@ async function main() {
       z.object({
         action: z.literal('commit-changes'),
         paths: z.array(z.string().min(1).max(4096)).min(1).max(2000)
-          .describe('검증 전에 고정할 의도된 변경의 projectRoot 상대 경로. git status를 확인해 실제 수정·추가한 파일만 전달'),
+          .describe('검증 전에 고정할 의도된 추가·수정·삭제의 projectRoot 상대 파일 또는 폴더 경로. 폴더는 하위의 모든 실제 변경 파일을 포함하므로 git status로 범위를 확인하세요. 입력 범위는 최대 2,000개이며 폴더에서 확장된 파일 수는 이 제한에 포함하지 않습니다. 와일드카드는 해석하지 않습니다.'),
         commitMessage: checkpointCommitMessageSchema
           .describe('이번 paths의 실제 변경을 설명하는 구조화 커밋 메시지. 서버가 커밋 제목 prefix, [MnP] 출처와 본문 섹션을 생성하므로 prefix와 출처를 직접 넣지 않음'),
       }).strict(),
@@ -1727,7 +1915,7 @@ async function main() {
     })
   })
 
-  registerTool(server, 'mindnprogress_send_group_document_instruction', '그룹 총괄 문서의 루트 AI가 같은 그룹에 속한 다른 문서의 원본 루트 AI에 승인된 문서별 지시 전문을 전달합니다. 이 도구는 AI 작업 위임이나 worker 배정이 아닙니다. 대상 문서 AI가 담당 분석·카드 정비를 수행하고, 승인된 실제 구현은 자기 문서의 하위 업무 카드에 별도로 위임합니다. 전달 전 mindnprogress_get_group_context에서 그룹 설정 버전과 대상 문서 버전, 두 단계 사용자 승인 범위를 확인하세요. 서버는 대상 문서 AI가 지시를 받은 첫 응답 턴만 replied 상태와 response로 기록하며 총괄 대화를 자동 재개하거나 이후 턴의 보고를 전달하지 않습니다. 최종 완료 보고는 대상 문서 AI가 지시 전문의 회신 방법에 따라 session-message로 회신 대상 대화에 직접 보내며 기본 대상은 현재 총괄 대화입니다. 사용자가 이번 지시에서 다른 대화를 명시한 경우에만 replyTarget을 explicit으로 지정하세요. 과거 지시·AION_SESSION_MESSAGE·reply_to를 근거로 대상을 추정하지 마세요. 대상 AI가 응답 중이면 지시를 내구 대기열에 보존하고 유휴 상태에서 자동 전달합니다. 모든 응답의 reasonCode와 message를 함께 읽고, queued·delivered·replied 상태를 업무 완료로 해석하지 마세요.', {
+  registerTool(server, 'mindnprogress_send_group_document_instruction', '그룹 총괄 문서의 루트 AI가 같은 그룹에 속한 다른 문서의 원본 루트 AI에 승인된 문서별 지시 전문을 전달합니다. 이 도구는 AI 작업 위임이나 worker 배정이 아닙니다. 대상 문서 AI가 담당 분석·카드 정비를 수행하고, 승인된 실제 구현은 자기 문서의 하위 업무 카드에 별도로 위임합니다. 전달 전 mindnprogress_get_group_context에서 그룹 설정 버전과 대상 문서 버전, 두 단계 사용자 승인 범위를 확인하세요. 서버는 대상 문서 AI가 지시를 받은 첫 응답 턴만 replied 상태와 response로 기록하며 총괄 대화를 자동 재개하거나 이후 턴의 보고를 전달하지 않습니다. 최종 완료 보고는 대상 문서 AI가 지시 전문의 회신 방법에 따라 session-message로 회신 대상 대화에 직접 보내며 기본 대상은 현재 총괄 대화입니다. 사용자가 이번 지시에서 다른 대화를 명시한 경우에만 replyTarget을 explicit으로 지정하세요. 과거 지시·AION_SESSION_MESSAGE·reply_to를 근거로 대상을 추정하지 마세요. 대상 AI가 응답 중이면 지시를 내구 대기열에 보존하고 유휴 상태에서 자동 전달합니다. 모든 응답의 reasonCode와 message를 함께 읽고, queued·delivered·replied 상태를 업무 완료로 해석하지 마세요. 기본 수신자는 AI 대화 선택에서 체크한 담당 대화(primaryConversationId)입니다. 기존 카드는 최신 대화가 초기 담당이며 새 보조 대화 추가로 바뀌지 않습니다. resume의 conversationId를 생략하면 담당을 사용합니다. 루트 CLI가 위임 규칙과 다르면 기존 담당의 인계문 작성과 후속 대화의 인수 확인 후 담당을 전환하고 보관한 지시를 전달합니다. 같은 CLI 안의 모델 변경은 연결된 대화 중 규칙 모델과 일치하는 최신 대화를 담당으로 바꾸어 이어갑니다. 일치하는 대화가 없으면 규칙에 맞는 새 대화를 생성해 담당으로 지정합니다. 이때 이전 conversationId·문맥 평가를 재사용하지 않고 서버가 대상 후보를 평가하며, 실제 선택은 응답의 instruction과 aiPolicy.primaryResolution에서 확인하세요. 담당 모델이 이미 규칙과 같으면 기존 담당을 유지합니다. 재사용 직전에 규칙의 사고 강도를 적용하고 실제 실행값을 검증하며, 확인 실패 시 업무 지시를 보내지 않습니다. 수동 담당 교체는 사용자가 체크를 변경하거나 명시적인 인계 도구를 사용합니다. 보조 AI를 이번 지시에 사용하라는 사용자 요청이 있을 때만 targetConversationRole=auxiliary와 aiPolicyOverride.evidence를 함께 지정하세요. 규칙 모델 불일치가 아닌 경우 strategy=new는 첫 담당 생성 또는 명시적으로 요청한 보조 대화 생성에만 사용합니다.', {
     mapId: z.string().min(1).describe('현재 그룹 총괄 루트 카드가 속한 문서 ID'),
     targetMapId: z.string().min(1).describe('지시를 받을 같은 그룹 소속 문서 ID. 대상 카드는 서버가 원본 루트로 확정합니다.'),
     targetRevision: z.number().int().positive().describe('get_group_context에서 확인한 대상 문서의 최신 version'),
@@ -1735,9 +1923,11 @@ async function main() {
     instructionType: z.enum(['planning', 'scope-adjustment', 'execution', 'validation', 'status-request']).describe('지시의 목적'),
     approvalScope: z.enum(['analysis-only', 'card-maintenance', 'implementation', 'validation']).describe('사용자에게 승인받아 대상 문서 AI가 수행할 수 있는 최대 범위'),
     approvalEvidence: z.string().min(1).max(10000).describe('사용자의 실제 승인 발언, 승인 범위와 확인 가능한 대화·메시지 출처. 분석 전용이면 해당 분석 요청 근거를 전달하며 확인하지 못한 근거를 만들지 않습니다. 이 전문을 instruction에 반복하지 않습니다.'),
-    strategy: z.enum(['resume', 'new']).describe('resume은 대상 문서 루트에 연결된 기존 대화 이어가기, new는 새 문서 담당 대화 생성'),
-    conversationId: z.string().min(1).max(120).optional().describe('resume일 때 이어갈 대상 문서 루트의 conversationId'),
+    strategy: z.enum(['resume', 'new']).describe('resume은 담당 대화 이어가기, new는 첫 담당 생성 또는 명시적으로 요청한 보조 대화 생성'),
+    targetConversationRole: z.enum(['primary', 'auxiliary']).optional().describe('생략하면 primary: 체크된 담당에게만 전달. auxiliary는 사용자가 이번 지시에서 보조 AI 사용을 지정한 경우만 허용하며 aiPolicyOverride.evidence에 근거를 전달. 담당 선택은 바꾸지 않음'),
+    conversationId: z.string().min(1).max(120).optional().describe('resume일 때 대상 대화. 기본은 primaryConversationId이며 생략 가능. auxiliary는 연결된 보조 대화 ID를 반드시 지정'),
     conversationAssessmentId: z.string().regex(/^[a-f0-9]{64}$/).optional().describe('resume일 때 mindnprogress_list_ai_conversations가 대상 루트 대화의 contextHealth.assessmentId로 반환한 최신 평가 ID'),
+    ...contextOverrideArgument('지시 기록'),
     machineId: z.string().regex(/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/).optional().describe('new일 때 실행할 머신. resume은 기존 대화의 머신으로 고정됩니다.'),
     instruction: z.string().min(1).max(100000).describe('대상 문서 AI가 수행할 작업·제외 범위·완료 및 회신 조건. 승인 범위를 넘는 변경은 포함하지 않습니다. 사용자 승인 발언과 승인 출처는 approvalEvidence에만 전달하며 동일 전문을 반복하지 않습니다.'),
     replyTarget: z.union([
@@ -1751,16 +1941,19 @@ async function main() {
     decisionReason: z.string().min(1).max(1000).describe('기존 대화를 이어가거나 새 대화가 필요하다고 판단한 근거'),
     sourceRevision: z.number().int().positive().describe('get_context 또는 get_document에서 확인한 총괄 문서의 최신 version'),
     idempotencyKey: z.string().regex(GROUP_DOCUMENT_INSTRUCTION_ID_PATTERN).describe('같은 지시의 중복 전달을 막는 안정적인 키. sourceRevision과 targetMapId를 포함하는 형식을 권장'),
+    ...aiDelegationPolicyArguments,
     newConversation: z.object({
-      agentId: z.string().min(1).max(512),
-      modelId: z.string().min(1).max(512),
+      agentId: z.string().min(1).max(512).optional(),
+      modelId: z.string().min(1).max(512).optional(),
       modeId: z.string().min(1).max(512).optional(),
       thoughtLevelId: z.string().min(1).max(512).optional(),
       enabledSkillIds: z.array(z.string().min(1).max(512)).max(128).optional(),
       disabledBuiltinSkillIds: z.array(z.string().min(1).max(512)).max(128).optional(),
       mcpIds: z.array(z.string().min(1).max(512)).max(128).optional(),
       workspace: z.string().min(1).max(4096).optional(),
-    }).optional().describe('new일 때 사용할 문서 담당 AI 실행 환경. 생략하면 대상 루트의 최근 대화 또는 현재 총괄 대화 설정을 상속'),
+      claudeAccountId: z.string().trim().min(1).max(120).optional().describe('사용자가 이번 새 대화에 지정한 Claude 계정 ID. 계정 번호와 둘 중 하나만 지정. 정책보다 우선하며 전역 기본값은 바꾸지 않음'),
+      claudeAccountNumber: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional().describe('사용자가 이번 새 대화에 지정한 Claude 계정 번호(예: 1). 실행 머신의 최신 계정 목록에서 ID로 변환. 번호를 default 계정으로 추측하지 않음. resume에서는 계정을 변경할 수 없으므로 new를 사용'),
+    }).optional().describe('new일 때 문서 담당 AI의 기술·MCP·작업 디렉토리·Claude 계정. agentId·modelId·modeId·thoughtLevelId는 aiPolicyOverride가 있을 때만 적고, 없으면 위임 규칙 값을 씀. 생략한 항목은 대상 루트의 최근 대화 또는 현재 총괄 대화 설정을 상속. Claude 계정은 명시하면 이번 대화에 적용하며, 생략하면 기존 용도별 계정 정책을 따름'),
   }, async ({ mapId, ...instruction }) => {
     const origin = delegationOriginForMap(mapId)
     return apiRequest(`/api/maps/${encodeURIComponent(mapId)}/group-document-instructions`, {
@@ -1776,24 +1969,30 @@ async function main() {
     })
   })
 
-  registerTool(server, 'mindnprogress_list_group_document_instructions', '그룹 총괄 문서에서 보낸 문서 지시의 대기·전달·응답·실패 상태를 조회합니다. 전달이나 응답 상태는 실제 문서 업무 완료를 뜻하지 않으므로 get_group_context의 카드와 문서 내부 AI 위임도 함께 확인하세요.', {
+  registerTool(server, 'mindnprogress_list_group_document_instructions', '그룹 총괄 문서에서 보낸 문서 지시의 대기·전달·응답·실패 상태를 조회합니다. 전달이나 응답 상태는 실제 문서 업무 완료를 뜻하지 않으므로 get_group_context의 카드와 문서 내부 AI 위임도 함께 확인하세요. 응답이 약 4만 자를 넘으면 queued·delivered 지시는 그대로 두고 대상 문서별 최신 지시는 마지막까지 남기며, 정리된 이력만 오래된 지시부터 원문 생략, 요약(summary=true), 개수화 순으로 줄여 응답 앞쪽 responseBudget과 omitted에 표기합니다. 생략된 지시는 instructionId와 includeContent=true로 한 건씩 조회하세요.', {
     mapId: z.string().min(1).describe('그룹 총괄 문서 ID'),
     targetMapId: z.string().min(1).optional().describe('특정 대상 문서로 필터'),
+    instructionId: z.string().min(1).optional().describe('지시 한 건만 조회. 없으면 GROUP_DOCUMENT_INSTRUCTION_NOT_FOUND'),
     includeContent: z.boolean().optional().describe('승인 근거·지시·응답 원문 포함'),
-  }, async ({ mapId, targetMapId, includeContent }) => {
+  }, async ({ mapId, targetMapId, instructionId, includeContent }) => {
     const query = new URLSearchParams()
     if (targetMapId) query.set('targetMapId', targetMapId)
+    if (instructionId) query.set('instructionId', instructionId)
     if (includeContent) query.set('includeContent', 'true')
     const suffix = query.size > 0 ? `?${query}` : ''
     return apiRequest(`/api/maps/${encodeURIComponent(mapId)}/group-document-instructions${suffix}`, { aiMapId: mapId })
+  }, {
+    // 지시 이력이 클라이언트 출력 한도를 넘으면 정리된 이력만 줄인다. 지시 한 건을 지정한 조회는 그대로 준다.
+    finalizeResult: (result, { mapId, instructionId, includeContent }) => (instructionId ? result : applyInstructionListBudget(result, { mapId, includeContent })),
   })
 
-  registerTool(server, 'mindnprogress_delegate_ai_work', '이 대화가 시작된 카드와 같은 문서의 모든 깊이 하위 카드에 사용자 요청 또는 상위 AI가 맡긴 범위의 작업을 위임합니다. 다른 문서의 루트 AI에는 mindnprogress_send_group_document_instruction을 사용하고, 문서 담당·하위 AI에게 같은 사용자 승인을 반복해서 요구하지 마세요. 기존 대화를 이어가거나 새 대화를 만들 수 있으며 다른 카드를 조회해도 위임 기준 카드는 바뀌지 않습니다. 등록된 작업공간 pool은 MindNProgress가 worker 배정과 main 직렬 통합을 관리합니다. 먼저 후보·작업 상태와 현재 문서 version을 확인하고, 응답의 reasonCode와 message로 접수·대기·실패를 구분하세요.', {
+  registerTool(server, 'mindnprogress_delegate_ai_work', '이 대화가 시작된 카드와 같은 문서의 모든 깊이 하위 카드에 사용자 요청 또는 상위 AI가 맡긴 범위의 작업을 위임합니다. 다른 문서의 루트 AI에는 mindnprogress_send_group_document_instruction을 사용하고, 문서 담당·하위 AI에게 같은 사용자 승인을 반복해서 요구하지 마세요. 기존 대화를 이어가거나 새 대화를 만들 수 있으며 다른 카드를 조회해도 위임 기준 카드는 바뀌지 않습니다. 등록된 작업공간 pool은 MindNProgress가 worker 배정과 main 직렬 통합을 관리합니다. 먼저 후보·작업 상태와 현재 문서 version을 확인하고, 응답의 reasonCode와 message로 접수·대기·실패를 구분하세요. 새 대화의 CLI·모델·사고 강도는 서버 위임 규칙이 workType·analysisDepth와 대상 카드 구분으로 정해 응답 aiPolicy로 알립니다. 하위 카드도 담당 대화를 우선합니다. 담당 모델이 규칙과 다르면 일치 모델의 최신 연결 대화를 선택하고, 없을 때만 새 대화를 생성합니다. 규칙과 같은 담당은 유지하며 재사용 직전에 규칙의 사고 강도를 적용·검증합니다. 확인 실패 시 작업을 보내지 않으며 실행 확인 후 담당을 저장합니다. 실제 선택은 aiPolicy.primaryResolution과 delegation.primarySelection으로 확인하세요. 자동으로 대상이 바뀌면 서버가 문맥을 다시 평가합니다. 실행 중인 후보는 새 대화로 대체하지 않습니다. 중단된 동일 위임의 복구와 명시적 aiPolicyOverride에는 자동 교체를 적용하지 않습니다. instruction은 새 대화도 이해하도록 쓰세요.', {
     mapId: z.string().min(1).describe('이 대화가 시작된 상위 카드가 속한 문서 ID'),
     targetCardId: z.string().min(1).max(120).describe('작업을 맡길 대화 시작 카드의 계층상 하위 카드 ID. 모든 깊이의 하위 카드를 지원'),
     strategy: z.enum(['resume', 'new']).describe('resume은 연결된 기존 대화 이어가기, new는 새 대화 생성'),
     conversationId: z.string().min(1).max(120).optional().describe('resume일 때 이어갈 대상 카드의 conversationId'),
     conversationAssessmentId: z.string().regex(/^[a-f0-9]{64}$/).optional().describe('일반 resume일 때 mindnprogress_list_ai_conversations가 해당 대화의 contextHealth.assessmentId로 반환한 최신 평가 ID. 중단된 동일 위임의 직접 재개에는 생략 가능'),
+    ...contextOverrideArgument('위임 기록'),
     machineId: z.string().regex(/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/).optional().describe('new일 때 풀 lease 없는 일반 작업을 실행할 머신 ID. 생략하면 편집자의 기본 머신을 사용합니다. resume은 기존 대화의 homeMachineId로 고정되며, 등록된 Unity 작업공간 pool 위임은 현재 메인 머신만 지원합니다.'),
     instruction: z.string().min(1).max(100000).describe('같은 문서의 하위 AI가 제안에 그치지 않고 실제로 수행할 작업 범위·허용 작업·제외 범위·완료 조건. 분석·제안만 맡기는 경우 구현·추가 위임 금지를 명시합니다.'),
     role: z.string().min(1).max(200).optional().describe('하위 AI가 맡을 역할·페르소나(예: 시니어 엔지니어, 리뷰어, QA, 또는 ~/.claude/agents에 정의된 서브에이전트 이름). 생략하면 일반적인 하위 위임 실행으로 표기됩니다.'),
@@ -1802,16 +2001,19 @@ async function main() {
     idempotencyKey: z.string().regex(AI_DELEGATION_ID_PATTERN).describe('같은 위임의 중복 실행을 막는 안정적인 키. 영문·숫자로 시작하고 영문·숫자·밑줄·하이픈·콜론을 사용해 sourceRevision과 targetCardId를 포함하는 형식을 권장'),
     retryOfRequestId: z.string().min(1).max(120).optional().describe('접수 실패 응답의 requestFailure.retryReference.requestId. 같은 업무를 재접수할 때 전달하고 원 instruction은 유지한 채 sourceRevision 등 메타데이터만 갱신하세요. 다른 업무에 사용하지 마세요. 성공 접수 시 기존 실패 경고가 자동 해제됩니다.'),
     taskSummary: z.string().min(1).max(240).optional().describe('사용자에게 표시할 이번 업무의 짧은 요약. 카드 제목만으로 여러 위임을 구분하기 어려울 때 제공합니다. 비밀·인증 정보나 지시 전문을 넣지 마세요.'),
+    ...aiDelegationPolicyArguments,
     newConversation: z.object({
-      agentId: z.string().min(1).max(512),
-      modelId: z.string().min(1).max(512),
+      agentId: z.string().min(1).max(512).optional(),
+      modelId: z.string().min(1).max(512).optional(),
       modeId: z.string().min(1).max(512).optional(),
       thoughtLevelId: z.string().min(1).max(512).optional(),
       enabledSkillIds: z.array(z.string().min(1).max(512)).max(128).optional(),
       disabledBuiltinSkillIds: z.array(z.string().min(1).max(512)).max(128).optional(),
       mcpIds: z.array(z.string().min(1).max(512)).max(128).optional(),
       workspace: z.string().min(1).max(4096).optional(),
-    }).optional().describe('new일 때 명시적으로 사용할 실행 환경. 생략하면 대상 카드의 최근 대화, 그마저 없으면 현재 상위 대화 설정을 상속'),
+      claudeAccountId: z.string().trim().min(1).max(120).optional().describe('사용자가 이번 위임에 지정한 Claude 계정 ID. 계정 번호와 둘 중 하나만 지정. 정책보다 우선하며 전역 기본값은 바꾸지 않음'),
+      claudeAccountNumber: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional().describe('사용자가 이번 위임에 지정한 Claude 계정 번호(예: 1). 실행 머신의 최신 계정 목록에서 ID로 변환. 번호를 default 계정으로 추측하지 않음. resume에서는 계정을 변경할 수 없으므로 new를 사용'),
+    }).optional().describe('new일 때 기술·MCP·작업 디렉토리·Claude 계정. agentId·modelId·modeId·thoughtLevelId는 aiPolicyOverride가 있을 때만 적고, 없으면 위임 규칙 값을 씀. 생략한 항목은 대상 카드의 최근 대화, 그마저 없으면 현재 상위 대화 설정을 상속. Claude 계정은 명시하면 이번 위임에 적용하며, 생략하면 기존 용도별 계정 정책을 따름'),
   }, async ({ mapId, ...delegation }) => {
     const origin = delegationOriginForMap(mapId)
     return apiRequest(`/api/maps/${encodeURIComponent(mapId)}/ai-delegations`, {
@@ -1827,42 +2029,50 @@ async function main() {
     })
   })
 
-  registerTool(server, 'mindnprogress_list_ai_delegations', '문서의 AI 작업 위임 상태와 감사 정보를 조회합니다. worker 대기(waiting-workspace), 통합 작업공간 정리 대기(waiting-integration-clean), 하위 실행·자원 대기(waiting-resource), 통합 대기, AI 충돌 해결, 상위 대기·재개, 완료 또는 실패 상태와 대상 대화·turnId·작업공간 결과를 반환하며 문서 버전을 변경하지 않습니다. 복구 판단이 가능한 상태에는 recovery.failureCategory, recoveryAvailable, recommendedAction과 recoveryTool을 함께 반환합니다. recoveryAvailable은 기록 기준 후보이며 실제 세션·브랜치·HEAD·작업 트리 안전성은 복구 호출 시 다시 검증합니다.', {
+  registerTool(server, 'mindnprogress_list_ai_delegations', '문서의 AI 작업 위임 상태와 감사 정보를 조회합니다. worker 대기(waiting-workspace), 통합 작업공간 정리 대기(waiting-integration-clean), 하위 실행·자원 대기(waiting-resource), 통합 대기, AI 충돌 해결, 상위 대기·재개, 완료 또는 실패 상태와 대상 대화·turnId·작업공간 결과를 반환하며 문서 버전을 변경하지 않습니다. 복구 판단이 가능한 상태에는 recovery.failureCategory, recoveryAvailable, recommendedAction과 recoveryTool을 함께 반환합니다. recoveryAvailable은 기록 기준 후보이며 실제 세션·브랜치·HEAD·작업 트리 안전성은 복구 호출 시 다시 검증합니다. 응답이 약 4만 자를 넘으면 판단이 필요한 위임(미종료·실패·복구 가능·종료 처리 가능·보고 대기)과 미해결 접수 실패는 그대로 두고 정리된 이력(완료·대체·종료된 위임과 재접수 확인·종료된 접수 실패)만 결과 원문 생략, 요약(summary=true), 오래된 이력 개수화 순으로 줄이며, 줄인 범위와 회수 경로를 응답 앞쪽 responseBudget과 omitted에 표기합니다. 생략된 위임은 delegationId로 한 건씩 조회하세요.', {
     mapId: z.string().min(1),
     parentCardId: z.string().min(1).max(120).optional().describe('상위 카드로 필터'),
     targetCardId: z.string().min(1).max(120).optional().describe('하위 대상 카드로 필터'),
     includeResult: z.boolean().optional().describe('결과 원문과 검증된 resultHash/resultTurnId 포함. 필요한 대상만 필터해서 읽으세요. 조회만으로 보고를 수신 확인하지 않습니다. 담당 상위 AI는 읽은 결과를 refresh_ai_delegation의 acknowledgeResultHash로 명시적으로 수신 확인할 수 있습니다. resultHash는 반환된 result 문자열(절단 표시 포함) 기준이며 resultHashBasis로 표시합니다. 원문이 12,000자를 넘으면 result는 앞 12,000자와 절단 표시만 담고 resultTruncated=true, resultOriginalLength와 resultFullAvailable을 함께 반환합니다.'),
     includeFullResult: z.boolean().optional().describe('includeResult=true와 함께 사용합니다. 절단된 결과의 보관 원문(resultFull, 최대 100,000자)과 resultFullHash를 포함합니다. 수신 확인에는 resultFullHash가 아니라 resultHash를 사용합니다.'),
-  }, async ({ mapId, parentCardId, targetCardId, includeResult, includeFullResult }) => {
+    delegationId: z.string().regex(AI_DELEGATION_ID_PATTERN).optional().describe('위임 한 건만 조회. 응답 예산으로 생략된 결과·세부 기록을 읽을 때 includeResult=true와 함께 사용'),
+  }, async ({ mapId, parentCardId, targetCardId, includeResult, includeFullResult, delegationId }) => {
     const query = new URLSearchParams()
     if (parentCardId) query.set('parentCardId', parentCardId)
     if (targetCardId) query.set('targetCardId', targetCardId)
+    if (delegationId) query.set('delegationId', delegationId)
     if (includeResult) query.set('includeResult', 'true')
     if (includeResult && includeFullResult) query.set('includeFullResult', 'true')
     const suffix = query.size > 0 ? `?${query}` : ''
-    return apiRequest(`/api/maps/${encodeURIComponent(mapId)}/ai-delegations${suffix}`, { aiMapId: mapId })
+    const result = await apiRequest(`/api/maps/${encodeURIComponent(mapId)}/ai-delegations${suffix}`, { aiMapId: mapId })
+    // delegationId 필터를 모르는 이전 서버도 한 건과 그 위임에 연결된 접수 실패만 돌려주도록 MCP에서도 거른다.
+    return delegationId && Array.isArray(result?.delegations)
+      ? { ...result, delegations: result.delegations.filter((item) => item.id === delegationId),
+        ...(Array.isArray(result.requestFailures) ? { requestFailures: result.requestFailures.filter((item) =>
+          item.requestedDelegationId === delegationId || item.resolvedByDelegationId === delegationId) } : {}) }
+      : result
+  }, {
+    // 문서 전체·카드 이력이 클라이언트 출력 한도를 넘으면 정리된 이력만 줄인다. 위임 한 건을 지정한 조회는 그대로 준다.
+    finalizeResult: (result, { mapId, delegationId }) => (delegationId ? result : applyDelegationBudget(result, { mapId })),
   })
 
-  registerTool(server, 'mindnprogress_get_card', '한 카드의 설명, 공유 지식, 업무 필드와 댓글을 선택적으로 조회합니다. description과 sharedKnowledge의 길이·SHA-256은 textIntegrity로 반환하며 이미지 카드는 로컬 원본 경로도 반환합니다. get_context의 fallback 카드 또는 간략 개요에서 원문이 필요할 때 사용하세요.', {
+  registerTool(server, 'mindnprogress_get_card', '한 카드의 설명, 공유 지식, 업무 필드와 댓글을 선택적으로 조회합니다. description과 sharedKnowledge의 길이·SHA-256은 textIntegrity로 반환하며 이미지 카드는 로컬 원본 경로도 반환합니다. get_context의 fallback 카드 또는 간략 개요에서 원문이 필요할 때 사용하세요. fields로 필요한 data 필드만, includeComments=false로 댓글 없이 받을 수 있으며 get_context의 omitted.retrieval이 이 인자를 안내합니다. textIntegrity는 fields와 무관하게 항상 description·sharedKnowledge 전체 기준입니다. 응답이 약 4만 자를 넘으면 댓글 페이지를 먼저 줄이고(남은 댓글은 list_comments의 nextOffset으로 조회), 그래도 넘으면 fields로 고르지 않은 2,000자 초과 보조 필드와 description·sharedKnowledge 원문(큰 것부터)을 생략해 card.omittedFields와 응답 앞쪽 responseBudget·omitted에 표기합니다. 생략한 필드는 fields로 한 필드씩 조회하세요.', {
     mapId: z.string().min(1),
     cardId: z.string().min(1),
     commentOffset: z.number().int().nonnegative().default(0),
     commentLimit: z.number().int().min(1).max(100).default(20),
     commentOrder: z.enum(['asc', 'desc']).default('desc'),
     includeCommentDetail: z.boolean().default(false).describe('true이면 댓글 상세 본문을 함께 반환. 요약만으로 작업 판단이 어려울 때 사용'),
-  }, async ({ mapId, cardId, commentOffset, commentLimit, commentOrder, includeCommentDetail }) => {
-    const [documentResult, commentsResult, health] = await Promise.all([
-      apiRequest(`/api/maps/${encodeURIComponent(mapId)}`),
-      apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments?nodeId=${encodeURIComponent(cardId)}&includeDetail=${includeCommentDetail}`),
-      apiRequest('/api/health'),
-    ])
+    fields: z.array(z.string().min(1).max(80)).min(1).max(40).optional().describe('반환할 card.data 필드 이름. 지정하면 label과 이 필드만 반환. 생략하면 모든 필드'),
+    includeComments: z.boolean().default(true).describe('false이면 댓글 본문 없이 commentsPage의 total만 반환'),
+  }, async ({ mapId, cardId, commentOffset, commentLimit, commentOrder, includeCommentDetail, fields, includeComments }) => {
+    const query = new URLSearchParams({ readCard: cardId, commentOffset: String(includeComments ? commentOffset : 0),
+      commentLimit: String(includeComments ? commentLimit : 1), commentOrder, includeCommentDetail: String(includeComments && includeCommentDetail) })
+    const documentResult = await apiRequest(`/api/maps/${encodeURIComponent(mapId)}?${query}`)
     const card = documentResult.map.nodes.find((node) => node.id === cardId)
     if (!card) throw new Error(`카드를 찾을 수 없습니다: ${cardId}`)
-    const commentPage = paginateComments(commentsResult.comments ?? [], {
-      offset: commentOffset,
-      limit: commentLimit,
-      order: commentOrder,
-    })
+    const shownCard = contentCard(card, mapId)
+    const page = documentResult.commentsPage
     return {
       documentGroups: documentResult.documentGroups,
       document: {
@@ -1872,14 +2082,20 @@ async function main() {
         updatedAt: documentResult.map.updatedAt,
         updatedBy: documentResult.map.updatedBy,
       },
-      card: contentCard(card, mapId),
-      accessUrl: cardAccessUrl(health.publicBaseUrl, documentResult.map.id, card.id),
-      comments: commentPage.items,
-      commentsPage: commentPage.page,
+      card: fields ? { ...shownCard, data: selectedCardFields(shownCard.data, fields) } : shownCard,
+      accessUrl: cardAccessUrl(documentResult.publicBaseUrl, documentResult.map.id, card.id),
+      comments: includeComments ? documentResult.comments : [],
+      commentsPage: includeComments || !page ? page : {
+        ...page, offset: 0, limit: 0, hasMore: page.total > 0, nextOffset: page.total > 0 ? 0 : null,
+      },
     }
+  }, {
+    // 카드와 댓글이 클라이언트 출력 한도를 넘으면 댓글 페이지부터 줄인다. fields로 고른 필드는 줄이지 않는다.
+    finalizeResult: (result, { mapId, cardId, fields, includeComments, commentLimit, includeCommentDetail }) =>
+      applyCardReadBudget(result, { mapId, cardId, fields, includeComments, commentLimit, includeCommentDetail }),
   })
 
-  registerTool(server, 'mindnprogress_get_shared_knowledge_review_context', '정리 후보 한 카드의 sharedKnowledge 원문, 무결성 해시, 검토 신호, 계층·지식선 관계와 최근 댓글을 조회합니다. 후보 목록에서 선택한 카드만 호출하고 반환된 document.version과 card.textIntegrity.sha256을 저장 요청에 그대로 사용하세요.', {
+  registerTool(server, 'mindnprogress_get_shared_knowledge_review_context', '정리 후보 한 카드의 sharedKnowledge 원문, 무결성 해시, 검토 신호, 계층·지식선 관계와 최근 댓글을 조회합니다. 후보 목록에서 선택한 카드만 호출하고 반환된 document.version, card.textIntegrity.sha256과 reviewContextToken을 저장 요청에 그대로 사용하세요. 검토 의존성이 변경되면 충돌로 거부하며 기대값을 자동 교체하지 않습니다.', {
     mapId: z.string().min(1),
     cardId: z.string().min(1).max(120),
     commentLimit: z.number().int().min(0).max(20).default(10),
@@ -1915,7 +2131,7 @@ async function main() {
     }
   })
 
-  registerTool(server, 'mindnprogress_add_card', '문서에 새 카드 또는 하위 카드를 추가합니다. 실제로 실행할 카드에 독립적으로 판정할 구현·검증 조건이 2개 이상이면 결과 중심 checklist를 작성하되 별도 하위 카드의 작업은 중복하지 마세요. 비어 있지 않은 checklist를 보내면 완료 비율로 progress와 status를 자동 계산합니다. 외부 전달물이나 결정 대기는 제목이 아니라 waitingItems로 기록합니다. 기본 affected 응답은 추가한 카드와 문서 요약만 반환하며, full은 변경 전과 같은 API 원본 전체 문서를 반환합니다.', {
+  registerTool(server, 'mindnprogress_add_card', '문서에 새 카드 또는 하위 카드를 추가합니다. 실제로 실행할 카드에 독립적으로 판정할 구현·검증 조건이 2개 이상이면 결과 중심 checklist를 작성하되 별도 하위 카드의 작업은 중복하지 마세요. 비어 있지 않은 checklist를 보내면 완료 비율로 progress와 status를 자동 계산합니다. 외부 전달물이나 결정 대기는 제목이 아니라 waitingItems로 기록합니다. 기본 affected 응답은 추가한 카드와 문서 요약만 반환하며, full은 변경 전과 같은 API 원본 전체 문서를 반환합니다. affected의 affectedCards에는 서버가 함께 조정한 카드(상위 진행률·Root 집계 등)의 상태 요약과 changedKeys만 있습니다.', {
     mapId: z.string().min(1),
     parentCardId: z.string().min(1).optional().describe('새 카드를 추가할 상위 카드 ID. 최상위 카드를 추가할 때는 생략'),
     parentId: z.string().min(1).optional().describe('기존 대화 호환용 상위 카드 ID. 새 호출에서는 parentCardId 사용'),
@@ -1978,6 +2194,8 @@ async function main() {
     const createdCard = savedMap.nodes.find((item) => item.id === nodeId)
     if (!createdCard) throw new Error('저장 후 추가한 카드를 찾을 수 없습니다.')
     const rootCard = rootCardOf(savedMap)
+    // 추가한 카드는 보낸 원문과 대조하도록 그대로 두고, 서버가 함께 조정한 카드(상위 진행률 등)는 update_card처럼 요약만 준다.
+    const affectedCards = adjustedCardSummaries(previousMap, savedMap, { rootCardId: rootCard?.id, excludedCardIds: [nodeId] })
     return {
       responseMode,
       document: saved.summary,
@@ -1987,11 +2205,12 @@ async function main() {
       },
       parentCardId: resolvedParentCardId ?? null,
       root: rootRollup(rootCard),
-      affectedCards: affectedCardsOf(previousMap, savedMap, mapId, [], rootCard?.id, [nodeId]),
+      affectedCards,
+      ...(affectedCards.length > 0 ? { omitted: affectedCardsOmitted(mapId, affectedCards) } : {}),
     }
   })
 
-  registerTool(server, 'mindnprogress_update_card', '카드의 일부 필드만 부분 병합합니다. data에는 변경할 필드만 보내고 description 또는 sharedKnowledge의 일부만 고칠 때는 mindnprogress_patch_card_text를 사용하세요. checklist는 기존 ID를 보존한 전체 배열이며 완료 비율로 progress와 status를 자동 계산합니다. 완료 처리하면 waitingItems가 해제될 수 있고 Ref와 자동 집계 카드는 서버가 원본·하위 업무 기준으로 다시 계산합니다. responseMode=full은 최신 문서를, affected는 직접 수정 카드와 서버가 함께 조정한 카드만 반환합니다.', {
+  registerTool(server, 'mindnprogress_update_card', '카드의 일부 필드만 부분 병합합니다. data에는 변경할 필드만 보내고 description 또는 sharedKnowledge의 일부만 고칠 때는 mindnprogress_patch_card_text를 사용하세요. checklist는 기존 ID를 보존한 전체 배열이며 완료 비율로 progress와 status를 자동 계산합니다. 완료 처리하면 waitingItems가 해제될 수 있고 Ref와 자동 집계 카드는 서버가 원본·하위 업무 기준으로 다시 계산합니다. responseMode=full은 최신 문서를, affected는 직접 수정 카드와 서버가 함께 조정한 카드만 반환합니다. affected의 card는 이번에 보낸 필드와 저장 중 바뀐 필드를 원문으로 주고, 그 밖의 1,000자 초과 필드는 card.omittedFields와 textIntegrity로만 표시합니다. affectedCards에는 요청 카드를 빼고 서버가 함께 조정한 카드의 상태 요약과 changedKeys만 있습니다.', {
     mapId: z.string().min(1),
     cardId: z.string().min(1).optional().describe('수정할 카드 ID. 새 호출에서는 이 필드를 사용'),
     nodeId: z.string().min(1).optional().describe('기존 대화 호환용 카드 ID. 새 호출에서는 cardId 사용'),
@@ -2015,7 +2234,8 @@ async function main() {
       ...checklistState,
       ...(data.waitingItems === undefined ? {} : { waitingItems: normalizeWaitingItems(preserveOmittedWaitingItemNotes(node.data?.waitingItems, data.waitingItems)) }),
     }
-    node.data = nextData.status === 'done' || nextData.progress >= 100
+    const updatesWorkState = ['status', 'progress', 'checklist', 'waitingItems'].some((field) => Object.hasOwn(data, field))
+    node.data = updatesWorkState && (nextData.status === 'done' || nextData.progress >= 100)
       ? { ...nextData, waitingItems: [] }
       : nextData
     if (position) node.position = position
@@ -2034,16 +2254,27 @@ async function main() {
       }
     }
     const rootCard = rootCardOf(savedMap)
+    const previousCard = previousMap.nodes.find((item) => item.id === resolvedCardId)
+    const projectedCard = referenceProjectedNode(savedCard, previousCard, savedMap)
+    const shownCard = contentCard(projectedCard, mapId)
+    // 요청 카드는 card에만 둔다. 바꾸지 않은 큰 필드와 서버 조정 카드의 원문은 get_card로 읽는다.
+    const { data: cardData, omittedFields } = compactRequestedCardData(previousCard?.data, projectedCard.data, shownCard.data, changedFields)
+    const affectedCards = adjustedCardSummaries(previousMap, savedMap, { rootCardId: rootCard?.id, excludedCardIds: [resolvedCardId] })
     return {
       responseMode,
       document: saved.summary,
       card: {
-        ...contentCard(savedCard, mapId),
+        ...shownCard,
+        data: cardData,
         position: savedCard.position,
+        ...(omittedFields.length > 0 ? { omittedFields } : {}),
       },
       root: rootRollup(rootCard),
-      affectedCards: affectedCardsOf(previousMap, savedMap, mapId, [resolvedCardId], rootCard?.id),
+      affectedCards,
       changedFields,
+      ...(omittedFields.length > 0 || affectedCards.length > 0
+        ? { omitted: updateCardOmitted(mapId, resolvedCardId, omittedFields, affectedCards) }
+        : {}),
     }
   })
 
@@ -2064,7 +2295,7 @@ async function main() {
       const beforeText = typeof node.data?.[field] === 'string' ? node.data[field] : ''
       const before = textIntegrity(beforeText)
       if (before.sha256 !== expectedSha256) {
-        throw new Error(`TEXT_HASH_MISMATCH: 원문이 조회 이후 변경되었습니다. 다시 조회해 최신 해시를 사용하세요. (currentSha256=${before.sha256})`)
+        conflict('TEXT_HASH_MISMATCH', 'FIELD_CONFLICT', mapId, field, expectedSha256, before.sha256, cardId)
       }
 
       const nextText = applyCardTextPatch(beforeText, operation)
@@ -2076,7 +2307,7 @@ async function main() {
       }
       node.data = { ...node.data, [field]: nextText }
       return { before, nextText }
-    })
+    }, { textOperations: [{ cardId, field, expectedSha256, operation }] })
 
     const savedCard = saved.map.nodes.find((item) => item.id === cardId)
     if (!savedCard) throw new Error('저장 후 카드를 찾을 수 없습니다.')
@@ -2098,12 +2329,14 @@ async function main() {
     }
   })
 
-  registerTool(server, 'mindnprogress_apply_shared_knowledge_review', '검토 문맥에서 만든 sharedKnowledge 정리 결과를 한 문서에 원자적으로 저장하고 검토 완료로 기록합니다. 모든 카드의 현재 SHA-256과 문서 버전이 일치할 때만 전체 요청을 한 번에 반영하며 하나라도 다르면 아무것도 저장하지 않습니다. 본문을 줄이거나 재구성한 경우 cleaned와 replacement를, 현재 장문 전체가 계속 필요하면 accepted-long만 사용하세요. Ref 카드는 지원하지 않습니다.', {
+  registerTool(server, 'mindnprogress_apply_shared_knowledge_review', '검토 문맥에서 만든 sharedKnowledge 정리 결과를 한 문서에 원자적으로 저장하고 검토 완료로 기록합니다. 모든 patch에 원래 reviewContextToken을 전달하면 본문 해시와 설명·종류·관계·댓글·Ref 출처를 검사하며 무관한 문서 버전 변경은 허용합니다. 토큰을 생략한 기존 요청은 엄격한 문서 버전 조건을 유지합니다. 충돌 시 변경 없이 거부하며 기대값을 최신 값으로 자동 교체하지 않습니다. cleaned는 replacement를, accepted-long은 replacement 없이 사용합니다. Ref 카드는 원본에서 검토하세요.', {
     mapId: z.string().min(1),
     baseVersion: z.number().int().positive().describe('검토 문맥의 document.version'),
     patches: z.array(z.object({
       cardId: z.string().min(1).max(120),
       expectedSha256: z.string().regex(/^[a-f0-9]{64}$/).describe('검토 문맥의 card.textIntegrity.sha256'),
+      reviewContextToken: z.object({ schemaVersion: z.literal(1), mapId: z.string(), cardId: z.string(), lifecycleVersion: z.number().int().nonnegative(),
+        dependencies: z.record(z.string().regex(/^[a-f0-9]{64}$/)) }).optional().describe('검토 문맥의 reviewContextToken을 변경 없이 전달. 생략하면 기존 문서 버전 조건 적용'),
       reviewResult: z.enum(['cleaned', 'accepted-long']),
       replacement: z.string().max(sharedKnowledgeMaxLength, sharedKnowledgeLimitMessage).optional().describe('cleaned일 때만 보내는 정리된 sharedKnowledge 전체. accepted-long일 때는 생략'),
     })).min(1).max(20),
@@ -2116,7 +2349,7 @@ async function main() {
     },
   ))
 
-  registerTool(server, 'mindnprogress_recover_ai_delegation', '원래 맡긴 범위에서 현재 상태와 미완료 부분을 확인하세요. 그룹 총괄 AI가 범위를 변경하려면 사용자 승인을 먼저 확인합니다. AionCore 재시작, 연결 끊김 또는 필수 체크포인트·통합 실패로 recovery-required 또는 integration-recovery-required가 된 AI 위임을 기존 대화와 기존 작업공간에서 명시적으로 재개합니다. recovery.recommendedAction=resume-existing인 failed 또는 parent-wake-failed는 list_ai_delegations가 recoveryAvailable=true를 반환하고 사용자가 한도·모델 용량 부족 해소를 확인했거나 연결 중단(upstream-interrupted)·실행 전 DB 접수 오류(dispatch-database-transient)의 복구를 승인한 경우 같은 방식으로 재개합니다. 원 실행이 만료됐으면 원 지시·계정·카드·lease를 서버가 대사하며 불확실한 증거로 격리를 해제하지 않습니다. waiting-usage-limit, waiting-rate-limit, waiting-model-capacity도 같은 조건으로 재개하며 worker가 없는 문서 조정 위임도 지원합니다. waiting-child-resume은 사용자가 중지 후 재개를 요청한 경우에만 처리합니다. 로컬 변경으로 cherry-pick이 실패하거나 통합 작업공간의 index.lock 또는 main HEAD 변경으로 반영이 중단된 완료 위임은 recovery.recommendedAction=retry-integration일 때 지원합니다. 차단 원인 해소 후 기존 체크포인트·소유권·통합 후보를 검증하여 통합 대기로 복구하며 하위 AI 작업은 다시 실행하지 않습니다. Git 잠금은 자동 삭제하지 않고, main이 진행됐다면 이전 후보를 보존한 별도 브랜치에서 최신 main 기준으로 통합합니다. 접수 여부가 불명확하면 새 실행을 만들지 말고 mindnprogress_refresh_ai_delegation으로 확인하세요. 원래 지시를 자동 재생하지 않으며, 현재 카드·Git·작업공간 상태를 확인한 뒤 미완료 부분만 수행하도록 새 복구 지시를 전달합니다. 통합 재시도는 요청 ID와 queued 접수 기록을 먼저 반환하고 긴 Git 검증을 비동기로 수행합니다. 접수는 통합 성공이 아닙니다. 응답 유실 시 재호출하지 말고 상태를 조회하며 같은 요청은 같은 recoveryRequestId로 확인합니다. failed receipt의 차단 원인을 해소한 뒤 사용자가 다시 승인한 재시도에는 새 recoveryRequestId를 사용하세요. 실행 턴 없이 정확한 DB 트랜잭션 중첩 오류로 failed-clean 반환된 요청은 원 dispatch·대화·lease·무변경을 검증한 경우만 수동 재개하며 만료를 추정하지 않습니다. 복구 호출 후 mindnprogress_list_ai_delegations로 실제 상태를 확인하세요.', {
+  registerTool(server, 'mindnprogress_recover_ai_delegation', '원래 맡긴 범위에서 현재 상태와 미완료 부분을 확인하세요. 그룹 총괄 AI가 범위를 변경하려면 사용자 승인을 먼저 확인합니다. AionCore 재시작, 연결 끊김 또는 필수 체크포인트·통합 실패로 recovery-required 또는 integration-recovery-required가 된 AI 위임을 기존 대화와 기존 작업공간에서 명시적으로 재개합니다. recovery.recommendedAction=resume-existing인 failed 또는 parent-wake-failed는 list_ai_delegations가 recoveryAvailable=true를 반환하고 사용자가 한도·모델 용량 부족 해소를 확인했거나 연결 중단(upstream-interrupted)·실행 전 DB 접수 오류(dispatch-database-transient)의 복구를 승인한 경우 같은 방식으로 재개합니다. 원 실행이 만료됐으면 원 지시·계정·카드·lease를 서버가 대사하며 불확실한 증거로 격리를 해제하지 않습니다. waiting-usage-limit, waiting-rate-limit, waiting-model-capacity도 같은 조건으로 재개하며 worker가 없는 문서 조정 위임도 지원합니다. waiting-child-resume은 사용자가 중지 후 재개를 요청한 경우에만 처리합니다. 로컬 변경으로 cherry-pick이 실패하거나 통합 작업공간의 index.lock, main HEAD 변경 또는 통합 후보의 Git 상태 조회 실패로 반영이 중단된 완료 위임은 recovery.recommendedAction=retry-integration일 때 지원합니다. 차단 원인 해소 후 기존 체크포인트·소유권·통합 후보를 검증하여 통합 대기로 복구하며 하위 AI 작업은 다시 실행하지 않습니다. Git 잠금은 자동 삭제하지 않고, main이 진행됐다면 이전 후보를 보존한 별도 브랜치에서 최신 main 기준으로 통합합니다. 접수 여부가 불명확하면 새 실행을 만들지 말고 mindnprogress_refresh_ai_delegation으로 확인하세요. 원래 지시를 자동 재생하지 않으며, 현재 카드·Git·작업공간 상태를 확인한 뒤 미완료 부분만 수행하도록 새 복구 지시를 전달합니다. 통합 재시도는 요청 ID와 queued 접수 기록을 먼저 반환하고 긴 Git 검증을 비동기로 수행합니다. 접수는 통합 성공이 아닙니다. 응답 유실 시 재호출하지 말고 상태를 조회하며 같은 요청은 같은 recoveryRequestId로 확인합니다. failed receipt의 차단 원인을 해소한 뒤 사용자가 다시 승인한 재시도에는 새 recoveryRequestId를 사용하세요. 실행 턴 없이 정확한 DB 트랜잭션 중첩 오류로 failed-clean 반환된 요청은 원 dispatch·대화·lease·무변경을 검증한 경우만 수동 재개하며 만료를 추정하지 않습니다. 복구 호출 후 mindnprogress_list_ai_delegations로 실제 상태를 확인하세요.', {
     mapId: z.string().min(1).describe('위임을 시작한 상위 문서 ID. 원래 상위 대화가 중단되었어도 같은 상위 카드에 연결된 새 대화에서 복구할 수 있습니다.'),
     delegationId: z.string().regex(AI_DELEGATION_ID_PATTERN).describe('mindnprogress_list_ai_delegations에서 확인한 복구 대상 위임 ID'),
     recoveryRequestId: z.string().regex(/^[A-Za-z0-9_-]{8,128}$/u).optional().describe('통합 재시도 접수의 요청 ID. 응답 유실·같은 접수 재확인은 동일 ID를 사용합니다. failed receipt의 원인 해소 후 사용자가 승인한 새 재시도에는 새 ID를 사용합니다.'),
@@ -2128,7 +2361,11 @@ async function main() {
       expectedSha256: z.string().regex(/^[a-f0-9]{64}$/),
       mainCommit: z.string().regex(/^[a-f0-9]{40}$/),
     }).strict().optional().describe('사용자가 승인한 단일 미추적 Assets/*.cs.meta의 원본 보존·정리. Git 잠금 통합 재시도에만 지정합니다. 정확한 경로·원본 SHA-256·최신 main HEAD를 전달하며 같은 GUID의 등록 메타가 main에 있어야 합니다. 다른 변경은 정리하지 않습니다.'),
-  }, async ({ mapId, delegationId, instruction, sourceRevision, recoveryMode, untrackedMetaRecovery, recoveryRequestId }) => {
+    trackedEolRecovery: z.object({
+      expectedHead: z.string().regex(/^[a-f0-9]{40}$/),
+      files: z.array(z.object({ path: z.string().min(1), expectedSha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict()).min(1).max(64),
+    }).strict().optional().describe('중단된 통합 충돌 재개 시 사용자가 승인한 줄바꿈 전용 변경만 원본 백업 후 정리합니다. 후보 HEAD와 각 파일의 원본 SHA-256을 명시합니다. CRLF→LF 외 내용 차이·index 변경·다른 파일 변경이 있으면 거부하며 자동 삭제하지 않습니다.'),
+  }, async ({ mapId, delegationId, instruction, sourceRevision, recoveryMode, untrackedMetaRecovery, trackedEolRecovery, recoveryRequestId }) => {
     const origin = delegationOriginForMap(mapId)
     return apiRequest(`/api/maps/${encodeURIComponent(mapId)}/ai-delegations/${encodeURIComponent(delegationId)}/recover`, {
       method: 'POST',
@@ -2141,6 +2378,7 @@ async function main() {
       timeoutMs: 60_000,
       body: JSON.stringify({ instruction, sourceRevision, ...(recoveryMode ? { recoveryMode } : {}),
         ...(recoveryRequestId ? { recoveryRequestId } : {}),
+        ...(trackedEolRecovery ? { trackedEolRecovery } : {}),
         ...(untrackedMetaRecovery ? { untrackedMetaRecovery } : {}) }),
     })
   })
@@ -2194,7 +2432,7 @@ async function main() {
     })
   })
 
-  registerTool(server, 'mindnprogress_move_card', '카드와 모든 하위 카드를 유지한 채 다른 카드의 하위로 이동합니다. targetMapId를 생략하면 같은 문서 안에서 이동하고, 다른 문서를 지정하면 카드 ID·댓글·AI 대화·완료된 위임 이력·이미지와 Ref 연결을 보존해 실제로 이동합니다. 문서 경계를 가로지르는 지식선·선행 관계나 실행 중인 AI 작업이 있으면 손상 없이 거부합니다. 기본 affected 응답은 이동 결과와 관계 변화만 반환하며, full은 관련 원본 문서 전체를 반환합니다.', {
+  registerTool(server, 'mindnprogress_move_card', '카드와 모든 하위 카드를 유지한 채 다른 카드의 하위로 이동합니다. targetMapId를 생략하면 같은 문서 안에서 이동하고, 다른 문서를 지정하면 카드 ID·댓글·AI 대화·완료된 위임 이력·이미지와 Ref 연결을 보존해 실제로 이동합니다. 문서 경계를 가로지르는 지식선·선행 관계나 실행 중인 AI 작업이 있으면 손상 없이 거부합니다. 기본 affected 응답은 이동 결과와 관계 변화만 반환하며, full은 관련 원본 문서 전체를 반환합니다. 같은 문서 안 이동의 affected 응답에서 card는 바뀌지 않은 1,000자 초과 필드를 card.omittedFields와 textIntegrity로만 표시하고, affectedCards에는 서버가 함께 조정한 카드의 상태 요약과 changedKeys만 있습니다.', {
     mapId: z.string().min(1),
     targetMapId: z.string().min(1).optional().describe('다른 문서로 실제 이동할 때 지정하는 대상 문서 ID. 생략하거나 mapId와 같으면 기존 문서 내부 이동'),
     cardId: z.string().min(1).optional().describe('이동할 카드 ID. 새 호출에서는 이 필드를 사용'),
@@ -2268,23 +2506,34 @@ async function main() {
     const movedCard = savedMap.nodes.find((item) => item.id === resolvedCardId)
     if (!movedCard) throw new Error('저장 후 이동한 카드를 찾을 수 없습니다.')
     const rootCard = rootCardOf(savedMap)
+    // 이동은 카드 내용을 바꾸지 않으므로 저장 중 바뀐 필드만 원문으로 두고, 서버 조정 카드는 요약만 준다.
+    const previousCard = previousMap.nodes.find((item) => item.id === resolvedCardId)
+    const projectedCard = referenceProjectedNode(movedCard, previousCard, savedMap)
+    const shownCard = contentCard(projectedCard, mapId)
+    const { data: cardData, omittedFields } = compactRequestedCardData(previousCard?.data, projectedCard.data, shownCard.data, [])
+    const affectedCards = adjustedCardSummaries(previousMap, savedMap, { rootCardId: rootCard?.id, excludedCardIds: [resolvedCardId] })
     return {
       responseMode,
       document: saved.summary,
       card: {
-        ...contentCard(movedCard, mapId),
+        ...shownCard,
+        data: cardData,
         position: movedCard.position,
+        ...(omittedFields.length > 0 ? { omittedFields } : {}),
       },
       hierarchy: {
         previousParentCardId,
         newParentCardId: resolvedParentCardId,
       },
       root: rootRollup(rootCard),
-      affectedCards: affectedCardsOf(previousMap, savedMap, mapId, [], rootCard?.id, [resolvedCardId]),
+      affectedCards,
+      ...(omittedFields.length > 0 || affectedCards.length > 0
+        ? { omitted: affectedCardsOmitted(mapId, affectedCards, { cardId: resolvedCardId, cardOmittedFields: omittedFields }) }
+        : {}),
     }
   })
 
-  registerTool(server, 'mindnprogress_delete_card', '카드를 삭제합니다. 일반 카드는 기본적으로 모든 하위 카드도 함께 삭제합니다. 최상위 카드는 직계 자식이 정확히 하나일 때만 삭제할 수 있고 해당 자식이 새 최상위 카드로 승격되며, 직계 자식이 없거나 여러 개면 삭제하지 않습니다. 기본 affected 응답은 삭제한 카드 ID와 끊어진 계층·지식선 관계 및 함께 조정된 카드만 반환하며, full은 변경 전과 같은 API 원본 전체 문서를 반환합니다.', {
+  registerTool(server, 'mindnprogress_delete_card', '카드를 삭제합니다. 일반 카드는 기본적으로 모든 하위 카드도 함께 삭제합니다. 최상위 카드는 직계 자식이 정확히 하나일 때만 삭제할 수 있고 해당 자식이 새 최상위 카드로 승격되며, 직계 자식이 없거나 여러 개면 삭제하지 않습니다. 기본 affected 응답은 삭제한 카드 ID와 끊어진 계층·지식선 관계 및 함께 조정된 카드만 반환하며, full은 변경 전과 같은 API 원본 전체 문서를 반환합니다. affectedCards에는 서버가 함께 조정한 카드의 상태 요약과 changedKeys만 있습니다.', {
     mapId: z.string().min(1),
     cardId: z.string().min(1).optional().describe('삭제할 카드 ID. 새 호출에서는 이 필드를 사용'),
     nodeId: z.string().min(1).optional().describe('기존 대화 호환용 카드 ID. 새 호출에서는 cardId 사용'),
@@ -2337,6 +2586,7 @@ async function main() {
       }
     }
     const rootCard = rootCardOf(savedMap)
+    const affectedCards = adjustedCardSummaries(previousMap, savedMap, { rootCardId: rootCard?.id })
     return {
       responseMode,
       document: saved.summary,
@@ -2344,7 +2594,8 @@ async function main() {
       relationChanges,
       promotedRootCardId,
       root: rootRollup(rootCard),
-      affectedCards: affectedCardsOf(previousMap, savedMap, mapId, [], rootCard?.id),
+      affectedCards,
+      ...(affectedCards.length > 0 ? { omitted: affectedCardsOmitted(mapId, affectedCards) } : {}),
     }
   })
 
@@ -2489,11 +2740,30 @@ async function main() {
     apiRequest(`/api/maps/${encodeURIComponent(mapId)}/history?offset=${offset}&limit=${limit}`))
   registerTool(server, 'mindnprogress_restore_history', '선택한 변경 이력으로 문서 전체를 복원합니다. 복원 직전 view를 생략한 get_document(full)로 현재 문서를 백업하세요. 복원은 현재 문서 전체를 교체해 현재 변경을 잃을 수 있고, 복원 자체가 새 변경 이력을 만듭니다. 먼저 list_history에서 revisionId를 확인하고 복원 후 get_document와 list_history로 결과를 재조회해 검증하세요.', {
     mapId: z.string().min(1), revisionId: z.string().min(1),
-  }, async ({ mapId, revisionId }) => apiRequest(`/api/maps/${encodeURIComponent(mapId)}/history/${encodeURIComponent(revisionId)}/restore`, { method: 'POST' }))
+    baseVersion: z.number().int().positive().optional().describe('백업·검토한 현재 문서 버전. 생략 시 호출 시작의 문서 버전을 고정'),
+    baseLifecycleVersion: z.number().int().nonnegative().optional(),
+    expectedSnapshotSha256: z.string().regex(/^[a-f0-9]{64}$/).optional().describe('list_history의 복원할 이력 snapshotSha256'),
+  }, async ({ mapId, revisionId, baseVersion, baseLifecycleVersion, expectedSnapshotSha256 }) => {
+    if ((baseVersion === undefined) !== (baseLifecycleVersion === undefined)) {
+      throw new Error('검토한 baseVersion과 baseLifecycleVersion을 함께 전달해 주세요.')
+    }
+    const current = await getDocument(mapId)
+    let snapshotHash = expectedSnapshotSha256
+    for (let offset = 0; !snapshotHash;) {
+      const history = await apiRequest(`/api/maps/${encodeURIComponent(mapId)}/history?limit=100&offset=${offset}`)
+      snapshotHash = history.revisions.find((r) => r.id === revisionId)?.snapshotSha256
+      if (!history.hasMore || !Number.isInteger(history.nextOffset) || history.nextOffset <= offset) break
+      offset = history.nextOffset
+    }
+    return apiRequest(`/api/maps/${encodeURIComponent(mapId)}/history/${encodeURIComponent(revisionId)}/restore`, {
+      method: 'POST', body: JSON.stringify({ baseVersion: baseVersion ?? current.version,
+        baseLifecycleVersion: baseLifecycleVersion ?? current.lifecycleVersion ?? 0, expectedSnapshotSha256: snapshotHash }),
+    })
+  })
 
   registerTool(server, 'mindnprogress_list_users', '담당자로 지정할 수 있는 편집자 계정 목록을 조회합니다. active=false인 계정은 기존 담당자 표시용이며 새 담당자로 지정하지 마세요.', {}, async () =>
     apiRequest('/api/assignees'))
-  registerTool(server, 'mindnprogress_list_comments', '문서 또는 특정 카드의 댓글과 답글을 페이지 단위로 조회합니다. 기본 응답은 요약과 상세 존재 여부만 포함하며, 작업 근거나 검증 내용이 더 필요할 때 includeDetail=true를 사용하세요. 다음 댓글이 있으면 nextOffset을 offset으로 전달하세요.', {
+  registerTool(server, 'mindnprogress_list_comments', '문서 또는 특정 카드의 댓글과 답글을 페이지 단위로 조회합니다. 기본 응답은 요약과 상세 존재 여부만 포함하며, 작업 근거나 검증 내용이 더 필요할 때 includeDetail=true를 사용하세요. 다음 댓글이 있으면 nextOffset을 offset으로 전달하세요. 응답이 약 4만 자를 넘으면 요청 순서의 앞쪽 댓글부터 예산에 드는 만큼만 반환하고 limit·nextOffset을 반환한 댓글 기준으로 맞추며, 응답 앞쪽 responseBudget과 omitted에 표기합니다. 반환한 댓글의 상세는 줄이지 않고 건너뛴 댓글도 없으니 hasMore가 true이면 nextOffset으로 이어서 조회하세요.', {
     mapId: z.string().min(1),
     cardId: z.string().min(1).optional().describe('댓글을 조회할 카드 ID. 생략하면 문서 전체 댓글 조회'),
     nodeId: z.string().min(1).optional().describe('기존 대화 호환용 카드 ID. 새 호출에서는 cardId 사용'),
@@ -2515,6 +2785,9 @@ async function main() {
     })
     if (resolvedCardId) query.set('nodeId', resolvedCardId)
     return apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments?${query}`)
+  }, {
+    // 한 페이지가 클라이언트 출력 한도를 넘으면 앞쪽 댓글부터 예산에 드는 만큼만 주고 nextOffset으로 이어 받게 한다.
+    finalizeResult: (result, { mapId, cardId, nodeId, includeDetail }) => applyCommentListBudget(result, { mapId, cardId: cardId ?? nodeId, includeDetail }),
   })
   registerTool(server, 'mindnprogress_manage_comment', '댓글 또는 답글을 추가·수정·삭제하거나 스레드 해결 상태와 이모지 반응을 변경합니다. operation.action별 입력 스키마를 따르세요. add의 summary는 [진행], [차단], [결과]로 시작하는 240자 이하의 1~2문장으로 작성하고 긴 내용은 detail에 기록합니다. update는 기존 작성자·시각·답글 관계를 유지하며 expectedText로 동시 수정을 막을 수 있습니다. delete는 연결된 답글도 삭제합니다.', {
     mapId: z.string().min(1),
@@ -2535,13 +2808,15 @@ async function main() {
         detail: z.string().max(6000).optional().describe('빈 문자열이면 기존 상세 삭제'),
         text: z.string().min(1).max(1000).optional().describe('이전 형식 호환용. 새 형식 댓글의 요약 변경에는 summary 사용'),
         expectedText: z.string().max(1000).optional().describe('현재 댓글 원문과 다르면 다른 편집자의 변경을 덮어쓰지 않고 실패'),
+        expectedContentSha256: z.string().regex(/^[a-f0-9]{64}$/).optional().describe('요약·상세·레거시 본문 전체의 기대 해시'),
       }).strict(),
-      z.object({ action: z.literal('delete'), commentId: z.string().min(1) }).strict(),
-      z.object({ action: z.literal('set-resolved'), commentId: z.string().min(1), resolved: z.boolean() }).strict(),
+      z.object({ action: z.literal('delete'), commentId: z.string().min(1), expectedDeleteSha256: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict(),
+      z.object({ action: z.literal('set-resolved'), commentId: z.string().min(1), resolved: z.boolean(), expectedResolvedSha256: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict(),
       z.object({
         action: z.literal('toggle-reaction'),
         commentId: z.string().min(1),
         emoji: z.enum(['👍', '❤️', '🎉', '👀']),
+        expectedReacted: z.boolean().optional().describe('해당 이모지에 대한 현재 편집자의 이전 반응 여부'),
       }).strict(),
     ]).describe('댓글에 수행할 동작과 동작별 필수 입력'),
   }, async ({ mapId, operation }) => {
@@ -2564,6 +2839,9 @@ async function main() {
         return result
       })
     }
+    const comments = (await apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments?includeDetail=true`)).comments
+    const target = comments.find((c) => c.id === operation.commentId)
+    if (!target) throw new Error('댓글을 찾을 수 없습니다.')
     if (operation.action === 'update') {
       if (operation.summary === undefined && operation.detail === undefined && operation.text === undefined) {
         throw new Error('수정할 댓글 내용을 입력해 주세요.')
@@ -2575,19 +2853,25 @@ async function main() {
           detail: operation.detail,
           text: operation.text,
           expectedText: operation.expectedText,
+          expectedContentSha256: operation.expectedContentSha256 ?? commentContentHash(target),
         }),
       })
     }
     if (operation.action === 'delete') {
-      return apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments/${encodeURIComponent(operation.commentId)}`, { method: 'DELETE' })
+      return apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments/${encodeURIComponent(operation.commentId)}`, {
+        method: 'DELETE', body: JSON.stringify({ expectedDeleteSha256: operation.expectedDeleteSha256 ?? commentDeleteHash(comments, target.id) }),
+      })
     }
     if (operation.action === 'set-resolved') {
       return apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments/${encodeURIComponent(operation.commentId)}/resolve`, {
-        method: 'PATCH', body: JSON.stringify({ resolved: operation.resolved }),
+        method: 'PATCH', body: JSON.stringify({ resolved: operation.resolved, expectedResolvedSha256: operation.expectedResolvedSha256 ?? commentResolvedHash(target) }),
       })
     }
+    const actor = (await apiRequest('/api/auth/me')).user
+    if (!actor?.id) throw new Error('댓글 반응을 변경할 편집자를 확인하지 못했습니다.')
     return apiRequest(`/api/maps/${encodeURIComponent(mapId)}/comments/${encodeURIComponent(operation.commentId)}/reactions`, {
-      method: 'POST', body: JSON.stringify({ emoji: operation.emoji }),
+      method: 'POST', body: JSON.stringify({ emoji: operation.emoji,
+        expectedReacted: operation.expectedReacted ?? (target.reactions?.[operation.emoji] ?? []).includes(actor.id) }),
     })
   })
 
@@ -2622,7 +2906,11 @@ async function main() {
     ? apiRequest(`/api/notifications/${encodeURIComponent(operation.notificationId)}/read`, { method: 'PATCH' })
     : apiRequest('/api/notifications/read-all', { method: 'POST' }))
 
-  await server.connect(new StdioServerTransport())
+  const transport = new StdioServerTransport()
+  // 도구 목록의 의미 없는 직렬화 표기만 빼서 보낸다(mcp/toolListSurface.mjs). SDK에는 변환 옵션을 줄 자리가 없다.
+  const send = transport.send.bind(transport)
+  transport.send = (message, ...rest) => send(compactToolListMessage(message), ...rest)
+  await server.connect(transport)
 }
 
 main().catch((error) => {

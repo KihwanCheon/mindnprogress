@@ -254,7 +254,9 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
 
   async function closeDelegation(item: Delegation) {
     if (acting.current || !closeDraft || closeDraft.id !== item.id || closeDraft.note.trim().length < 3) return
-    if (!window.confirm(item.closure?.workspaceReleaseRequired
+    if (!window.confirm(item.closure?.quarantinedRelease
+      ? '격리된 작업공간을 반환할까요? 원 작업 브랜치의 체크포인트와 실패 이력은 Git 참조와 기록으로 보존합니다. 결과를 main에 통합하거나 AI를 다시 실행하지 않으며, 미커밋 변경이 있으면 반환하지 않습니다.'
+      : item.closure?.workspaceReleaseRequired
       ? '이 위임의 통합을 종료하고 작업공간을 반환할까요? 원본 커밋·부분 통합 후보·실패 이력은 보존합니다. 업무를 완료 처리하거나 결과를 main에 통합하지 않으며 다른 위임은 유지합니다.'
       : '이 위임을 완료 처리하거나 결과를 전달하지 않고 사용자 종료 상태로 전환합니다. 카드·코드·작업공간과 실행 이력은 그대로 보존됩니다. 계속할까요?')) return
     acting.current = true
@@ -266,6 +268,8 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
         request<{ map: { version: number } }>(`/api/maps/${encodeURIComponent(item.mapId)}`),
       ])
       await request(`/api/maps/${encodeURIComponent(parentMapId)}/ai-delegations/${encodeURIComponent(item.id)}/close`, {
+        // 결과 보존 반환은 작업공간 Git 검증 때문에 오래 걸릴 수 있다. 서버 저장 기한(60초)보다 길게 기다려 실제 결과를 받는다.
+        ...(item.closure?.workspaceReleaseRequired ? { signal: AbortSignal.timeout(120_000) } : {}),
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
           expectedUpdatedAt: item.updatedAt, sourceRevision: parent.map.version, targetRevision: target.map.version,
           reason: closeDraft.reason, note: closeDraft.note.trim(),
@@ -280,7 +284,11 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
           : '완료나 결과 전달로 기록하지 않고 사용자 종료 상태로 전환했습니다.')
       }
     } catch (reason) {
-      if (mounted.current) setError(reason instanceof Error ? reason.message : 'AI 위임을 종료하지 못했습니다.')
+      const message = reason instanceof Error ? reason.message : 'AI 위임을 종료하지 못했습니다.'
+      // 작업공간 반환이 먼저 저장됐는데 응답이 끊긴 경우 서버가 반환 기록으로 위임 종료를 곧 대사한다.
+      if (mounted.current) setError(item.closure?.workspaceReleaseRequired
+        ? `${message} 작업공간 반환이 이미 저장됐다면 잠시 뒤 자동으로 종료 처리됩니다. 상태가 바뀌지 않으면 같은 버튼을 다시 눌러 주세요.`
+        : message)
     } finally {
       if (mounted.current) {
         try { await refresh() } catch { /* 작업 오류 메시지를 보존한다. */ }
@@ -411,7 +419,9 @@ export function AiDelegationRecovery({ mapId, cardId, focusRequestId, onFocusHan
           </div>}
         </>}
         {!history && !cardAttention && closing ? <div className="ai-delegation-close-form">
-          {item.closure?.workspaceReleaseRequired && <p>원본 커밋·부분 통합 결과·실패 이력을 보존하고 작업공간을 반환합니다. main 반영이나 업무 완료 처리는 하지 않습니다.</p>}
+          {item.closure?.workspaceReleaseRequired && <p>{item.closure.quarantinedRelease
+            ? '원 작업 브랜치의 체크포인트와 실패 이력을 보존하고 격리된 작업공간만 반환합니다. main 반영·AI 재실행·업무 완료 처리는 하지 않으며, 대화가 실행 중이거나 미커밋 변경이 있으면 반환하지 않습니다.'
+            : '원본 커밋·부분 통합 결과·실패 이력을 보존하고 작업공간을 반환합니다. main 반영이나 업무 완료 처리는 하지 않습니다.'}</p>}
           <label><span>종료 사유</span><select disabled={busy} value={closeDraft.reason} onChange={(event) => setCloseDraft({ ...closeDraft, reason: event.target.value as CloseReason })}>{Object.entries(closeReasonLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
           <label><span>감사 메모</span><textarea disabled={busy} maxLength={1000} rows={3} value={closeDraft.note} placeholder="복구하거나 결과를 보고하지 않고 종료하는 이유를 남겨 주세요." onChange={(event) => setCloseDraft({ ...closeDraft, note: event.target.value })} /></label>
           <div className="ai-delegation-recovery-actions">

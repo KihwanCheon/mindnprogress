@@ -157,7 +157,13 @@ Windows에서는 저장소 루트의 `MindNProgress_Backup.bat`을 실행하면 
 MindNProgress_Backup.bat
 ```
 
-백업에는 `server/data` 전체와 저장소 루트에 존재하는 로컬 `.env*`·`*.local` 설정이 포함됩니다. 저장소 밖 사용자 설정 폴더(`~/.mnp`)의 설정은 포함되지 않으므로 필요하면 따로 보관하세요. 문서, 계정, 세션, 댓글, 알림, 변경 이력, 일일 백업, 문서별 원본 이미지, MCP 토큰과 AI 작성자 귀속을 함께 보존하며 `node_modules`, `dist`, 로그와 PID 같은 재생성 가능한 파일은 제외합니다. 서버가 실행 중이면 일관된 시점의 데이터를 복사하기 위해 잠시 중지하고, 스냅샷 복사가 끝나는 즉시 기존 실행 상태로 자동 복구한 뒤 압축과 검증을 계속합니다. ZIP 검증이 끝나면 서버를 다시 잠시 중지하고 현재 문서·변경 이력·일일 백업 어디에서도 참조하지 않는 24시간 이상 된 이미지 자산만 정리한 뒤 실행 상태를 복구합니다. 삭제 대상도 정리 직전 ZIP에는 포함되므로 필요하면 백업에서 복원할 수 있습니다.
+백업에는 `server/data`와 저장소 루트에 존재하는 로컬 `.env*`·`*.local` 설정이 포함됩니다. 저장소 밖 사용자 설정 폴더(`~/.mnp`)의 설정은 포함되지 않으므로 필요하면 따로 보관하세요. 문서, 계정, 세션, 댓글, 알림, 변경 이력, 일일 백업, 문서별 원본 이미지, MCP 토큰과 AI 작성자 귀속을 함께 보존하며 `node_modules`, `dist`, 로그와 PID 같은 재생성 가능한 파일은 제외합니다. 서버가 실행 중이면 일관된 시점의 데이터를 복사하기 위해 잠시 중지하고, 스냅샷 복사가 끝나는 즉시 기존 실행 상태로 자동 복구한 뒤 압축과 검증을 계속합니다. ZIP 검증이 끝나면 서버를 다시 잠시 중지하고 현재 문서·변경 이력·일일 백업 어디에서도 참조하지 않는 24시간 이상 된 이미지 자산만 정리한 뒤 실행 상태를 복구합니다. 삭제 대상도 정리 직전 ZIP에는 포함되므로 필요하면 백업에서 복원할 수 있습니다.
+
+변경 이력(`server/data/_history`)은 백업 날짜(한국 시간) 한 달 전 0시를 기준 시각으로 삼아, 그보다 오래된 이력은 문서·날짜별로 가장 늦게 저장된 1개만 백업에 담습니다. 기준 시각 이후 이력, 저장 시각을 알 수 없는 파일과 이력 밖의 데이터는 모두 담으며 운영 데이터의 이력은 지우지 않습니다. 기준 시각과 포함·제외 개수는 `manifest.json`의 `historyRetention`과 `RESTORE.txt`에 기록됩니다. 전체 이력이 필요하면 `MindNProgress_Backup.bat -KeepAllHistory`로 실행하거나 `MNP_BACKUP_KEEP_ALL_HISTORY=1`을 지정합니다.
+
+변경 이력은 `<이력ID>.json.br`(brotli)로 압축해 저장하고 읽을 때 풀며, 압축 이전 이력(`.json`)도 계속 읽습니다. 저장 복구 기록의 변경 후 파일 사본은 반영이 끝난 뒤 백그라운드에서 압축해 보관합니다. 기존 이력 변환(`scripts/compress-revision-history.mjs`)과 세부 규칙은 [변경 이력·저장 복구 사본 압축 보관](docs/history-storage-compression.md)을 참고하세요. 백업은 시작할 때 이전 실행이 강제 종료로 남긴 6시간 지난 복사본과 미완성 ZIP을 정리합니다.
+
+서버를 다시 시작할 때는 작업 스케줄러에 상시 실행 작업 `\MindNProgress`가 등록된 설치면 `scripts/mnp-runtime.ps1 -Action start`를, 등록 작업이 없는 설치면 기존 런처를 사용합니다. 등록 작업이 있는데 시작에 실패하면 런처로 대신 띄우지 않고 오류로 종료합니다.
 
 각 ZIP에는 파일별 크기와 SHA-256을 기록한 `manifest.json`과 수동 복원 안내 `RESTORE.txt`가 포함됩니다. 백업 배치는 .NET ZIP API의 `Fastest` 수준으로 압축하며, 기존 `Optimal` 수준보다 압축 속도를 우선하므로 ZIP 크기는 커질 수 있습니다. 검증할 때는 ZIP 내부 파일을 스트림으로 읽어 크기와 SHA-256을 manifest와 대조한 뒤에만 완료 처리합니다. 검증용 압축 해제 폴더를 만들지 않으며, ZIP 구조와 기존 복원 배치의 호환성은 유지합니다. 복원은 동일한 소스 버전을 준비한 후 다음처럼 실행합니다.
 
@@ -238,7 +244,7 @@ PC마다 이렇게 설치한 MindNProgress의 `server/data`는 서로 독립되�
 
 ### macOS Git 개발 환경 일괄 설치
 
-macOS에서는 [`installer/macos/Install-MnPSuite.sh`](installer/macos/Install-MnPSuite.sh)를 사용합니다. 이 설치기는 MindNProgress, AionUi, AionCore를 한 루트에 복제하고, 선택한 Dooray MCP와 PowerPoint MCP의 macOS 런타임을 준비합니다. Windows DPAPI 대신 Dooray 키를 macOS Keychain에 보관하고, PowerPoint COM 대신 LibreOffice 렌더링을 사용합니다. PowerPoint MCP 선택 시 Noto CJK·나눔·은글꼴을 사용자 폰트로 설치하고 한글 PPTX의 실제 PNG 렌더링까지 확인합니다.
+macOS에서는 [`installer/macos/Install-MnPSuite.sh`](installer/macos/Install-MnPSuite.sh)를 사용합니다. 이 설치기는 MindNProgress, AionUi, AionCore를 한 루트에 복제하고, 선택한 Dooray MCP와 PowerPoint MCP의 macOS 런타임을 준비합니다. Windows DPAPI 대신 Dooray 키를 macOS Keychain에 보관하고, PowerPoint COM 대신 PowerPoint for Mac(AppleScript) 렌더링을 사용합니다. PowerPoint MCP 선택 시 Noto CJK·나눔·은글꼴을 사용자 폰트로 설치하고, PowerPoint for Mac이 있으면 한글 PPTX의 실제 PNG 렌더링까지 확인합니다.
 
 ```bash
 cd installer/macos
@@ -486,21 +492,21 @@ node runner/index.mjs
 | 명령어 | 설명 |
 | --- | --- |
 | `mindnprogress_read_me_first` | 문서 선택 없이 제품 개념, 작성 규칙과 권장 작업 순서를 조회합니다. |
-| `mindnprogress_list_documents` | 활성 문서 목록, 버전, 완료 현황과 문서 그룹·혼합 순서를 조회합니다. |
-| `mindnprogress_search_content` | 열람 가능한 활성 문서 전체의 사용자 콘텐츠를 관련도순으로 검색하거나, 정확성 보완이 필요할 때 모든 카드를 커서 기반 카탈로그로 순회합니다. 결과는 후보이므로 최종 판단 전에 `mindnprogress_get_card`로 최신 원문을 확인합니다. |
-| `mindnprogress_get_context` | 선택 카드와 문서 구조, 관계, 댓글, 담당자, 업무 링크 및 선행 지식을 작업 문맥으로 조회합니다. `detailLevel`은 `focused` 또는 `full`을 사용합니다. |
-| `mindnprogress_get_document` | 문서의 모든 카드와 연결 관계 및 외부 접근 URL을 조회합니다. `view`를 생략하면 기존 full 응답이며, `compact`(카드 원문 유지·AI 대화 상세와 렌더링 값 축약), `outline`(구조·상태·관계·본문 길이와 `textIntegrity`, `cardIds`로 고른 카드만 전문), `version`(version과 `documentEtag`만)을 선택할 수 있습니다. 같은 `view`·`cardIds`로 받은 응답의 `documentEtag`를 `ifNoneMatch`로 전달했고 그 뒤 문서가 바뀌지 않았으면 본문을 생략하고 `notModified=true`를 반환합니다. `knownVersion`은 version 일치 여부만 `freshness`로 알려 주며 본문을 생략하지 않습니다(`view`를 생략한 full 응답에는 `freshness`가 없습니다). |
-| `mindnprogress_get_card` | 특정 카드의 설명, 공유 지식, 업무 필드와 댓글을 페이지 단위로 조회합니다. |
+| `mindnprogress_list_documents` | 활성 문서 목록, 버전, 완료 현황과 문서 그룹·혼합 순서를 조회합니다. 응답이 4만 자를 넘으면 문서 항목은 모두 두고 같은 값인 `documentGroups`, 작성자 세부, 중복 그룹 필드, 빈 필드 순으로 줄여 `responseBudget`·`omitted`에 표기합니다. 그룹 정보는 각 문서의 `group`·`groupMembership`·`groupProject`에 있습니다. |
+| `mindnprogress_search_content` | 열람 가능한 활성 문서 전체의 사용자 콘텐츠를 관련도순으로 검색하거나, 정확성 보완이 필요할 때 모든 카드를 커서 기반 카탈로그로 순회합니다. 결과는 후보이므로 최종 판단 전에 `mindnprogress_get_card`로 최신 원문을 확인합니다. 응답이 4만 자를 넘으면 결과 내용은 두고 같은 조건·커서로 `limit`만 줄여 다시 조회한 앞쪽 결과를 돌려주며 `responseBudget`에 표기합니다. 건너뛴 결과는 없으니 `page.nextCursor`로 이어서 읽습니다. |
+| `mindnprogress_get_context` | 선택 카드와 문서 구조, 관계, 댓글, 담당자, 업무 링크 및 선행 지식을 작업 문맥으로 조회합니다. `detailLevel`은 `focused` 또는 `full`을 사용합니다. `focused` 응답이 약 4만 자를 넘으면 `guide` 등 규칙은 그대로 두고 덜 중요한 데이터부터 줄이며, 생략한 경로와 회수 도구를 응답 앞쪽 `contextBudget`·`omitted`에 표기합니다([응답 크기 예산](docs/mcp-response-budget-20261029.md)). |
+| `mindnprogress_get_document` | 문서의 모든 카드와 연결 관계 및 외부 접근 URL을 조회합니다. `view`를 생략하면 기존 full 응답이며, `compact`(카드 원문 유지·AI 대화 상세와 렌더링 값 축약), `outline`(구조·상태·관계·본문 길이와 `textIntegrity`, `cardIds`로 고른 카드만 전문), `version`(version과 `documentEtag`만)을 선택할 수 있습니다. 같은 `view`·`cardIds`로 받은 응답의 `documentEtag`를 `ifNoneMatch`로 전달했고 그 뒤 문서가 바뀌지 않았으면 본문을 생략하고 `notModified=true`를 반환합니다. `knownVersion`은 version 일치 여부만 `freshness`로 알려 주며 본문을 생략하지 않습니다(`view`를 생략한 full 응답에는 `freshness`가 없습니다). `outline` 응답이 약 4만 자를 넘으면 구조·상태·계층과 `cardIds` 카드 전문은 두고 큰 비원문 필드부터 단계적으로 줄이며, 줄인 범위와 회수 경로를 `responseBudget`·`omitted`에 표기합니다. |
+| `mindnprogress_get_card` | 특정 카드의 설명, 공유 지식, 업무 필드와 댓글을 페이지 단위로 조회합니다. `fields`로 필요한 data 필드만, `includeComments=false`로 댓글 없이 받을 수 있습니다. 응답이 4만 자를 넘으면 댓글 페이지를 먼저 줄이고, 그래도 넘으면 `fields`로 고르지 않은 큰 보조 필드와 description·sharedKnowledge 원문(큰 것부터)을 생략해 `card.omittedFields`·`responseBudget`·`omitted`에 표기합니다. |
 | `mindnprogress_list_shared_knowledge_candidates` | 정리가 필요한 공유 지식 후보의 우선순위·길이·SHA-256·검토 상태를 원문 없이 페이지 단위로 조회합니다. |
 | `mindnprogress_get_shared_knowledge_review_context` | 후보 한 카드의 공유 지식 원문과 관계·최근 댓글·검토 기준을 조회합니다. |
 | `mindnprogress_get_ai_work_states` | 지정한 카드 또는 문서 전체에서 연결된 AI 대화의 현재 작업·승인 대기·유휴·확인 불가 상태를 조회합니다. 문서 버전은 변경하지 않습니다. |
-| `mindnprogress_get_ai_usage` | MnP 서버가 읽은 AionUi 구독 사용량을 조회합니다. `provider`는 `all`(기본값), `claude`, `codex`이며 사용률·참고 잔여율·UTC 초기화 시각과 제공자별 최신성을 반환합니다. `guide.aiUsage`에서 해석 기준을 확인합니다. |
+| `mindnprogress_get_ai_usage` | MnP 서버가 읽은 AionUi 구독 사용량을 조회합니다. `provider`는 `all`(기본값), `claude`, `codex`이며 사용률·참고 잔여율·UTC 초기화 시각과 제공자별 최신성을 반환합니다. Claude와 Codex 모두 5시간 창(`session`)과 주간 창(`weekly`)을 주며, Codex 5시간 창은 요금제에 따라 없어 `null`일 수 있습니다. Codex 한도 도달(`limitReached`)은 AionUi가 두 창을 함께 판정한 값입니다. `guide.aiUsage`에서 해석 기준을 확인합니다. |
 | `mindnprogress_get_ai_workspace_pool` | MindNProgress가 관리하는 AI 작업공간의 역할·경로·Unity 인스턴스 해시와 현재 상태를 조회합니다. 다른 대화의 lease·job 식별자는 노출하지 않습니다. |
 | `mindnprogress_checkpoint_ai_workspace` | `operation.action=commit-changes`이면 worker의 실제 변경 경로와 구조화 커밋 메시지를 체크포인트로 고정하고, `confirm-no-changes`이면 git status와 diff로 의도한 파일 변경이 없음을 확인합니다. 두 action의 입력은 서로 섞을 수 없습니다. |
 | `mindnprogress_list_ai_conversations` | 카드에 연결된 모든 AI 대화 후보의 실행 환경, 최근 활동, 실시간 상태와 `contextHealth`를 조회해 기존 대화 이어가기와 새 대화 시작 판단에 사용합니다. |
 | `mindnprogress_delegate_ai_work` | 대화 시작 카드의 모든 깊이 하위 카드에 실행 가능한 지시를 전달해 기존 대화를 이어가거나 새 대화를 만들고, 해당 턴 완료 후 결과와 함께 상위 대화를 자동 재개합니다. 일반 `resume`에는 후보의 최신 `contextHealth.assessmentId`가 필요합니다. 다른 카드 조회는 위임 기준을 바꾸지 않습니다. |
 | `mindnprogress_complete_ai_delegation` | 사용자가 중지한 하위 위임을 같은 대화에서 직접 이어 실제 작업을 완료했을 때, 카드 기록과 작업공간 체크포인트 이후 마지막 턴에 명시적 완료 신호를 보냅니다. 단순 질의 응답과 중간 보고에는 사용하지 않습니다. |
-| `mindnprogress_list_ai_delegations` | 하위 실행부터 상위 대화 재개까지 AI 작업 위임의 현재 상태, 대상 대화와 turnId를 조회합니다. 구버전 실행 기록의 자원 대기(`waiting-resource`) 상태도 호환 조회합니다. |
+| `mindnprogress_list_ai_delegations` | 하위 실행부터 상위 대화 재개까지 AI 작업 위임의 현재 상태, 대상 대화와 turnId를 조회합니다. 구버전 실행 기록의 자원 대기(`waiting-resource`) 상태도 호환 조회합니다. 응답이 4만 자를 넘으면 판단이 필요한 위임과 미해결 접수 실패는 두고 정리된 이력만 줄여 `responseBudget`·`omitted`에 표기하며, 생략된 위임은 `delegationId`로 한 건씩 조회합니다. |
 | `mindnprogress_recover_ai_delegation` | AionCore 재시작으로 복구가 필요해진 위임을 원 지시 자동 재생 없이 기존 대화·작업공간에서 명시적으로 이어갑니다. |
 | `mindnprogress_finalize_ai_coordination` | 완료된 문서 조정 실행이 하위 업무·문서 검수 대기에 남았을 때, 카드 상태·진행률·외부 대기와 실제 미완료 하위 위임을 보존하고 후속 성공으로 해소된 과거 한도 시도만 정리한 채 조정 위임을 종료해 현재 결과를 상위 AI에 전달합니다. |
 | `mindnprogress_supersede_ai_delegation` | 한도에 막혀 변경 없이 끝난 과거 위임을 같은 카드에서 나중에 성공한 위임과 연결하여 `superseded`로 종료합니다. 카드나 작업공간을 수정하지 않습니다. |
@@ -514,12 +520,12 @@ node runner/index.mjs
 | 명령어 | 설명 |
 | --- | --- |
 | `mindnprogress_create_mindmap` | 루트 한 건부터 여러 카드까지 새 문서와 계층 구조를 한 번에 생성하고 자동 배치합니다. |
-| `mindnprogress_add_card` | 새 카드 또는 지정한 상위 카드의 하위 카드를 추가합니다. 기본 `responseMode=affected`는 추가한 카드와 문서·Root 요약만, `full`은 변경 전과 같은 API 원본 전체 문서를 반환합니다. |
-| `mindnprogress_update_card` | 전달한 필드만 부분 병합하여 카드 제목, 설명, 공유 지식, 상태, 진행률과 업무 관리 필드를 수정합니다. 일반 카드에서 생략한 필드와 위치는 보존됩니다. 기본 `responseMode=full`은 저활용 필드를 제외한 최신 전체 문서를, `affected`는 직접·간접 변경 카드와 문서·Root 요약을 반환합니다. |
+| `mindnprogress_add_card` | 새 카드 또는 지정한 상위 카드의 하위 카드를 추가합니다. 기본 `responseMode=affected`는 추가한 카드와 문서·Root 요약만, `full`은 변경 전과 같은 API 원본 전체 문서를 반환합니다. affected의 `affectedCards`에는 서버가 함께 조정한 카드의 상태 요약과 `changedKeys`만 있습니다. |
+| `mindnprogress_update_card` | 전달한 필드만 부분 병합하여 카드 제목, 설명, 공유 지식, 상태, 진행률과 업무 관리 필드를 수정합니다. 일반 카드에서 생략한 필드와 위치는 보존됩니다. 기본 `responseMode=full`은 저활용 필드를 제외한 최신 전체 문서를, `affected`는 직접·간접 변경 카드와 문서·Root 요약을 반환합니다. `affected`의 요청 카드는 바꾸지 않은 1,000자 초과 필드를 `omittedFields`로만 표시하고, 서버가 함께 조정한 카드는 상태 요약과 `changedKeys`로 줍니다. |
 | `mindnprogress_patch_card_text` | 조회한 SHA-256이 유지된 경우에만 설명 또는 공유 지식의 유일 문자열·경계 내부를 교체하거나 뒤에 추가합니다. 장문 필드 전체를 다시 생성하지 않습니다. |
 | `mindnprogress_apply_shared_knowledge_review` | 문서 버전과 카드별 SHA-256이 모두 일치할 때만 최대 20개 카드의 정리 결과와 검토 기록을 한 번에 저장합니다. |
-| `mindnprogress_move_card` | 카드와 전체 하위 구조를 다른 카드 아래로 이동합니다. `targetMapId`를 지정하면 카드 ID와 댓글·AI 대화·완료 위임·이미지·Ref 연결을 유지한 채 다른 문서로 실제 이동합니다. 기본 `responseMode=affected`는 이동 결과와 이전·새 상위 관계만, `full`은 관련 원본 문서 전체를 반환합니다. |
-| `mindnprogress_delete_card` | 카드와 선택적으로 전체 하위 카드를 삭제합니다. Root 카드는 삭제할 수 없습니다. 기본 `responseMode=affected`는 삭제한 카드 ID와 끊어진 계층·지식선 관계 및 함께 조정된 카드만, `full`은 변경 전과 같은 API 원본 전체 문서를 반환합니다. |
+| `mindnprogress_move_card` | 카드와 전체 하위 구조를 다른 카드 아래로 이동합니다. `targetMapId`를 지정하면 카드 ID와 댓글·AI 대화·완료 위임·이미지·Ref 연결을 유지한 채 다른 문서로 실제 이동합니다. 기본 `responseMode=affected`는 이동 결과와 이전·새 상위 관계만, `full`은 관련 원본 문서 전체를 반환합니다. 같은 문서 안 이동의 affected는 바뀌지 않은 1,000자 초과 필드를 `card.omittedFields`로, 서버 조정 카드는 상태 요약과 `changedKeys`로만 줍니다. |
+| `mindnprogress_delete_card` | 카드와 선택적으로 전체 하위 카드를 삭제합니다. Root 카드는 삭제할 수 없습니다. 기본 `responseMode=affected`는 삭제한 카드 ID와 끊어진 계층·지식선 관계 및 함께 조정된 카드만, `full`은 변경 전과 같은 API 원본 전체 문서를 반환합니다. 함께 조정된 카드는 상태 요약과 `changedKeys`로만 줍니다. |
 | `mindnprogress_manage_knowledge_line` | `operation.action=add/update/delete`로 지식선을 추가하거나 정책을 변경하거나 삭제합니다. add는 중복·순환을 거부하고 update는 중복 관계를 거부합니다. |
 | `mindnprogress_update_document_info` | 문서 이름 또는 아이콘 색상을 변경합니다. |
 
@@ -564,11 +570,11 @@ AI 정리는 `mindnprogress_list_shared_knowledge_candidates`로 원문 없는 �
 | --- | --- |
 | `mindnprogress_reorder_documents` | 좌측 문서 목록의 순서를 변경합니다. |
 | `mindnprogress_save_document_layout` | 그룹, 그룹 내부 문서 순서와 그룹·개별 문서가 섞인 최상위 순서를 저장합니다. |
-| `mindnprogress_get_group_context` | 그룹의 기획 기준, 총괄 문서, 소속 문서 루트, 문서 지시와 과거 그룹 위임 결과를 조회합니다. |
+| `mindnprogress_get_group_context` | 그룹의 기획 기준, 총괄 문서, 소속 문서 루트, 문서 지시와 과거 그룹 위임 결과를 조회합니다. 기본 `summary`는 기획 기준·지침 전문과 나머지 요약·원문 회수 경로를, `detailLevel=full`은 모든 원문을 반환합니다. |
 | `mindnprogress_update_group_project` | 그룹의 기획 기준과 총괄 문서 연결을 버전 조건부로 수정합니다. |
 | `mindnprogress_create_group_document` | 그룹에 기능 문서와 담당 범위·완료 조건을 담은 집계 루트를 만듭니다. |
 | `mindnprogress_send_group_document_instruction` | 총괄 루트 AI가 같은 그룹의 문서 루트 AI에 승인된 지시 전문을 전달합니다. 기존 루트 대화를 이어갈 때는 최신 `contextHealth.assessmentId`가 필요합니다. |
-| `mindnprogress_list_group_document_instructions` | 문서 지시의 대기·전달·응답 상태와 선택적으로 전문을 조회합니다. |
+| `mindnprogress_list_group_document_instructions` | 문서 지시의 대기·전달·응답 상태와 선택적으로 전문을 조회합니다. 응답이 4만 자를 넘으면 `queued`·`delivered` 지시와 대상 문서별 최신 지시는 두고 오래된 이력부터 원문 생략·요약·개수화 순으로 줄이며, 생략된 지시는 `instructionId`와 `includeContent=true`로 한 건씩 조회합니다. |
 
 그룹이나 혼합 순서를 변경할 때는 먼저 `mindnprogress_list_documents`의 `documentLayout`을 확인하고 모든 활성 문서를 정확히 한 번 포함해야 합니다.
 
@@ -597,7 +603,7 @@ AI 정리는 `mindnprogress_list_shared_knowledge_candidates`로 원문 없는 �
 
 | 명령어 | 설명 |
 | --- | --- |
-| `mindnprogress_list_comments` | 문서 전체 또는 특정 카드의 댓글과 답글을 페이지 조회합니다. `includeDetail=true`이면 상세 본문을 포함합니다. |
+| `mindnprogress_list_comments` | 문서 전체 또는 특정 카드의 댓글과 답글을 페이지 조회합니다. `includeDetail=true`이면 상세 본문을 포함합니다. 한 페이지가 4만 자를 넘으면 앞쪽 댓글부터 예산에 드는 만큼만 주고 `limit`·`nextOffset`을 반환한 댓글 기준으로 맞추므로, `hasMore`가 true이면 `nextOffset`으로 이어서 조회합니다. |
 | `mindnprogress_manage_comment` | `operation.action=add/update/delete/set-resolved/toggle-reaction`으로 댓글을 변경합니다. action별로 작성 대상·본문·댓글 ID·해결 상태·이모지 입력을 분리해 검증합니다. |
 
 `mindnprogress_list_comments` 응답에 `nextOffset`이 있으면 다음 호출의 `offset`으로 전달합니다. AI 댓글의 `summary`는 의미 있는 진행, 차단과 완료 결과에 따라 `[진행]`, `[차단]`, `[결과]` 머리말로 시작하는 1~2문장으로 작성합니다. `detail`에는 다른 세션이 작업을 이어가거나 검증하는 데 필요한 수행 내용, 판단, 변경 범위, 검증 방법과 실제 결과, 산출물, 제한사항과 다음 단계 중 해당 내용을 충실하게 기록합니다. 요약 때문에 상세를 축약하지 않으며 개별 도구 호출과 의미 없는 반복만 제외합니다.
@@ -712,3 +718,5 @@ npm run usage:mcp -- --json # 집계 JSON 출력
 ## 라이선스
 
 이 프로젝트는 [MIT License](LICENSE)로 배포됩니다.
+
+휴대폰 푸시 연동: [Aion Android 알리미 푸시 발송 API](docs/mobile-push.md)

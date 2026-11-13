@@ -342,6 +342,8 @@ export function createAiDelegationRequestSignature({
   sourceRevision,
   newConversation,
   role,
+  contextOverride = null,
+  aiPolicy = null,
 }) {
   const normalizedMachineId = String(machineId ?? '').trim()
   const requested = newConversation && typeof newConversation === 'object'
@@ -355,6 +357,8 @@ export function createAiDelegationRequestSignature({
         disabledBuiltinSkillIds: normalizedRequestList(newConversation.disabledBuiltinSkillIds),
         mcpIds: normalizedRequestList(newConversation.mcpIds),
         workspace: String(newConversation.workspace ?? '').trim() || null,
+        ...(newConversation.claudeAccountId !== undefined ? { claudeAccountId: String(newConversation.claudeAccountId).trim() } : {}),
+        ...(newConversation.claudeAccountNumber !== undefined ? { claudeAccountNumber: newConversation.claudeAccountNumber } : {}),
       }
     : null
   return createHash('sha256').update(JSON.stringify({
@@ -370,6 +374,10 @@ export function createAiDelegationRequestSignature({
     sourceRevision,
     newConversation: strategy === 'new' ? requested : null,
     role: role || null,
+    // 예외가 없는 요청의 서명은 이전과 같게 유지한다.
+    ...(contextOverride ? { contextOverride: { reasonCode: contextOverride.reasonCode, reason: contextOverride.reason } } : {}),
+    // 위임 규칙 값(workType 등)이 없는 이전 요청의 서명도 그대로 둔다.
+    ...(aiPolicy ? { aiPolicy } : {}),
   })).digest('hex')
 }
 
@@ -571,6 +579,24 @@ export function integrationHeadChangedFailure(result) {
 }
 
 export const integrationCandidateDirtyReasonCode = 'integration-candidate-worktree-dirty'
+export const integrationGitStatusFailureReasonCode = 'integration-git-status-failed'
+
+export function integrationGitStatusFailure(result) {
+  if (result?.status !== 'quarantined' || result.childStatus !== 'completed' || result.childError
+    || result.integratedCommit || !result.integrationBranch || result.conflictRound || result.unmergedFiles?.length
+    || !['headCommit', 'integrationBaseCommit'].every(key => /^[a-f0-9]{40}$/u.test(String(result[key] ?? '')))) return null
+  const failure = result.integrationFailure
+  // 구버전은 명령 오류만 저장했다. 후보 HEAD가 없어도 복구 시 모든 체크포인트의 tree와 부모를 검증한다.
+  const legacy = !failure && /^Command failed: git status --porcelain --untracked-files=all\r?\n/u.test(String(result.error ?? ''))
+  if (!legacy && (failure?.reasonCode !== integrationGitStatusFailureReasonCode
+    || failure.phase !== 'candidate-status' || failure.workspaceId !== result.workspaceId
+    || failure.branch !== result.integrationBranch
+    || failure.command !== 'git status --porcelain --untracked-files=all')) return null
+  const candidateCommit = result.integrationHeadCommit ?? failure?.candidateCommit ?? null
+  if ((candidateCommit && !/^[a-f0-9]{40}$/u.test(candidateCommit))
+    || (failure?.candidateCommit && failure.candidateCommit !== candidateCommit)) return null
+  return { candidateCommit }
+}
 
 export function integrationCandidateWorktreeFailure(result) {
   if (result?.status !== 'quarantined' || result.childStatus !== 'completed' || result.childError
@@ -638,6 +664,11 @@ export function aiDelegationRecoveryAvailability(delegation) {
   if (retryCompletedIntegration && delegation.workspaceLease?.leaseId
     && integrationCandidateWorktreeFailure(delegation.workspaceResult)) {
     return { failurePhase: 'integration', failureCategory: integrationCandidateDirtyReasonCode, recoveryAvailable: true,
+      recommendedAction: 'retry-integration', recoveryTool: 'mindnprogress_recover_ai_delegation' }
+  }
+  if (retryCompletedIntegration && delegation.workspaceLease?.leaseId
+    && integrationGitStatusFailure(delegation.workspaceResult)) {
+    return { failurePhase: 'integration', failureCategory: integrationGitStatusFailureReasonCode, recoveryAvailable: true,
       recommendedAction: 'retry-integration', recoveryTool: 'mindnprogress_recover_ai_delegation' }
   }
   if (!['parent-wake-failed', 'failed', 'waiting-usage-limit', 'waiting-rate-limit', 'waiting-model-capacity', 'recovery-required', 'integration-recovery-required', 'waiting-child-resume'].includes(delegation?.state)) return null
@@ -720,11 +751,36 @@ export function aiDelegationIsTerminal(delegation) {
   return AI_DELEGATION_TERMINAL_STATES.has(String(delegation?.state ?? ''))
 }
 
+// 통합을 시작하기 전에 격리된 실패 위임(마무리 정리 실패·하위 실행 실패 등)은 지원되는 복구가 없으면
+// 원 작업 브랜치를 참조로 보존하고 작업공간만 반환할 수 있다. 통합·업무 완료·AI 재실행은 하지 않는다.
+export function quarantinedWorkspaceReleaseCandidate(delegation) {
+  const result = delegation?.workspaceResult
+  return delegation?.state === 'failed' && !delegation.groupId && !delegation.pendingRecovery
+    && !integrationRecoveryPending(delegation) && !delegation.resultCorrection && !delegation.workspaceLease?.ownership
+    && Boolean(delegation.workspaceLease?.leaseId) && result?.status === 'quarantined'
+    && result.leaseId === delegation.workspaceLease.leaseId
+    && !result.integrationBranch && !result.integratedCommit && !result.conflictRound && !(result.unmergedFiles?.length)
+    && !localChangesIntegrationCommits(result)
+    && aiDelegationRecoveryAvailability(delegation)?.recoveryAvailable !== true
+}
+
+// 같은 상위·대상 카드에서 나중에 시작해 성공한 위임. 이전 실패의 체크포인트를 다시 통합하면 중복 반영이 되므로 자동 통합 복구를 막는 근거로 쓴다.
+export function laterCompletedDelegationForCard(delegation, delegations) {
+  return [...delegations].find(candidate => candidate?.id !== delegation?.id && candidate.state === 'completed'
+    && aiDelegationSucceeded(candidate) && candidate.mapId === delegation.mapId
+    && (candidate.parentMapId ?? candidate.mapId) === (delegation.parentMapId ?? delegation.mapId)
+    && candidate.parentCardId === delegation.parentCardId && candidate.targetCardId === delegation.targetCardId
+    && String(candidate.createdAt ?? '') > String(delegation.createdAt ?? '')) ?? null
+}
+
 export function aiDelegationClosureAvailability(delegation) {
   if (delegation?.state === 'failed' && !delegation.groupId && !delegation.pendingRecovery
     && !integrationRecoveryPending(delegation) && !delegation.resultCorrection && !delegation.workspaceLease?.ownership
     && delegation.workspaceLease?.leaseId && localChangesIntegrationCommits(delegation.workspaceResult)) {
     return { closeAvailable: true, reason: 'preserve-integration-result', workspaceReleaseRequired: true }
+  }
+  if (quarantinedWorkspaceReleaseCandidate(delegation)) {
+    return { closeAvailable: true, reason: 'preserve-quarantined-result', workspaceReleaseRequired: true, quarantinedRelease: true }
   }
   if (!delegation || aiDelegationIsTerminal(delegation) || delegation.pendingRecovery || integrationRecoveryPending(delegation)) return null
   if (delegation.groupId) return { closeAvailable: false, reason: 'group-managed' }
@@ -754,12 +810,29 @@ export function preservedIntegrationReleaseClosure(delegation, lease) {
     || lease.cardId !== delegation.targetCardId || result.cardId !== delegation.targetCardId
     || lease.conversationId !== delegation.targetConversationId || result.conversationId !== delegation.targetConversationId
     || result.previousResult?.headCommit !== delegation.workspaceResult?.headCommit
-    || receipt.sourceHead !== delegation.workspaceResult?.headCommit) return null
+    // 통합 전 격리 반환은 이전 결과에 HEAD가 없을 수 있어 반환 당시 기록한 이전 HEAD로 대사한다.
+    || (receipt.kind === 'quarantined-release' ? receipt.previousHeadCommit ?? null : receipt.sourceHead)
+      !== (delegation.workspaceResult?.headCommit ?? null)) return null
   return { state: 'closed', workspaceResult: result, workspaceReleasedAt: receipt.releasedAt,
     closedAt: receipt.releasedAt, closedByUserId: receipt.approvedByUserId ?? null,
     closedByOperator: receipt.approvedByOperator ?? null, closureSourceState: delegation.state,
     closureReason: 'no-longer-needed', closureNote: receipt.reason,
     closureSource: 'workspace-pool-preserved-release', reportApprovalRequired: false, reportCancelledAt: receipt.releasedAt }
+}
+
+// 결과 보존 반환은 작업공간 풀 상태 파일에 먼저 저장되고, 위임 종료는 요청 트랜잭션에서 저장된다.
+// 요청이 끊기거나 저장 기한이 지나 위임 종료가 반영되지 않았으면 반환 receipt로 종료를 대사한다.
+// 기동 시와 주기 점검에서 같은 규칙을 쓴다. 처리 중(busy)인 위임은 요청이 끝난 뒤 다음 주기에 대사한다.
+export async function reconcilePreservedReleaseClosures({ delegations, leaseFor, busy = () => false, update }) {
+  const closed = []
+  for (const delegation of [...delegations]) {
+    if (delegation?.state !== 'failed' || busy(delegation.id)) continue
+    const closure = preservedIntegrationReleaseClosure(delegation, leaseFor(delegation.workspaceLease?.leaseId))
+    if (!closure) continue
+    await update(delegation.id, closure)
+    closed.push(delegation.id)
+  }
+  return closed
 }
 
 export function aiDelegationCanBeSupersededBy(delegation, replacement) {

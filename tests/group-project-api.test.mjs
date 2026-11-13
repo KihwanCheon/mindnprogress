@@ -6,6 +6,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { storageControl } from './helpers/storage-api-harness.mjs'
 import { AI_EXECUTION_APPROVAL_INSTRUCTION, GROUP_APPROVAL_INSTRUCTION, GROUP_COORDINATOR_INSTRUCTION, DOCUMENT_COORDINATOR_INSTRUCTION, AI_DELEGATION_FOLLOWUP_INSTRUCTION, GROUP_AI_DELEGATION_FOLLOWUP_INSTRUCTION } from '../src/utils/aiApprovalInstructions.mjs'
 
 const projectDirectory = path.resolve(import.meta.dirname, '..')
@@ -102,14 +103,16 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
   await new Promise((resolve) => probe.close(resolve))
   const baseUrl = `http://127.0.0.1:${port}`
   let errors = ''
+  let storage
   async function start({ allowLegacyGroupDelegationCreation = true } = {}) {
-    child = spawn(process.execPath, ['server/index.mjs'], { cwd: projectDirectory, env: {
+    child = spawn(process.execPath, ['--import', './tests/helpers/storage-fs-barrier.mjs', 'server/index.mjs'], { cwd: projectDirectory, env: {
       ...process.env, MNP_DATA_DIR: directory, MNP_API_HOST: '127.0.0.1', MNP_API_PORT: String(port), MNP_WEB_PORT: String(port),
       MNP_AIONUI_URL: `http://127.0.0.1:${fakePort}`, MNP_AI_DELEGATION_POLL_INTERVAL_MS: '100',
       MNP_ALLOW_LEGACY_GROUP_DELEGATION_CREATION: allowLegacyGroupDelegationCreation ? '1' : '0',
       MNP_WORKSPACE_POOL_REGISTRY: path.join(directory, 'no-workspace-pool.json'),
       MNP_ADMIN_EMAIL: 'group-test@mind.local', MNP_ADMIN_PASSWORD: 'GroupTest!2026',
-    }, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
+    }, stdio: ['ignore', 'ignore', 'pipe', 'ipc'], windowsHide: true })
+    storage = storageControl(child, directory)
     child.stderr.on('data', (chunk) => { errors += chunk })
     await until(async () => { try { return (await fetch(baseUrl + '/api/health')).ok } catch { return false } }, `서버를 시작하지 못했습니다. ${errors}`)
   }
@@ -118,7 +121,8 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
     const token = (await readFile(path.join(directory, '_integration-token'), 'utf8')).trim()
     const headers = { Authorization: `Bearer ${token}`, 'X-MNP-Editor-Id': 'group-test-editor', 'Content-Type': 'application/json' }
     async function api(url, method = 'GET', body, extraHeaders = {}) {
-      const response = await fetch(baseUrl + url, { method, headers: { ...headers, ...extraHeaders }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
+      const response = await fetch(baseUrl + url, { method, signal: AbortSignal.timeout(15_000), headers: { ...headers, ...extraHeaders }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
+        .catch((error) => { throw new Error(`${method} ${url}: ${error.message}\n${errors}`, { cause: error }) })
       return { status: response.status, body: await response.json() }
     }
     await api('/api/maps', 'POST', { title: '그룹 밖 문서', map: { nodes: [{ id: 'outside-root', type: 'mind', position: { x: 0, y: 0 }, data: { label: '그룹 밖 원본', description: '', kind: 'root', isWork: false, status: 'planned', progress: 0 } }], edges: [] } })
@@ -210,7 +214,15 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
     assert.equal((await api(`/api/maps/${target.id}`, 'DELETE')).status, 409)
     assert.equal((await api(delegateUrl)).body.delegations[0].id, 'group-first')
 
+    const recoveryPublishing = await storage.barrier('_ai-delegations.json.', 'writeFile', { prefix: true })
     dispatches.get('group-first').state = 'recovery_required'
+    await recoveryPublishing.reached
+    let recoveryContextResolved = false
+    const recoveryContext = api(`/api/groups/${groupId}`).then((value) => { recoveryContextResolved = true; return value })
+    await pause(80)
+    assert.equal(recoveryContextResolved, false, '그룹 조회는 확정되지 않은 메모리 위임 상태를 노출하지 않는다.')
+    recoveryPublishing.release()
+    assert.equal((await recoveryContext).status, 200)
     await until(async () => (await api(`/api/groups/${groupId}`)).body.delegations.some((item) => item.state === 'recovery-required'), '복구 필요 상태가 되지 않았습니다.')
     await stop(child); await start()
     assert.equal((await api(`/api/groups/${groupId}`)).body.project.source, source)
@@ -263,6 +275,7 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
     const leafId = 'implementation-leaf'
     const withLeaf = await api(`/api/maps/${target.id}`, 'PUT', {
       baseVersion: beforeLeaf.version,
+      baseLifecycleVersion: beforeLeaf.lifecycleVersion ?? 0,
       map: {
         nodes: [...beforeLeaf.nodes, { id: leafId, type: 'mind', position: { x: 300, y: 0 }, data: { label: '하위 구현', description: '로비 진입 구현과 검증', kind: 'task', isWork: true, status: 'planned', progress: 0 } }],
         edges: [...beforeLeaf.edges, { id: 'root-to-leaf', source: targetRoot, target: leafId, data: { relation: 'hierarchy' } }],
@@ -558,7 +571,14 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
     assert.equal(invalidReplyTarget.status, 400)
     assert.equal(invalidReplyTarget.body.reasonCode, 'GROUP_DOCUMENT_INSTRUCTION_REQUEST_INVALID')
     assert.equal(calls.some((call) => call.operationId === 'gdi:group-instruction-invalid-reply-target'), false)
-    const instructed = await api(instructionUrl, 'POST', instructionArgs, sourceHeaders)
+    const publishing = await storage.barrier('_group-document-instructions.json.', 'writeFile', { prefix: true })
+    const instructing = api(instructionUrl, 'POST', instructionArgs, sourceHeaders)
+    await publishing.reached
+    await storage.tick(100)
+    assert.equal((await api(`/api/maps/${outsideMap}`)).status, 200, '지시 저장 대기 중 무관한 문서를 읽는다.')
+    assert.equal(calls.some((call) => call.operationId === 'gdi:group-instruction-first'), false)
+    publishing.release()
+    const instructed = await instructing
     assert.equal(instructed.status, 202, JSON.stringify(instructed.body))
     assert.equal(instructed.body.reasonCode, 'GROUP_DOCUMENT_INSTRUCTION_DELIVERED', JSON.stringify(instructed.body))
     assert.match(instructed.body.message, /업무 완료를 의미하지 않습니다/)
@@ -597,13 +617,45 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
     const repliedInstruction = instructionList.body.instructions.find((item) => item.id === 'group-instruction-first')
     assert.equal(repliedInstruction.response, assistantResult)
     assert.match(repliedInstruction.responseHash, /^[a-f0-9]{64}$/)
+    const singleInstruction = await api(`${instructionUrl}?instructionId=group-instruction-first&includeContent=true`)
+    assert.equal(singleInstruction.status, 200)
+    assert.deepEqual(singleInstruction.body.instructions, [repliedInstruction])
+    const missingInstruction = await api(`${instructionUrl}?instructionId=group-instruction-missing`)
+    assert.equal(missingInstruction.status, 404)
+    assert.equal(missingInstruction.body.reasonCode, 'GROUP_DOCUMENT_INSTRUCTION_NOT_FOUND')
+
+    // 화면용 기본 응답은 그대로 두고, AI용 요약은 원문 대신 회수 경로를 준다.
+    const fullGroupContext = (await api(`/api/groups/${groupId}`)).body
+    assert.equal(fullGroupContext.view, undefined)
+    assert.equal(fullGroupContext.documentInstructions.find((item) => item.id === 'group-instruction-first').response, assistantResult)
+    assert.ok(fullGroupContext.documents.every((document) => Array.isArray(document.waitingDetails)))
+    const coordinatorSummary = await api(`/api/groups/${groupId}?view=summary&mapId=${coordinatorId}`)
+    assert.equal(coordinatorSummary.status, 200)
+    assert.equal(coordinatorSummary.body.role, 'coordinator')
+    assert.deepEqual(coordinatorSummary.body.project, fullGroupContext.project)
+    assert.deepEqual(coordinatorSummary.body.guide, fullGroupContext.guide)
+    const summarizedInstruction = coordinatorSummary.body.documentInstructions.find((item) => item.id === 'group-instruction-first')
+    assert.equal(summarizedInstruction.state, 'replied')
+    for (const field of ['instruction', 'approvalEvidence', 'response']) assert.equal(summarizedInstruction[field], undefined)
+    assert.equal(coordinatorSummary.body.documentInstructionCounts.total, fullGroupContext.documentInstructions.length)
+    for (const document of fullGroupContext.documents) {
+      const summarized = coordinatorSummary.body.documents.find((item) => item.id === document.id)
+      assert.equal(summarized.waitingDetails, undefined)
+      assert.equal(summarized.root?.textIntegrity.description.length ?? 0, document.root?.data.description?.length ?? 0)
+      assert.equal(summarized.root?.data.description, undefined)
+    }
+    const documentSummary = (await api(`/api/groups/${groupId}?view=summary&mapId=${instructionDocument.id}`)).body
+    assert.equal(documentSummary.role, 'document')
+    assert.ok(documentSummary.documentInstructions.length > 0)
+    assert.ok(documentSummary.documentInstructions.every((item) => item.targetMapId === instructionDocument.id))
 
     const latestInstructionTarget = (await api(`/api/maps/${instructionDocument.id}`)).body.map
+    assert.equal(latestInstructionTarget.nodes[0].data.aiPrimaryConversationId, instructed.body.instruction.targetConversationId, '첫 대화가 담당으로 저장된다')
     const queuedInstructionArgs = {
       ...instructionArgs,
       targetRevision: latestInstructionTarget.version,
       strategy: 'resume',
-      conversationId: instructed.body.instruction.targetConversationId,
+      conversationId: undefined,
       conversationAssessmentId: await assessmentIdFor(instructionDocument.id, instructionDocument.nodes[0].id, instructed.body.instruction.targetConversationId),
       decisionReason: '같은 문서 담당 대화의 후속 지시입니다.',
       instruction: '같은 승인 범위에서 문서 내부 진행 상태를 다시 확인하세요.',
@@ -616,6 +668,7 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
       const blockedGroupNew = await api(instructionUrl, 'POST', {
         ...instructionArgs, targetRevision: latestInstructionTarget.version,
         idempotencyKey: `group-instruction-blocked-model-new-${blockedSuffix}`,
+        targetConversationRole: 'auxiliary', workType: 'other', aiPolicyOverride: { evidence: '사용자가 지정한 모델의 보조 대화 생성 차단을 검증합니다.' },
         newConversation: { agentId: 'claude', modelId: blockedModelId, workspace: projectDirectory },
       }, sourceHeaders)
       assert.equal(blockedGroupNew.status, 409)
@@ -627,6 +680,7 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
       const blockedGroupResumeId = `group-instruction-blocked-model-resume-${blockedSuffix}`
       const blockedGroupResume = await api(instructionUrl, 'POST', {
         ...queuedInstructionArgs,
+        workType: 'other', aiPolicyOverride: { evidence: '사용자가 현재 담당 모델을 그대로 사용하도록 지정했습니다.' },
         conversationAssessmentId: blockedGroupCandidate.contextHealth.assessmentId,
         idempotencyKey: blockedGroupResumeId,
       }, sourceHeaders)
@@ -635,7 +689,7 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
       assert.equal(calls.some((call) => call.operationId === `gdi:${blockedGroupResumeId}`), false)
     }
     conversations.get(instructedConversationId).extra.current_model_id = 'opus'
-    busyGroupInstructionConversationReads = 2
+    busyGroupInstructionConversationReads = 3
     const queuedInstruction = await api(instructionUrl, 'POST', queuedInstructionArgs, sourceHeaders)
     assert.equal(queuedInstruction.status, 202, JSON.stringify(queuedInstruction.body))
     assert.equal(queuedInstruction.body.reasonCode, 'GROUP_DOCUMENT_INSTRUCTION_QUEUED')
@@ -661,7 +715,13 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
     Object.assign(dispatches.get('changed-plan'), { state: 'failed', errorMessage: "You've hit your usage limit" })
     await until(async () => (await api(delegateUrl)).body.delegations.find((item) => item.id === 'changed-plan').state === 'waiting-usage-limit', '기준 변경 검사 전 대기에 들어가지 못했습니다.')
     const beforeChanged = (await api(`/api/groups/${groupId}`)).body
-    assert.equal((await api(`/api/groups/${groupId}`, 'PATCH', { baseVersion: beforeChanged.project.version, sourceVersion: 'v0.5' })).status, 200)
+    // MCP 기준 저장은 요약 응답을 받는다. 화면용 기본 PATCH 응답은 아래 대기 분류 시험에서 확인한다.
+    const changedSummary = await api(`/api/groups/${groupId}?view=summary&mapId=${coordinatorId}`, 'PATCH', { baseVersion: beforeChanged.project.version, sourceVersion: 'v0.5' })
+    assert.equal(changedSummary.status, 200)
+    assert.equal(changedSummary.body.view, 'summary')
+    assert.equal(changedSummary.body.project.version, beforeChanged.project.version + 1)
+    assert.equal(changedSummary.body.project.sourceVersion, 'v0.5')
+    assert.deepEqual(changedSummary.body.guide, beforeChanged.guide)
     const changedRecovery = await api(`${delegateUrl}/changed-plan/recover`, 'POST', { sourceRevision: parent.version, instruction: '기존 작업 재개' }, sourceHeaders)
     assert.equal(changedRecovery.status, 409)
     assert.match(changedRecovery.body.error, /기획 기준이 변경/)
@@ -677,7 +737,7 @@ test('그룹 기획 관리, 문서 지시와 과거 루트 위임은 범위·동
     const reviewRoot = reviewDocument.nodes[0]
     const waitingItem = { id: 'wait-assets', label: '최종 아트 전달', note: '첫 절\n\n보존할 마지막 절', resumeCondition: '승인된 아트 제공 후 검증', since: '2026-09-10T00:00:00Z' }
     const waitingNode = { id: 'waiting-child', type: 'mind', position: { x: 200, y: 0 }, data: { label: '최종 아트 적용', description: '원문 요구사항', kind: 'task', isWork: true, status: 'planned', progress: 0, waitingItems: [waitingItem] } }
-    const reviewFixture = await api(`/api/maps/${reviewDocument.id}`, 'PUT', { baseVersion: reviewDocument.version, map: { nodes: [...reviewDocument.nodes, waitingNode], edges: [{ id: 'review-edge', source: reviewRoot.id, target: waitingNode.id }] } })
+    const reviewFixture = await api(`/api/maps/${reviewDocument.id}`, 'PUT', { baseVersion: reviewDocument.version, baseLifecycleVersion: reviewDocument.lifecycleVersion ?? 0, map: { nodes: [...reviewDocument.nodes, waitingNode], edges: [{ id: 'review-edge', source: reviewRoot.id, target: waitingNode.id }] } })
     assert.equal(reviewFixture.status, 200, JSON.stringify(reviewFixture.body))
     const beforeReviewDocument = (await api(`/api/maps/${reviewDocument.id}`)).body.map
     const beforeReviewContext = (await api(`/api/groups/${reviewGroupId}`)).body

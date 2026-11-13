@@ -49,6 +49,7 @@ async function startMockAionUi({
   conversationWorkspace = mockLiveConversationWorkspace,
 } = {}) {
   let conversationRuntimeState = 'running'
+  let conversationArchivedAt = null
   const dispatchRequests = []
   const conversationTitleUpdates = []
   const conversationMessageRequests = []
@@ -77,6 +78,13 @@ async function startMockAionUi({
       }])
     }
     if (request.url === '/api/providers') return send([])
+    if (request.url === `/api/sidebar/conversation/${conversationId}/archive-state` && request.method === 'GET') {
+      return send({ conversation_id: conversationId, exists: true, archived_at: conversationArchivedAt })
+    }
+    if (request.url === `/api/sidebar/conversation/${conversationId}/archive` && request.method === 'POST') {
+      conversationArchivedAt ??= Date.now()
+      return send({ conversation_id: conversationId, archived_at: conversationArchivedAt })
+    }
     if (request.url === '/api/skills') return send([])
     if (request.url === '/api/mcp/servers') return send([])
     if (request.url === '/api/internal/conversation-runtimes/active') {
@@ -531,7 +539,8 @@ async function main() {
     }
     assert.deepEqual(toolSchema('mindnprogress_patch_card_text')?.properties?.field?.enum, ['description', 'sharedKnowledge'])
     assert.equal(toolSchema('mindnprogress_patch_card_text')?.properties?.expectedSha256?.pattern, '^[a-f0-9]{64}$')
-    assert.ok(toolSchema('mindnprogress_patch_card_text')?.required?.includes('operation'))
+    assert.ok(toolSchema('mindnprogress_patch_card_text')?.properties?.operation)
+    assert.equal(toolSchema('mindnprogress_patch_card_text')?.properties?.resultOnly?.type, 'boolean')
     assert.equal(toolSchema('mindnprogress_list_shared_knowledge_candidates')?.properties?.limit?.maximum, 100)
     assert.equal(toolSchema('mindnprogress_get_shared_knowledge_review_context')?.properties?.commentLimit?.minimum, 0)
     assert.equal(toolSchema('mindnprogress_apply_shared_knowledge_review')?.properties?.patches?.maxItems, 20)
@@ -605,9 +614,10 @@ async function main() {
     assert.ok(toolSchema('mindnprogress_supersede_ai_delegation')?.required?.includes('replacementDelegationId'))
     assert.deepEqual(toolSchema('mindnprogress_get_card_layout_request')?.required, ['requestId'])
     assert.deepEqual(
-      toolSchema('mindnprogress_submit_card_layout_proposal')?.required,
-      ['requestId', 'baseRevision', 'plan'],
+      toolSchema('mindnprogress_submit_card_layout_proposal')?.required ?? [],
+      [],
     )
+    assert.ok(toolSchema('mindnprogress_submit_card_layout_proposal')?.properties?.proposalRequestId)
     assert.deepEqual(
       toolSchema('mindnprogress_submit_card_layout_proposal')?.properties?.plan?.required,
       ['order', 'reason'],
@@ -641,6 +651,7 @@ async function main() {
       return errorPayload
     }
 
+    await invokeExpectError('mindnprogress_patch_card_text', {}, /operation/)
     const guide = await invoke('mindnprogress_read_me_first')
     assert.ok(guide.important.includes(AI_CONVERSATION_SELECTION_INSTRUCTION))
     assert.ok(guide.guide.operationRules.includes(AI_CONVERSATION_SELECTION_INSTRUCTION))
@@ -788,7 +799,8 @@ async function main() {
     const fullWithKnownVersion = await invoke('mindnprogress_get_document', { mapId, knownVersion: documentResult.map.version })
     assert.equal(fullWithKnownVersion.map.nodes.length, documentResult.map.nodes.length)
     await invokeExpectError('mindnprogress_get_document', { mapId, view: 'compact', cardIds: ['task-a'] }, /cardIds/, 'DOCUMENT_VIEW_ARGUMENT_INVALID')
-    await invokeExpectError('mindnprogress_get_document', { mapId, view: 'outline', cardIds: ['missing-card'] }, /missing-card/, 'DOCUMENT_CARD_NOT_FOUND')
+    const missingDocumentCard = await invokeExpectError('mindnprogress_get_document', { mapId, view: 'outline', cardIds: ['missing-card'] }, /문서에 없는 카드/, 'DOCUMENT_CARD_NOT_FOUND')
+    assert.deepEqual(missingDocumentCard.details, { mapId, missingCardIds: ['missing-card'] })
     const knowledgeCandidates = await invoke('mindnprogress_list_shared_knowledge_candidates', { mapId, limit: 10 })
     assert.equal(knowledgeCandidates.maintenance.periodicIntervalDays, 7)
     assert.equal(knowledgeCandidates.maintenance.requiresExplicitApproval, true)
@@ -922,6 +934,7 @@ async function main() {
       body: JSON.stringify({
         map: { nodes: transientOnlyMap.nodes, edges: transientOnlyMap.edges },
         baseVersion: documentResult.map.version,
+        baseLifecycleVersion: documentResult.map.lifecycleVersion ?? 0,
       }),
     })
     assert.equal(transientOnlySaveResponse.status, 200)
@@ -1011,7 +1024,7 @@ async function main() {
       editorId: attribution.editorId,
       attributionToken: attribution.attributionToken,
     })
-    assert.equal(context.contextSchemaVersion, '3.3')
+    assert.equal(context.contextSchemaVersion, '3.4')
     assert.equal(context.guide.contextLifecycle.bootstrap.tool, 'mindnprogress_get_context')
     assert.deepEqual(context.guide.sharedKnowledgePolicy, guide.guide.sharedKnowledgePolicy)
     assert.match(context.nextStep, /sharedKnowledge.*새 지식·변경 조건.*새 지식이 없으면 변경하지/)
@@ -1227,6 +1240,30 @@ async function main() {
     assert.equal(linkedConversations[0].agent.label, 'Claude Code')
     assert.equal(linkedConversations[0].model.label, 'Claude Test Model')
     assert.equal(linkedConversations[0].startedBy.label, 'MCP 테스트 편집자')
+    // 자기 카드 대화 인계: 성공 경로는 tests/card-conversation-starts-api.test.mjs가 실제 MCP로 검증한다.
+    // 여기서는 서버가 저장 전에 거부하는 경로만 호출해 MCP 등록·인자 형식·API 연결·자기 카드 판정을 확인한다.
+    // conversation-test의 연결 기록이 task-a를 가리키는 이 시점에 둔다. 이후 단계는 대화를 다른 문서에 다시 연결한다.
+    const handoffDispatchCount = mockAionUi.dispatchRequests.length
+    const handoffRequest = {
+      mapId,
+      cardId: 'task-a',
+      requestId: 'mcp-test-handoff-1',
+      predecessorConversationId: 'conversation-test',
+      newConversation: { agentId: 'agent-claude-test', modelId: 'claude-test-model' },
+      initialMessage: 'MCP 검증용 인계 원문',
+      decisionReason: 'MCP 도구 연결 검증',
+      approvalEvidence: '검증 시나리오이며 실제 인계를 만들지 않는다.',
+    }
+    await invokeExpectError('mindnprogress_start_card_conversation', { ...handoffRequest, cardId: 'branch-a' },
+      /자기 원본 카드/, 'CARD_CONVERSATION_START_OWN_CARD_REQUIRED')
+    await invokeExpectError('mindnprogress_start_card_conversation', { mapId, cardId: 'task-a', requestId: 'mcp-test-handoff-unknown', resultOnly: true },
+      /인계 요청을 찾을 수 없습니다/, 'CARD_CONVERSATION_START_NOT_FOUND')
+    await invokeExpectError('mindnprogress_start_card_conversation', { ...handoffRequest, predecessorConversationId: 'conversation-other' },
+      /이전 대화 ID가 도구를 호출한 대화와 다릅니다/, 'CARD_CONVERSATION_START_PREDECESSOR_MISMATCH')
+    assert.equal(mockAionUi.dispatchRequests.length, handoffDispatchCount, '거부된 인계가 새 대화를 만들면 안 됩니다.')
+    const handoffDocument = await invoke('mindnprogress_get_document', { mapId })
+    assert.equal(handoffDocument.map.nodes.find((node) => node.id === 'task-a')?.data.aiConversationId, 'conversation-test', '거부된 인계가 대표 대화를 바꾸면 안 됩니다.')
+
     const conversationListResponse = await fetch(`${apiBaseUrl}/api/maps/${encodeURIComponent(mapId)}/cards/task-a/ai-conversations`, {
       headers: { Cookie: editorSessionCookie },
     })
@@ -1264,6 +1301,7 @@ async function main() {
     assert.deepEqual(emptyDelegations.delegations, [])
     await invokeExpectError('mindnprogress_delegate_ai_work', {
       mapId,
+      workType: 'other',
       targetCardId: 'branch-a',
       strategy: 'new',
       instruction: '하위 카드 작업을 실제로 수행하세요.',
@@ -1396,6 +1434,10 @@ async function main() {
       decisionReason: '기존 대화가 없어 상위 대화와 같은 실행 환경으로 새 대화를 시작합니다.',
       sourceRevision: delegationSourceDocument.map.version,
       idempotencyKey: `mcp-regression:${delegatedChild.id}:${delegationSourceDocument.map.version}`,
+      // 시험 AionUi에는 위임 규칙 모델이 없으므로 상위 대화와 같은 시험 모델을 예외로 지정한다. 규칙 적용은 ai-delegation-policy-api 시험이 확인한다.
+      workType: 'other',
+      aiPolicyOverride: { evidence: 'MCP 회귀 시험: 상위 대화와 같은 시험 모델로 위임' },
+      newConversation: { agentId: 'agent-claude-test', modelId: 'claude-test-model' },
     }
     const [inspectedChildContext, inspectedUnrelatedContext] = await Promise.all([
       invoke('mindnprogress_get_context', {
@@ -2182,6 +2224,9 @@ async function main() {
       addedCardResult.affectedCards.every((entry) => entry.card.id !== addedCardResult.card.id),
       'affected 응답은 card와 affectedCards에 같은 카드를 중복해서 담지 않아야 합니다.',
     )
+    const isAdjustedSummary = (entry) => Array.isArray(entry.card.changedKeys)
+      && Object.keys(entry.card.data).every((key) => ['label', 'kind', 'status', 'progress', 'isWork'].includes(key))
+    assert.ok(addedCardResult.affectedCards.every(isAdjustedSummary), 'add_card affectedCards는 서버 조정 카드의 상태 요약만 담아야 합니다.')
     const addedCard = addedCardResult.card
     assert.ok(addedCard)
     assert.equal(addedCard.data.label, '추가 카드')
@@ -2253,8 +2298,16 @@ async function main() {
     assert.equal(waitingCardResult.responseMode, 'affected')
     assert.ok(waitingCardResult.changedFields.includes('progress'))
     assert.ok(waitingCardResult.changedFields.includes('status'))
-    assert.ok(waitingCardResult.affectedCards.some((item) => item.card.id === addedCard.id && item.reason === 'requested'))
-    assert.ok(waitingCardResult.affectedCards.some((item) => item.card.id === 'root' && item.reason === 'root-rollup'))
+    assert.ok(
+      waitingCardResult.affectedCards.every((item) => item.card.id !== addedCard.id),
+      'update_card affected 응답은 요청 카드를 card에만 담고 affectedCards에 중복해서 담지 않아야 합니다.',
+    )
+    const rootRollupEntry = waitingCardResult.affectedCards.find((item) => item.card.id === 'root' && item.reason === 'root-rollup')
+    assert.ok(rootRollupEntry)
+    assert.equal(rootRollupEntry.card.data.progress, 15)
+    assert.ok(rootRollupEntry.card.changedKeys.length > 0)
+    assert.equal(rootRollupEntry.card.data.description, undefined, '서버 조정 카드는 원문 대신 상태 요약만 줍니다.')
+    assert.equal(waitingCardResult.omitted.retrieval.tool, 'mindnprogress_get_card')
 
     const partialMergePreservedFields = [
       'label',
@@ -2434,6 +2487,7 @@ async function main() {
     assert.equal(movedCardResult.hierarchy.newParentCardId, 'branch-b')
     assert.equal(movedCardResult.hierarchy.previousParentCardId, 'root')
     assert.ok(movedCardResult.affectedCards.every((entry) => entry.card.id !== addedCard.id))
+    assert.ok(movedCardResult.affectedCards.every(isAdjustedSummary), 'move_card affectedCards는 서버 조정 카드의 상태 요약만 담아야 합니다.')
 
     const movedBackResult = await invoke('mindnprogress_move_card', {
       mapId, cardId: addedCard.id, newParentCardId: 'root', responseMode: 'full',
@@ -2474,6 +2528,7 @@ async function main() {
     }])
     assert.equal(deletedCardResult.root.progress, 30)
     assert.ok(deletedCardResult.affectedCards.every((entry) => entry.card.id !== addedCard.id))
+    assert.ok(deletedCardResult.affectedCards.every(isAdjustedSummary), 'delete_card affectedCards는 서버 조정 카드의 상태 요약만 담아야 합니다.')
 
     const fullDeletedCardResult = await invoke('mindnprogress_delete_card', {
       mapId, nodeId: secondAddedCard.id, includeDescendants: true, responseMode: 'full',
@@ -2526,13 +2581,18 @@ async function main() {
     assert.equal(commentWithFailedNotification.comment.author.name, 'Claude Code(Claude Test Model)')
     let commentList = await invoke('mindnprogress_list_comments', { mapId, nodeId: 'root' })
     assert.equal(commentList.comments.filter((comment) => comment.id === commentWithFailedNotification.comment.id).length, 1)
-    const deletedWithFailedNotification = await invoke('mindnprogress_manage_comment', {
+    const failedDelete = await invokeExpectError('mindnprogress_manage_comment', {
       mapId,
       operation: { action: 'delete', commentId: commentWithFailedNotification.comment.id },
-    })
-    assert.deepEqual(deletedWithFailedNotification.deletedIds, [commentWithFailedNotification.comment.id])
+    }, /요청을 저장하지 못했습니다/, 'ENOTDIR')
+    assert.equal(failedDelete.outcome, 'not-applied')
+    assert.ok((await invoke('mindnprogress_list_comments', { mapId })).comments.some((comment) => comment.id === commentWithFailedNotification.comment.id))
     await rm(notificationsPath, { force: true })
     await mkdir(notificationsPath, { recursive: true })
+    const deletedAfterRepair = await invoke('mindnprogress_manage_comment', {
+      mapId, operation: { action: 'delete', commentId: commentWithFailedNotification.comment.id },
+    })
+    assert.deepEqual(deletedAfterRepair.deletedIds, [commentWithFailedNotification.comment.id])
 
     await writeFile(path.join(notificationsPath, `${attribution.editorId}.json`), '{', 'utf8')
     const parentComment = await invoke('mindnprogress_manage_comment', {
@@ -2584,6 +2644,8 @@ async function main() {
     assert.equal(commentList.comments.find((comment) => comment.id === parentComment.comment.id)?.detail, undefined)
     assert.equal(commentList.comments.find((comment) => comment.id === parentComment.comment.id)?.hasDetail, true)
     assert.equal(commentList.comments.find((comment) => comment.id === replyComment.comment.id)?.parentId, parentComment.comment.id)
+    // 기존 알림의 참조 제거는 필수 공동 변경이다. 손상된 정본을 먼저 복구한다.
+    await writeFile(path.join(notificationsPath, `${attribution.editorId}.json`), '[]', 'utf8')
     const deletedThread = await invoke('mindnprogress_manage_comment', {
       mapId,
       operation: { action: 'delete', commentId: parentComment.comment.id },
@@ -2763,11 +2825,20 @@ async function main() {
     assert.equal(deleteLinkEditorLoginResponse.status, 200)
     editorSessionCookie = deleteLinkEditorLoginResponse.headers.get('set-cookie')?.split(';')[0]
     assert.ok(editorSessionCookie, '대화 연결 삭제용 테스트 편집자 세션 쿠키가 없습니다.')
+    const sharedConversationLinkResponse = await fetch(`${apiBaseUrl}/api/maps/${encodeURIComponent(mapId)}/cards/task-a/ai-conversations/conversation-test`, {
+      method: 'DELETE', headers: { Cookie: editorSessionCookie },
+    })
+    assert.equal(sharedConversationLinkResponse.status, 409)
+    assert.equal((await sharedConversationLinkResponse.json()).code, 'AI_CONVERSATION_REMOVAL_BLOCKED')
+    // 지식선 검수에서 branch-a에 만든 공용 연결을 해제한 뒤 단독 대화 삭제를 검사한다.
+    await invoke('mindnprogress_update_card', { mapId, cardId: 'branch-a',
+      data: { aiConversationId: null, aiConversations: [] }, responseMode: 'affected' })
+    mockAionUi.setConversationRuntimeState('idle')
     const deleteConversationLinkResponse = await fetch(`${apiBaseUrl}/api/maps/${encodeURIComponent(mapId)}/cards/task-a/ai-conversations/conversation-test`, {
       method: 'DELETE',
       headers: { Cookie: editorSessionCookie, 'X-MNP-Client': 'mcp-test-client' },
     })
-    assert.equal(deleteConversationLinkResponse.status, 200)
+    assert.equal(deleteConversationLinkResponse.status, 200, await deleteConversationLinkResponse.clone().text())
     const deletedConversationLink = await deleteConversationLinkResponse.json()
     assert.equal(deletedConversationLink.removedConversationId, 'conversation-test')
     assert.equal(deletedConversationLink.latestConversationId, null)
@@ -2784,7 +2855,8 @@ async function main() {
       method: 'DELETE',
       headers: { Cookie: editorSessionCookie },
     })
-    assert.equal(repeatedDeleteConversationLinkResponse.status, 404)
+    assert.equal(repeatedDeleteConversationLinkResponse.status, 200)
+    assert.equal((await repeatedDeleteConversationLinkResponse.json()).archiveState, 'unlinked')
 
     const groupLibrary = await invoke('mindnprogress_list_documents', {})
     const unconfiguredGroup = await invoke('mindnprogress_get_group_context', { groupId: 'group-mcp-regression' })
@@ -2807,12 +2879,17 @@ async function main() {
     const managedGroup = await invoke('mindnprogress_update_group_project', {
       groupId: groupTestId, baseVersion: 0, source: '기획 원본 경로', sourceVersion: 'v1', objective: '요구사항 전체 구현', createCoordinator: true,
     })
-    assert.ok(managedGroup.coordinator.root.id)
-    assert.equal(managedGroup.coordinator.root.data.isWork, false)
+    // MCP 그룹 저장 응답은 요약이라 총괄 루트는 rootId로 받고, 루트 data는 full 조회로 확인한다.
+    assert.equal(managedGroup.view, 'summary')
+    assert.ok(managedGroup.coordinator.rootId)
+    const managedGroupFull = await invoke('mindnprogress_get_group_context', { groupId: groupTestId, detailLevel: 'full' })
+    assert.equal(managedGroupFull.view, undefined)
+    assert.equal(managedGroupFull.coordinator.root.id, managedGroup.coordinator.rootId)
+    assert.equal(managedGroupFull.coordinator.root.data.isWork, false)
     const groupDocument = await invoke('mindnprogress_create_group_document', {
       groupId: groupTestId, baseVersion: managedGroup.project.version, title: '기능 문서', description: '원본 분석 후 하위 업무를 구성합니다.',
     })
-    const groupCoordinatorContext = await invoke('mindnprogress_get_context', { mapId: managedGroup.coordinator.id, cardId: managedGroup.coordinator.root.id })
+    const groupCoordinatorContext = await invoke('mindnprogress_get_context', { mapId: managedGroup.coordinator.id, cardId: managedGroup.coordinator.rootId })
     const savedGroup = await invoke('mindnprogress_get_group_context', { groupId: groupTestId })
     assert.ok(savedGroup.documents.some((document) => document.id === groupDocument.map.id))
     assert.equal(savedGroup.delegations.length, 0)
@@ -2857,6 +2934,7 @@ async function main() {
     assert.deepEqual(emptyInstructionList.instructions, [])
     await invokeExpectError('mindnprogress_send_group_document_instruction', {
       mapId: managedGroup.coordinator.id,
+      workType: 'other',
       targetMapId: groupDocument.map.id,
       targetRevision: groupDocument.map.version,
       groupProjectVersion: sourceContext.project.version,
@@ -2880,12 +2958,12 @@ async function main() {
     assert.equal(groupDocumentRoleContext.guide.documentCoordinator, DOCUMENT_COORDINATOR_INSTRUCTION)
     assert.equal(groupDocumentRoleContext.guide.approval, GROUP_APPROVAL_INSTRUCTION)
     assert.match(groupDocumentContext.selection.aiWorkCoordination.childDelegation.instruction, /같은 문서의 계층상 하위 카드/)
-    const coordinatorAgain = await invoke('mindnprogress_get_context', { mapId: managedGroup.coordinator.id, cardId: managedGroup.coordinator.root.id, detailLevel: 'full' })
+    const coordinatorAgain = await invoke('mindnprogress_get_context', { mapId: managedGroup.coordinator.id, cardId: managedGroup.coordinator.rootId, detailLevel: 'full' })
     assert.equal(coordinatorAgain.selection.workflow, undefined)
     const coordinatorRoleContext = await invoke('mindnprogress_get_group_context', { groupId: groupTestId })
     assert.equal(coordinatorRoleContext.guide.executionApproval, AI_EXECUTION_APPROVAL_INSTRUCTION)
     assert.equal(coordinatorRoleContext.guide.approval, GROUP_APPROVAL_INSTRUCTION)
-    const coordinatorChild = await invoke('mindnprogress_add_card', { mapId: managedGroup.coordinator.id, parentCardId: managedGroup.coordinator.root.id, data: { label: '총괄 문서의 일반 하위 카드', kind: 'task', isWork: false } })
+    const coordinatorChild = await invoke('mindnprogress_add_card', { mapId: managedGroup.coordinator.id, parentCardId: managedGroup.coordinator.rootId, data: { label: '총괄 문서의 일반 하위 카드', kind: 'task', isWork: false } })
     const coordinatorChildContext = await invoke('mindnprogress_get_context', { mapId: managedGroup.coordinator.id, cardId: coordinatorChild.card.id, detailLevel: 'full' })
     assert.doesNotMatch(JSON.stringify(coordinatorChildContext.guide), /# 사용자 승인과 실행 범위/)
     assert.equal(coordinatorChildContext.selection.role, undefined)
@@ -2955,6 +3033,17 @@ async function main() {
     })
     assert.equal(cardLayoutProposal.submitted, true)
     assert.equal(cardLayoutProposal.revision, 1)
+    assert.equal(cardLayoutProposal.requestId, cardLayoutRequest.id)
+    assert.match(cardLayoutProposal.storageRequestId, /^mnpw:/)
+    const layoutReplay = await invoke('mindnprogress_submit_card_layout_proposal', {
+      requestId: cardLayoutProposal.storageRequestId, proposalRequestId: cardLayoutRequest.id,
+      baseRevision: cardLayoutContext.revision,
+      plan: { order: cardLayoutContext.snapshot.map.nodes.map((node) => node.id), reason: '카드 계층과 실측 크기를 기준으로 읽기 순서를 정렬했습니다.' },
+    })
+    assert.equal(layoutReplay.revision, 1)
+    assert.equal(layoutReplay.transactionId, cardLayoutProposal.transactionId)
+    assert.equal(layoutReplay.proposalRequestId, cardLayoutRequest.id)
+    assert.equal((await invoke('mindnprogress_submit_card_layout_proposal', { requestId: cardLayoutProposal.storageRequestId, resultOnly: true })).revision, 1)
     const lifecycleContext = await invoke('mindnprogress_get_reconstruction_context', { mapIds: [lifecycleSource.id] })
     const lifecyclePlan = {
       id: 'mcp-full-lifecycle', mode: 'compact', baseline: 'v0.4', reason: '임시 데이터 전환 검증',
@@ -3021,6 +3110,8 @@ async function main() {
       '실패한 도구 호출이 계측되지 않았습니다.',
     )
 
+    assert.doesNotMatch(serverLogs.join(''), /RESOURCE_(?:NOT_HELD|ORDER_VIOLATION|UPGRADE_FORBIDDEN)/,
+      '요청에서 분리한 귀속·위임 저장이 보호 문맥을 우회하면 안 됩니다.')
     console.log(JSON.stringify({
       registeredTools: registeredToolNames.length,
       calledTools: calledTools.size,

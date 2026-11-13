@@ -4,8 +4,11 @@ import {
   aiDelegationCanBeSupersededBy,
   aiDelegationClosureAvailability,
   aiDelegationIsTerminal,
+  aiDelegationRecoveryAvailability,
   aiDelegationWorkPending,
+  laterCompletedDelegationForCard,
   preservedIntegrationReleaseClosure,
+  reconcilePreservedReleaseClosures,
 } from '../server/lib/aiDelegations.mjs'
 
 const completedAttempt = {
@@ -89,4 +92,75 @@ test('풀 반환 후 위임 저장 전 중단은 귀속이 일치하는 반환 r
   }
   assert.equal(preservedIntegrationReleaseClosure({ ...failed, state: 'running' }, lease), null)
   assert.equal(preservedIntegrationReleaseClosure({ ...failed, ...patch }, lease), null)
+})
+
+const quarantinedBeforeIntegration = { ...completedAttempt, state: 'failed', workspaceResult: { status: 'quarantined', leaseId: 'lease-a',
+  childStatus: 'completed', headCommit: null, integrationBranch: null, integratedCommit: null, unmergedFiles: [],
+  error: "EBUSY: resource busy or locked, unlink 'C:\\fork2\\Assets\\nhncef_core.log'" } }
+
+test('통합 전에 격리되고 지원 복구가 없는 실패 위임만 격리 작업공간 결과 보존 반환 후보로 표시한다', () => {
+  assert.deepEqual(aiDelegationClosureAvailability(quarantinedBeforeIntegration), {
+    closeAvailable: true, reason: 'preserve-quarantined-result', workspaceReleaseRequired: true, quarantinedRelease: true,
+  })
+  const childFailed = { ...quarantinedBeforeIntegration, childStatus: 'failed', workspaceResult: { ...quarantinedBeforeIntegration.workspaceResult,
+    childStatus: 'failed', headCommit: 'base', childError: 'Failed to authenticate: OAuth token revoked. Please log in again.' } }
+  assert.equal(aiDelegationClosureAvailability(childFailed)?.quarantinedRelease, true, '인증 실패처럼 재개 대상이 아닌 하위 실패도 반환할 수 있다')
+  for (const patch of [{ groupId: 'group' }, { pendingRecovery: {} }, { resultCorrection: { phase: 'held' } },
+    { workspaceLease: { leaseId: 'lease-a', ownership: {} } }, { workspaceLease: { leaseId: 'other-lease' } },
+    { integrationRecoveryRequest: { status: 'checking' } },
+    { workspaceResult: { ...quarantinedBeforeIntegration.workspaceResult, integrationBranch: 'mnp/integrate/job' } },
+    { workspaceResult: { ...quarantinedBeforeIntegration.workspaceResult, integratedCommit: 'merged' } },
+    { workspaceResult: { ...quarantinedBeforeIntegration.workspaceResult, status: 'waiting-integration' } },
+    { state: 'running' }]) {
+    assert.notEqual(aiDelegationClosureAvailability({ ...quarantinedBeforeIntegration, ...patch })?.quarantinedRelease, true, JSON.stringify(patch))
+  }
+  // 한도 중단처럼 기존 작업 재개가 가능한 실패는 반환 대신 재개 경로를 유지한다.
+  const resumable = { ...childFailed, childError: 'usage limit', workspaceResult: { ...childFailed.workspaceResult, childError: 'usage limit' } }
+  assert.equal(aiDelegationRecoveryAvailability(resumable)?.recoveryAvailable, true)
+  assert.notEqual(aiDelegationClosureAvailability(resumable)?.quarantinedRelease, true)
+})
+
+test('격리 반환 receipt는 이전 결과에 HEAD가 없어도 반환 당시의 이전 HEAD로 종료를 대사한다', () => {
+  const scope = { leaseId: 'lease-a', jobId: 'job-a', mapId: completedAttempt.mapId, cardId: completedAttempt.targetCardId, conversationId: completedAttempt.targetConversationId }
+  const receipt = { kind: 'quarantined-release', phase: 'released', sourceRef: 'refs/mnp/preserved-results/job-a/source', sourceHead: 'checkpoint',
+    previousHeadCommit: null, reason: '후속 재적용 위임이 통합해 반환합니다.', releasedAt: '2026-11-08', approvedByUserId: 'user-editor' }
+  const lease = { ...scope, status: 'cancelled', result: { ...scope, status: 'released-preserved', integratedCommit: null,
+    previousResult: quarantinedBeforeIntegration.workspaceResult, preservedRelease: receipt } }
+  const patch = preservedIntegrationReleaseClosure(quarantinedBeforeIntegration, lease)
+  assert.equal(patch.state, 'closed')
+  assert.equal(patch.closedByUserId, 'user-editor')
+  assert.equal(preservedIntegrationReleaseClosure(quarantinedBeforeIntegration,
+    { ...lease, result: { ...lease.result, preservedRelease: { ...receipt, previousHeadCommit: 'different' } } }), null)
+})
+
+test('반환은 저장됐지만 위임 종료가 빠진 기록만 주기 대사로 종료하고 처리 중인 위임은 다음 주기로 미룬다', async () => {
+  const scope = { leaseId: 'lease-a', jobId: 'job-a', mapId: completedAttempt.mapId, cardId: completedAttempt.targetCardId, conversationId: completedAttempt.targetConversationId }
+  const released = { ...scope, status: 'cancelled', result: { ...scope, status: 'released-preserved', integratedCommit: null,
+    previousResult: quarantinedBeforeIntegration.workspaceResult, preservedRelease: { kind: 'quarantined-release', phase: 'released',
+      sourceHead: 'checkpoint', previousHeadCommit: null, reason: '요청이 끊겨 종료가 빠진 반환', releasedAt: '2026-11-08', approvedByUserId: 'user-editor' } } }
+  const pending = { ...quarantinedBeforeIntegration, id: 'pending-release' }
+  const stillQuarantined = { ...quarantinedBeforeIntegration, id: 'still-quarantined', workspaceLease: { leaseId: 'lease-b' },
+    workspaceResult: { ...quarantinedBeforeIntegration.workspaceResult, leaseId: 'lease-b' } }
+  const alreadyClosed = { ...pending, id: 'already-closed', state: 'closed' }
+  const leases = { 'lease-a': released, 'lease-b': { ...released, leaseId: 'lease-b', status: 'quarantined', result: stillQuarantined.workspaceResult } }
+  const updates = []
+  const run = (busy) => reconcilePreservedReleaseClosures({ delegations: [pending, stillQuarantined, alreadyClosed],
+    leaseFor: (leaseId) => leases[leaseId], busy, update: async (id, patch) => { updates.push({ id, patch }) } })
+  assert.deepEqual(await run((id) => id === 'pending-release'), [], '처리 중인 요청의 위임은 건드리지 않는다')
+  assert.deepEqual(await run(), ['pending-release'])
+  assert.equal(updates.length, 1)
+  assert.equal(updates[0].patch.state, 'closed')
+  assert.equal(updates[0].patch.closedByUserId, 'user-editor')
+  assert.equal(updates[0].patch.closureNote, '요청이 끊겨 종료가 빠진 반환')
+})
+
+test('같은 카드에서 나중에 성공한 위임만 이전 실패의 후속 완료로 찾는다', () => {
+  const failed = { ...quarantinedBeforeIntegration, parentDispatchState: undefined }
+  const reapplied = { ...failed, id: 'reapply', state: 'completed', createdAt: '2026-09-03T00:00:00.000Z', childStatus: 'completed',
+    parentDispatchState: 'completed', workspaceResult: { status: 'completed', integratedCommit: 'merged' } }
+  assert.equal(laterCompletedDelegationForCard(failed, [failed, reapplied])?.id, 'reapply')
+  for (const other of [{ ...reapplied, targetCardId: 'task-b' }, { ...reapplied, parentCardId: 'root-b' },
+    { ...reapplied, createdAt: '2026-08-31T00:00:00.000Z' }, { ...reapplied, state: 'failed' }]) {
+    assert.equal(laterCompletedDelegationForCard(failed, [failed, other]), null, JSON.stringify(other))
+  }
 })

@@ -91,6 +91,9 @@ export function createGroupDocumentInstructionSignature({
   decisionReason,
   replyTarget,
   newConversation,
+  contextOverride = null,
+  aiPolicy = null,
+  targetConversationRole = 'primary',
 }) {
   const requestedConversation = newConversation && typeof newConversation === 'object'
     ? {
@@ -102,6 +105,8 @@ export function createGroupDocumentInstructionSignature({
         disabledBuiltinSkillIds: [...new Set((newConversation.disabledBuiltinSkillIds ?? []).map(String))].sort(),
         mcpIds: [...new Set((newConversation.mcpIds ?? []).map(String))].sort(),
         workspace: String(newConversation.workspace ?? '').trim() || null,
+        ...(newConversation.claudeAccountId !== undefined ? { claudeAccountId: String(newConversation.claudeAccountId).trim() } : {}),
+        ...(newConversation.claudeAccountNumber !== undefined ? { claudeAccountNumber: newConversation.claudeAccountNumber } : {}),
       }
     : null
   const normalizedReplyTarget = normalizeGroupDocumentReplyTarget(replyTarget)
@@ -122,6 +127,11 @@ export function createGroupDocumentInstructionSignature({
     decisionReason,
     ...(normalizedReplyTarget?.mode === 'explicit' ? { replyTarget: normalizedReplyTarget } : {}),
     newConversation: strategy === 'new' ? requestedConversation : null,
+    // 예외가 없는 요청의 서명은 이전과 같게 유지한다.
+    ...(contextOverride ? { contextOverride: { reasonCode: contextOverride.reasonCode, reason: contextOverride.reason } } : {}),
+    // 위임 규칙 값(workType 등)이 없는 이전 요청의 서명도 그대로 둔다.
+    ...(aiPolicy ? { aiPolicy } : {}),
+    ...(targetConversationRole !== 'primary' ? { targetConversationRole } : {}),
   })).digest('hex')
 }
 

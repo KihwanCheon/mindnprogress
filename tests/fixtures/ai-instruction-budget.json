@@ -1,15 +1,15 @@
 {
   "schemaVersion": 4,
-  "toolCount": 60,
-  "schemaDescriptionCount": 156,
+  "toolCount": 61,
+  "schemaDescriptionCount": 239,
   "sourceConstantChars": 616,
   "sourceConstantSha256": "cd24be035e93b5923ec24f3148330ba5aac2c4f3a71c9851861b4e66e8c57cdd",
   "serverInstructionsChars": 922,
   "serverInstructionsSha256": "8b9f506f7079ef160331fdfecdc0cd3ab77d9a4814c087c97389c43a6da74844",
-  "toolNameChars": 2022,
-  "toolDescriptionChars": 14626,
-  "inputSchemaJsonChars": 49394,
-  "rawRegisteredSurfaceChars": 66964,
+  "toolNameChars": 2059,
+  "toolDescriptionChars": 20738,
+  "inputSchemaJsonChars": 57768,
+  "rawRegisteredSurfaceChars": 81487,
   "rawRegisteredSurfaceMeaning": "initialize instructions와 도구 이름·설명·inputSchema JSON 문자열 길이의 합계입니다. 전송 JSON이나 호스트 총주입량이 아닙니다.",
   "hostMetadata": {
     "measured": false,
@@ -20,8 +20,8 @@
     "perToolWrapperChars": 35,
     "note": "과거 캡처·상수이며 이번 전체 주입량 실측값이 아닙니다."
   },
-  "dynamicTotalChars": 53940,
-  "maxDynamicChars": 7237,
+  "dynamicTotalChars": 54251,
+  "maxDynamicChars": 7391,
   "repetitionCounts": {
     "contextBootstrap": 8,
     "workspace": 3,
@@ -99,8 +99,8 @@
     },
     {
       "name": "worker-new-lease",
-      "chars": 6447,
-      "sha256": "85a34382ab752db3e896189b14d0afeea057a2f59f6a00ed0ef261c7cfc4a2fc"
+      "chars": 6601,
+      "sha256": "cee898c4b02977614321a8236e3cb2d1ed8442acb107840334993b19bbdb7aee"
     },
     {
       "name": "worker-resume",
@@ -124,8 +124,8 @@
     },
     {
       "name": "user-stop-recovery",
-      "chars": 7237,
-      "sha256": "e038f2ca4cd949123ef263bb62c51c32664efea92575115e68f622844d7a5ccd"
+      "chars": 7391,
+      "sha256": "fd7186741dc2b2e0a586ef49f0a2a3ec235a28ad5a2f959afddeab527c0ad3ae"
     },
     {
       "name": "reconstruction",
@@ -139,8 +139,8 @@
     },
     {
       "name": "dooray-proposal",
-      "chars": 2351,
-      "sha256": "063c8a6d59e88cc9c4b68aa2fb43255d2abf0ffe25d98cd85da26d714b179748"
+      "chars": 2354,
+      "sha256": "8b344fabe2d1d8d67684e02f0a12bae3bc54e9f3a79f71fde2048f2ba2477ad1"
     },
     {
       "name": "dooray-approval",
@@ -155,7 +155,7 @@
       "leaf:get_context": 27000,
       "document-coordinator:get_context": 27000,
       "group-coordinator:get_context": 32500,
-      "group:get_group_context": 8000
+      "group:get_group_context": 9800
     },
     "items": [
       {
@@ -185,7 +185,7 @@
       {
         "name": "group:get_group_context",
         "tool": "mindnprogress_get_group_context",
-        "chars": 6895,
+        "chars": 9577,
         "guideChars": 5686
       }
     ]

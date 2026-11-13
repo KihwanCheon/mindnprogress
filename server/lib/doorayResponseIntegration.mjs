@@ -52,6 +52,15 @@ export function doorayManualResultRecoveryEvidence({ user, operation, job, messa
   const requestedAt = Date.parse(job.createdAt)
   const original = textValue(operation.prompt) && messages?.find(input => input.position === 'right' && input.type === 'text'
     && input.conversation_id === operation.conversationId && input.content === operation.prompt)
+  // Claude(ACP) 대화 메시지에는 backend_turn_id가 없다(AionCore에서는 Codex만 fork 기준점으로 만든다).
+  // 턴 ID가 없으면 답변이 원래 실행 턴(원 지시 뒤 사용자 입력 없음)이나 마지막 사용자 입력에 대한 턴에서 나온 경우만 인정한다.
+  // 답변 뒤에 사용자가 다시 입력했다면 그 답변이 마지막 의도와 다를 수 있어 회수하지 않는다. 대화 유휴·완료 검사는 아래에서 함께 한다.
+  const userMessages = original ? messages.filter(input => input.position === 'right') : []
+  const singleRequest = Boolean(original) && !userMessages.some(input => input !== original
+    && (!Number.isFinite(Number(input.created_at)) || Number(input.created_at) >= Number(original.created_at)))
+  const latestTurn = Boolean(original) && Number.isFinite(Number(message?.created_at))
+    && userMessages.every(input => Number.isFinite(Number(input.created_at)) && Number(input.created_at) < Number(message.created_at))
+  const turnEvidence = textValue(message?.backend_turn_id) ? 'backend-turn' : singleRequest ? 'single-request' : latestTurn ? 'latest-turn' : null
   if (job.conversationPolicy !== 'dedicated' || job.userId !== user.id || !workspace || conversation?.id !== operation.conversationId
     || !operation.id.startsWith(`${job.id}-`) || extra.mnpDoorayResponseId !== job.id || extra.mnpDoorayUserId !== user.id
     || !textValue(extra.mnpDoorayOperationId) || !extra.mnpDoorayOperationId.startsWith(`${job.id}-`) || extra.workspace !== workspace
@@ -59,13 +68,13 @@ export function doorayManualResultRecoveryEvidence({ user, operation, job, messa
     || runtime.is_processing || runtime.isProcessing || Number(runtime.pending_confirmations ?? runtime.pendingConfirmations ?? 0) > 0
     || (runtime.task_status && runtime.task_status !== 'finished')
     || message?.conversation_id !== operation.conversationId || message.position !== 'left' || message.type !== 'text'
-    || message.status !== 'finish' || message.hidden === true || !textValue(message.id) || !textValue(message.backend_turn_id)
+    || message.status !== 'finish' || message.hidden === true || !textValue(message.id) || !turnEvidence
     || !original || !Number.isFinite(requestedAt) || !Number.isFinite(Number(original.created_at)) || Number(original.created_at) < requestedAt
     || !Number.isFinite(Number(message.created_at)) || Number(message.created_at) < Number(original.created_at)) {
     throw fail('수동 이어가기의 최종 답변·전용 대화·사용자·작업 위치를 확인하지 못했습니다. AI를 다시 실행하지 않았습니다.')
   }
-  return { method: 'manual-continuation', requestMessageId: original.id, resultMessageId: message.id, resultBackendTurnId: message.backend_turn_id,
-    resultCreatedAt: new Date(Number(message.created_at)).toISOString() }
+  return { method: 'manual-continuation', requestMessageId: original.id, resultMessageId: message.id, resultBackendTurnId: message.backend_turn_id ?? null,
+    resultTurnEvidence: turnEvidence, resultCreatedAt: new Date(Number(message.created_at)).toISOString() }
 }
 
 function textValue(value) { return typeof value === 'string' && value.trim() }
@@ -141,6 +150,7 @@ export function createDoorayResponseIntegration(d) {
     }
   }
   const resolveSettings = async (user, requested = {}) => {
+    if (requested.pushEnabled === true) d.validatePushTarget?.(user, requested.pushMachineId)
     const { machineId } = d.resolveTargetMachineForUser(user, requested.machineId)
     const proposalWorkspace = doorayResponseWorkspace(d.dataDirectory, d.mainMachineId, { ...requested, machineId }, user.id)
     const [rawAgents, providers, servers] = await Promise.all([call(machineId, '/api/agents/management'), call(machineId, '/api/providers'), call(machineId, '/api/mcp/servers')])
@@ -162,6 +172,8 @@ export function createDoorayResponseIntegration(d) {
       return requestedId || (list.some((entry) => entry.id === defaultId) ? defaultId : list[0]?.id) || null
     }
     return { machineId, proposalWorkspace, machineRole: machineId === d.mainMachineId ? 'main' : 'sub', agentId: agent.id, agentName: agent.name, modelId: model.id, modelName: model.label, modelPolicy, mcpServers,
+      ...(typeof requested.pushEnabled === 'boolean' ? { pushEnabled: requested.pushEnabled } : {}),
+      ...(requested.pushMachineId ? { pushMachineId: requested.pushMachineId } : {}),
       mode: option(agent.modes, requested.mode, agent.defaultMode),
       thoughtLevel: option(agent.thoughtLevels, requested.thoughtLevel, agent.defaultThoughtLevel),
       // Claude 멀티 계정: 저장된 선택을 따르고, 없으면 '그 외' 용도 정책 계정을 쓴다.
@@ -184,6 +196,8 @@ export function createDoorayResponseIntegration(d) {
   }
   const service = createDoorayResponseService({
     directory: path.join(d.dataDirectory, '_dooray-responses'), read: d.readStoredRecord, write: d.writeStoredRecord,
+    withMutation: d.withMutation, withRead: d.withRead,
+    sendPush: d.sendPush, publicBaseUrl: d.publicBaseUrl,
     user: d.user, resolveSettings, loadMaps,
     getSettings: (user) => d.responsePreferences.get(user.id),
     rememberSettings: (user, settings, saved) => d.responsePreferences.put(user.id, doorayResponseSettingsFromResolved(settings), { expectedSettings: saved ?? null }),

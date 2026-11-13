@@ -1,0 +1,634 @@
+# MCP 응답 크기 예산: get_context·update_card (2026-10-29)
+
+## 배경
+
+AI 클라이언트는 큰 MCP 응답을 그대로 받지 못한다. Claude Code는 25,000토큰(MnP JSON 실측: 48,499자 통과, 56,289자 초과)을 넘는 결과를 파일로 저장하고, AI는 그 파일을 스크립트로 읽는다. Codex는 결과 객체를 코드로 받지만 출력이 중간에서 잘린다. 2026-10-07~29 대화 기록(읽기 전용 집계)에서 두 도구의 상황은 다음과 같았다.
+
+| 도구 | 클라이언트 | 호출 | 중앙값 | 90% | 48k자 초과 |
+|---|---|---:|---:|---:|---:|
+| `get_context` | Claude | 221 | 106,527자 | 305,622자 | 169건(76%) |
+| `get_context` | Codex | 994 | 38,375자 | 121,475자 | 166건(17%) |
+| `update_card` | Claude | 312 | 24,230자 | 170,224자 | 98건(31%) |
+| `update_card` | Codex | 1,346 | 35,901자 | 42,900자 | 88건(7%) |
+
+`get_context`는 모든 대화의 첫 호출이고 규칙(`guide`)이 들어 있다. 응답이 파일로 저장되면 규칙도 파일 안에만 있게 되고, 저장 파일을 열지 않고 진행한 사례가 29건 있었다.
+
+## 원인
+
+- **`get_context`**: 규칙 문구(`guide`, 위임·조사 규칙, `nextStep`)만 2.3만~3.1만 자다. 가장 큰 데이터는 주요 선행 지식(`selection.knowledgeSources.primary`)으로, 원천마다 카드 원문 전체를 담아 초과 사례 기준 중앙값 4만 자, 최대 58만 자였다. 다음이 선택 카드 본문(중앙값 1.4만 자, 90% 4.1만 자)이다.
+- **`update_card`(affected)**:
+  - 변경 전 문서는 Ref 원본이 투영된 조회본(GET)이고, 저장 API(`content-patch`)는 투영하지 않은 저장본을 돌려준다(`server/index.mjs`). 둘을 그대로 비교해 바뀌지 않은 Ref 카드가 모두 "server-adjusted"로 잡혔고, 저장본에 남은 오래된 사본이 반환됐다. 초과 사례의 서버 조정 카드 908장 중 861장이 Ref였다. 크기 문제이자 정확성 문제다.
+  - 요청 카드가 `card`와 `affectedCards`(reason=`requested`)에 두 번 들어갔다(84/84건).
+  - 요청 카드와 서버 조정 카드 모두 바꾸지 않은 큰 필드까지 원문 전체를 돌려줬다.
+
+## 원칙
+
+- 규칙 원문은 첫 응답에 그대로 둔다([롤백 교훈](ai-guidance-rollback-2026-10-01/rollback-cause-record.md)). 줄이는 것은 데이터뿐이다.
+- 생략한 내용은 경로·이유·회수 도구를 응답에 표기한다(`get_document` outline의 `omitted`와 같은 방식).
+- 회수 경로의 응답도 한도 안에 들어와야 한다.
+- 한도 안의 응답은 바꾸지 않는다.
+- 성공 기준은 문자 수 절감이 아니라 한도 초과 없이 규칙과 필수 데이터가 첫 응답에 도착하고 행동 평가가 나빠지지 않는 것이다.
+
+## 변경
+
+### Ref 비교 수정 (`mcp/affectedCards.mjs`, `server/lib/referenceProjection.mjs`)
+
+- 투영 필드 목록(`REFERENCE_CONTENT_KEYS`)과 `projectReferenceNodeData`를 서버와 MCP가 같이 쓰는 모듈로 옮겼다. 서버 동작은 같다.
+- 변경 카드 판정은 Ref 카드의 투영 필드와 `label`을 빼고 비교한다. 위치·참조 대상 같은 로컬 변경은 그대로 잡는다.
+- 응답의 Ref 카드는 같은 문서 원본이면 저장 후 값을, 다른 문서 원본이면 조회 시점 투영값을 쓴다.
+- 공용 함수라 `add_card`·`update_card`·`move_card`·`delete_card`의 affected 응답에 함께 적용된다.
+
+### `update_card` affected 응답
+
+- 요청 카드는 `card`에만 둔다.
+- `card.data`는 이번에 보낸 필드와 저장 중 바뀐 필드(진행률·상태·대기 등)를 원문으로 준다. 바꾸지 않은 1,000자 초과 필드는 생략하고 `card.omittedFields`와 `card.textIntegrity`로 알린다. 바꾼 원문은 그대로 오므로 "저장 후 원문을 읽어 대조" 규칙은 응답만으로 충족된다.
+- `affectedCards`는 서버가 함께 조정한 다른 카드의 상태 요약(`label`·`kind`·`status`·`progress`·`isWork`)과 `changedKeys`만 준다.
+- 생략이 있으면 `omitted`(생략 경로·규칙·`get_card` 회수 인자)를 붙인다.
+- 기본값 `full`은 바꾸지 않았다. 실제 호출은 거의 모두 `affected`이고(Claude 314/314, Codex 1,345/1,346), 기본값을 바꾸려면 `guide` 문장을 고쳐야 한다.
+
+### `get_context` focused 예산 (`mcp/contextBudget.mjs`)
+
+최종 응답(그룹 메타데이터 포함)이 4만 자(`CONTEXT_RESPONSE_BUDGET_CHARS`)를 넘을 때만 아래 순서로 줄이고, 들어오면 멈춘다. `detailLevel=full`은 그대로다.
+
+| 순서 | 단계 ID | 줄이는 데이터 | 회수 경로 |
+|---|---|---|---|
+| 1 | `knowledgeSourceSupplements` | 주요 선행 지식의 설명·댓글·보조 필드(sharedKnowledge·상태는 유지) | `get_card` |
+| 2 | `knowledgeSourceIndex` | 선행 지식 항목을 색인으로(ID·제목·정책·상태·본문 길이) | `get_card` |
+| 3 | `knowledgeLinksScope` | 선택 카드와 무관한 문서 지식선(개수만 남김) | `get_document` |
+| 4 | `waitingDetails` | 관계·개요 카드의 대기 상세(개수로), 최상위 카드 선택 시 개요와 겹치는 `descendants` | `get_document` |
+| 5 | `recentComments` | 선택 카드 댓글을 최근 5건으로 | `list_comments` |
+| 6 | `outlineFields` | 문서 개요를 `id`·`label`·`parentId`·`status`·`progress`로 | `get_document` |
+| 7 | `knowledgeSourceSharedKnowledge` | 선행 지식 sharedKnowledge(뒤 원천부터, 예산에 들 때까지) | `get_card` |
+| 8 | `selectionComments` | 선택 카드 댓글 전체 | `list_comments` |
+| 9 | `outline` | 문서 개요 전체 | `get_document` |
+| 10~11 | `selectedDescription`·`selectedSharedKnowledge` | 선택 카드 description, sharedKnowledge | `get_card` |
+| 12 | `selectedLargeFields` | 선택 카드의 2,000자 초과 보조 필드(checklist·waitingItems 제외) | `get_card` |
+
+- **항상 남기는 것**: `guide` 전문, `groupProject`, `aiAttribution`, 문서 메타·`stats`, 선택 카드의 상태·`checklist`·`waitingItems`·`blockedBy`·`textIntegrity`, `selection.taskLinks`(startupInspection 포함), `selection.aiWorkCoordination`, `knowledgeSources.rule`과 모든 원천의 ID·정책·상태, `selection.commentsPage`, `teamMembers`, `nextStep`.
+- **표기**: 줄였을 때만 `detailLevel` 바로 뒤에 `contextBudget`(`limitChars`·`focusedChars`·`returnedChars`·`appliedSteps`·`exceeded`)과 `omitted`(`fields`·`counts`·`cardIds`·`selectedCardFields`·`cardAccessUrlTemplate`·`notOmitted`·`rule`·`retrieval`)를 둔다. 코드로 일부만 출력하거나 긴 출력의 중간이 잘려도 보이게 하기 위해서다.
+- **`exceeded`**: 규칙과 색인만으로 예산을 넘으면 모든 단계를 적용한 뒤 `exceeded=true`로 알린다. 규칙은 줄이지 않는다.
+- `contextSchemaVersion`을 3.4로 올렸다. 예산 안의 응답은 이 값 외에는 같다.
+- 예산은 그룹 메타데이터를 붙인 최종 응답에 적용한다(`registerTool`의 `finalizeResult`). 그래서 `returnedChars`가 실제 응답 크기와 같다.
+
+### `get_card` 회수 인자
+
+- `fields`: 지정하면 `label`과 그 data 필드만 반환한다. `textIntegrity`는 항상 전체 description·sharedKnowledge 기준이다.
+- `includeComments=false`: 댓글 본문 없이 `commentsPage.total`만 반환한다.
+- 인자를 주지 않으면 기존과 같다. `get_context`의 `omitted.retrieval`이 이 인자를 안내한다.
+
+### 도구 설명
+
+`get_context`·`get_card`·`update_card`는 기준선 설명 문장을 그대로 두고 생략·회수 안내만 뒤에 덧붙였다. 코드로 필드를 꺼내는 AI가 생략된 경로를 조용히 빈 값으로 읽지 않도록 생략될 수 있는 필드를 이름으로 밝혔다(`tests/mcp-instruction-surface.test.mjs`).
+
+## 호환성과 배포
+
+- 바뀌는 코드는 MCP 쪽이다. 서버는 투영 필드 목록의 위치만 옮겼다. 그래서 서버와 MCP 버전이 어긋나도 동작이 깨지지 않는다.
+- 이미 열린 대화는 MCP를 다시 연결할 때부터 적용된다.
+- Codex가 생략된 경로를 코드로 읽으면 `undefined`가 된다. 응답 앞쪽 `omitted`, 도구 설명, 같은 경로 유지(`textIntegrity.*.length` 등)로 줄였고 행동 평가로 확인했다.
+
+## 검증
+
+### 테스트
+
+- 새 테스트
+  - `tests/mcp-affected-cards.test.mjs`: Ref 비교, 응답 Ref 투영, 서버 조정 요약, 요청 카드 축소.
+  - `tests/mcp-context-budget.test.mjs`: 예산 안 그대로 반환, 단계 순서·조기 중단, 생략 기록·회수 인자, `exceeded`.
+  - `tests/mcp-response-budget-mcp.test.mjs`: 실제 MCP와 격리 API로 큰 문맥 축소, `get_card` 회수(길이·SHA-256 대조), 작은 문맥 무변경, Ref 오탐 없음, Ref 직접 수정 시 투영값을 확인.
+- 관련 테스트 16개 파일 104건(직렬): 통과. `npm run test:mcp`: 통과. 변경 파일 `oxlint`: 경고 없음.
+- `npm run test:unit`: 1,585건 중 실패 5건.
+  - 4건은 `65704ea` 기준선의 기존 실패다(`ai-limit-workspace-recovery` 2건, `card-layout-api`, `sub-machine-routing-api`).
+  - 1건(`storage-concurrency-api` "댓글·검토 1/10/20 동시 요청")은 병렬 실행 중 동시 20건 구간의 `LOCK_WAIT_TIMEOUT`이었다. 직렬 재실행에서 6/6 통과했다. 이번 변경은 저장·댓글 경로를 바꾸지 않았다.
+- 지침 fixture: 도구 설명 699자, 입력 스키마 설명 2개(`get_card`의 새 인자)가 늘었다. 고정 fixture의 `get_context` 응답 크기는 그대로다.
+
+### 운영 데이터 사본 측정 (읽기 전용)
+
+운영 `server/data`에서 문서·댓글·그룹·이미지 파일만 임시 폴더로 복사해 격리 서버를 띄웠다. 개정 전(`ae3b60b`)과 개정 후 MCP로 같은 카드를 호출했다. Dooray·세션·연동 토큰·작업공간 파일은 복사하지 않았고, 측정 후 사본을 지웠다.
+
+- 대상: 활성 문서 52개. 문서마다 최상위 카드, 들어오는 지식선이 있는 카드 전부, 설명이 긴 업무 카드 3장.
+- `update_card`는 현재 상태 값을 그대로 보내는 무변경 호출로 쟀다. 서버가 저장하지 않으므로 응답 구성만 비교한다.
+- 휴지통 문서(조회 404)와 보관 문서(변경 거부 `DOCUMENT_ARCHIVED`)는 제외했다.
+
+| 도구 | 개정 | 호출 | 중앙값 | 90% | 최대 | 48k자 초과 |
+|---|---|---:|---:|---:|---:|---:|
+| `get_context` | 전 | 464 | 68,770자 | 177,593자 | 341,602자 | 359건(77%) |
+| `get_context` | 후 | 464 | 37,949자 | 39,783자 | 44,169자 | 0건 |
+| `update_card` | 전 | 412 | 26,013자 | 159,936자 | 312,833자 | 162건(39%) |
+| `update_card` | 후 | 412 | 3,426자 | 4,562자 | 6,229자 | 0건 |
+
+- 개정 후 `get_context`는 391건에 축소가 적용됐다. 선택 카드 설명은 464건 중 252건(54%)에서 첫 응답에 남았다.
+- 규칙과 색인만으로 4만 자를 넘은 경우(`exceeded`)는 20건이고, 최대 44,169자였다.
+
+### 행동 평가
+
+[행동 평가 체크리스트](ai-guidance-rollback-2026-10-01/behavior-evaluation-checklist.md)에 따라 도구 설명 변경 전후를 같은 모델로 비교했다. 실행 원본은 저장소 밖 `C:\Git\MindNProgress\behavior-eval-response-budget-20261029`에 있다.
+
+- **방식**: 그룹 문맥 평가 하네스를 카드 단위 대화로 바꿔 썼다. 실행마다 합성 문서·가짜 AionUi·격리 MnP 서버를 띄웠고 운영 MnP·Dooray에는 연결하지 않았다.
+- **모델**: Claude 개인 Max(`C:\Users\NHN\.claude-max`) `claude-opus-5-5`, Codex `gpt-6-astra`(AionUi와 같은 exec 코드 모드, MnP 도구 자동 승인). 사고 강도 xhigh 12회, high 8회.
+- **fixture**: 선택 카드에 선행 지식 12개, 댓글 22건, 형제 카드 15장, Ref 6장(저장본에 예전 사본)을 두었다. 개정 전 `get_context`는 110,130자(Claude는 파일 저장), 개정 후는 38,886자(선행 지식 원문 12개 생략)였다. 판별 단서는 원문 한 곳에만 둔다: F1 선택 카드 설명, F2 앞쪽 원천, F3·F4 뒤쪽 원천.
+- **시나리오**: BEH-15(신규, 축소된 문맥에서 생략 원문을 반영한 계획), BEH-12(체크리스트 한 항목 수정 후 확인), BEH-11(새 결론 없는 검증 완료).
+
+| 시나리오 | 사고 강도 | Claude 전 | Claude 후 | Codex 전 | Codex 후 |
+|---|---|---|---|---|---|
+| BEH-15 축소된 최초 문맥의 원문 회수 | xhigh / high | 통과 / 통과 | 통과 / 통과 | 통과 / 통과 | 통과 / 통과 |
+| BEH-12 최초 문맥 바인딩 후 대상별 조회 | xhigh / high | 통과 / 통과 | 통과 / 통과 | 통과 / 실패 | 통과 / 통과 |
+| BEH-11 공유 지식 갱신 조건 | xhigh | 통과 | 통과 | 통과 | 통과 |
+
+개정 후 판정이 개정 전보다 나빠진 시나리오는 없다.
+
+- **개정 후 AI는 생략 표기를 따라 원문을 회수했다.** BEH-15 4회 모두 생략된 원천 12개를 `get_card(fields)`로 읽었고(뒤쪽 원천 포함), 네 단서를 근거 카드와 함께 반영했다. `get_context` 재호출이나 `full` 조회로 돌아간 실행은 없었다.
+- **개정 전 Claude는 매번 저장 파일을 처리했다.** 실행당 파일 처리 호출이 5~11회였고 평균 3.3분이 걸렸다. 개정 후는 평균 1.6분이었다.
+- **Ref 오탐은 실제로 AI를 헷갈리게 했다.** Claude 개정 전 BEH-12 xhigh는 저장 응답의 Ref 6장이 예전 제목·`planned`로 보이자 따로 다시 조회했다.
+- **`omittedFields`를 삭제로 해석하거나 생략된 필드를 다시 보낸 실행은 없었다.** 모든 `update_card` 호출이 `checklist`만 보냈고, 설명·공유 지식은 모든 실행에서 그대로였다.
+- **Codex 개정 전 BEH-12 high의 실패**: 카드를 이미 읽은 뒤 저장 직전에 `get_context`를 다시 호출했다(금지 행동).
+- **이번 변경과 무관한 관찰**: Codex는 개정 전후 모두 형식에 맞지 않는 `requestId`를 넣어 두 번 거부된 뒤 성공했다(`update_card`·`manage_comment`).
+- **판정 보정**: Claude 개정 전 BEH-15 high는 F3를 '이월' 대신 '다음 날 배치로 넘어갑니다'로 써서 자동 키워드 검사가 놓쳤다. 최종 응답 원문으로 확인해 통과로 판정했다.
+- **사용량**: Claude 10회 환산 $12.04(Max 한도에서 차감), Codex 10회 입력 534만 토큰(캐시 476만), 출력 2.9만 토큰.
+- **평가의 한계**: 조합마다 1회만 실행했고 합성 데이터다. Claude 평가 권한은 지난 평가와 같다(`dontAsk`, Bash는 python·node 등 일부만 허용). 그래서 개정 전 파일 처리 방식은 실제 AionUi 대화와 다를 수 있다. BEH-07(최종 회신)은 실행하지 않았다.
+
+## 한계와 후속
+
+- 규칙이 큰 문맥은 더 줄일 수 없는 최소 응답도 4만 자를 넘는다(운영 측정 20건, 최대 44,169자). 규칙은 줄이지 않는다.
+- 큰 문맥에서는 선행 지식 원문을 원천 수만큼 `get_card`로 따로 읽으므로 호출 수가 늘어난다.
+- 단일 필드가 4.8만 자 안팎인 카드는 `fields`로 나눠 받아도 그 필드 하나가 한도를 넘을 수 있다.
+- `get_document`의 `full`·`compact` 크기는 범위가 아니다. `get_document`의 `outline`, `list_ai_delegations`, `get_card`·`list_comments`, `list_documents`·`list_group_document_instructions`는 아래 후속 절에서 다룬다.
+
+## 후속: `get_document` outline 예산
+
+### 배경과 원인
+
+- 2026-10 대화 기록에서 `get_document`는 Claude 파일 저장 187건, Codex 5.6만 자 초과 1,717건으로 가장 많았다.
+- 기본 `full`은 문서 전체를 주는 계약이다(`mcp/documentViews.mjs`: 기존 응답과 바이트 단위로 같아야 한다). 백업·전수 감사에 쓰이므로 바꾸지 않는다.
+- 구조 파악용 `outline`도 운영 문서 74개 중 11개에서 4.8만 자를 넘었다(최대 1,045,284자). 원인은 문서마다 다르다.
+  - 큰 비원문 필드: JP-게임룸 · 인게임 v0.3의 `requirementsLedger` 55만 자 등
+  - 대기 메모 원문: 감사 문서들의 `waitingItems` 4만~7.5만 자
+  - 카드별 `textIntegrity`, 공유 지식 갱신 기록, 지식선
+- `get_context` 예산이 생략한 문서 개요의 회수 경로가 `outline`이라, 큰 문서에서는 회수 경로도 한도를 넘었다.
+
+### 변경 (`mcp/documentViews.mjs`)
+
+`outline` 응답이 4만 자(`OUTLINE_RESPONSE_BUDGET_CHARS`)를 넘을 때만 아래 순서로 줄이고 예산 안에 들면 멈춘다. 서버가 만든 응답에 MCP가 그룹 메타데이터·로컬 이미지 경로를 덧붙이므로 1천 자를 여유로 둔다.
+
+| 순서 | 단계 ID | 줄이는 데이터 |
+|---|---|---|
+| 1 | `largeFields` | 원문 이외의 2천 자 초과 필드(카드별 `omittedFields`에 이름) |
+| 2 | `integrityLengths` | `textIntegrity`의 SHA-256(길이는 유지) |
+| 3 | `metadataFields` | 공유 지식 갱신·검토 기록, 재구성 출처, 외부 링크 미리보기 |
+| 4 | `mediumFields` | 원문 이외의 500자 초과 필드 |
+| 5 | `waitingNotes` | 대기 메모 원문(큰 카드부터, 예산에 들 때까지) |
+| 6 | `waitingCounts` | 대기 항목을 개수로(큰 카드부터) |
+| 7 | `minimalCards` | 카드를 id·계층·제목·상태만으로(큰 카드부터, `minimal=true`) |
+| 8 | `knowledgeLinks` | 지식선 목록(개수만 남김) |
+
+- 구조(`cards[]`의 id·`parentId`·`childCount`), 상태·진행률, `cardIds`로 고른 카드 전문(`selectedCards`)은 줄이지 않는다. 고른 카드 전문만으로 예산을 넘으면 개요를 줄이지 않고 `exceeded=true`와 함께 `cardIds`를 줄이라고 안내한다. 줄여도 어차피 한도를 넘어 정보만 잃기 때문이다.
+- 대기 메모는 재개를 제한하는 조건을 담을 수 있으므로 늦은 단계에서만 줄인다. 줄였을 때는 대기 재개·완료·위임 판단 전에 원문을 확인하라는 안내와 `retrieval.cardFields`(`get_card` `fields`)를 붙인다.
+- 줄였을 때 `view` 바로 뒤에 `responseBudget`(`limitChars`·`originalChars`·`returnedChars`·`appliedSteps`·`exceeded`)을 두고 `omitted.fields`·`counts`·`notOmitted`·`retrieval.cardFields`를 갱신한다. MCP는 최종 응답 기준으로 `returnedChars`를 다시 맞춘다.
+- `DOCUMENT_VIEW_FORMAT`을 4로 올려, 이전 형식으로 받은 `documentEtag`가 새 응답과 맞지 않게 했다.
+- `get_document` 도구 설명은 기준선 문장 뒤에 `outline` 예산 안내만 덧붙였다. `get_context`의 생략 안내 문구도 `outline`이 예산을 지킨다는 내용으로 고쳤다.
+- `outline`은 서버가 만들므로 운영 반영에는 서버 재시작이 필요하다. 서버와 MCP 버전이 어긋나도 응답이 스스로 설명하므로 동작은 깨지지 않는다.
+
+### 측정 (운영 문서 파일, 읽기 전용)
+
+| 범위 | 개정 전 중앙값 | 개정 전 최대 | 4.8만 자 초과 | 개정 후 최대 | 개정 후 초과 |
+|---|---:|---:|---:|---:|---:|
+| 휴지통 제외 74개 | 21,852자 | 1,045,284자 | 11개 | 38,840자 | 0개 |
+| 활성 52개 | 11,867자 | 1,045,284자 | 7개 | 38,840자 | 0개 |
+
+- 예산 적용 19개(활성 9개), `exceeded` 0개. 4만 자 안의 문서 55개는 그대로다.
+- 대기 메모가 많은 감사 문서는 큰 카드부터 필요한 만큼만 줄여 3.8만 자 안팎까지 원문을 유지했다(예: JP 감사 · 누락 33항목 112,084자 → 38,348자).
+
+### 행동 평가
+
+개정 전은 `f401193`(이 절 이전 변경까지 포함), 개정 후는 이 변경을 더한 작업 트리다. 실행 원본은 저장소 밖 `C:\Git\MindNProgress\behavior-eval-outline-budget-20261029`에 있다.
+
+- **시나리오 BEH-03(넓은 요청의 대상 분모 확인), 문서 단위**: 문서의 모든 대기 항목을 메모·재개 조건과 함께 빠짐없이 보고하게 했다(카드·댓글 수정 금지).
+- **fixture**: 카드 36장에 대기 항목 50개(라벨 W-01~W-50)를 두었다. 대기 메모가 가장 긴 카드 네 곳의 메모에만 판별 단서 P1~P4를 두었다. 개정 전 `outline`은 74,763자, 개정 후는 37,954자다(메모 20개 생략, P1·P2 생략, P3·P4 유지).
+- **모델**: Claude 개인 Max `claude-opus-5-5`, Codex `gpt-6-astra`(exec 코드 모드), 사고 강도 xhigh·high. 8회.
+
+| 사고 강도 | Claude 전 | Claude 후 | Codex 전 | Codex 후 |
+|---|---|---|---|---|
+| xhigh | 통과 | 통과 | 통과 | 통과 |
+| high | 통과 | 통과 | 통과 | 통과 |
+
+- 8회 모두 대기 항목 50/50개와 총수(50건)를 보고했고, 판별 단서 네 개를 원문 그대로 옮겼다. 쓰기는 없었다.
+- **Codex 개정 후**는 예산이 적용된 `outline`(38,365자)을 받은 뒤 메모가 생략된 카드 10장만 `get_card(fields=["waitingItems"])`로 읽어 P1·P2를 회수했다. 개정 전은 75,174자 `outline`(또는 93,696자 `compact`)을 객체로 받았다.
+- **Claude**는 개정 전후 모두 "빠짐없이" 요청에 원문을 모두 담는 `compact`를 먼저 골라 파일 저장 뒤 카드 36장을 `get_card`로 읽었다. 개정 후 high 1회만 `cardIds` 12장으로 `outline`을 더 조회했다(38,979자, 한도 안).
+- **사용량**: Claude 4회 환산 $6.01(Max 한도에서 차감), Codex 4회 입력 128만 토큰(캐시 108만), 출력 1.6만 토큰.
+- **한계**: 조합마다 1회, 합성 데이터다. Claude는 `cardIds` 없는 `outline`을 고르지 않아, Claude가 메모 생략 응답을 받은 경우는 평가하지 못했다.
+
+## 후속: 단계 중간 판정 보정 (`get_context`·`outline`)
+
+`list_ai_delegations` 예산을 측정하다가 발견했다. 같은 구조인 앞의 두 예산에도 같은 문제가 있었다.
+
+- **원인**: 카드·원천을 하나씩 줄이는 단계는 줄일 때마다 크기를 다시 잰다. 그런데 이때 재는 응답에 그 단계의 생략 기록이 빠져 있었다.
+  - `get_context`의 `knowledgeSourceSharedKnowledge`: 생략 안내(`fields`)와 단계 ID를 반복이 끝난 뒤에 붙였다.
+  - `outline`의 카드별 단계: 단계 ID만 빠졌다.
+  - 그 결과 예산에 든 것으로 판정한 응답이 실제로는 기록만큼 컸다.
+- **영향**:
+  - `get_context`에서는 다음 판정에서 예산을 넘은 것으로 보고, 필요 없는 다음 단계(선택 카드 댓글·개요 생략 등)까지 적용했다. 최종 크기는 한도 안이었다.
+  - `outline`은 단계 ID 몇십 자만큼 후처리 여유분(1천 자)을 잠식했다.
+- **수정**:
+  - 단계 ID를 먼저 `appliedSteps`에 넣고 시작한다. 줄인 것이 없으면 뺀다.
+  - 생략 기록은 줄일 때마다 남긴 뒤 크기를 잰다.
+- **테스트**: 여러 규모를 훑는 테스트를 추가했다. 이전 코드에서 실패하는 것을 확인했다.
+  - `get_context`: 원천 원문이 남았는데 다음 단계까지 줄였는지를 본다.
+  - `outline`: 후처리 여유분을 남겼는지를 본다.
+
+## 후속: `list_ai_delegations` 예산
+
+### 배경과 원인
+
+2026-10-07~29 대화 기록을 읽기 전용으로 집계했다(행동 평가 세션 제외).
+
+| 클라이언트 | 호출 | 중앙값 | 90% | 최대 | 4.8만 자 초과 |
+|---|---:|---:|---:|---:|---:|
+| Claude | 320 | 12,902자 | 116,223자 | 1,488,720자 | 66건(21%) |
+| Codex | 4,793 | 24,450자 | 53,058자 | 527,608자 | 1,592건(33%) |
+
+- 응답은 문서(또는 카드)의 위임 기록 전체다. 위임마다 작업공간 결과, lease, 판정 사유, 지시 미리보기를 담는다. `includeResult=true`이면 결과 원문(최대 12,000자)도 담는다.
+- 운영 기록 599건 중 593건(99.0%)이 정리된 이력이다(완료 584, 대체 7, 종료 2). 나머지 6건은 실패다.
+- 대상 카드 348장 중 137장(39%)에 위임이 2건 이상 쌓였다(최대 14건). Codex 호출의 54%가 `includeResult`와 `targetCardId`를 함께 쓴다. 그래서 카드 이력만 조회해도 한도를 넘었다.
+- 응답의 `requestFailures`(접수 실패 기록)도 줄이지 않았다. 문서 하나에 재접수가 확인된 기록 38건(49,516자)이 쌓여, 위임이 1건인데도 응답이 55,306자였다.
+
+### 변경 (`mcp/delegationBudget.mjs`)
+
+응답이 4만 자(`DELEGATION_RESPONSE_BUDGET_CHARS`)를 넘을 때만 정리된 이력을 아래 순서로 줄인다. 예산 안에 들면 멈춘다.
+
+| 순서 | 단계 ID | 줄이는 데이터 |
+|---|---|---|
+| 1 | `olderSettledResults` | 카드별 최신이 아닌 정리된 위임의 결과 원문(`resultHash`·길이 유지, `resultOmitted=true`) |
+| 2 | `settledRequestFailureSummaries` | 정리된 접수 실패를 요약으로(ID·카드·사유 코드·시각·재접수 위임 ID·`retryVerification.state`·`method`) |
+| 3 | `olderSettledSummaries` | 카드별 최신이 아닌 정리된 위임을 요약으로(ID·상태·카드·대화·시각·보고 상태·결과 해시, `summary=true`) |
+| 4 | `settledRequestFailuresRemoved` | 오래된 정리된 접수 실패를 목록에서 빼고 문서/카드별 개수만 남김 |
+| 5 | `latestSettledResults` | 카드별 최신 정리된 위임의 결과 원문 |
+| 6 | `latestSettledSummaries` | 카드별 최신 정리된 위임을 요약으로 |
+| 7 | `oldSettledRemoved` | 오래된 정리된 위임을 목록에서 빼고 문서/카드별 개수만 남김 |
+
+- **줄이지 않는 것**: 판단이 필요한 위임과 미해결 접수 실패다.
+  - 위임: 미종료·실패·복구 가능(`recovery.recoveryAvailable`)·종료 처리 가능(`closure.closeAvailable`)·보고 대기(`reportPending`), 그리고 표시 상태가 저장 상태와 다른 위임
+  - 접수 실패: `retryVerification.state`가 `confirmed`·`closed`가 아니거나 `retryReference`가 있는 기록
+  - 이 둘은 원문과 결과를 그대로 둔다. 상위 AI의 복구·재접수·수신 확인 판단 근거이기 때문이다.
+- **"카드별 최신"**: `mapId/targetCardId`마다 가장 최근의 정리된 위임이다. 검토에서 가장 먼저 읽는 보고라 마지막까지 결과를 남긴다.
+- **표기**: 줄였을 때 `mapId` 바로 뒤에 `responseBudget`과 `omitted`를 둔다.
+  - `responseBudget`: `limitChars`·`originalChars`·`returnedChars`·`appliedSteps`·`exceeded`
+  - `omitted`: `fields`·`counts`·`resultOmittedDelegationIds`·`removedByTarget`·`removedRequestFailuresByTarget`·`rule`·`retrieval`
+  - `returnedChars`는 그룹 메타데이터를 붙인 최종 응답 크기와 같다.
+- **회수 경로**:
+  - 새 인자 `delegationId`로 위임 한 건을 조회한다. 이 조회는 줄이지 않는다.
+  - 서버(`GET /api/maps/:id/ai-delegations?delegationId=`)와 MCP가 함께 거른다.
+  - 접수 실패는 그 위임을 요청했거나 그 위임으로 재접수가 확인된 기록만 준다.
+  - 목록에서 뺀 이력은 `targetCardId`로 카드별로 조회한다.
+- **도구 설명·안내**:
+  - `list_ai_delegations` 도구 설명은 기준선 문장 뒤에 예산 안내만 덧붙였다.
+  - 그룹 문맥 요약(`server/lib/groupContextSummary.mjs`)의 위임 회수 안내에 `delegationId`를 더했다.
+
+### 테스트
+
+- `tests/mcp-delegation-budget.test.mjs`(새 테스트): 판정 기준, 예산 안 무변경, 단계 순서와 카드별 최신 유지, 개수화, 접수 실패 축소, 여러 규모의 최종 크기를 확인한다.
+- `tests/mcp-response-budget-mcp.test.mjs`: 실제 MCP와 격리 API로 다음을 확인한다.
+  - 카드 이력 축소
+  - `delegationId` 회수(줄이지 않은 원문)
+  - 연결된 접수 실패만 반환
+  - 복구 위임 유지
+- `npm run test:mcp`: 통과.
+- `npm run test:unit`: 1,588건 중 실패 4건. `65704ea` 기준선의 기존 실패 4건과 같다.
+- 변경 파일 `oxlint`: 경고 없음.
+
+### 측정 (운영 데이터 사본, 읽기 전용)
+
+운영 `server/data`에서 문서 파일, 위임 기록, 접수 실패 기록, 그룹 파일만 임시 폴더로 복사해 격리 서버를 띄웠다. 개정 전(`4fd6700`)과 개정 후 MCP로 같은 조회를 했다. 연동 토큰·세션·Dooray 파일은 복사하지 않았고, 측정 후 사본을 지웠다.
+
+| 조회 | 개정 | 호출 | 중앙값 | 90% | 최대 | 4만 자 초과 | 4.8만 자 초과 |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 문서 전체 | 전 | 37 | 51,017자 | 118,686자 | 284,488자 | 23 | 21 |
+| 문서 전체 | 후 | 37 | 21,381자 | 34,502자 | 39,574자 | 0 | 0 |
+| 문서 전체 + 결과 | 전 | 37 | 71,136자 | 150,728자 | 398,921자 | 26 | 24 |
+| 문서 전체 + 결과 | 후 | 37 | 22,840자 | 37,066자 | 39,890자 | 0 | 0 |
+| 카드별 + 결과(위임 2건 이상) | 전 | 118 | 9,669자 | 34,436자 | 129,442자 | 10 | 6 |
+| 카드별 + 결과(위임 2건 이상) | 후 | 118 | 9,669자 | 28,477자 | 39,342자 | 0 | 0 |
+
+- 4만 자 안의 응답은 그대로다. `exceeded`는 0건이다.
+- 예산이 적용된 응답은 55건(문서 전체 조회, 결과 포함·미포함)이다.
+  - 오래된 위임을 목록에서 뺀 경우는 5건이고, 나머지는 결과 생략·요약에서 멈췄다.
+  - 정리된 접수 실패는 14건에서 요약했고, 7건에서 목록에서 뺐다.
+- `get_context`가 실패해 위 표에서 빠진 문서 1개는 따로 쟀다. 접수 실패 기록이 큰 그 문서다. 55,306자에서 39,949자가 됐다. 운영 데이터가 측정 중에도 바뀌므로 수치는 측정 시점 기준이다.
+- 첫 측정에서 개수화 단계가 끝난 응답이 40,128자·40,170자로 한도를 넘었다. 원인은 개수 기록과 안내를 마지막 크기 판정 뒤에 붙인 것이었다. 이를 고치면서 위 "단계 중간 판정 보정"도 함께 찾았다.
+
+### 행동 평가
+
+개정 전은 `4fd6700`, 개정 후는 이 변경을 더한 작업 트리다. 실행 원본은 저장소 밖 `C:\Git\MindNProgress\behavior-eval-delegation-budget-20261029`에 있다.
+
+- **시나리오 BEH-09(반복 보완의 중단), 이력 검토형**: 상위 AI에게 한 카드의 위임 이력을 검토하게 했다. 요청은 다음 세 가지이고, 위임·복구·수신 확인·카드 수정은 금지했다.
+  - 회차별 결론 코드·달성 결과·남은 문제를 빠짐없이 정리한다.
+  - 같은 남은 문제가 반복됐는지 밝힌다.
+  - 지금 판단이 필요한 위임이 있는지 밝힌다.
+- **fixture**:
+  - 완료 위임 12회차(결과 원문 약 4,800자씩)와 복구가 필요한 13회차를 두었다.
+  - 반복(8~10회차)은 오래된 결과 원문에만 있다.
+  - 개정 전 카드 조회는 74,865자다. 개정 후는 23,852자로, 1~11회차 결과 원문이 생략되고 12·13회차는 유지된다.
+- **모델**: Claude 개인 Max `claude-opus-5-5`, Codex `gpt-6-astra`(exec 코드 모드), 사고 강도 xhigh·high. 8회.
+
+| 사고 강도 | Claude 전 | Claude 후 | Codex 전 | Codex 후 |
+|---|---|---|---|---|
+| xhigh | 통과 | 통과 | 통과 | 통과 |
+| high | 통과 | 통과 | 통과 | 통과 |
+
+- **결과**: 8회 모두 다음을 보고했다.
+  - 1~12회차 결론 코드 12/12와 각 결과·남은 문제
+  - 8~10회차의 같은 남은 문제
+  - 13회차가 `recovery-required`(권장 `resume-existing`)라 판단이 필요하다는 점
+  - 복구·위임·수신 확인·카드 수정은 없었고, 데이터는 그대로였다.
+- **개정 후** 네 실행 모두 `omitted.resultOmittedDelegationIds`의 11건을 `delegationId`로 한 건씩(각 약 6,360자) 읽었다. 생략된 회차를 추측하거나 건너뛴 실행은 없었다.
+- **개정 전 Claude**는 저장 파일을 처리했다(파일 처리 호출 5~8회). 두 실행 모두 원문 전체를 읽지 못했다고 스스로 밝혔다.
+  - xhigh: "13~10회차는 직접 읽었고, 나머지 회차는 … 필드를 뽑아 읽었습니다"
+  - high: "셸을 쓸 수 없어 … 패턴 검색으로 확인했습니다"
+- **개정 전 Codex**는 `includeFullResult`를 붙인 74,865자 응답을 객체로 받아 코드로 정리했다.
+- **시간·사용량**:
+  - Claude: 개정 전 1.7~2.5분, 개정 후 1.3~1.4분. 비용은 개정 후가 회당 $0.10~0.21 많았다(4회 환산 $4.69, Max 한도에서 차감). 회수 조회 11회가 대화에 더해졌기 때문이다.
+  - Codex: 개정 전 1.1~1.9분, 개정 후 1.3~2.2분. 입력 토큰은 개정 후가 12~18% 많았다(4회 입력 115만, 캐시 96만, 출력 1.0만 토큰).
+- **관찰**: Claude 개정 후 high는 첫 문장에 "9~13회차 … 모두 읽었습니다"라고 잘못 썼다. 표와 조회 기록은 1~13회차 전부다.
+- **한계**: 조합마다 1회, 합성 데이터다. 접수 실패 축소는 행동 평가에 포함하지 않았고 단위·E2E 테스트로만 확인했다.
+
+## 후속: `get_card`·`list_comments` 예산과 `add_card`·`move_card`·`delete_card` affected 정리
+
+### 배경과 원인
+
+2026-10-07~29 대화 기록을 읽기 전용으로 집계했다(행동 평가 세션 제외, Claude·Codex 모두 그 기간에 수정된 세션 파일).
+
+| 도구 | Claude 호출 | Claude 4.8만 자 초과 | Codex 호출 | Codex 4.8만 자 초과 |
+|---|---:|---:|---:|---:|
+| `get_card` | 591 | 28 | 21,817 | 1,893 |
+| `list_comments` | 402 | 66 | 1,165 | 71(4만 자 초과 561) |
+| `add_card` | 69 | 13 | 362 | 12 |
+| `move_card` | 0 | 0 | 11 | 0(중앙값 39,598자) |
+
+- **`get_card`**: 큰 응답의 원인은 두 가지다.
+  - 댓글 상세: Codex의 `includeCommentDetail=true`·`commentLimit` 51~100 호출 4,925회 중 1,047회가 4.8만 자를 넘었다. 이 응답의 댓글은 평균 10만 자였다.
+  - 카드 본문: 상세 없이 읽은 큰 응답도 설명만 평균 2.4만~4.3만 자였다.
+- **`list_comments`**: 상세를 포함한 큰 페이지가 원인이다. Claude의 문서 전체·상세·`limit=100` 호출 56회는 모두 4.8만 자를 넘었고 평균 20만 자였다.
+- **`add_card`·`move_card`·`delete_card`**: `affectedCards`가 서버가 함께 조정한 카드(상위 진행률·Root 집계)를 원문 전체로 담았다. Claude의 큰 `add_card` 응답은 평균 21만~32만 자(14~15장)였다. `update_card`는 앞 절에서 이미 요약으로 바꿨다.
+- 4만 자를 넘은 실제 응답에 설계안을 적용해 보았다(응답 구조를 해석할 수 있는 기록만).
+  - `list_comments`는 Claude 67건·Codex 497건이 모두 한도 안에 들었다.
+  - `add_card`·`move_card`도 모두 한도 안에 들었다.
+  - `get_card`는 Claude 47건 중 40건, Codex 3,080건 중 2,680건이 들었다. 남은 것은 원문 한 필드가 약 3.8만 자를 넘는 카드 등이다.
+
+### 변경 (`mcp/cardReadBudget.mjs`, `mcp/server.mjs`)
+
+- **`list_comments`**: 응답이 4만 자를 넘을 때만 페이지를 줄인다.
+  - 요청 순서의 앞쪽 댓글부터 예산에 드는 만큼만 돌려준다(최소 1건). 반환한 댓글의 요약·상세는 줄이지 않는다.
+  - `limit`·`hasMore`·`nextOffset`을 반환한 댓글 기준으로 맞춘다. `offset+limit`으로 다음 위치를 계산해도 건너뛰는 댓글이 없다.
+  - 응답 맨 앞에 `responseBudget`(`requestedLimit`·`returnedComments` 포함)과 `omitted`(다음 조회 인자)를 둔다.
+- **`get_card`**: 응답이 4만 자를 넘을 때만 아래 순서로 줄이고 예산에 들면 멈춘다.
+
+| 순서 | 단계 ID | 줄이는 데이터 | 회수 경로 |
+|---|---|---|---|
+| 1 | `commentPage` | 댓글 페이지(앞쪽부터 남김, 0건까지) | `list_comments`의 `nextOffset` |
+| 2 | `cardLargeFields` | 원문·판단 필드 외의 2,000자 초과 보조 필드 | `get_card` `fields` |
+| 3 | `cardTextFields` | description·sharedKnowledge 원문(큰 것부터 하나씩) | `get_card` `fields`(한 필드씩) |
+
+- `get_card`의 세부 규칙:
+  - 상태·`checklist`·`waitingItems`·`blockedBy`와 `textIntegrity`(전체 원문 기준 길이·SHA-256)는 줄이지 않는다.
+  - 2·3단계로 생긴 여유만큼 댓글을 다시 채운다. 그래서 큰 보조 필드 때문에 댓글이 모두 빠지는 일은 없다.
+  - `fields`로 직접 고른 필드는 줄이지 않는다. 고른 필드만으로 넘으면 `exceeded=true`와 함께 필드를 나눠 조회하라고 안내한다.
+  - 줄였을 때 `document` 바로 뒤에 `responseBudget`과 `omitted`(`fields`·`cardFields`·`rule`·`retrieval`)를 두고, 카드에 `card.omittedFields`를 붙인다.
+- **`add_card`·`move_card`·`delete_card` affected**: `update_card`와 같이 항상 적용한다.
+  - `affectedCards`에는 서버가 함께 조정한 카드의 상태 요약(`label`·`kind`·`status`·`progress`·`isWork`)과 `changedKeys`만 둔다.
+  - `add_card`의 `card`는 그대로다. AI가 보낸 원문과 대조하는 데 쓴다.
+  - 같은 문서 안 `move_card`의 `card`는 저장 중 바뀌지 않은 1,000자 초과 필드를 `card.omittedFields`와 `textIntegrity`로만 표시한다.
+  - 줄인 것이 있으면 `omitted`(`get_card` 회수 인자)를 붙인다.
+  - 다른 문서로 이동(`targetMapId`)하는 경우는 서버가 응답을 만들므로 범위가 아니다.
+- **도구 설명**: 다섯 도구 모두 기준선 문장 뒤에 안내만 덧붙였다.
+- **서버 변경 없음**: 운영 반영에는 MCP 재연결만 필요하다.
+
+### 테스트
+
+- `tests/mcp-card-read-budget.test.mjs`(새 테스트)
+  - 예산 안 무변경, 페이지 축소와 `limit`·`nextOffset` 정합, 한 건 보장
+  - 댓글 우선 축소, 큰 보조 필드 생략 뒤 댓글 다시 채우기, 원문을 큰 것부터 생략
+  - `fields` 무축소와 `exceeded`, 여러 규모의 최종 크기
+- `tests/mcp-response-budget-mcp.test.mjs`: 실제 MCP와 격리 API로 다음을 확인한다.
+  - `get_card` 축소와 생략 원문의 `fields` 회수(SHA-256 대조)
+  - 카드 댓글 45건과 문서 전체 댓글 75건을 페이지로 빠짐없이 회수
+  - `add_card`·`move_card`·`delete_card` 요약
+- `scripts/test-mcp.mjs`: 세 쓰기 도구의 `affectedCards`가 요약인지 확인을 더했다.
+- `npm run test:mcp`: 통과.
+- `npm run test:unit`: 1,598건 중 실패 5건.
+  - 4건은 `65704ea` 기준선의 기존 실패다.
+  - 1건(`content-preconditions-api` 동시 1/10/20 요청)은 병렬 실행에서만 실패했고, 직렬 재실행에서 6/6 통과했다.
+- 변경 파일 `oxlint`: 경고 없음.
+
+### 측정 (운영 데이터 사본, 읽기 전용)
+
+운영 `server/data`에서 문서·댓글·그룹 파일만 버전마다 새 임시 폴더로 복사했다. 개정 전(`c801b5d`)과 개정 후 MCP로 같은 조회와 쓰기를 했다. 쓰기는 사본에서만 했고, 측정 후 사본을 지웠다.
+
+- 대상: 문서마다 댓글이 많은 카드 3장과 본문이 큰 카드 2장
+- 쓰기 순서: 가장 깊은 카드 아래에 완료 업무 카드 추가 → 다른 가지로 이동 → 삭제. 가장 큰 비루트 카드는 Root 아래로 이동
+
+| 조회 | 개정 | 호출 | 중앙값 | 90% | 최대 | 4.8만 자 초과 |
+|---|---|---:|---:|---:|---:|---:|
+| `get_card` 기본 | 전 | 198 | 17,682자 | 49,642자 | 314,032자 | 25 |
+| `get_card` 기본 | 후 | 198 | 16,586자 | 33,734자 | 39,969자 | 0 |
+| `get_card` 상세·50건 | 전 | 198 | 30,933자 | 114,094자 | 543,806자 | 68 |
+| `get_card` 상세·50건 | 후 | 198 | 24,600자 | 39,401자 | 39,968자 | 0 |
+| `list_comments` 문서 전체·상세·100건 | 전 | 65 | 76,401자 | 256,135자 | 383,036자 | 44 |
+| `list_comments` 문서 전체·상세·100건 | 후 | 65 | 37,920자 | 39,691자 | 39,823자 | 0 |
+| `list_comments` 카드·상세·50건 | 전 | 49 | 40,166자 | 126,446자 | 163,463자 | 22 |
+| `list_comments` 카드·상세·50건 | 후 | 49 | 36,331자 | 39,795자 | 39,930자 | 0 |
+| `add_card` | 전 | 42 | 8,093자 | 25,285자 | 41,943자 | 0 |
+| `add_card` | 후 | 42 | 3,547자 | 3,825자 | 4,034자 | 0 |
+| `move_card`(큰 카드) | 전 | 31 | 17,791자 | 57,269자 | 168,878자 | 4 |
+| `move_card`(큰 카드) | 후 | 31 | 4,085자 | 4,865자 | 5,087자 | 0 |
+| `delete_card` | 전 | 42 | 6,754자 | 22,265자 | 41,635자 | 0 |
+| `delete_card` | 후 | 42 | 3,036자 | 3,315자 | 3,370자 | 0 |
+
+- `get_card` 기본 조회에서 적용된 단계는 원문 생략 26건, 댓글 페이지 9건, 큰 보조 필드 3건이다. `exceeded`는 0건이다.
+- `get_card` `commentLimit=100`은 50건과 결과가 같았다(4.8만 자 초과 68→0).
+- 쓰기 오류(`add_card` 22건, 큰 카드 이동 19건)는 두 버전이 같았다. 모두 보관 문서의 `LIFECYCLE_CONFLICT`다.
+
+### 행동 평가
+
+개정 전은 `c801b5d`, 개정 후는 이 변경을 더한 작업 트리다. 실행 원본은 저장소 밖 `C:\Git\MindNProgress\behavior-eval-card-read-budget-20261029`에 있다.
+
+- **fixture**: 대상 카드는 설명 34,000자·공유 지식 14,000자에 상세 댓글 36건(결론 코드 CMT-01~36)을 가진 묶음 카드다.
+  - 판별 단서는 다섯 곳에 하나씩 둔다: 설명 중간(REQ-NTF-07), 공유 지식(SK-1), 오래된 댓글 상세(BLK-02·VIO-05), 최근 댓글 상세(BLK-31).
+  - 대상 카드의 `get_card` 크기는 다음과 같다.
+
+| 조회 | 개정 전 | 개정 후 |
+|---|---:|---:|
+| 기본 | 56,860자 | 23,731자(설명 생략) |
+| 상세·50건 | 149,305자 | 38,516자(설명 생략, 댓글 8건) |
+
+- **시나리오 A, BEH-03(넓은 요청의 대상 분모 확인) 카드 검토형**: 카드의 설명·공유 지식·댓글 이력(상세 포함)을 빠짐없이 검토해, 미해결 차단·위반을 근거 위치와 함께 보고하게 했다(수정 금지). 8회(Claude 개인 Max `claude-opus-5-5`·Codex `gpt-6-astra` × 개정 전후 × xhigh·high).
+- **시나리오 B, BEH-12(최초 문맥 바인딩 후 대상별 조회) 카드 추가형**: 대상 카드 아래에 체크리스트 2개짜리 업무 카드를 추가하고, 저장 결과와 상위 진행률 변화를 확인하게 했다. 4회(xhigh).
+  - 개정 전 `add_card` 응답은 51,120자였고, 개정 후는 2,801자다.
+
+| 시나리오 | 사고 강도 | Claude 전 | Claude 후 | Codex 전 | Codex 후 |
+|---|---|---|---|---|---|
+| A 카드 검토 | xhigh / high | 통과 / 통과 | 통과 / 통과 | 통과 / 통과 | 통과 / 통과 |
+| B 카드 추가 | xhigh | 통과 | 통과 | 통과 | 통과 |
+
+- **A 결과**: 8회 모두 댓글 36건을 실제로 받았고(응답에 담긴 댓글 ID 기준), 다섯 단서와 미해결 차단 2건·위반 1건을 근거 위치와 함께 보고했다. 쓰기는 없었다.
+  - 개정 후 네 실행은 생략된 설명을 `fields`로 읽었고, 남은 댓글은 `list_comments`의 `nextOffset`으로 두세 페이지에 걸쳐 이어 받았다(페이지마다 4만 자 이하). 저장 파일 처리는 없었다.
+  - Codex는 결론 코드 36개를 모두 적었고, Claude는 같은 반복 내용의 댓글을 'CMT-06 ~ CMT-30'처럼 범위로 묶었다.
+  - 개정 전 Claude는 14.9만 자 응답을 파일로 받아 17~21회 처리했다. 개정 전 Codex는 6.3만~8.6만 자 응답을 객체로 받아 코드로 정리했다.
+- **B 결과**: 4회 모두 카드 하나를 정확히 추가했다(제목·업무 여부·체크리스트·상위 카드). 다른 카드는 바꾸지 않았고, 진행률 변화(대상 70%→47%, Root 47%→35%)를 맞게 보고했다.
+  - 개정 후 요약된 `affectedCards`를 삭제로 해석하거나 다시 저장한 실행은 없었다.
+  - 개정 전 Claude는 5.1만 자 응답을 파일로 받아 3회 처리했다.
+  - Codex는 개정 전후 모두 형식에 맞지 않는 `requestId`로 두 번 거부된 뒤 성공했다. 앞 절에서 관찰한 것과 같으며, 이번 변경과는 무관하다.
+- **시간·사용량**:
+  - A의 Claude는 개정 전 4.0~4.7분에서 개정 후 1.1~1.8분으로 줄었다. Codex는 개정 전 2.0~3.8분, 개정 후 2.3~3.9분이었다.
+  - A의 Claude 비용은 개정 후가 회당 $0.15~0.30 많았다. 저장 파일을 부분 검색하던 방식 대신 원문 페이지를 직접 읽었기 때문이다.
+  - 총 사용량은 Claude 6회 환산 $8.09(Max 한도에서 차감), Codex 6회 입력 253만(캐시 219만)·출력 2.1만 토큰이다.
+- **한계**: 조합마다 1회, 합성 데이터다. 원문 한 필드가 4만 자 안팎인 카드는 `fields`로 나눠도 그 필드 하나가 한도를 넘을 수 있다(구간 읽기는 범위 밖).
+
+## 후속: `list_documents`·`list_group_document_instructions` 예산
+
+### 배경과 원인
+
+2026-10-07~29 대화 기록을 읽기 전용으로 집계했다(행동 평가 세션 제외).
+
+| 도구 | Claude 호출 | Claude 4.8만 자 초과 | Codex 호출 | Codex 4.8만 자 초과 |
+|---|---:|---:|---:|---:|
+| `list_documents` | 23 | 12 | 28 | 26 |
+| `list_group_document_instructions` | 32 | 4 | 456 | 44(4만 자 초과 166) |
+
+- **`list_documents`**: 큰 필드 없이 문서 수에 비례해 커진다. 현재 운영 문서 52개에 62,932자다.
+  - `documentGroups`(1.4만 자)는 각 문서 항목의 `group`·`groupMembership`·`groupProject`를 그대로 한 번 더 담는다(측정에서 값이 모두 같음을 확인).
+  - 작성자(`createdBy`·`updatedBy`)는 AI에게 필요 없는 이메일·권한·공개 접근 여부를 담는다.
+  - 문서별 `groupProject`는 `group`과 같은 그룹 ID·이름과 모든 문서에서 같은 `contextTool`을 반복한다.
+- **`list_group_document_instructions`**: 지시 이력 전체를 돌려준다.
+  - 지시마다 미리보기·판단 사유·회신 대상·응답 기록 등이 약 2,500자이고, 원문을 포함하면 2,000~6,000자가 더해진다.
+  - 운영 총괄 문서 7개 중 4개가 4만 자를 넘었다. 가장 큰 문서(지시 129건)는 328,281자, 원문 포함 928,798자였다.
+  - 대상 문서 하나의 원문 포함 조회도 최대 145,432자였다.
+
+### 변경 (`mcp/documentListBudget.mjs`, `mcp/instructionListBudget.mjs`, `mcp/server.mjs`)
+
+- **`list_documents`**: 응답이 4만 자를 넘을 때만 아래 순서로 줄이고 예산에 들면 멈춘다. 문서 항목은 하나도 빼지 않는다.
+
+| 순서 | 단계 ID | 줄이는 데이터 | 회수 경로 |
+|---|---|---|---|
+| 1 | `documentGroups` | 문서 항목과 같은 값인 `documentGroups`(값이 다르면 줄이지 않음) | 각 문서의 `group`·`groupMembership`·`groupProject` |
+| 2 | `authors` | 작성자를 `{id, name}`으로 | `list_users` |
+| 3 | `groupProject` | 문서별 `groupProject`를 `{coordinatorMapId, role}`로 | `get_group_context(groupId)` |
+| 4 | `emptyFields` | 값이 없거나 비어 있는 필드 | 없음(값 없음과 같다) |
+| 5 | `minimalDocuments` | 문서별 식별·버전·진행률·상태·대기 수·그룹 필드 외의 필드 | `get_document` |
+
+- **`list_group_document_instructions`**: `list_ai_delegations`와 같은 방식이다. 응답이 4만 자를 넘을 때만 정리된 이력(`replied`·`failed`·`expired`·`cancelled`)을 아래 순서로 줄인다.
+  - 전달·응답 대기 지시(`queued`·`delivered`)는 그대로 둔다.
+  - 대상 문서별 최신 지시(그 문서의 현재 지시)는 마지막까지 남긴다.
+
+| 순서 | 단계 ID | 줄이는 데이터 |
+|---|---|---|
+| 1 | `olderSettledContent` | 최신이 아닌 지시의 원문(`instruction`·`approvalEvidence`·`response`, 해시는 유지, `contentOmitted=true`) |
+| 2 | `olderSettledSummaries` | 최신이 아닌 지시를 요약으로(ID·상태·대상·유형·승인 범위·시각·사유 코드·해시, `summary=true`) |
+| 3 | `latestSettledContent` | 대상 문서별 최신 지시의 원문 |
+| 4 | `latestSettledSummaries` | 대상 문서별 최신 지시를 요약으로 |
+| 5 | `olderSettledRemoved` | 최신이 아닌 지시를 오래된 것부터 목록에서 빼고 대상 문서별 개수만 남김 |
+| 6 | `latestSettledRemoved` | 그래도 넘으면 최신 지시도 오래된 것부터 개수로 |
+
+- 지시 목록의 세부 규칙:
+  - 5단계에서 최신이 아닌 지시부터 빼므로, 오래전에 받은 지시가 현재 지시인 문서도 목록에 남는다.
+  - 회수 경로는 이미 있는 `instructionId`+`includeContent=true`(한 건)와 `targetMapId`(문서별)다. `instructionId`로 한 건을 조회하면 줄이지 않는다.
+- **표기**: 줄였을 때 `responseBudget`과 `omitted`를 응답 앞쪽에 둔다(`list_documents`는 맨 앞, 지시 목록은 `parentMapId` 바로 뒤). `returnedChars`는 그룹 메타데이터를 붙인 최종 응답 크기와 같다.
+- **도구 설명**: 두 도구 모두 기준선 문장 뒤에 안내만 덧붙였다. 생략된 `documentGroups`를 코드로 읽으면 빈 값이 되므로, 같은 값이 각 문서 항목에 있다는 점을 설명과 `omitted`에 밝혔다.
+- **서버 변경 없음**: 운영 반영에는 MCP 재연결만 필요하다.
+
+### 테스트
+
+- `tests/mcp-list-budget.test.mjs`(새 테스트)
+  - `list_documents`: 예산 안 무변경, 문서 항목 유지, 값이 다르면 `documentGroups` 유지, 단계별 축소, 최소 필드와 `exceeded`, 여러 규모
+  - 지시 목록: 대기 지시 판정, 대기·최신 지시 유지와 오래된 원문부터 생략, 오래전 지시가 현재 지시인 문서 유지, 여러 규모
+- `tests/mcp-response-budget-mcp.test.mjs`: 실제 MCP와 격리 API로 다음을 확인한다.
+  - 문서 85개(그룹 1개)의 `list_documents` 축소와 그룹 필드 유지
+  - 지시 40건(응답 대기 1건 포함)의 원문 포함 조회 축소, 대기 지시 원문 유지, `instructionId` 회수
+- `npm run test:mcp`: 통과.
+- `npm run test:unit`: 1,608건 중 실패 4건. `65704ea` 기준선의 기존 실패 4건과 같다.
+- 변경 파일 `oxlint`: 경고 없음.
+
+### 측정 (운영 데이터 사본, 읽기 전용)
+
+운영 `server/data`에서 문서·그룹·지시 파일만 임시 폴더로 복사해 격리 서버를 띄웠다. 개정 전(`5425a0a`)과 개정 후 MCP로 같은 조회를 했다. 연동 토큰·세션·Dooray 파일은 복사하지 않았고, 측정 후 사본을 지웠다.
+
+| 조회 | 개정 | 호출 | 중앙값 | 최대 | 4만 자 초과 | 4.8만 자 초과 |
+|---|---|---:|---:|---:|---:|---:|
+| `list_documents`(문서 52개) | 전 | 1 | 62,932자 | 62,932자 | 1 | 1 |
+| `list_documents`(문서 52개) | 후 | 1 | 39,533자 | 39,533자 | 0 | 0 |
+| 지시 전체(총괄 문서 5개) | 전 | 5 | 88,908자 | 328,281자 | 4 | 3 |
+| 지시 전체(총괄 문서 5개) | 후 | 5 | 36,320자 | 39,846자 | 0 | 0 |
+| 지시 전체 + 원문 | 전 | 5 | 223,421자 | 928,798자 | 5 | 4 |
+| 지시 전체 + 원문 | 후 | 5 | 39,132자 | 39,680자 | 0 | 0 |
+| 대상 문서별 + 원문 | 전 | 30 | 46,778자 | 145,432자 | 16 | 14 |
+| 대상 문서별 + 원문 | 후 | 30 | 24,441자 | 39,585자 | 0 | 0 |
+
+- `list_documents`는 1~3단계로 들어왔다. `exceeded`는 0건이다.
+- 지시 목록에서 최신 지시까지 개수로 바꾼 경우(`latestSettledRemoved`)는 없었다.
+- 4만 자를 넘은 대화 기록 응답에 같은 규칙을 적용해 보았다. `list_documents` 25건과 지시 목록 Claude 4건은 모두 한도 안에 들었다. Codex 161건은 1건을 빼고 모두 들었고, 남은 1건(40,953자)은 시뮬레이션의 추정치 오차 범위였다.
+
+### 행동 평가
+
+개정 전은 `5425a0a`, 개정 후는 이 변경을 더한 작업 트리다. 실행 원본은 저장소 밖 `C:\Git\MindNProgress\behavior-eval-list-budget-20261029`에 있다.
+
+- **fixture**: 합성 문서 60개다. 그룹 4개(총괄 포함 24개)와 그룹 없는 문서 36개가 있다.
+  - 결제 그룹 총괄은 소속 문서 6개에 지시 42건을 보냈고, 그중 1건(PAY-02)은 응답 대기다.
+  - 문서별 최신 응답에 LATEST 코드를, PAY-03에 처음 보낸 지시의 응답에만 마감일(DEADLINE-P3, 2026-11-14)을 두었다.
+
+| 조회 | 개정 전 | 개정 후 |
+|---|---:|---:|
+| `list_documents` | 57,300자 | 38,376자 |
+| 지시 전체 | 67,014자 | 37,853자 |
+| 지시 전체 + 원문 | 245,838자 | 38,269자(마감일 원문은 생략) |
+
+- **시나리오 A, BEH-03(넓은 요청의 대상 분모 확인) 문서 목록형**: 활성 문서 전체를 그룹별로 정리하게 했다(그룹별 소속 문서·루트 진행률·총괄 문서, 미소속 문서의 개수와 제목, 수정 금지). 4회(xhigh).
+- **시나리오 B, BEH-07(그룹 문서 지시의 최종 회신) 총괄 검토형**: 총괄 문서에서 다음을 확인하게 했다(새 지시·수정 금지). 8회(xhigh·high).
+  - 소속 문서별 마지막 지시와 응답 요지
+  - 응답 대기 지시
+  - PAY-03에 처음 보낸 지시의 마감일
+
+| 시나리오 | 사고 강도 | Claude 전 | Claude 후 | Codex 전 | Codex 후 |
+|---|---|---|---|---|---|
+| A 문서 목록 | xhigh | 통과 | 통과 | 통과 | 통과 |
+| B 지시 이력 | xhigh / high | 통과 / 통과 | 통과 / 통과 | 통과 / 통과 | 통과 / 통과 |
+
+- **A 결과**: 4회 모두 그룹 문서 24개를 맞는 그룹·총괄 문서·진행률로 정리했고, 미소속 문서 36개의 개수와 제목을 모두 적었다. 쓰기는 없었다.
+  - 개정 후에는 `documentGroups` 없이 각 문서의 그룹 필드로 정확히 답했다.
+  - 개정 전 Claude는 5.7만 자 응답을 파일로 받아 21회 처리했다(2.5분). 개정 후는 0.5분이었다.
+- **B 결과**: 8회 모두 다음을 맞게 보고했다. 새 지시나 쓰기는 없었다.
+  - 문서별 마지막 지시와 응답 요지(PAY-02는 응답 대기)
+  - 응답 대기 지시 1건
+  - PAY-03 첫 지시의 마감일: `instructionId`+`includeContent`로 그 지시를 읽어 확인했다.
+- **B 세부**:
+  - 개정 후 Claude는 원문 포함 전체 조회(38,269자)로 시작해, 원문이 생략된 지시를 `instructionId`로 7건 회수했다.
+  - 개정 전 Claude는 6.7만 자 응답(high는 24.6만 자 원문 포함 응답도)을 파일로 받아 실행마다 5회 처리했다.
+  - Codex는 개정 전후 모두 `get_group_context` 요약으로 지시 ID를 찾은 뒤 한 건씩 조회했다. 그래서 큰 목록 응답을 받지 않았다.
+  - PAY-02는 마지막 지시가 응답 대기라서 직전 응답의 LATEST-P2는 선택 정보다. 이를 함께 적은 실행은 Claude 3회였다.
+- **시간·사용량**:
+  - A의 Claude는 개정 전 2.5분·$1.25, 개정 후 0.5분·$0.66이었다.
+  - B의 Claude는 개정 전 1.5~1.9분, 개정 후 0.6~1.0분이었다.
+  - 유효한 12회 사용량은 Claude 6회 환산 $6.01(Max 한도에서 차감), Codex 6회 입력 175만(캐시 146만)·출력 1.3만 토큰이다.
+- **재실행**: B의 첫 실행 8회는 판정에 쓰지 않았다. fixture의 응답 대기 지시에 전달 작업 ID가 있어, 격리 서버의 지시 상태 확인이 가짜 AionUi 응답을 실패로 바꿨기 때문이다.
+  - 그 지시의 전달 작업 ID를 빼고 다시 실행했다.
+  - 버린 실행의 사용량은 Claude 4회 $4.68, Codex 4회 입력 133만 토큰이다. 원본은 `runs-discarded-fixture-v1`에 보존했다.
+- **한계**: 조합마다 1회, 합성 데이터다. Codex는 B에서 큰 지시 목록을 받지 않아, 개정 후 목록 축소에 대한 Codex의 반응은 평가하지 못했다(단위·E2E 테스트로만 확인).
+
+## 후속: `search_content` 예산
+
+### 배경과 원인
+
+2026-10-01~11-03 MCP 사용 기록을 읽기 전용으로 집계했다. `search_content`는 세션 3,171개 중 126개에서 345회 호출됐고, 가장 큰 응답은 96,857자, 4.8만 자를 넘은 세션은 10개였다.
+
+- 응답 예산이 없어 결과 수(`limit`, 최대 100)에 비례해 커진다. 결과 한 건은 700~880자다.
+- 운영 데이터(문서 99개, 카드 1,911장)에서 `limit` 100 질의 9개는 71,894~89,091자였다. 기본값 `limit` 25는 약 2.1만 자로 예산 안이다.
+- 서버 커서는 결과 집합의 지문과 다음 위치를 담는다. MCP가 결과를 잘라 원래 커서를 넘기면 잘라낸 결과를 건너뛴다.
+
+### 변경
+
+- `mcp/searchBudget.mjs`의 `applySearchResponseBudget`이 4만 자를 넘는 응답에만 적용된다. 앞쪽 결과 중 예산에 드는 개수를 정한 뒤, 같은 조건·커서로 `limit`만 줄여 서버에 다시 요청한다.
+- 결과 내용(`snippet`·`path` 등)과 구조는 바꾸지 않는다. 응답 맨 앞 `responseBudget`에 `requestedLimit`·`returnedLimit`·`deferredResults`·`returnedChars`(최종 직렬화 크기)를 적는다.
+- 재요청 사이에 결과가 커지면 새 응답 기준으로 개수를 다시 정한다(처음 요청 포함 최대 3회). 한 건도 들지 않으면 1건을 돌려주고 `exceeded=true`로 알린다.
+- 도구 설명에는 동작 설명 한 문장만 덧붙였다. 사용자 결정에 따라 검색 사용을 권하는 안내는 `read_me_first`·`get_context` 등에 넣지 않는다.
+
+### 검증
+
+- 운영 데이터 사본 측정: `limit` 100 질의 9개가 39,137~39,980자(페이지당 44~58건)가 됐다. `limit` 25는 그대로다.
+- `tests/mcp-search-budget.test.mjs`: 예산 안 응답 보존, ranked·catalog 축소와 정확한 크기·커서, 축소된 페이지를 끝까지 이어 읽은 결과가 `limit` 25 순회와 순서까지 같은지, 재요청 사이 결과 증가, 1건 초과, 형식 오류.
+- `tests/mcp-response-budget-mcp.test.mjs`: 실제 MCP로 `limit` 100 검색을 이어 읽어 120건이 빠짐없이 한 번씩 나오는지 확인했다.
+- 행동 평가는 하지 않았다. 응답 구조가 바뀌지 않고 기존 `page.hasMore`·`nextCursor` 규칙을 그대로 쓰기 때문이다.

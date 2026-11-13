@@ -157,13 +157,88 @@ test('수동 완료 답변은 백그라운드에서 회수하되 원래 실패 �
 })
 
 test('만료된 실행 영수증은 원 지시·전용 대화·현재 요청의 최종 답변으로만 회수하고 재전송하지 않는다', async t => {
-  const { service, job, file, counts } = await fixture(t, context => {
-    context.deps.getDispatch = async () => { throw Object.assign(Error('expired'), { status: 404, code: 'NOT_FOUND' }) }
-  })
+  // AionCore는 영수증이 없으면 EXTERNAL_DISPATCH_NOT_FOUND로 응답한다.
+  for (const code of ['NOT_FOUND', 'EXTERNAL_DISPATCH_NOT_FOUND']) {
+    const { service, job, file, counts } = await fixture(t, context => {
+      context.deps.getDispatch = async () => { throw Object.assign(Error('expired'), { status: 404, code }) }
+    })
+    const result = await service.recoverResult(job.userId, job.id, job.updatedAt)
+    assert.equal(result.proposal, proposal)
+    assert.equal(JSON.parse(await readFile(file, 'utf8')).jobs[0].resultRecovery.dispatchState, 'expired')
+    assert.equal(counts.dispatch, 0)
+  }
+})
+
+test('턴 ID 없는 답변은 원래 실행 턴이나 마지막 사용자 입력에 대한 턴의 답변일 때만 회수한다', async t => {
+  const { service, job, file, counts } = await fixture(t, context => { delete context.message.backend_turn_id })
   const result = await service.recoverResult(job.userId, job.id, job.updatedAt)
   assert.equal(result.proposal, proposal)
-  assert.equal(JSON.parse(await readFile(file, 'utf8')).jobs[0].resultRecovery.dispatchState, 'expired')
+  const stored = JSON.parse(await readFile(file, 'utf8')).jobs[0].resultRecovery
+  assert.equal(stored.resultTurnEvidence, 'single-request')
+  assert.equal(stored.resultBackendTurnId, null)
   assert.equal(counts.dispatch, 0)
+  const withUserInputs = (times, extra = () => {}) => context => {
+    delete context.message.backend_turn_id
+    extra(context)
+    const readMessages = context.deps.messages
+    context.deps.messages = async () => {
+      const items = await readMessages()
+      return [...items, ...times.map((at, index) => ({ id: `manual-input-${index}`, conversation_id: 'proposal-chat', position: 'right', type: 'text',
+        content: '이어서 작성해 주세요.', created_at: typeof at === 'string' ? Date.parse(at) : at }))]
+    }
+  }
+  // 수동으로 이어 쓴 뒤 마지막 입력에 대한 답변(Claude 대화)은 회수한다.
+  const continued = await fixture(t, withUserInputs(['2026-10-01T00:02:00Z', '2026-10-01T00:02:30Z']))
+  const recovered = await continued.service.recoverResult(continued.job.userId, continued.job.id, continued.job.updatedAt)
+  assert.equal(recovered.proposal, proposal)
+  const continuedRecovery = JSON.parse(await readFile(continued.file, 'utf8')).jobs[0].resultRecovery
+  assert.equal(continuedRecovery.resultTurnEvidence, 'latest-turn')
+  assert.equal(continuedRecovery.method, 'manual-continuation')
+  assert.equal(continued.counts.dispatch, 0)
+  // 답변 뒤에 사용자가 다시 입력했거나 입력 시각을 확인할 수 없으면 회수하지 않는다.
+  for (const configure of [
+    withUserInputs(['2026-10-01T00:02:00Z', '2026-10-01T00:04:00Z']),
+    withUserInputs(['2026-10-01T00:03:00Z']),
+    withUserInputs(['2026-10-01T00:02:00Z', 'invalid']),
+    withUserInputs(['2026-10-01T00:02:00Z'], context => { context.conversation.runtime.state = 'running' }),
+  ]) {
+    const rejected = await fixture(t, configure)
+    const before = await readFile(rejected.file, 'utf8')
+    await assert.rejects(rejected.service.recoverResult(rejected.job.userId, rejected.job.id, rejected.job.updatedAt))
+    assert.equal(await readFile(rejected.file, 'utf8'), before)
+    assert.equal(rejected.counts.dispatch, 0)
+  }
+  // 턴 ID가 있는 대화(Codex)는 이어 쓴 입력 순서와 관계없이 기존처럼 턴 ID로 판단한다.
+  const codex = await fixture(t, context => {
+    const readMessages = context.deps.messages
+    context.deps.messages = async () => [...await readMessages(), { id: 'later-input', conversation_id: 'proposal-chat', position: 'right', type: 'text',
+      content: '추가 요청', created_at: Date.parse('2026-10-01T00:04:00Z') }]
+  })
+  await codex.service.recoverResult(codex.job.userId, codex.job.id, codex.job.updatedAt)
+  assert.equal(JSON.parse(await readFile(codex.file, 'utf8')).jobs[0].resultRecovery.resultTurnEvidence, 'backend-turn')
+})
+
+test('영수증 만료 뒤에도 턴 ID 없는 대화의 완료 답변을 자동 회수한다(본문 코드 블록 포함)', async t => {
+  const nested = '## 대응안\n\n```bash\nnode app.mjs\n```\n\n끝.'
+  const inputDecision = { kind: 'input', reason: '확인할 사실이 있습니다.', questions: ['어떤 기준인가요?'], approval: null }
+  const { service, file, counts } = await fixture(t, c => {
+    c.job.operation.kind = 'review'
+    c.job.operation.id = 'response-test-review-0'
+    c.job.route = structuredClone(route)
+    c.job.review = { conversationId: 'proposal-chat', machineId: 'main' }
+    c.job.error = '이번 요청의 AI 결과를 확인하지 못했습니다. 대화에서 답변을 확인한 후 상태를 다시 확인해 주세요.'
+    c.deps.getDispatch = async () => { c.counts.getDispatch++; throw Object.assign(Error('expired'), { status: 404, code: 'EXTERNAL_DISPATCH_NOT_FOUND' }) }
+    delete c.message.backend_turn_id
+    c.message.content = `\`\`\`json\n${JSON.stringify({ requestId: c.job.operation.id, proposal: nested, decision: inputDecision }, null, 2)}\n\`\`\``
+  })
+  await service.poll()
+  const stored = JSON.parse(await readFile(file, 'utf8')).jobs[0]
+  assert.equal(stored.status, 'needs-input')
+  assert.equal(stored.proposal, nested)
+  assert.equal(stored.resultRecovery.dispatchState, 'expired')
+  assert.equal(stored.resultRecovery.method, 'manual-continuation')
+  assert.equal(stored.resultRecovery.resultTurnEvidence, 'single-request')
+  assert.deepEqual({ create: counts.create, dispatch: counts.dispatch, link: counts.link }, { create: 0, dispatch: 0, link: 0 })
 })
 
 test('회수는 요청·대화·사용자·작업 위치·최종 메시지·현재 실행을 검증하고 거부 시 변경하지 않는다', async t => {
@@ -173,9 +248,17 @@ test('회수는 요청·대화·사용자·작업 위치·최종 메시지·현�
     c => { c.dispatch.conversationId = 'different-chat' },
     c => { c.deps.authorize = async () => { throw Error('접근 불가') } },
     c => { c.deps.getDispatch = async () => { throw Object.assign(Error('expired'), { status: 404 }) } },
+    c => { c.deps.getDispatch = async () => { throw Object.assign(Error('route'), { status: 404, code: 'ROUTE_NOT_FOUND' }) } },
     c => { c.message.content = JSON.stringify({ requestId: 'previous-request', ...route, proposal, decision }) },
     c => { c.message.position = 'right' }, c => { c.message.status = 'loading' }, c => { c.message.hidden = true },
-    c => { delete c.message.backend_turn_id }, c => { c.message.conversation_id = 'different-chat' },
+    c => {
+      // 턴 ID 없는 답변 뒤에 사용자가 다시 입력한 대화
+      delete c.message.backend_turn_id
+      const readMessages = c.deps.messages
+      c.deps.messages = async () => [...await readMessages(), { id: 'later-input', conversation_id: 'proposal-chat', position: 'right', type: 'text',
+        content: '추가 요청', created_at: Date.parse('2026-10-01T00:04:00Z') }]
+    },
+    c => { c.message.conversation_id = 'different-chat' },
     c => { c.message.created_at = Date.parse('2026-09-01') },
     c => { c.deps.messages = async () => [c.message] },
     c => { const readMessages = c.deps.messages; c.deps.messages = async () => { const items = await readMessages(); items[0].content = '다른 회차의 지시'; return items } },
@@ -197,6 +280,51 @@ test('회수는 요청·대화·사용자·작업 위치·최종 메시지·현�
     await assert.rejects(service.recoverResult('user-test', job.id, job.updatedAt))
     assert.equal(await readFile(file, 'utf8'), before)
     assert.equal(counts.create, 0)
+    assert.equal(counts.dispatch, 0)
+  }
+})
+
+test('완료된 실행의 답변을 해석하지 못한 실패는 턴 ID 없는 대화에서도 재실행 없이 회수한다', async t => {
+  const unread = '이번 요청의 AI 결과를 확인하지 못했습니다. 대화에서 답변을 확인한 후 상태를 다시 확인해 주세요.'
+  const nested = '## 대응안\n\n```bash\nnode app.mjs\n```\n\n끝.'
+  const inputDecision = { kind: 'input', reason: '확인할 사실이 있습니다.', questions: ['어떤 기준인가요?'], approval: null }
+  const configure = c => {
+    c.job.operation.kind = 'review'
+    c.job.operation.id = 'response-test-review-0'
+    c.job.route = structuredClone(route)
+    c.job.review = { conversationId: 'proposal-chat', machineId: 'main' }
+    c.job.error = unread
+    Object.assign(c.dispatch, { operationId: c.job.operation.id, state: 'completed', turnId: 'completed-turn', errorMessage: undefined })
+    delete c.message.backend_turn_id
+    c.message.content = `\`\`\`json\n${JSON.stringify({ requestId: c.job.operation.id, proposal: nested, decision: inputDecision }, null, 2)}\n\`\`\``
+  }
+  for (const run of [
+    ({ service, job }) => service.recoverResult(job.userId, job.id, job.updatedAt),
+    ({ service, job }) => service.retry(job.userId, job.id),
+    ({ service }) => service.poll(),
+  ]) {
+    const context = await fixture(t, configure)
+    await run(context)
+    const stored = JSON.parse(await readFile(context.file, 'utf8')).jobs[0]
+    assert.equal(stored.status, 'needs-input')
+    assert.equal(stored.proposal, nested)
+    assert.equal(stored.error, '')
+    assert.equal(stored.resultRecovery.method, 'completed-dispatch')
+    assert.equal(stored.resultRecovery.previousError, unread)
+    assert.equal(stored.resultRecovery.dispatchTurnId, 'completed-turn')
+    assert.deepEqual({ create: context.counts.create, dispatch: context.counts.dispatch, link: context.counts.link }, { create: 0, dispatch: 0, link: 0 })
+  }
+  // 실행이 완료되지 않았거나 다른 실패 사유면 수동 이어가기 검증을 적용해, 답변 뒤에 사용자가 다시 입력한 대화의 턴 ID 없는 답변을 회수하지 않는다.
+  const continued = c => {
+    const readMessages = c.deps.messages
+    c.deps.messages = async () => [...await readMessages(), { id: 'later-input', conversation_id: 'proposal-chat', position: 'right', type: 'text',
+      content: '추가 요청', created_at: Date.parse('2026-10-01T00:04:00Z') }]
+  }
+  for (const change of [c => { c.dispatch.state = 'failed' }, c => { c.job.error = '모델 실행 용량 초과' }]) {
+    const { service, job, file, counts } = await fixture(t, c => { configure(c); change(c); continued(c) })
+    const before = await readFile(file, 'utf8')
+    await assert.rejects(service.recoverResult(job.userId, job.id, job.updatedAt))
+    assert.equal(await readFile(file, 'utf8'), before)
     assert.equal(counts.dispatch, 0)
   }
 })

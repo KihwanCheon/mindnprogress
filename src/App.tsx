@@ -29,6 +29,8 @@ import './App.css'
 import { MindNode } from './components/MindNode'
 import { GroupOverview, type GroupAiTarget } from './components/GroupOverview'
 import { DocumentLifecycle } from './components/DocumentLifecycle'
+import { DocumentTrashReview } from './components/DocumentTrashReview'
+import { trashPreviewFromError, type DocumentTrashPreview } from './utils/documentTrashReview'
 import { CardLayoutDialog } from './components/CardLayoutDialog'
 import { useLibraryTouchMenu } from './components/useLibraryTouchMenu'
 import { KnowledgeEdge } from './components/KnowledgeEdge'
@@ -36,13 +38,17 @@ import { LinkifiedText } from './components/LinkifiedText'
 import { DoorayTaskLinkLabel } from './components/DoorayTaskLinkLabel'
 import { MentionText } from './components/MentionText'
 import { AdminEditorPanel } from './components/AdminEditorPanel'
+import { AiDelegationPolicyDialog } from './components/AiDelegationPolicyDialog'
 import { AiConversationDialog } from './components/AiConversationDialog'
 import { WorkspaceSettingsDialog } from './components/WorkspaceSettingsDialog'
 import { AiDelegationRecovery, type AiDelegationPreview } from './components/AiDelegationRecovery'
 import { AiConversationPickerDialog } from './components/AiConversationPickerDialog'
+import { AiConversationLinkDialog, type AiConversationLookup } from './components/AiConversationLinkDialog'
 import { AiConversationActivityIndicator } from './components/AiConversationRuntimeBadge'
 import { DailyBackupPreviewDialog, type DailyBackupPreview } from './components/DailyBackupPreviewDialog'
 import { DoorayMentionsPanel } from './components/DoorayMentionsPanel'
+import { doorayResponseIdFromSearch } from './utils/doorayResponseLink.mjs'
+import { libraryDropDestination, libraryDropTargetFromElement, type LibraryDropTarget } from './utils/libraryTouchDrop.mjs'
 import { ImagePreviewDialog } from './components/ImagePreviewDialog'
 import { SharedKnowledgeReviewDialog, type SharedKnowledgeReviewApplied } from './components/SharedKnowledgeReviewDialog'
 import { GlobalSearchDialog } from './components/GlobalSearchDialog'
@@ -55,6 +61,7 @@ import { resolveAiConversationTarget, type AiConversationExplicitTarget } from '
 import { claudeAccountMark, mostUsedClaudeUsageEntry } from './utils/claudeAccounts.mjs'
 import { applyBoxSelection, boxSelectionNodeIds, boxSelectionRect, isBoxSelectionDrag } from './utils/boxSelection.mjs'
 import { copyTextToClipboard } from './utils/clipboardText.mjs'
+import { cardMoveRequestId, cutCardSelection, resolveCardMove, type CardCut, type CardMoveRequest } from './utils/cardMove.mjs'
 import { parseGroupDeepLink } from './utils/groupDeepLink.mjs'
 import { collectDragDescendantOwners, dragRootIds, hierarchyReparentPairs } from './utils/hierarchyDrag.mjs'
 import { blockingNodes, createsDependencyCycle, dependentNodes, prerequisiteNodes } from './utils/dependencies'
@@ -66,17 +73,19 @@ import { splitImageFileName, uniqueImageFileName } from './utils/imageFileNames.
 import { copiedImagePlacementOverrides } from './utils/imageClipboard.mjs'
 import { isSameWebLinkUrl, parseWebLinkUrl } from './utils/webLinks.mjs'
 import { shouldReconnectEventStream } from './utils/eventStreamHealth.mjs'
+import { createConditionalRefresh } from './utils/conditionalRefresh.mjs'
 import { aiConversationLinksFromData } from './utils/aiConversations.mjs'
 import { revisionReasonLabel, shouldRefreshMapContentForAction } from './utils/mapChangeMetadata.mjs'
 import { mapContentsEqual, reconcileRemoteMapContent } from './utils/mapDocumentSync.mjs'
 import { createMapContentPatch } from './utils/mapContentPatch.mjs'
-import { mapCacheKey, reclaimSynchronizedMapCaches, tryWriteMapCache } from './utils/mapLocalCache.mjs'
+import { mapCacheKey, pruneExpiredMapCaches, reclaimSynchronizedMapCaches, tryWriteMapCache } from './utils/mapLocalCache.mjs'
+import { REFERENCE_MANAGED_DATA_KEYS } from './utils/referenceNodeFields.mjs'
 import { createLocalBackupNotice, localBackupNoticeReducer } from './utils/localBackupNotice.mjs'
 import { mergeMapContent } from './utils/mergeMapContent.mjs'
 import { MINDMAP_GRID_SIZE, snapMindMapPosition } from './utils/mindMapGrid.mjs'
 import { nextOverlappingNodeId, nodeOverlapPresentation } from './utils/nodeOverlap.mjs'
 import { viewportForNodeVisibility } from './utils/nodeViewportVisibility.mjs'
-import { notificationTitle } from './utils/notificationTitles.mjs'
+import { notificationTitle, updateDelegationNotificationStatuses, type DelegationNotificationStatus } from './utils/notificationTitles.mjs'
 import { computeProgressRollups } from './utils/progressRollup.mjs'
 import { snapAspectResizeToGrid, snapFreeResizeToGrid } from './utils/resizeGrid.mjs'
 import type { ResizeSnapRequest } from './utils/resizeGrid.mjs'
@@ -194,6 +203,7 @@ const LAST_LOGIN_EMAIL_KEY = 'mindnprogress-last-login-email'
 const INSPECTOR_TEXTAREA_HEIGHTS_STORAGE_PREFIX = 'mindnprogress-inspector-textarea-heights'
 const INSPECTOR_TEXTAREA_MIN_HEIGHT = 32
 const INSPECTOR_TEXTAREA_MAX_HEIGHT = 10_000
+const DESCRIPTION_PLACEHOLDER = '설명을 입력해 주세요'
 
 type InspectorTextareaField = 'description' | 'sharedKnowledge'
 type InspectorTextareaHeights = Partial<Record<InspectorTextareaField, number>>
@@ -620,6 +630,8 @@ type AionUiSubscriptionUsage = {
     state: 'loading' | 'ready' | 'unavailable'
     updatedAt: string | null
     stale: boolean
+    /** 5시간 창. 요금제에 따라 없을 수 있고(null), 이 필드가 생기기 전 서버 응답에는 키가 없다. */
+    session?: (SubscriptionUsageWindow & { windowDurationMins: number | null }) | null
     weekly: (SubscriptionUsageWindow & { windowDurationMins: number | null }) | null
     limitReached: boolean
   } | null
@@ -691,6 +703,7 @@ type MapDocument = {
 }
 
 type MapRevisionSummary = {
+  snapshotSha256?: string
   id: string
   mapId: string
   title: string
@@ -710,6 +723,7 @@ type MapRevisionPage = {
 }
 
 type DailyBackupSummary = {
+  snapshotSha256?: string
   date: string
   mapId: string
   title: string
@@ -776,6 +790,10 @@ type UserNotification = {
   nodeLabel: string
   commentId?: string
   message: string
+  dedupeKey?: string
+  delegationId?: string
+  delegationKind?: string
+  delegationStatus?: DelegationNotificationStatus
   actor: AuthUser
   createdAt: string
   readAt: string | null
@@ -826,6 +844,7 @@ type AiConversationSelectionRequestedEvent = {
   requestedAt: string
 }
 type NotificationEvent = { type: 'notification'; notification: UserNotification }
+type AiDelegationChangedEvent = { type: 'ai-delegation-changed'; delegation: { notificationStatus?: DelegationNotificationStatus } }
 type NotificationsReadEvent = { type: 'notifications-read'; userId: string; notificationId: string | null; readAt: string }
 type NotificationsRemovedEvent = { type: 'notifications-removed'; userId: string; notificationIds: string[] }
 type HeartbeatEvent = { type: 'heartbeat'; sentAt: string }
@@ -866,6 +885,7 @@ function mergeResolvedReferenceData(localData: MindNodeData, resolvedData: MindN
     externalLink: resolvedData.externalLink,
     webLink: resolvedData.webLink,
     aiConversationId: resolvedData.aiConversationId,
+    aiPrimaryConversationId: resolvedData.aiPrimaryConversationId,
     aiConversations: resolvedData.aiConversations,
     isWork: resolvedData.isWork,
     assigneeId: resolvedData.assigneeId,
@@ -889,27 +909,6 @@ function mergeResolvedReferenceNodes(currentNodes: MindMapNode[], resolvedNodes:
   })
   return changed ? nextNodes : currentNodes
 }
-
-const REFERENCE_MANAGED_DATA_KEYS = new Set<keyof MindNodeData>([
-  'label',
-  'description',
-  'sharedKnowledge',
-  'sharedKnowledgeUpdatedAt',
-  'sharedKnowledgeUpdatedBy',
-  'sharedKnowledgeReview',
-  'progress',
-  'status',
-  'taskUrl',
-  'externalLink',
-  'webLink',
-  'aiConversationId',
-  'aiConversations',
-  'isWork',
-  'assigneeId',
-  'dueDate',
-  'checklist',
-  'waitingItems',
-])
 
 function editableReferencePatch(patch: Partial<MindNodeData>) {
   const editablePatch = { ...patch } as Record<string, unknown>
@@ -1226,6 +1225,7 @@ function Icon({ name, size = 18 }: { name: string; size?: number }) {
     chart: <><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></>,
     copy: <><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></>,
     paste: <><path d="M9 5h6M9 3h6v4H9z"/><path d="M9 5H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h7"/><path d="M15 11v8M11 15h8"/></>,
+    cut: <><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="m8 8 13 13M8 16 21 3"/></>,
     undo: <><path d="M9 7 4 12l5 5"/><path d="M5 12h8a6 6 0 0 1 6 6"/></>,
     redo: <><path d="m15 7 5 5-5 5"/><path d="M19 12h-8a6 6 0 0 0-6 6"/></>,
     sparkles: <><path d="m12 3 1.4 4.1L17.5 8.5l-4.1 1.4L12 14l-1.4-4.1-4.1-1.4 4.1-1.4Z"/><path d="m18.5 14 .7 2.3 2.3.7-2.3.7-.7 2.3-.7-2.3-2.3-.7 2.3-.7Z"/></>,
@@ -1433,9 +1433,12 @@ function AionUiSubscriptionUsageIndicator({ onOpen }: { onOpen?: () => void }) {
   const pillClaudeEntry = mostUsedClaudeUsageEntry(visibleClaudeEntries)
   const pillClaudeEntries = pillClaudeEntry ? [pillClaudeEntry] : []
   const showClaude = visibleClaudeEntries.length > 0
-  const showCodex = codexLoading || Boolean(codex?.state === 'ready' && !codex.stale && codex.weekly)
+  // Codex 5시간 창은 요금제에 따라 없다. 없으면 주간만 쓰는 기존 표시와 같다.
+  const codexSession = codex?.session ?? null
+  const showCodex = codexLoading || Boolean(codex?.state === 'ready' && !codex.stale && (codexSession || codex.weekly))
   const visibleUsageValues = [
     ...visibleClaudeEntries.flatMap(({ value }) => [value?.session?.usedPercent, value?.weekly?.usedPercent]),
+    showCodex ? codexSession?.usedPercent : null,
     showCodex ? codex?.weekly?.usedPercent : null,
     showCodex && codex?.limitReached ? 100 : null,
   ].filter((value): value is number => Number.isFinite(value))
@@ -1456,9 +1459,14 @@ function AionUiSubscriptionUsageIndicator({ onOpen }: { onOpen?: () => void }) {
         ? claudeTitle(entry.name, entry.value)
         : `${entry.name} 사용량 정보 없음`).join('\n\n')
     : claudeTitle(name, value)
-  const codexTitle = codex?.state === 'ready' && codex.weekly
-    ? `Codex 사용량\n주간 ${Math.round(codex.weekly.usedPercent)}% · ${usageResetLabel(codex.weekly.resetsAt)}`
+  const codexTitle = codex?.state === 'ready' && (codexSession || codex.weekly)
+    ? [
+        'Codex 사용량',
+        codexSession ? `5시간 ${Math.round(codexSession.usedPercent)}% · ${usageResetLabel(codexSession.resetsAt)}` : null,
+        codex.weekly ? `주간 ${Math.round(codex.weekly.usedPercent)}% · ${usageResetLabel(codex.weekly.resetsAt)}` : null,
+      ].filter(Boolean).join('\n')
     : 'Codex 사용량을 조회하고 있습니다.'
+  const codexTone = usageTone(codexSession?.usedPercent, codex?.weekly?.usedPercent, codex?.limitReached ? 100 : null)
 
   return (
     <div className="subscription-usage-summary" aria-label="AI 구독 사용량" ref={containerRef}>
@@ -1476,11 +1484,16 @@ function AionUiSubscriptionUsageIndicator({ onOpen }: { onOpen?: () => void }) {
             ].filter(Boolean).join(' · ')}</span>}
       </div>)}
       {showCodex && <div
-        className={`subscription-usage-pill codex ${usageTone(codex?.weekly?.usedPercent, codex?.limitReached ? 100 : null)}`}
+        className={`subscription-usage-pill codex ${codexTone}`}
         title={codexTitle}
       >
         <strong>Codex</strong>
-        {codexLoading ? <LoadingUsageDots /> : <span>{Math.round(codex?.weekly?.usedPercent ?? 0)}%</span>}
+        {codexLoading
+          ? <LoadingUsageDots />
+          : <span>{[
+              codexSession ? `${Math.round(codexSession.usedPercent)}%` : null,
+              codex?.weekly ? `${Math.round(codex.weekly.usedPercent)}%` : null,
+            ].filter(Boolean).join(' · ')}</span>}
       </div>}
       <button
         className={`subscription-usage-mobile-trigger ${summaryTone}`}
@@ -1522,11 +1535,14 @@ function AionUiSubscriptionUsageIndicator({ onOpen }: { onOpen?: () => void }) {
                   {value?.weekly && <span><b>주간 {Math.round(value.weekly.usedPercent)}%</b><small>{usageResetLabel(value.weekly.resetsAt)}</small></span>}
                 </div>}
           </section>)}
-          {showCodex && <section className={usageTone(codex?.weekly?.usedPercent, codex?.limitReached ? 100 : null)}>
+          {showCodex && <section className={codexTone}>
             <strong>Codex</strong>
             {codexLoading
               ? <LoadingUsageDots />
-              : codex?.weekly && <div><span><b>주간 {Math.round(codex.weekly.usedPercent)}%</b><small>{usageResetLabel(codex.weekly.resetsAt)}</small></span></div>}
+              : (codexSession || codex?.weekly) && <div>
+                  {codexSession && <span><b>5시간 {Math.round(codexSession.usedPercent)}%</b><small>{usageResetLabel(codexSession.resetsAt)}</small></span>}
+                  {codex?.weekly && <span><b>주간 {Math.round(codex.weekly.usedPercent)}%</b><small>{usageResetLabel(codex.weekly.resetsAt)}</small></span>}
+                </div>}
           </section>}
         </div>
       </div>}
@@ -2249,20 +2265,26 @@ function DistributedWorkDialog({ onClose }: { onClose: () => void }) {
               <small>새 대화와 위임에서 미리 선택될 머신입니다. 매번 다르게 고를 수 있습니다.</small>
             </label>
 
-            <div className="distributed-work-machines">
+            <div className="distributed-work-pools">
               <h4>원격 Unity Fork 풀</h4>
-              <p>서브 머신 registry의 coordinatorId: <code>{workspaceCoordinatorId ?? '확인 중'}</code></p>
-              {remotePools.length === 0 && <p>Runner가 보고한 관리형 Fork 풀이 없습니다. 일반 대화 경로는 풀 등록이 아닙니다.</p>}
+              <p className="distributed-work-pool-meta">서브 머신 registry의 coordinatorId: <code>{workspaceCoordinatorId ?? '확인 중'}</code></p>
+              {remotePools.length === 0 && <p className="distributed-work-pool-empty">Runner가 보고한 관리형 Fork 풀이 없습니다. 일반 대화 경로는 풀 등록이 아닙니다.</p>}
               {remotePools.map((pool) => (
-                <section key={`${pool.machineId}:${pool.poolId}`}>
-                  <strong>{pool.machineId} · {pool.poolId} · {pool.stale ? '보고 만료' : pool.approved ? '승인됨' : '승인 대기'}</strong>
-                  <p>origin: <code>{pool.originUrl.replace(/(https?:\/\/)[^/@]+@/, '$1[인증정보 생략]@')}</code></p>
+                <section className="distributed-work-pool" key={`${pool.machineId}:${pool.poolId}`}>
+                  <strong className="distributed-work-pool-heading">{pool.machineId} · {pool.poolId} · {pool.stale ? '보고 만료' : pool.approved ? '승인됨' : '승인 대기'}</strong>
+                  <p className="distributed-work-pool-meta">origin: <code>{pool.originUrl.replace(/(https?:\/\/)[^/@]+@/, '$1[인증정보 생략]@')}</code></p>
                   <ul>{pool.workspaces.map((worker) => (
-                    <li key={worker.workspaceId}><code>{worker.projectRoot}</code> · {worker.status}{worker.dirty ? ' · 미커밋 변경 있음' : ''}{worker.leaseId ? ` · ${worker.leaseId}` : ''}<small>Git 보고: {worker.branch} · {worker.headCommit.slice(0, 10)} · AI runtime {worker.runtimeIdle ? '유휴' : '사용 중'}</small></li>
+                    <li key={worker.workspaceId}>
+                      <code>{worker.projectRoot}</code>
+                      <span>{worker.status}{worker.dirty ? ' · 미커밋 변경 있음' : ''}{worker.leaseId ? ` · ${worker.leaseId}` : ''}</span>
+                      <small>Git 보고: {worker.branch} · {worker.headCommit.slice(0, 10)} · AI runtime {worker.runtimeIdle ? '유휴' : '사용 중'}</small>
+                    </li>
                   ))}</ul>
                   <button type="button" disabled={submitting || pool.stale && !pool.approved} onClick={() => void registerWorkspacePool(pool)}>{pool.approved ? '새 배정 비활성화' : '풀 등록 승인'}</button>
                 </section>
               ))}
+            </div>
+            <div className="distributed-work-machines">
               <h4>등록된 머신</h4>
               <ul>
                 {machines.map((machine) => {
@@ -2408,6 +2430,8 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
   const documentArchived = activeDocumentRecord?.id === activeMapId && Boolean(activeDocumentRecord.archivedAt)
   const mode: AccessMode = documentArchived ? 'viewer' : accountMode
   const [lifecycleOpen, setLifecycleOpen] = useState(false)
+  const [trashReview, setTrashReview] = useState<{ preview: DocumentTrashPreview; message?: string } | null>(null)
+  const trashRequestPending = useRef(false)
   const [lifecycleEntry, setLifecycleEntry] = useState<{ scope?: { type: 'map' | 'group'; id: string }; initialTab: 'archive' | 'reconstruction' }>({ initialTab: 'archive' })
   const [archivedDocuments, setArchivedDocuments] = useState<MapSummary[]>([])
   const [adminOpen, setAdminOpen] = useState(false)
@@ -2429,10 +2453,13 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
   }, [])
   const [accountMenuOpen, setAccountMenuOpen] = useState(false)
   const [distributedWorkOpen, setDistributedWorkOpen] = useState(false)
+  const [aiDelegationPolicyOpen, setAiDelegationPolicyOpen] = useState(false)
   const [passwordDialogOpen, setPasswordDialogOpen] = useState(false)
   const [aiDialogOpen, setAiDialogOpen] = useState(false)
   const [aiConversationLaunch, setAiConversationLaunch] = useState<AiConversationExplicitTarget & { initialRequest: string } | null>(null)
   const [aiConversationPicker, setAiConversationPicker] = useState<{ mapId: string; cardId: string; cardTitle: string; launch?: GroupAiTarget } | null>(null)
+  const [aiConversationLinkTarget, setAiConversationLinkTarget] = useState<{ mapId: string; cardId: string; cardTitle: string } | null>(null)
+  const [documentAiConversations, setDocumentAiConversations] = useState<{ mapId: string; title: string } | null>(null)
   const [aionUiWebNavigation, setAionUiWebNavigation] = useState(() => ({
     baseUrl: defaultAionUiWebBaseUrl(),
     configured: false,
@@ -2463,7 +2490,17 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
   const [historyOpen, setHistoryOpen] = useState(false)
   const [globalSearchOpen, setGlobalSearchOpen] = useState(false)
   const [sharedKnowledgeReviewOpen, setSharedKnowledgeReviewOpen] = useState(false)
-  const [doorayMentionsOpen, setDoorayMentionsOpen] = useState(false)
+  const [linkedDoorayResponseId, setLinkedDoorayResponseId] = useState(() => doorayResponseIdFromSearch(window.location.search))
+  const [doorayMentionsOpen, setDoorayMentionsOpen] = useState(() => Boolean(doorayResponseIdFromSearch(window.location.search)))
+  const closeDoorayMentions = () => {
+    setDoorayMentionsOpen(false)
+    setLinkedDoorayResponseId('')
+    const url = new URL(window.location.href)
+    if (url.searchParams.has('doorayResponseId')) {
+      url.searchParams.delete('doorayResponseId')
+      window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash)
+    }
+  }
   const [historyTab, setHistoryTab] = useState<'changes' | 'daily'>('changes')
   const [mapRevisions, setMapRevisions] = useState<MapRevisionSummary[]>([])
   const [dailyBackups, setDailyBackups] = useState<DailyBackupSummary[]>([])
@@ -2510,6 +2547,9 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
   const [assigneeFilter, setAssigneeFilter] = useState('all')
   const [collapsedNodeIds, setCollapsedNodeIds] = useState<Set<string>>(() => new Set())
   const [creatingMap, setCreatingMap] = useState(false)
+  const [newMapGroupId, setNewMapGroupId] = useState<string | null>(null)
+  const [mapCreationBusy, setMapCreationBusy] = useState(false)
+  const mapCreationPending = useRef(false)
   const [creatingGroup, setCreatingGroup] = useState(false)
   const [newMapTitle, setNewMapTitle] = useState('')
   const [newGroupName, setNewGroupName] = useState('')
@@ -2536,6 +2576,29 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
   const paneRightPressRef = useRef({ x: 0, y: 0 })
   const [copiedNodes, setCopiedNodes] = useState<CopiedNodes | null>(null)
   const [copiedImages, setCopiedImages] = useState<CopiedImages | null>(null)
+  const [cutCards, setCutCards] = useState<CardCut | null>(null)
+  const moveStorageKey = `mnp-pending-card-move:${user.id}`
+  const [pendingCardMove, setPendingCardMove] = useState<CardMoveRequest | null>(() => {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(moveStorageKey) ?? 'null') as CardMoveRequest | null
+      return saved?.requestId && saved.sourceMapId && saved.body?.cardIds?.length ? saved : null
+    } catch { return null }
+  })
+  const [cardMoveBusy, setCardMoveBusy] = useState(false)
+  const [cardMoveMessage, setCardMoveMessage] = useState('이동 결과를 확인해 주세요.')
+  const cardMoveBusyRef = useRef(false)
+  const contentSavesInFlight = useRef(new Map<string, number>())
+  const cardMoveBlocked = cardMoveBusy || Boolean(pendingCardMove)
+  useEffect(() => {
+    if (!cardMoveBlocked) return
+    const blockShortcuts = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' && event.target instanceof Element && event.target.closest('.card-move-dialog')) return
+      event.stopImmediatePropagation()
+      if (event.key !== 'Tab') event.preventDefault()
+    }
+    window.addEventListener('keydown', blockShortcuts, true)
+    return () => window.removeEventListener('keydown', blockShortcuts, true)
+  }, [cardMoveBlocked])
   const [draggingLibraryItem, setDraggingLibraryItem] = useState<DocumentLayoutItem | null>(null)
   const [documentDropTargetId, setDocumentDropTargetId] = useState<string | null>(null)
   const documentListRef = useRef<HTMLElement | null>(null)
@@ -2659,7 +2722,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
   const suppressTouchContextMenu = useRef<{ nodeId: string; until: number } | null>(null)
   const suppressMobileInspectorSelection = useRef<string | null>(null)
   const serverBaseline = useRef<MapDocument | null>(null)
-  const pendingMapCacheWrite = useRef<{ mapId: string; content: Pick<MapDocument, 'nodes' | 'edges'> } | null>(null)
+  const pendingMapCacheWrite = useRef<{ mapId: string; content: Pick<MapDocument, 'nodes' | 'edges'>; serverMap: MapDocument | null } | null>(null)
   const mapCacheRecovery = useRef<Promise<void> | null>(null)
   const pastedNodeNotificationSuppressions = useRef<Map<string, Set<string>>>(new Map())
   const cursorSendAt = useRef(0)
@@ -2691,6 +2754,16 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     updateLocalBackupNotice({ type: 'open', mapId: activeMapId })
   }, [activeMapId, mapReloadToken, selectedGroupId])
 
+  useEffect(() => {
+    const prune = () => {
+      try { pruneExpiredMapCaches(window.localStorage, { keepMapId: activeMapIdRef.current }) }
+      catch { /* 저장소 오류는 실제 백업 쓰기 시점에 안내한다. */ }
+    }
+    prune()
+    const timer = window.setInterval(prune, 5 * 60 * 1000)
+    return () => window.clearInterval(timer)
+  }, [activeMapId])
+
   const saveMapCache = useCallback((mapId: string, content: Pick<MapDocument, 'nodes' | 'edges'>) => {
     let storage: Storage
     try {
@@ -2699,8 +2772,9 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       if (activeMapIdRef.current === mapId) updateLocalBackupNotice({ type: 'backup-failed', mapId })
       return false
     }
-    pendingMapCacheWrite.current = { mapId, content }
-    const result = tryWriteMapCache(storage, mapId, content)
+    const serverMap = serverBaseline.current?.id === mapId ? serverBaseline.current : null
+    pendingMapCacheWrite.current = { mapId, content, serverMap }
+    const result = tryWriteMapCache(storage, mapId, content, { serverMap })
     if (result.saved) {
       pendingMapCacheWrite.current = null
       if (activeMapIdRef.current === mapId) updateLocalBackupNotice({ type: 'backup-saved', mapId })
@@ -2715,7 +2789,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       const retryWrite = () => {
         const pending = pendingMapCacheWrite.current
         if (!pending) return true
-        const retry = tryWriteMapCache(storage, pending.mapId, pending.content)
+        const retry = tryWriteMapCache(storage, pending.mapId, pending.content, { serverMap: pending.serverMap })
         if (retry.saved) {
           pendingMapCacheWrite.current = null
           if (activeMapIdRef.current === pending.mapId) {
@@ -3420,6 +3494,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       },
       className: [
         node.className,
+        cutCards?.sourceMapId === activeMapId && cutCards.movedCardIds.includes(node.id) ? 'card-cut-pending' : '',
         node.id === dropTargetId ? 'drop-target' : '',
         node.id === knowledgeConnection?.sourceId ? `knowledge-link-source ${knowledgeConnection.policy === 'reuse-first' ? 'primary' : 'secondary'}` : '',
         node.id === knowledgeConnectionTargetId ? `knowledge-link-target ${hoveredKnowledgeConnectionIssue ? 'invalid' : 'valid'}` : '',
@@ -3432,7 +3507,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         overlapWarningIds.has(node.id) ? 'overlap-warning' : '',
       ].filter(Boolean).join(' '),
     }
-  }), [activeMapId, aiConversationRuntimes, aiDelegationPreview, aiDelegationPreviewNodeIds, aiDelegationStatuses, beginHistoryTransaction, collapsedHiddenNodeIds, collapsedNodeIds, collapsibleNodeIds, commentStats, descendantCounts, dropTargetId, endHistoryTransaction, filterActive, filterMatchedNodeIds, filterVisibleNodeIds, hoveredKnowledgeConnectionIssue, knowledgeConnection, knowledgeConnectionTargetId, mode, nodes, normalizedNodeSearch, openAiDelegationRecovery, openDependencies, openWaitingItems, overlapStackByRepresentativeId, overlapWarningIds, progressRollups, referenceCommentStats, searchContextNodeIds, searchMatchedNodeIds, setNodes, teamMembers, unresolvedReferenceNodeIds])
+  }), [activeMapId, aiConversationRuntimes, aiDelegationPreview, aiDelegationPreviewNodeIds, aiDelegationStatuses, beginHistoryTransaction, collapsedHiddenNodeIds, collapsedNodeIds, collapsibleNodeIds, commentStats, cutCards, descendantCounts, dropTargetId, endHistoryTransaction, filterActive, filterMatchedNodeIds, filterVisibleNodeIds, hoveredKnowledgeConnectionIssue, knowledgeConnection, knowledgeConnectionTargetId, mode, nodes, normalizedNodeSearch, openAiDelegationRecovery, openDependencies, openWaitingItems, overlapStackByRepresentativeId, overlapWarningIds, progressRollups, referenceCommentStats, searchContextNodeIds, searchMatchedNodeIds, setNodes, teamMembers, unresolvedReferenceNodeIds])
   const visibleFlowNodeIds = useMemo(() => new Set(flowNodes.filter((node) => !node.hidden).map((node) => node.id)), [flowNodes])
   visibleFlowNodeIdsRef.current = visibleFlowNodeIds
   const visibleFlowNodeIdsKey = useMemo(() => [...visibleFlowNodeIds].sort().join('\u0000'), [visibleFlowNodeIds])
@@ -3803,39 +3878,35 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     if (!activeMapId || mode !== 'editor' || documentArchived) return
 
     const controller = new AbortController()
-    let inFlight = false
-    const refresh = async () => {
-      if (controller.signal.aborted || inFlight) return
-      inFlight = true
-      try {
-        const result = await apiRequest<{ delegations: AiDelegationSummary[]; requestFailures?: AiDelegationSummary[] }>(
-          `/api/maps/${encodeURIComponent(activeMapId)}/ai-delegations`,
-          { signal: controller.signal },
-        )
-        if (!controller.signal.aborted) {
-          setAiDelegationStatuses(aiDelegationStatusByCard([...result.delegations, ...(result.requestFailures ?? [])], activeMapId))
-        }
-      } catch {
-        // 일시적인 조회 실패로 이미 확인한 복구 표시를 지우지 않는다.
-      } finally {
-        inFlight = false
-      }
-    }
+    const refreshQueue = createConditionalRefresh<{ delegations: AiDelegationSummary[]; requestFailures?: AiDelegationSummary[] }>(
+      (etag) => fetch(`/api/maps/${encodeURIComponent(activeMapId)}/ai-delegations`, {
+        signal: controller.signal, credentials: 'include',
+        headers: { 'X-MNP-Client': CLIENT_ID, ...(etag ? { 'If-None-Match': etag } : {}) },
+      }),
+      (result) => {
+        if (!controller.signal.aborted) setAiDelegationStatuses(aiDelegationStatusByCard(
+          [...result.delegations, ...(result.requestFailures ?? [])], activeMapId))
+      },
+    )
+    const refresh = () => refreshQueue.request().catch(() => undefined)
     const refreshWhenVisible = () => {
       if (document.visibilityState === 'visible') void refresh()
     }
 
     void refresh()
-    const timer = window.setInterval(refreshWhenVisible, 5_000)
+    const timer = window.setInterval(refreshWhenVisible, 30_000)
+    window.addEventListener('mnp-delegations-refresh', refreshWhenVisible)
     window.addEventListener('focus', refreshWhenVisible)
     document.addEventListener('visibilitychange', refreshWhenVisible)
     return () => {
       controller.abort()
+      refreshQueue.dispose()
       window.clearInterval(timer)
+      window.removeEventListener('mnp-delegations-refresh', refreshWhenVisible)
       window.removeEventListener('focus', refreshWhenVisible)
       document.removeEventListener('visibilitychange', refreshWhenVisible)
     }
-  }, [activeMapId, documentArchived, mode])
+  }, [activeMapId, documentArchived, mode, user.id])
 
   useEffect(() => {
     setAiConversationRuntimes({})
@@ -3899,7 +3970,14 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     const handleEventMessage = (message: MessageEvent<string>) => {
       lastEventAt = Date.now()
       try {
-        const event = JSON.parse(message.data) as MapChangeEvent | PresenceEvent | CursorEvent | CommentChangeEvent | AiConversationLinkedEvent | AiConversationRuntimeEvent | AiConversationRuntimeSnapshotEvent | AiConversationRuntimeSummaryEvent | AiConversationRuntimeSummarySnapshotEvent | AiConversationSelectionRequestedEvent | NotificationEvent | NotificationsReadEvent | NotificationsRemovedEvent | HeartbeatEvent | { type: 'connected' }
+        const event = JSON.parse(message.data) as MapChangeEvent | PresenceEvent | CursorEvent | CommentChangeEvent | AiConversationLinkedEvent | AiConversationRuntimeEvent | AiConversationRuntimeSnapshotEvent | AiConversationRuntimeSummaryEvent | AiConversationRuntimeSummarySnapshotEvent | AiConversationSelectionRequestedEvent | AiDelegationChangedEvent | NotificationEvent | NotificationsReadEvent | NotificationsRemovedEvent | HeartbeatEvent | { type: 'connected' }
+        if (event.type.startsWith('ai-delegation') || event.type === 'map-changed') {
+          window.dispatchEvent(new Event('mnp-delegations-refresh'))
+        }
+        if (event.type === 'ai-delegation-changed') {
+          setNotifications((current) => updateDelegationNotificationStatuses(current, event.delegation.notificationStatus))
+          return
+        }
         if (event.type === 'heartbeat') return
         if (event.type === 'ai-conversation-selection-requested') {
           selectCardAndReveal(event.mapId, event.cardId)
@@ -4047,6 +4125,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       nextEventSource.onopen = () => {
         if (disposed || eventSource !== nextEventSource) return
         lastEventAt = Date.now()
+          window.dispatchEvent(new Event('mnp-delegations-refresh'))
         void synchronizeAfterReconnect()
       }
     }
@@ -4317,6 +4396,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
 
   useEffect(() => {
     if (!activeMapId || loadedMapId !== activeMapId) return
+    if (pendingCardMove) return
     const localContent = createPersistedMapContent(nodes, edges)
     const localBackupSaved = saveMapCache(activeMapId, localContent)
     if (mode === 'viewer') {
@@ -4337,6 +4417,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       setSavedAt('서버에 저장 중…')
       setSaveError('')
       const savingMapId = activeMapId
+      contentSavesInFlight.current.set(savingMapId, (contentSavesInFlight.current.get(savingMapId) ?? 0) + 1)
       const suppressedNotificationNodeIds = [...(pastedNodeNotificationSuppressions.current.get(savingMapId) ?? [])]
         .filter((nodeId) => localContent.nodes.some((node) => node.id === nodeId))
       const clearPastedNodeNotificationSuppressions = () => {
@@ -4414,9 +4495,12 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
           updateLocalBackupNotice({ type: 'server-failed', mapId: savingMapId })
           setSavedAt('저장 실패')
         })
+        .finally(() => {
+          contentSavesInFlight.current.set(savingMapId, Math.max(0, (contentSavesInFlight.current.get(savingMapId) ?? 1) - 1))
+        })
     }, 600)
     return () => window.clearTimeout(timer)
-  }, [acceptSavedMap, activeMapId, edges, loadedMapId, mode, nodes, reconcileRemoteMap, saveMapCache, serverBaselineRevision])
+  }, [acceptSavedMap, activeMapId, edges, loadedMapId, mode, nodes, pendingCardMove, reconcileRemoteMap, saveMapCache, serverBaselineRevision])
 
   const onConnect = useCallback(
     (connection: Connection) => {
@@ -4546,12 +4630,13 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     if (conversationId) void openAiConversation(conversationId, cardId, mapId)
   }
 
-  const deleteUnavailableAiConversation = async (mapId: string, cardId: string, conversationId: string) => {
+  const deleteAiConversation = async (mapId: string, cardId: string, conversationId: string) => {
     const result = await apiRequest<{
       map: MapDocument
       card: MindMapNode
       removedConversationId: string
       latestConversationId: string | null
+      primaryConversationId: string | null
     }>(`/api/maps/${encodeURIComponent(mapId)}/cards/${encodeURIComponent(cardId)}/ai-conversations/${encodeURIComponent(conversationId)}`, {
       method: 'DELETE',
     })
@@ -4559,7 +4644,16 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       reconcileRemoteMap(result.map)
       setSavedAt('서버와 동기화됨')
     }
-    return { latestConversationId: result.latestConversationId }
+    return { latestConversationId: result.latestConversationId, primaryConversationId: result.primaryConversationId }
+  }
+
+  const setPrimaryAiConversation = async (mapId: string, cardId: string, conversationId: string, expectedPrimaryConversationId: string | null) => {
+    const result = await apiRequest<{ map: MapDocument; primaryConversationId: string | null }>(
+      `/api/maps/${encodeURIComponent(mapId)}/cards/${encodeURIComponent(cardId)}/ai-conversations/primary`, {
+        method: 'PUT', body: JSON.stringify({ conversationId, expectedPrimaryConversationId }),
+      })
+    if (mapId === activeMapId) reconcileRemoteMap(result.map)
+    return { primaryConversationId: result.primaryConversationId }
   }
 
   const startOrOpenContextNodeAiConversation = () => {
@@ -4584,13 +4678,20 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     setDocumentContextMenu(null)
     setAiConversationContextMenu({
       x: Math.min(event.clientX, window.innerWidth - 230),
-      y: Math.min(event.clientY, window.innerHeight - 110),
+      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 175)),
     })
   }
 
   const startNewAiConversation = () => {
     setAiConversationContextMenu(null)
     setAiDialogOpen(true)
+  }
+
+  const showAiConversationLinkDialog = () => {
+    setAiConversationContextMenu(null)
+    if (!selectedNode || documentArchived) return
+    setAiConversationLinkTarget({ mapId: selectedCommentMapId,
+      cardId: selectedCommentNodeId ?? selectedNode.id, cardTitle: selectedNode.data.label })
   }
 
   const showAiEditorOnlyAlert = () => {
@@ -4845,7 +4946,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       position: nextPosition,
       data: {
         label: '새로운 아이디어',
-        description: '설명을 입력해 주세요',
+        description: '',
         sharedKnowledge: '',
         progress: 0,
         status: 'planned',
@@ -5064,14 +5165,16 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       setMobileInspectorOpen(false)
       suppressMobileInspectorSelection.current = selectedIdRef.current === nodeId ? null : nodeId
     }
-    selectCardLocally(nodeId)
-    const menuHeight = nodes.find((node) => node.id === nodeId)?.data.kind === 'image' ? 310 : 440
+    // 이미 선택된 카드를 우클릭하면 선택 묶음을 유지해 다중 복사에 사용한다.
+    if (nodes.some((node) => node.id === nodeId && node.selected)) setSelectedId(nodeId)
+    else selectCardLocally(nodeId)
+    const menuHeight = (nodes.find((node) => node.id === nodeId)?.data.kind === 'image' ? 310 : 440) + (cutCards ? 120 : 50)
     setNodeContextMenu({
       x: Math.max(8, Math.min(clientX, window.innerWidth - 230)),
       y: Math.max(8, Math.min(clientY, window.innerHeight - menuHeight)),
       nodeId,
     })
-  }, [mode, nodes, selectCardLocally, setMobileInspectorOpen])
+  }, [cutCards, mode, nodes, selectCardLocally, setMobileInspectorOpen])
 
   const openNodeContextMenu = useCallback((event: ReactMouseEvent, nodeId: string) => {
     const touchSuppression = suppressTouchContextMenu.current
@@ -5427,6 +5530,122 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     return () => window.removeEventListener('blur', cancelTouchPan)
   }, [])
 
+  const waitForCardMoveSave = useCallback(async (mapId: string) => {
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if (activeMapIdRef.current !== mapId) throw new Error('문서가 바뀌었습니다. 다시 시도해 주세요.')
+      const baseline = serverBaseline.current
+      if (baseline?.id === mapId && loadedMapIdRef.current === mapId
+        && !contentSavesInFlight.current.get(mapId)
+        && mapContentsEqual(createPersistedMapContent(nodesRef.current, edgesRef.current), baseline)) return baseline
+      await new Promise((resolve) => window.setTimeout(resolve, 100))
+    }
+    throw new Error('현재 문서의 서버 저장이 끝나지 않았습니다. 저장 상태를 확인한 뒤 다시 시도해 주세요.')
+  }, [])
+
+  const cutNode = useCallback(async (nodeId: string) => {
+    if (mode !== 'editor' || !activeMapId || cardMoveBusyRef.current || pendingCardMove) return
+    cardMoveBusyRef.current = true
+    setCardMoveBusy(true)
+    setCardMoveMessage('문서 저장을 확인하고 있습니다…')
+    setNodeContextMenu(null)
+    try {
+      const initialSelection = cutCardSelection(nodesRef.current, edgesRef.current, nodeId)
+      const baseline = await waitForCardMoveSave(activeMapId)
+      if (initialSelection.cardIds.some((id) => !baseline.nodes.some((node) => node.id === id))) throw new Error('선택한 카드가 변경되었습니다. 다시 선택해 주세요.')
+      const selection = cutCardSelection(baseline.nodes.map((node) => ({ ...node, selected: initialSelection.cardIds.includes(node.id) })),
+        baseline.edges, initialSelection.cardIds[0])
+      setCutCards({ ...selection, sourceMapId: activeMapId, sourceVersion: baseline.version, sourceTitle: baseline.title,
+        labels: Object.fromEntries(baseline.nodes.map((node) => [node.id, node.data.label])) })
+      setCopiedNodes(null)
+      setCopiedImages(null)
+      setSaveError('')
+    } catch (error) { setSaveError(error instanceof Error ? error.message : '카드를 잘라내지 못했습니다.') }
+    finally { cardMoveBusyRef.current = false; setCardMoveBusy(false) }
+  }, [activeMapId, mode, pendingCardMove, waitForCardMoveSave])
+
+  const finishCardMove = useCallback(async (request: CardMoveRequest, resultOnly = false) => {
+    const result = await resolveCardMove(request, { resultOnly,
+      fetchImpl: (url, init) => fetch(url, { ...init, headers: { ...init?.headers, 'X-MNP-Client': CLIENT_ID } }) })
+    if (result.state === 'pending') { setCardMoveMessage(String(result.body.error)); return }
+    if (result.state === 'rejected') {
+      const details = result.body.details as { cardIds?: string[]; knowledgeEdges?: { source: string; target: string }[]; blockedBy?: { cardId: string; blockedByCardId: string }[] } | undefined
+      const ids = [...new Set([...(details?.cardIds ?? []), ...(details?.knowledgeEdges ?? []).flatMap((edge) => [edge.source, edge.target]),
+        ...(details?.blockedBy ?? []).flatMap((edge) => [edge.cardId, edge.blockedByCardId])])]
+      setSaveError(`${String(result.body.error ?? '카드를 이동하지 못했습니다.')}${ids.length ? ` 관련 카드: ${ids.map((id) => cutCards?.labels[id] ?? id).join(', ')}` : ''}`)
+    } else {
+      // 저장 응답 이후의 변경도 반영한다. 화면 조회 실패 시에는 기존 요청의 결과만 다시 확인한다.
+      const mapId = activeMapIdRef.current
+      if (mapId) {
+        const { map } = await apiRequest<MapDocumentResponse>(`/api/maps/${encodeURIComponent(mapId)}`)
+        const roots = request.body.cardIds
+        const nextNodes = map.nodes.map((node) => ({ ...node, selected: mapId === request.body.targetMapId && roots.includes(node.id) }))
+        serverBaseline.current = structuredClone(map)
+        nodesRef.current = nextNodes
+        edgesRef.current = map.edges
+        setNodes(nextNodes)
+        setEdges(map.edges)
+        setActiveDocumentRecord(map)
+        setSelectedId(mapId === request.body.targetMapId ? roots[0] : null)
+        resetHistory(nextNodes, map.edges)
+        setServerBaselineRevision((value) => value + 1)
+        saveMapCache(mapId, createPersistedMapContent(nextNodes, map.edges))
+      }
+      const summaries = [result.body.sourceDocument, result.body.targetDocument] as MapSummary[]
+      setDocuments((current) => current.map((document) => summaries.find((summary) => summary.id === document.id) ?? document))
+      const source = result.body.sourceMap as MapDocument
+      if (source && source.id !== mapId) {
+        try { tryWriteMapCache(localStorage, source.id, createPersistedMapContent(source.nodes, source.edges), { serverMap: source }) }
+        catch { /* 이동은 서버에서 완료되었고, 다음 문서 조회 시 서버 값으로 갱신한다. */ }
+      }
+      setCutCards(null)
+      setSaveError('')
+      setMergeNotice(`카드 ${(result.body.movedCardIds as string[]).length}개를 AI 대화·댓글과 함께 이동했습니다.`)
+      setMapReloadToken((value) => value + 1)
+    }
+    sessionStorage.removeItem(moveStorageKey)
+    setPendingCardMove(null)
+  }, [cutCards, moveStorageKey, resetHistory, saveMapCache, setEdges, setNodes])
+
+  const pasteCutCards = useCallback(async (parentId: string) => {
+    if (mode !== 'editor' || !activeMapId || !cutCards || cardMoveBusyRef.current || pendingCardMove) return
+    cardMoveBusyRef.current = true
+    setCardMoveBusy(true)
+    setCardMoveMessage('문서 저장을 확인하고 카드를 이동하고 있습니다…')
+    setNodeContextMenu(null)
+    try {
+      if (cutCards.sourceMapId === activeMapId && cutCards.movedCardIds.includes(parentId)) throw new Error('자기 자신이나 하위 카드 아래로 이동할 수 없습니다.')
+      const health = await apiRequest<{ cardMoveProtocolVersion?: number }>('/api/health', { signal: AbortSignal.timeout(5000), cache: 'no-store' })
+      if ((health.cardMoveProtocolVersion ?? 0) < 2) throw new Error('서버에 카드 잘라내기·붙여넣기 기능이 아직 반영되지 않았습니다. MnP 서버를 업데이트·재시작한 뒤 시도해 주세요.')
+      const target = await waitForCardMoveSave(activeMapId)
+      const parent = target.nodes.find((node) => node.id === parentId)
+      if (!parent) throw new Error('붙여넣을 상위 카드를 찾을 수 없습니다.')
+      const remainingNodes = target.nodes.filter((node) => cutCards.sourceMapId !== activeMapId || !cutCards.movedCardIds.includes(node.id))
+      const targetBottom = Math.max(parent.position.y, ...remainingNodes.map((node) => node.position.y + nodeDimensions(node).height))
+      const request: CardMoveRequest = { requestId: cardMoveRequestId(), sourceMapId: cutCards.sourceMapId,
+        body: { cardIds: cutCards.cardIds, sourceVersion: cutCards.sourceVersion, targetVersion: target.version,
+          targetMapId: activeMapId, targetParentCardId: parentId, responseMode: 'full',
+          targetPosition: snapMindMapPosition({ x: childMindMapHorizontalPosition(parent.position, nodeDimensions(parent).width), y: targetBottom + 80 }) } }
+      // 재시작 후에도 동일한 키로 결과를 확인할 수 있어야 서버에 전송한다.
+      sessionStorage.setItem(moveStorageKey, JSON.stringify(request))
+      setPendingCardMove(request)
+      await finishCardMove(request)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '카드 이동을 확인하지 못했습니다.'
+      setCardMoveMessage(`이동 결과 확인이 필요합니다. ${message}`)
+      setSaveError(message)
+    } finally { cardMoveBusyRef.current = false; setCardMoveBusy(false) }
+  }, [activeMapId, cutCards, finishCardMove, mode, moveStorageKey, pendingCardMove, waitForCardMoveSave])
+
+  const recheckCardMove = useCallback(async () => {
+    if (!pendingCardMove || cardMoveBusyRef.current) return
+    cardMoveBusyRef.current = true
+    setCardMoveBusy(true)
+    setCardMoveMessage('이동 결과를 확인하고 있습니다…')
+    try { await finishCardMove(pendingCardMove, true) }
+    catch (error) { setCardMoveMessage(error instanceof Error ? error.message : '이동 결과를 확인하지 못했습니다.') }
+    finally { cardMoveBusyRef.current = false; setCardMoveBusy(false) }
+  }, [finishCardMove, pendingCardMove])
+
   const copyNode = useCallback((nodeId: string) => {
     const node = nodes.find((candidate) => candidate.id === nodeId)
     if (!node || node.data.kind === 'image' || !activeMapId) return
@@ -5434,11 +5653,13 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     const nodesToCopy = (selectedNodes.some((candidate) => candidate.id === nodeId) ? selectedNodes : [node])
       .filter((candidate) => candidate.data.kind !== 'image')
     const copiedNodeIds = new Set(nodesToCopy.map((candidate) => candidate.id))
+    setCutCards(null)
     setCopiedNodes({
       sourceMapId: activeMapId,
       nodes: nodesToCopy.map((candidate) => {
         const copiedData = structuredClone(candidate.data)
         delete copiedData.aiConversationId
+        delete copiedData.aiPrimaryConversationId
         delete copiedData.aiConversations
         return {
           sourceNodeId: candidate.id,
@@ -5458,6 +5679,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     if (mode !== 'editor' || !activeMapId) return
     const node = nodes.find((candidate) => candidate.id === nodeId)
     if (!node || node.data.kind !== 'image' || !node.data.image) return
+    setCutCards(null)
     const imagesToCopy = node.selected
       ? nodes.filter((candidate) => candidate.selected && candidate.data.kind === 'image' && candidate.data.image)
       : [node]
@@ -5549,6 +5771,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
           label,
           kind: 'task',
           aiConversationId: undefined,
+          aiPrimaryConversationId: undefined,
           aiConversations: undefined,
           reference: pasteMode === 'reference' ? originalReference : pasteMode === 'clone' ? undefined : copiedData.reference,
           blockedBy: remappedBlockedBy.length > 0 ? remappedBlockedBy : undefined,
@@ -5619,6 +5842,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     }
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
+        setCutCards(null)
         if (dailyBackupPreview) {
           setDailyBackupPreview(null)
           return
@@ -5682,9 +5906,23 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     setLiveCursors({})
   }, [activeMapId])
 
+  const toggleNewMapForm = (groupId: string | null) => {
+    if (mapCreationPending.current) return
+    setCreatingMap(!creatingMap || newMapGroupId !== groupId)
+    if (newMapGroupId !== groupId) setNewMapTitle('')
+    setNewMapGroupId(groupId)
+    setCreatingGroup(false)
+    setSaveError('')
+    if (groupId) setCollapsedDocumentGroupIds((current) => {
+      const next = new Set(current)
+      next.delete(groupId)
+      return next
+    })
+  }
+
   const createMap = async () => {
     const title = newMapTitle.trim()
-    if (!title || mode !== 'editor') return
+    if (!title || mode !== 'editor' || mapCreationPending.current) return
     const rootId = `root-${Date.now()}`
     const map: Pick<MapDocument, 'nodes' | 'edges'> = {
       nodes: [{
@@ -5703,22 +5941,64 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       edges: [],
     }
 
+    mapCreationPending.current = true
+    setMapCreationBusy(true)
     setSaveError('')
+    let createdMapId: string | null = null
     try {
-      const created = await apiRequest<{ map: MapDocument; summary: MapSummary; documentLayout: DocumentLayout }>('/api/maps', {
-        method: 'POST',
-        body: JSON.stringify({ title, map }),
-      })
-      setDocuments((current) => [...current, created.summary])
-      setDocumentLayout(created.documentLayout)
-      setCreatingMap(false)
-      setNewMapTitle('')
-      setSelectedGroupId(null)
-      setActiveMapId(created.summary.id)
+      if (newMapGroupId) {
+        const groupUrl = `/api/groups/${encodeURIComponent(newMapGroupId)}`
+        const context = await apiRequest<{ project: { version: number } }>(groupUrl)
+        const created = await apiRequest<{ map: MapDocument }>(`${groupUrl}/documents`, {
+          method: 'POST',
+          body: JSON.stringify({ title, description: map.nodes[0].data.description, baseVersion: context.project.version }),
+        })
+        createdMapId = created.map.id
+        const library = await apiRequest<DocumentLibraryResponse>('/api/maps')
+        setDocuments(library.maps)
+        setDocumentLayout(library.documentLayout)
+      } else {
+        const created = await apiRequest<{ map: MapDocument; summary: MapSummary; documentLayout: DocumentLayout }>('/api/maps', {
+          method: 'POST',
+          body: JSON.stringify({ title, map }),
+        })
+        createdMapId = created.summary.id
+        setDocuments((current) => [...current, created.summary])
+        setDocumentLayout(created.documentLayout)
+      }
     } catch (error) {
-      setSaveError(error instanceof Error ? error.message : '새 문서를 만들지 못했습니다.')
+      setSaveError(createdMapId
+        ? '문서는 생성되었지만 목록을 갱신하지 못했습니다. 새로고침해 주세요.'
+        : error instanceof Error ? error.message : '새 문서를 만들지 못했습니다.')
+    } finally {
+      // 생성 후 목록 조회만 실패했을 때 같은 문서를 다시 생성하지 않는다.
+      if (createdMapId) {
+        setCreatingMap(false)
+        setNewMapTitle('')
+        setNewMapGroupId(null)
+        setSearchTerm('')
+        setSelectedGroupId(null)
+        setActiveMapId(createdMapId)
+      }
+      mapCreationPending.current = false
+      setMapCreationBusy(false)
     }
   }
+
+  const renderNewMapForm = (groupId: string | null = null) => (
+    <form className={`new-map-form ${groupId ? 'group-new-map-form' : ''}`} onSubmit={(event) => { event.preventDefault(); void createMap() }} onKeyDown={(event) => {
+      if (event.key === 'Escape') {
+        event.stopPropagation()
+        if (!mapCreationPending.current) setCreatingMap(false)
+      }
+    }}>
+      <input value={newMapTitle} onChange={(event) => setNewMapTitle(event.target.value)} placeholder="새 마인드맵 이름" aria-label="새 마인드맵 이름" maxLength={80} disabled={mapCreationBusy} autoFocus />
+      <div className="new-map-form-actions">
+        <button type="submit" disabled={!newMapTitle.trim() || mapCreationBusy}>{!mapCreationBusy && <Icon name="plus" size={14} />}{mapCreationBusy ? '생성 중…' : '생성'}</button>
+        <button type="button" disabled={mapCreationBusy} onClick={() => setCreatingMap(false)}>취소</button>
+      </div>
+    </form>
+  )
 
   const renameActiveMap = async (value: string) => {
     const title = value.trim()
@@ -5815,7 +6095,8 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     try {
       const result = await apiRequest<{ map: MapDocument; summary: MapSummary; revisions: MapRevisionSummary[]; historyHasMore: boolean; historyNextOffset: number | null }>(
         `/api/maps/${encodeURIComponent(activeMapId)}/history/${encodeURIComponent(revision.id)}/restore`,
-        { method: 'POST' },
+        { method: 'POST', body: JSON.stringify({ baseVersion: serverBaseline.current?.version,
+          baseLifecycleVersion: serverBaseline.current?.lifecycleVersion ?? 0, expectedSnapshotSha256: revision.snapshotSha256 }) },
       )
       serverBaseline.current = structuredClone(result.map)
       const nextSelectedId = resolveDocumentNodeSelection(result.map.nodes, null, isPhoneViewport())
@@ -5849,7 +6130,8 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     try {
       const result = await apiRequest<{ map: MapDocument; summary: MapSummary; dailyBackups: DailyBackupSummary[]; revisions: MapRevisionSummary[]; historyHasMore: boolean; historyNextOffset: number | null }>(
         `/api/maps/${encodeURIComponent(activeMapId)}/backups/daily/${encodeURIComponent(backup.date)}/restore`,
-        { method: 'POST' },
+        { method: 'POST', body: JSON.stringify({ baseVersion: serverBaseline.current?.version,
+          baseLifecycleVersion: serverBaseline.current?.lifecycleVersion ?? 0, expectedSnapshotSha256: backup.snapshotSha256 }) },
       )
       serverBaseline.current = structuredClone(result.map)
       const nextSelectedId = resolveDocumentNodeSelection(result.map.nodes, null, isPhoneViewport())
@@ -6030,16 +6312,17 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     }
   }
 
-  const refreshLifecycleLibrary = async () => {
+  const refreshLifecycleLibrary = async (reloadActiveMap = true) => {
     const [library, archive, trash] = await Promise.all([apiRequest<DocumentLibraryResponse>('/api/maps'), apiRequest<{ maps: MapSummary[] }>('/api/maps/archive'),
       accountMode === 'editor' ? apiRequest<{ maps: MapSummary[] }>('/api/maps/trash') : Promise.resolve({ maps: [] as MapSummary[] })])
     setDocuments(library.maps); setDocumentLayout(library.documentLayout); setArchivedDocuments(archive.maps)
     if (library.lifecycleCounts) setLifecycleCounts(library.lifecycleCounts)
     setTrashedDocuments(trash.maps)
-    if (activeMapId && ![...library.maps, ...archive.maps].some((document) => document.id === activeMapId)) {
+    const currentMapId = activeMapIdRef.current
+    if (currentMapId && ![...library.maps, ...archive.maps].some((document) => document.id === currentMapId)) {
       setLoadedMapId(null); setActiveMapId(library.maps[0]?.id ?? '')
     }
-    setMapReloadToken((current) => current + 1)
+    if (reloadActiveMap) setMapReloadToken((current) => current + 1)
   }
   const archiveDocument = async (mapId: string) => {
     const document = documents.find((item) => item.id === mapId)
@@ -6054,26 +6337,52 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     } catch (error) { setSaveError(error instanceof Error ? error.message : '문서를 보관하지 못했습니다.') }
   }
 
-  const trashDocument = async (mapId: string) => {
-    if (mode !== 'editor') return
-    const document = documents.find((item) => item.id === mapId)
-    if (!document || !window.confirm(`“${document.title}” 문서를 휴지통으로 이동할까요? 휴지통에서 복원할 수 있습니다.`)) return
-    setDocumentContextMenu(null)
-    setSaveError('')
-
-    try {
-      const result = await apiRequest<{ trashedId: string; maps: MapSummary[]; documentLayout: DocumentLayout; trash: MapSummary[] }>(`/api/maps/${encodeURIComponent(mapId)}`, { method: 'DELETE' })
-      setDocuments(result.maps)
-      setDocumentLayout(result.documentLayout)
-      setTrashedDocuments(result.trash)
-      if (mapId === activeMapId) {
-        setLoadedMapId(null)
-        setActiveMapId(result.maps[0]?.id ?? '')
-      }
-      setSavedAt('휴지통으로 이동됨')
-    } catch (error) {
-      setSaveError(error instanceof Error ? error.message : '문서를 휴지통으로 이동하지 못했습니다.')
+  const performDocumentTrash = async (preview: DocumentTrashPreview) => {
+    if (accountMode !== 'editor') throw new Error('편집자만 문서를 휴지통으로 이동할 수 있습니다.')
+    const { target } = preview
+    if (target.id === activeMapIdRef.current && serverBaseline.current
+      && !mapContentsEqual(createPersistedMapContent(nodesRef.current, edgesRef.current), serverBaseline.current)) {
+      throw new Error('대상 문서의 변경이 저장된 뒤 휴지통으로 이동해 주세요.')
     }
+    await apiRequest(`/api/maps/${encodeURIComponent(target.id)}${target.archived ? '/archive' : ''}`, {
+      method: 'DELETE', body: JSON.stringify({ referenceVersion: preview.referenceVersion,
+        baseVersion: target.version, baseLifecycleVersion: target.lifecycleVersion }),
+    })
+    // 이동은 이미 완료됐다. 목록 재조회 실패를 이동 실패로 오인해 재요청하지 않는다.
+    // 탐색 중인 다른 문서의 편집은 유지한다. Ref 상태는 기존 변경 알림으로 갱신된다.
+    try { await refreshLifecycleLibrary(false) }
+    catch { setSaveError('문서는 휴지통으로 이동했지만 목록을 갱신하지 못했습니다. 새로고침해 주세요.') }
+    setSavedAt('휴지통으로 이동됨')
+  }
+  const requestDocumentTrash = async (document: { id: string; title: string }) => {
+    if (accountMode !== 'editor' || trashRequestPending.current) return false
+    trashRequestPending.current = true
+    setDocumentContextMenu(null); setSaveError('')
+    const showReview = (preview: DocumentTrashPreview, message?: string) => {
+      setTrashReview({ preview, message }); setLifecycleOpen(false); setMobileSidebarOpen(false)
+    }
+    try {
+      const preview = await apiRequest<DocumentTrashPreview>(`/api/maps/${encodeURIComponent(document.id)}/trash-preview`)
+      if (preview.references.length) { showReview(preview); return false }
+      const archiveNotice = preview.target.archived ? '보관 문서를 휴지통으로 이동할까요? 원문·댓글·이미지는 유지되며, 휴지통에서 복원하면 보관함으로 돌아옵니다.\n\n기존 링크는 휴지통에서 복원하기 전까지 사용할 수 없습니다. 보관 상태가 변경되므로 기존 문서 재구성의 일괄 되돌리기도 차단됩니다.'
+        : '문서를 휴지통으로 이동할까요? 휴지통에서 복원할 수 있습니다.'
+      if (!window.confirm(`“${preview.target.title}” ${archiveNotice}\n다른 문서의 Ref 참조는 없습니다.`)) return false
+      await performDocumentTrash(preview)
+      return true
+    } catch (error) {
+      const preview = trashPreviewFromError(error)
+      if (preview?.target.id === document.id) {
+        showReview(preview, error instanceof Error ? error.message : undefined)
+        return false
+      }
+      throw error
+    } finally { trashRequestPending.current = false }
+  }
+  const trashDocument = async (mapId: string) => {
+    const document = documents.find((item) => item.id === mapId)
+    if (!document) return
+    try { await requestDocumentTrash(document) }
+    catch (error) { setSaveError(error instanceof Error ? error.message : '문서를 휴지통으로 이동하지 못했습니다.') }
   }
 
   const restoreDocument = async (mapId: string) => {
@@ -6135,7 +6444,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     setAiConversationContextMenu(null)
     setDocumentContextMenu({
       x: Math.max(8, Math.min(event.clientX, window.innerWidth - 230)),
-      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 465)),
+      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 510)),
       mapId,
     })
   }
@@ -6146,9 +6455,41 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
     setNodeContextMenu(null); setAiConversationContextMenu(null)
     setDocumentContextMenu({ x: Math.max(8, Math.min(event.clientX, window.innerWidth - 230)), y: Math.max(8, Math.min(event.clientY, window.innerHeight - 140)), mapId: '', groupId })
   }
+  // 휴대폰은 끌면 목록이 스크롤되므로 꾹 눌러 메뉴가 열린 뒤 이어서 끌어야 문서·그룹을 옮긴다. 놓기는 PC 드래그와 같은 moveLibraryItem을 쓴다.
+  const touchDraggedLibraryItem = useRef<DocumentLayoutItem | null>(null)
+  const touchLibraryDropTarget = (x: number, y: number) => {
+    const dragged = touchDraggedLibraryItem.current
+    return dragged ? libraryDropTargetFromElement(window.document.elementFromPoint(x, y), dragged.type) : null
+  }
+  const endTouchLibraryDrag = () => {
+    touchDraggedLibraryItem.current = null
+    stopDocumentListAutoScroll()
+    setDraggingLibraryItem(null)
+    setDocumentDropTargetId(null)
+  }
   const libraryTouchMenu = useLibraryTouchMenu(accountMode === 'editor' && !trashOpen, ({ kind, id, x, y }) => {
     setNodeContextMenu(null); setAiConversationContextMenu(null); setCanvasPasteMenu(null)
-    setDocumentContextMenu({ x: Math.max(8, Math.min(x, window.innerWidth - 230)), y: Math.max(8, Math.min(y, window.innerHeight - (kind === 'map' ? 465 : 140))), mapId: kind === 'map' ? id : '', ...(kind === 'group' ? { groupId: id } : {}) })
+    setDocumentContextMenu({ x: Math.max(8, Math.min(x, window.innerWidth - 230)), y: Math.max(8, Math.min(y, window.innerHeight - (kind === 'map' ? 510 : 140))), mapId: kind === 'map' ? id : '', ...(kind === 'group' ? { groupId: id } : {}) })
+  }, {
+    enabled: mode === 'editor' && !normalizedDocumentSearch,
+    onStart: ({ kind, id }) => {
+      setDocumentContextMenu(null)
+      const item: DocumentLayoutItem = { type: kind, id }
+      touchDraggedLibraryItem.current = item
+      setDraggingLibraryItem(item)
+    },
+    onMove: (x, y) => {
+      updateDocumentListAutoScroll(y)
+      setDocumentDropTargetId(touchLibraryDropTarget(x, y)?.key ?? null)
+    },
+    onEnd: (x, y) => {
+      const dragged = touchDraggedLibraryItem.current
+      const target: LibraryDropTarget | null = touchLibraryDropTarget(x, y)
+      const destination = libraryDropDestination(target, dragged, effectiveDocumentLayout.items[0])
+      endTouchLibraryDrag()
+      if (dragged && destination) moveLibraryItem(dragged, destination)
+    },
+    onCancel: endTouchLibraryDrag,
   })
   const openDocumentCleanup = (scope: { type: 'map' | 'group'; id: string }) => {
     setDocumentContextMenu(null)
@@ -7104,6 +7445,11 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         key={document.id}
         data-library-menu-kind="map"
         data-library-menu-id={document.id}
+        data-library-drop-key={dropKey}
+        data-library-drop-accepts="map"
+        {...(location.type === 'top'
+          ? { 'data-library-drop-action': 'top-before', 'data-library-drop-target-type': 'map', 'data-library-drop-target-id': document.id }
+          : { 'data-library-drop-action': 'group-insert', 'data-library-drop-group-id': location.groupId, 'data-library-drop-map-id': document.id })}
         draggable={mode === 'editor' && !normalizedDocumentSearch}
         className={`map-item ${location.type === 'group' ? 'group-document' : ''} ${!selectedGroup && document.id === activeMapId ? 'active' : ''} ${rootStatus === 'planned' ? 'root-planned' : ''} ${draggingLibraryItem?.type === 'map' && draggingLibraryItem.id === document.id ? 'dragging' : ''} ${documentDropTargetId === dropKey ? 'document-drop-target' : ''}`}
         onClick={() => { setSelectedGroupId(null); setRenamingMap(false); setActiveMapId(document.id); setMobileSidebarOpen(false) }}
@@ -7154,7 +7500,8 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
   }
 
   return (
-    <div className={`app-shell ${resizingSidebar ? 'resizing-sidebar' : ''} ${resizingInspector ? 'resizing-inspector' : ''}`}>
+    <>
+    <div inert={cardMoveBlocked} className={`app-shell ${resizingSidebar ? 'resizing-sidebar' : ''} ${resizingInspector ? 'resizing-inspector' : ''}`}>
       <header className="topbar">
         <button
           type="button"
@@ -7285,7 +7632,8 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                       <span>
                         <strong>{notificationTitle(notification)}</strong>
                         <small>{notification.mapTitle} · {notification.nodeLabel}</small>
-                        <em>{notification.message}</em>
+                        {notification.delegationStatus && <em title={notification.delegationStatus.message}>{notification.delegationStatus.message}</em>}
+                        <em title={notification.message}>{notification.delegationStatus ? `발생 당시: ${notification.message}` : notification.message}</em>
                         <time>{new Date(notification.createdAt).toLocaleString('ko-KR')}</time>
                       </span>
                       {!notification.readAt && <i />}
@@ -7323,6 +7671,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                 <div className="account-summary"><strong>{user.name}</strong><span>{user.email}</span></div>
                 <button type="button" aria-pressed={aiIndicatorMotion === 'always'} title="이 브라우저에서만 AI 작업 표시의 점 3개를 항상 움직일 수 있습니다. 다른 애니메이션과 시스템 설정은 변경하지 않습니다." onClick={onToggleAiIndicatorMotion}><Icon name="sparkles" size={14} /><span>AI 작업 표시 움직임</span><span className="account-setting-state">{aiIndicatorMotion === 'always' ? '항상' : '시스템'}</span></button>
                 {!user.publicAccess && mode === 'editor' && <button onClick={() => { setAccountMenuOpen(false); setDistributedWorkOpen(true) }}><Icon name="sparkles" size={14} /><span>분산 작업 설정</span></button>}
+                {!user.publicAccess && mode === 'editor' && <button onClick={() => { setAccountMenuOpen(false); setAiDelegationPolicyOpen(true) }}><Icon name="users" size={14} /><span>AI 위임 규칙</span></button>}
                 {!user.publicAccess && <button onClick={() => { setAccountMenuOpen(false); setPasswordDialogOpen(true) }}><Icon name="lock" size={14} /><span>비밀번호 변경</span></button>}
                 <button className="account-logout" onClick={onLogout}><Icon name="logout" size={14} /><span>{user.publicAccess ? '로그인 화면으로 이동' : '로그아웃'}</span></button>
               </div>
@@ -7334,12 +7683,20 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
       {adminOpen && user.role === 'admin' && <AdminEditorPanel onClose={closeAdminPanel} />}
       {passwordDialogOpen && !user.publicAccess && <PasswordChangeDialog onClose={() => setPasswordDialogOpen(false)} />}
       {distributedWorkOpen && !user.publicAccess && mode === 'editor' && <DistributedWorkDialog onClose={() => setDistributedWorkOpen(false)} />}
+      {aiDelegationPolicyOpen && !user.publicAccess && mode === 'editor' && <AiDelegationPolicyDialog onClose={() => setAiDelegationPolicyOpen(false)} />}
 
       {externalChange && (
         <div className="external-change-banner" role="status">
           <span><Icon name="history" size={15} /><strong>{externalChange.updatedBy.name}</strong>님이 이 문서를 변경했습니다.</span>
           <button onClick={() => setMapReloadToken((current) => current + 1)}>변경 내용 불러오기</button>
           <button className="banner-close" onClick={() => setExternalChange(null)} aria-label="알림 닫기"><Icon name="close" size={13} /></button>
+        </div>
+      )}
+      {cutCards && (
+        <div className="card-cut-notice" role="status">
+          <span>“{cutCards.sourceTitle}”의 카드 {cutCards.movedCardIds.length}개 이동 대기 · 하위 카드 포함</span>
+          <span>대상 카드를 우클릭하여 붙여넣으세요.</span>
+          <button onClick={() => setCutCards(null)}>잘라내기 취소</button>
         </div>
       )}
       {mergeNotice && (
@@ -7393,8 +7750,8 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                   <button
                     type="button"
                     className="dooray-mentions-trigger"
-                    aria-label="Dooray 참조"
-                    title="Dooray 참조 — 나를 멘션한 업무와 댓글"
+                    aria-label="Dooray 업무 대응"
+                    title="Dooray 업무 대응 — 나를 멘션한 내용과 담당·참조 업무를 확인하고, 필요한 대응을 진행합니다."
                     onClick={(event) => {
                       setDoorayMentionsOpen(true)
                       event.currentTarget.blur()
@@ -7405,6 +7762,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                   <button
                     aria-label="새 문서 그룹"
                     title="새 문서 그룹"
+                    disabled={mapCreationBusy}
                     onClick={() => { setCreatingGroup((current) => !current); setCreatingMap(false) }}
                   >
                     <Icon name="folder" size={15} />
@@ -7412,9 +7770,10 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                   <button
                     aria-label="새 마인드맵"
                     title="새 마인드맵"
-                    onClick={() => { setCreatingMap((current) => !current); setCreatingGroup(false) }}
+                    disabled={mapCreationBusy}
+                    onClick={() => toggleNewMapForm(null)}
                   >
-                    <Icon name={creatingMap ? 'close' : 'plus'} size={16} />
+                    <Icon name={creatingMap && !newMapGroupId ? 'close' : 'plus'} size={16} />
                   </button>
                 </div>
               )}
@@ -7435,12 +7794,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                 <Icon name="search" size={16} />
                 <input placeholder="문서 검색" value={searchTerm} onChange={(event) => setSearchTerm(event.target.value)} />
               </label>
-              {creatingMap && (
-                <form className="new-map-form" onSubmit={(event) => { event.preventDefault(); void createMap() }}>
-                  <input value={newMapTitle} onChange={(event) => setNewMapTitle(event.target.value)} placeholder="새 마인드맵 이름" maxLength={80} autoFocus />
-                  <button type="submit" disabled={!newMapTitle.trim()}><Icon name="plus" size={14} />생성</button>
-                </form>
-              )}
+              {creatingMap && !newMapGroupId && renderNewMapForm()}
               {creatingGroup && (
                 <form className="new-map-form new-group-form" onSubmit={(event) => { event.preventDefault(); createDocumentGroup() }}>
                   <input value={newGroupName} onChange={(event) => setNewGroupName(event.target.value)} placeholder="새 그룹 이름" maxLength={80} autoFocus />
@@ -7467,6 +7821,9 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                   <div
                     className={`library-top-insertion-target ${documentDropTargetId === 'top-start' ? 'active' : ''}`}
                     title="목록 처음으로 이동"
+                    data-library-drop-key="top-start"
+                    data-library-drop-accepts="any"
+                    data-library-drop-action="top-start"
                     onDragOver={(event) => {
                       event.preventDefault()
                       event.stopPropagation()
@@ -7491,6 +7848,11 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                           <div
                             className={`library-drop-line ${documentDropTargetId === `top-before:map:${layoutItem.id}` ? 'active' : ''}`}
                             title={layoutIndex === 0 ? '목록 처음으로 이동' : '이 위치로 이동'}
+                            data-library-drop-key={`top-before:map:${layoutItem.id}`}
+                            data-library-drop-accepts="any"
+                            data-library-drop-action="top-before"
+                            data-library-drop-target-type="map"
+                            data-library-drop-target-id={layoutItem.id}
                             onDragOver={(event) => {
                               if (!draggingLibraryItem) return
                               event.preventDefault()
@@ -7525,6 +7887,11 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                     <section
                       className={`document-group ${collapsed ? 'collapsed' : ''}`}
                       key={`group-${group.id}`}
+                      data-library-drop-key={groupDropKey}
+                      data-library-drop-accepts="group"
+                      data-library-drop-action="top-before"
+                      data-library-drop-target-type="group"
+                      data-library-drop-target-id={group.id}
                       onDragOver={(event) => {
                         if (draggingLibraryItem?.type !== 'group' || normalizedDocumentSearch) return
                         event.preventDefault()
@@ -7541,6 +7908,11 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                         <div
                           className={`library-drop-line ${documentDropTargetId === `top-before:group:${group.id}` ? 'active' : ''}`}
                           title={layoutIndex === 0 ? '목록 처음으로 이동' : '이 위치로 이동'}
+                          data-library-drop-key={`top-before:group:${group.id}`}
+                          data-library-drop-accepts="any"
+                          data-library-drop-action="top-before"
+                          data-library-drop-target-type="group"
+                          data-library-drop-target-id={group.id}
                           onDragOver={(event) => {
                             if (!draggingLibraryItem) return
                             event.preventDefault()
@@ -7558,6 +7930,10 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                         className={`document-group-header ${selectedGroup?.id === group.id ? 'group-selected' : ''} ${draggingLibraryItem?.type === 'group' && draggingLibraryItem.id === group.id ? 'dragging' : ''} ${documentDropTargetId === groupDropKey ? 'document-drop-target' : ''}`}
                         data-library-menu-kind="group"
                         data-library-menu-id={group.id}
+                        data-library-drop-key={groupDropKey}
+                        data-library-drop-accepts="map"
+                        data-library-drop-action="group-append"
+                        data-library-drop-group-id={group.id}
                         onContextMenu={(event) => openGroupContextMenu(event, group.id)}
                         draggable={mode === 'editor' && !normalizedDocumentSearch}
                         onDragStart={(event) => {
@@ -7609,6 +7985,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                         </button>
                         {mode === 'editor' && (
                           <div className="document-group-actions">
+                            <button type="button" disabled={mapCreationBusy} onClick={() => toggleNewMapForm(group.id)} aria-label={`${group.name}에 새 마인드맵 추가`} title="새 마인드맵 추가" aria-expanded={creatingMap && newMapGroupId === group.id}><Icon name="plus" size={12} /></button>
                             <button type="button" onClick={() => renameDocumentGroup(group)} aria-label={`${group.name} 이름 변경`}><Icon name="edit" size={11} /></button>
                             <button type="button" onClick={() => deleteDocumentGroup(group)} aria-label={`${group.name} 그룹 삭제`}><Icon name="close" size={11} /></button>
                           </div>
@@ -7616,8 +7993,9 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                       </div>
                       {!collapsed && (
                         <div className="document-group-items">
+                          {creatingMap && newMapGroupId === group.id && renderNewMapForm(group.id)}
                           {visibleGroupDocuments.map((document) => renderDocumentListItem(document, { type: 'group', groupId: group.id }))}
-                          {visibleGroupDocuments.length === 0 && <div className="empty-document-group">문서를 이 그룹으로 드래그하세요.</div>}
+                          {visibleGroupDocuments.length === 0 && !(creatingMap && newMapGroupId === group.id) && <div className="empty-document-group">문서를 이 그룹으로 드래그하세요.</div>}
                         </div>
                       )}
                     </section>
@@ -7626,6 +8004,9 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                 {mode === 'editor' && !normalizedDocumentSearch && effectiveDocumentLayout.items.length > 0 && (
                   <div
                     className={`library-drop-boundary library-drop-end ${documentDropTargetId === 'top-end' ? 'active' : ''}`}
+                    data-library-drop-key="top-end"
+                    data-library-drop-accepts="any"
+                    data-library-drop-action="top-end"
                     onDragOver={(event) => {
                       if (!draggingLibraryItem) return
                       event.preventDefault()
@@ -8421,7 +8802,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                         else showAiEditorOnlyAlert()
                       }}
                       onContextMenu={mode === 'editor' ? openAiConversationContextMenu : undefined}
-                      title={mode === 'editor' ? '좌클릭: 기존 대화 열기 · 우클릭: 새 대화 시작' : '편집자만 사용 가능'}
+                      title={mode === 'editor' ? '좌클릭: 기존 대화 열기 · 우클릭: 새 대화 시작 또는 연결' : '편집자만 사용 가능'}
                     >
                       <Icon name="sparkles" size={15} /><span>AI 대화 열기</span>
                       {aiConversationLinksFromData(selectedNode.data).length > 1 && <b>{aiConversationLinksFromData(selectedNode.data).length}</b>}
@@ -8433,7 +8814,8 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                         if (mode === 'editor') setAiDialogOpen(true)
                         else showAiEditorOnlyAlert()
                       }}
-                      title={mode === 'editor' ? 'AI 대화 시작' : '편집자만 사용 가능'}
+                      onContextMenu={mode === 'editor' ? openAiConversationContextMenu : undefined}
+                      title={mode === 'editor' ? '좌클릭: AI 대화 시작 · 우클릭: 기존 대화 연결' : '편집자만 사용 가능'}
                     >
                       <Icon name="sparkles" size={15} /><span>AI 대화 시작</span>
                     </button>
@@ -8546,8 +8928,9 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                     <>
                       <textarea
                         ref={descriptionTextareaRef}
-                        value={selectedNode.data.description}
+                        value={selectedNode.data.description === DESCRIPTION_PLACEHOLDER ? '' : selectedNode.data.description}
                         onChange={(event) => updateNode(selectedNode.id, { description: event.target.value })}
+                        placeholder={DESCRIPTION_PLACEHOLDER}
                         rows={3}
                         style={inspectorTextareaHeights.description === undefined
                           ? undefined
@@ -9133,14 +9516,14 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
         </div>
       )}
       {doorayMentionsOpen && mode === 'editor' && (
-        <DoorayMentionsPanel clientId={CLIENT_ID} userId={user.id} onClose={() => setDoorayMentionsOpen(false)}
+        <DoorayMentionsPanel clientId={CLIENT_ID} userId={user.id} initialResponseId={linkedDoorayResponseId} onClose={closeDoorayMentions}
           aiRequestOpen={Boolean(aiConversationTarget)}
           onLaunchCard={setAiConversationLaunch}
           onOpenConversation={(job) => {
             if (job.conversationId) openAiConversation(job.conversationId, job.route?.cardId ?? '', job.route?.mapId ?? '', job.homeMachineRole)
           }}
           onOpenCard={(mapId, cardId) => {
-            setDoorayMentionsOpen(false)
+            closeDoorayMentions()
             selectCardAndReveal(mapId, cardId)
           }} />
       )}
@@ -9207,6 +9590,23 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
           onClose={closeAiConversationDialog}
         />
       )}
+      {aiConversationLinkTarget && mode === 'editor' && (
+        <AiConversationLinkDialog
+          key={`${aiConversationLinkTarget.mapId}:${aiConversationLinkTarget.cardId}`}
+          cardTitle={aiConversationLinkTarget.cardTitle}
+          onLookup={(conversationId, signal) => apiRequest<AiConversationLookup>(
+            `/api/maps/${encodeURIComponent(aiConversationLinkTarget.mapId)}/cards/${encodeURIComponent(aiConversationLinkTarget.cardId)}/ai-conversations/lookup?conversationId=${encodeURIComponent(conversationId)}`, { signal })}
+          onConnect={async (previewToken) => {
+            const target = aiConversationLinkTarget
+            const result = await apiRequest<MapDocumentResponse>(
+              `/api/maps/${encodeURIComponent(target.mapId)}/cards/${encodeURIComponent(target.cardId)}/ai-conversations/connect`, {
+                method: 'POST', body: JSON.stringify({ previewToken }),
+              })
+            reconcileRemoteMap(result.map)
+          }}
+          onClose={() => setAiConversationLinkTarget(null)}
+        />
+      )}
       {aiConversationPicker && (
         <AiConversationPickerDialog
           key={`${aiConversationPicker.mapId}:${aiConversationPicker.cardId}`}
@@ -9227,12 +9627,25 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
               initialRequest: '',
             })
           }}
-          onDeleteUnavailable={(conversationId) => deleteUnavailableAiConversation(
+          onDeleteConversation={(conversationId) => deleteAiConversation(
             aiConversationPicker.mapId,
             aiConversationPicker.cardId,
             conversationId,
           )}
+          onSetPrimaryConversation={(conversationId, cardId, expected) => setPrimaryAiConversation(aiConversationPicker.mapId, cardId, conversationId, expected)}
           onClose={() => setAiConversationPicker(null)}
+        />
+      )}
+      {documentAiConversations && (
+        <AiConversationPickerDialog
+          key={`document:${documentAiConversations.mapId}`}
+          mapId={documentAiConversations.mapId}
+          documentTitle={documentAiConversations.title}
+          onSelect={(conversation, cardId) => {
+            void openAiConversation(conversation.conversationId, cardId, documentAiConversations.mapId, conversation.homeMachineRole)
+          }}
+          onDeleteConversation={(conversationId, cardId) => deleteAiConversation(documentAiConversations.mapId, cardId, conversationId)}
+          onClose={() => setDocumentAiConversations(null)}
         />
       )}
       {previewImageNode?.data.image && (
@@ -9281,6 +9694,21 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
               <div className="context-divider" />
             </>
           )}
+          <button role="menuitem" disabled={contextMenuNode?.data.kind === 'root'} onClick={() => { void cutNode(nodeContextMenu.nodeId) }}>
+            <span className="context-icon"><Icon name="cut" size={15} /></span>
+            <span><strong>잘라내기</strong><small>선택 카드와 하위 카드 이동 준비 · AI 대화 유지</small></span>
+          </button>
+          {cutCards && <>
+            <button role="menuitem" onClick={() => { void pasteCutCards(nodeContextMenu.nodeId) }}>
+              <span className="context-icon"><Icon name="paste" size={15} /></span>
+              <span><strong>붙여넣기 (이동)</strong><small>카드 {cutCards.movedCardIds.length}개를 이 카드 아래로 이동</small></span>
+            </button>
+            <button role="menuitem" onClick={() => { setCutCards(null); setNodeContextMenu(null) }}>
+              <span className="context-icon"><Icon name="close" size={15} /></span>
+              <span><strong>잘라내기 취소</strong></span>
+            </button>
+          </>}
+          <div className="context-divider" />
           {contextMenuNode?.data.kind === 'image' ? (
             <>
               <button role="menuitem" onClick={() => { void copyImageNodes(nodeContextMenu.nodeId) }}>
@@ -9307,7 +9735,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                 <span className="context-icon"><Icon name="copy" size={15} /></span>
                 <span><strong>복사{nodes.some((node) => node.id === nodeContextMenu.nodeId && node.selected) && nodes.filter((node) => node.selected).length > 1 ? ` (${nodes.filter((node) => node.selected).length}개)` : ''}</strong><small>선택 노드와 내부 연결 관계 복사</small></span>
               </button>
-              {copiedNodes && copiedNodes.sourceMapId !== activeMapId ? (
+              {!cutCards && (copiedNodes && copiedNodes.sourceMapId !== activeMapId ? (
                 <>
                   <button role="menuitem" disabled={!copiedNodes} onClick={() => pasteNodeAsChild(nodeContextMenu.nodeId, 'clone')}>
                     <span className="context-icon"><Icon name="paste" size={15} /></span>
@@ -9323,7 +9751,7 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
                   <span className="context-icon"><Icon name="paste" size={15} /></span>
                   <span><strong>자식으로 붙여넣기</strong><small>{copiedNodes ? copiedNodes.nodes.length === 1 ? `“${copiedNodes.nodes[0].data.label}” 복사본 생성` : `${copiedNodes.nodes.length}개 노드 복사본 생성` : '먼저 노드를 복사해 주세요'}</small></span>
                 </button>
-              )}
+              ))}
               <div className="context-divider" />
               <button className="danger" role="menuitem" onClick={() => { deleteNodeById(nodeContextMenu.nodeId); setNodeContextMenu(null) }}>
                 <span className="context-icon"><Icon name="trash" size={15} /></span>
@@ -9393,6 +9821,10 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
             <span className="context-icon"><Icon name="sparkles" size={15} /></span>
             <span><strong>AI 대화를 새로 시작</strong><small>현재 카드를 기준으로 옵션 선택</small></span>
           </button>
+          <button role="menuitem" onClick={showAiConversationLinkDialog} disabled={documentArchived}>
+            <span className="context-icon"><Icon name="link" size={15} /></span>
+            <span><strong>AI 대화 연결</strong><small>대화 ID로 조회한 뒤 현재 카드에 연결</small></span>
+          </button>
         </div>
       )}
       {cardLayoutTarget && accountMode === 'editor' && <CardLayoutDialog mapId={cardLayoutTarget.id} title={cardLayoutTarget.title} api={apiRequest} userId={user.id} members={teamMembers} launchInWebUi={aionUiWebNavigation.configured || !isLoopbackHostname(window.location.hostname)} ensureClean={() => !serverBaseline.current || mapContentsEqual(createPersistedMapContent(nodesRef.current, edgesRef.current), serverBaseline.current)} onClose={() => setCardLayoutTarget(null)} onChanged={async () => { await refreshLifecycleLibrary(); setSavedAt('확인한 카드 배치 적용됨') }} />}
@@ -9437,6 +9869,14 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
             </div>
           </div>
           <div className="context-divider" />
+          <button role="menuitem" onClick={() => {
+            const target = documents.find((item) => item.id === documentContextMenu.mapId)
+            setDocumentContextMenu(null)
+            if (target) setDocumentAiConversations({ mapId: target.id, title: target.title })
+          }}>
+            <span className="context-icon"><Icon name="sparkles" size={15} /></span>
+            <span><strong>AI 대화 목록</strong><small>전체 카드의 연결 대화 확인·삭제</small></span>
+          </button>
           <button role="menuitem" onClick={() => openDocumentCleanup({ type: 'map', id: documentContextMenu.mapId })}>
             <span className="context-icon"><Icon name="sparkles" size={15} /></span><span><strong>문서 정리</strong><small>규모 정리 또는 새 기획 반영 · AI 정리안 요청</small></span>
           </button>
@@ -9465,8 +9905,19 @@ function Workspace({ user, onLogout, initialDeepLink, initialGroupId, theme, onT
           </button>
         </div>
       )}
-      {lifecycleOpen && <DocumentLifecycle api={apiRequest} editable={accountMode === 'editor'} documents={documents} initialIds={selectedGroup?.mapIds ?? (activeMapId ? [activeMapId] : [])} scope={lifecycleEntry.scope} initialTab={lifecycleEntry.initialTab} userId={user.id} members={teamMembers} launchInWebUi={aionUiWebNavigation.configured || !isLoopbackHostname(window.location.hostname)} onClose={() => { setLifecycleOpen(false); setLifecycleEntry({ initialTab: 'archive' }) }} onChanged={refreshLifecycleLibrary} onNavigate={(id, cardId) => { setLifecycleOpen(false); setLifecycleEntry({ initialTab: 'archive' }); selectCardAndReveal(id, cardId ?? null) }} />}
+      {lifecycleOpen && <DocumentLifecycle api={apiRequest} editable={accountMode === 'editor'} documents={documents} initialIds={selectedGroup?.mapIds ?? (activeMapId ? [activeMapId] : [])} scope={lifecycleEntry.scope} initialTab={lifecycleEntry.initialTab} userId={user.id} members={teamMembers} launchInWebUi={aionUiWebNavigation.configured || !isLoopbackHostname(window.location.hostname)} onClose={() => { setLifecycleOpen(false); setLifecycleEntry({ initialTab: 'archive' }) }} onChanged={refreshLifecycleLibrary} onTrashRequested={requestDocumentTrash} onNavigate={(id, cardId) => { setLifecycleOpen(false); setLifecycleEntry({ initialTab: 'archive' }); selectCardAndReveal(id, cardId ?? null) }} />}
+      {trashReview && <DocumentTrashReview key={`${trashReview.preview.target.id}:${trashReview.preview.referenceVersion}`} initialPreview={trashReview.preview} initialMessage={trashReview.message}
+        api={apiRequest} onNavigate={(id, cardId) => { setLifecycleOpen(false); setMobileSidebarOpen(false); selectCardAndReveal(id, cardId) }}
+        onTrash={performDocumentTrash} onClose={() => setTrashReview(null)} />}
     </div>
+    {cardMoveBlocked && <div className="card-move-backdrop">
+      <section className="card-move-dialog" role="dialog" aria-modal="true" aria-label="카드 이동 상태">
+        <h2>카드 이동</h2>
+        <p role="status">{cardMoveMessage}</p>
+        {pendingCardMove && !cardMoveBusy && <button onClick={() => { void recheckCardMove() }}>상태 다시 확인</button>}
+      </section>
+    </div>}
+    </>
   )
 }
 
